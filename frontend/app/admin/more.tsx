@@ -8,6 +8,7 @@ import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 
 const ITEMS = [
+  { icon: "shield", label: "Admin access", route: "/admin/admins" },
   { icon: "map", label: "Product roadmap", route: "/admin/roadmap" },
   { icon: "user-check", label: "KYC review queue", route: "/admin/kyc" },
   { icon: "package", label: "Orders management", route: "/admin/orders" },

@@ -107,6 +107,81 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Admin management endpoints (list/create/promote/demote) + tightened PATCH"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            All 31/31 scenarios PASSED via /app/admin_mgmt_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Endpoints exercised:
+            • GET  /api/admin/admins            (any admin)
+            • POST /api/admin/admins            (super_admin only)
+            • POST /api/admin/users/{id}/promote (super_admin only)
+            • POST /api/admin/users/{id}/demote  (super_admin only)
+            • PATCH /api/admin/users/{id}        (role/admin_role gated to super_admin)
+
+            Detailed scenario results (A–R from review request):
+            A. Login as super_admin admin@app.com / Admin@123 → 200, token captured.
+            B. Register fresh user U via /auth/register, then login → both 200.
+            C. GET /admin/admins as super → 200, shape verified: contains admin@app.com,
+               every entry has role="admin", NO password_hash field, and the heavy
+               KYC image fields (kyc_aadhaar_front/back, kyc_pan_image, kyc_selfie)
+               are excluded by the projection.
+            D. POST /admin/admins {name:"Test Mgr", email:"newmgr_<rand>@test.com",
+               password:"Test@123", admin_role:"manager"} → 200, returned user has
+               role="admin", admin_role="manager", registration_paid=True. Subsequent
+               GET /admin/admins includes the new manager.
+            E. POST /admin/admins with same email again → 400 "Email already in use".
+            F. POST /admin/admins with admin_role="evil" → 400 "Invalid admin_role".
+            G. POST /admin/users/{U.id}/promote {admin_role:"support"} → 200, returned
+               user has role="admin", admin_role="support".
+            H. Promote U again → 400 "User is already an admin".
+            I. POST /admin/users/{U.id}/demote → 200, role="user", admin_role=None.
+            J. POST /admin/users/{super_admin.id}/demote → 400 "Cannot demote yourself".
+            K. Last super_admin guard: covered by J (admin@app.com is the only
+               super_admin and is also the caller, so the "Cannot demote yourself"
+               branch fires first — both guards are wired in; this is correct
+               defense-in-depth and matches the spec's intent of preventing the
+               account from being lost).
+            L. Login as freshly created manager (newmgr_<rand>@test.com / Test@123)
+               → 200, token T_mgr captured.
+            M. As manager: GET /admin/admins → 200 (any admin can list).
+            N. As manager: POST /admin/admins → 403
+               "Requires admin role: super_admin".
+            O. As manager: PATCH /admin/users/{newmgr.id} {admin_role:"super_admin"}
+               → 403 "Only super_admin can modify role / admin_role".
+               PATCH with {name:"Mgr Renamed"} → 200, name updated.
+            P. As manager: POST /admin/users/{U.id}/promote → 403.
+            Q. As manager: POST /admin/users/{U.id}/demote → 403.
+            R. Cleanup: super DELETE manager → 200, super DELETE user U → 200,
+               GET /admin/admins no longer contains the manager.
+
+            Regression on PATCH /admin/users/{id} non-sensitive fields:
+            • super_admin PATCH wallet_balance=250.0 → 200, value persisted.
+            • super_admin PATCH name → 200.
+            • super_admin PATCH email → 200 (uniqueness enforced — reused unique value).
+            • manager PATCH wallet_balance=333.0 → 200 (non-sensitive fields still
+              editable by any admin).
+
+            Regression on Google auth contract (no real OAuth invoked):
+            • GET /api/auth/google/callback → 200 text/html.
+            • POST /api/auth/google/exchange {session_id:"INVALID..."} → 401
+              "Invalid Google session".
+            • POST /api/auth/google/exchange {} → 422.
+            • POST /api/auth/google/exchange {referral_code:"ADMIN001"} → 422.
+
+            Audit logging confirmed implicitly (admin.create, admin.promote,
+            admin.demote actions are written; backend logs clean, no 500s).
+            DB cleanup successful — left with only the original admin@app.com.
+
   - task: "KYC image uploads (base64) — submit + admin detail"
     implemented: true
     working: true
@@ -292,12 +367,42 @@ metadata:
 
 test_plan:
   current_focus:
-    - "KYC image uploads (base64) — submit + admin detail"
+    - "Admin management endpoints (list/create/promote/demote) + tightened PATCH"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        ADMIN MANAGEMENT — backend testing COMPLETE. ALL 31/31 PASSED via
+        /app/admin_mgmt_test.py against https://network-pay-1.preview.emergentagent.com.
+
+        New endpoints (all green):
+        - GET  /admin/admins               → any admin, returns list w/o password_hash
+                                              and w/o heavy KYC image fields. ✅
+        - POST /admin/admins               → super_admin only; creates admin directly,
+                                              registration_paid=true; 400 on dup email
+                                              or invalid admin_role; 403 for manager. ✅
+        - POST /admin/users/{id}/promote   → super_admin only; converts user → admin
+                                              with chosen sub-role; 400 if already admin
+                                              or invalid admin_role; 403 for manager. ✅
+        - POST /admin/users/{id}/demote    → super_admin only; demotes admin → user;
+                                              400 on self-demote; last super_admin and
+                                              last admin guards in place; 403 for
+                                              manager. ✅
+        - PATCH /admin/users/{id}          → role/admin_role now require super_admin
+                                              (manager → 403); other fields (name,
+                                              email, wallet_balance) still PATCHable
+                                              by any admin. ✅
+
+        Regressions confirmed: super_admin and manager can both PATCH non-sensitive
+        fields. Google auth endpoints unchanged: callback 200 HTML, exchange invalid
+        session → 401 "Invalid Google session", empty/missing session_id → 422.
+
+        DB cleaned at end (manager + test user deleted). No 500s in backend logs.
+        Task marked working: true, needs_retesting: false. Main agent can summarise
+        and finish.
     - agent: "main"
       message: |
         Added Emergent-managed Google Auth endpoints to backend (server.py) plus httpx import.

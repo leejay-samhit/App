@@ -748,6 +748,11 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
     update = {k: v for k, v in payload.dict().items() if v is not None}
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
+    # Only super_admin can change role / admin_role (admin promotion/demotion)
+    sensitive_fields = {"role", "admin_role"}
+    if sensitive_fields & set(update.keys()):
+        if (admin.get("admin_role") or "super_admin") != "super_admin":
+            raise HTTPException(status_code=403, detail="Only super_admin can modify role / admin_role")
     if "email" in update:
         update["email"] = update["email"].lower().strip()
         # Check uniqueness
@@ -756,6 +761,18 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
             raise HTTPException(status_code=400, detail="Email already taken")
     if "role" in update and update["role"] not in ("user", "admin"):
         raise HTTPException(status_code=400, detail="Invalid role")
+    if "admin_role" in update and update["admin_role"] not in ("super_admin", "manager", "support", None):
+        raise HTTPException(status_code=400, detail="Invalid admin_role")
+    # Prevent demoting/changing the last super_admin
+    if target.get("admin_role") == "super_admin":
+        downgrading = (
+            ("role" in update and update["role"] != "admin")
+            or ("admin_role" in update and update["admin_role"] != "super_admin")
+        )
+        if downgrading:
+            super_count = await db.users.count_documents({"role": "admin", "admin_role": "super_admin"})
+            if super_count <= 1:
+                raise HTTPException(status_code=400, detail="Cannot demote the last super_admin")
     # Prevent demoting the last admin
     if "role" in update and update["role"] == "user" and target.get("role") == "admin":
         admin_count = await db.users.count_documents({"role": "admin"})
@@ -764,6 +781,8 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
     await db.users.update_one({"id": user_id}, {"$set": update})
     fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     await _create_notification(user_id, "account", "Account updated", "Your account details were updated by admin.")
+    if sensitive_fields & set(update.keys()):
+        await _audit_log(admin, "admin.role_change", "user", user_id, {k: update[k] for k in sensitive_fields & set(update.keys())})
     return fresh
 
 
@@ -793,6 +812,125 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
     await db.cart_items.delete_many({"user_id": user_id})
     await db.notifications.delete_many({"user_id": user_id})
     return {"ok": True}
+
+
+# ------------------ Admin: Admins management (super_admin only) ------------------
+@api_router.get("/admin/admins")
+async def admin_list_admins(_: Dict[str, Any] = Depends(require_admin)):
+    """List all admin accounts. Visible to any admin (so they know who else has access)."""
+    items = await db.users.find(
+        {"role": "admin"},
+        {"_id": 0, "password_hash": 0, "kyc_aadhaar_front": 0, "kyc_aadhaar_back": 0, "kyc_pan_image": 0, "kyc_selfie": 0},
+    ).sort("created_at", 1).to_list(2000)
+    return items
+
+
+class AdminCreate(BaseModel):
+    name: str = Field(min_length=1)
+    email: EmailStr
+    password: str = Field(min_length=6)
+    admin_role: str = "manager"  # super_admin | manager | support
+    phone: Optional[str] = None
+
+
+@api_router.post("/admin/admins")
+async def admin_create_admin(payload: AdminCreate, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Create a new admin account directly (no public registration)."""
+    if payload.admin_role not in ("super_admin", "manager", "support"):
+        raise HTTPException(status_code=400, detail="Invalid admin_role")
+    email = payload.email.lower().strip()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already in use")
+    while True:
+        code = gen_referral_code()
+        if not await db.users.find_one({"referral_code": code}):
+            break
+    user_id = str(uuid.uuid4())
+    new_admin = {
+        "id": user_id,
+        "name": payload.name.strip(),
+        "email": email,
+        "password_hash": hash_password(payload.password),
+        "phone": payload.phone,
+        "role": "admin",
+        "admin_role": payload.admin_role,
+        "auth_provider": "password",
+        "referral_code": code,
+        "referred_by": None,
+        "sponsor_id": None,
+        "wallet_balance": 0.0,
+        "total_earned": 0.0,
+        "registration_paid": True,  # admins skip the ₹100 mock
+        "direct_referrals_count": 0,
+        "payouts_received": 0,
+        "upi_id": None,
+        "bank_account": None,
+        "ifsc": None,
+        "account_holder": None,
+        "is_blocked": False,
+        "block_reason": None,
+        "wallet_frozen": False,
+        "kyc_status": "approved",
+        "kyc_full_name": payload.name.strip(),
+        "kyc_aadhaar": None,
+        "kyc_pan": None,
+        "kyc_submitted_at": None,
+        "kyc_reviewed_at": None,
+        "kyc_reject_reason": None,
+        "created_at": now_utc().isoformat(),
+    }
+    await db.users.insert_one(new_admin)
+    await _audit_log(admin, "admin.create", "user", user_id, {"email": email, "admin_role": payload.admin_role})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return fresh
+
+
+class PromoteRequest(BaseModel):
+    admin_role: str = "manager"  # super_admin | manager | support
+
+
+@api_router.post("/admin/users/{user_id}/promote")
+async def admin_promote_user(user_id: str, payload: PromoteRequest, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Promote an existing user to admin with a sub-role."""
+    if payload.admin_role not in ("super_admin", "manager", "support"):
+        raise HTTPException(status_code=400, detail="Invalid admin_role")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") == "admin":
+        raise HTTPException(status_code=400, detail="User is already an admin")
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"role": "admin", "admin_role": payload.admin_role, "registration_paid": True}},
+    )
+    await _audit_log(admin, "admin.promote", "user", user_id, {"admin_role": payload.admin_role})
+    await _create_notification(user_id, "account", "Promoted to admin", f"You have been granted {payload.admin_role} access.")
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return fresh
+
+
+@api_router.post("/admin/users/{user_id}/demote")
+async def admin_demote_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Demote an admin back to a regular user."""
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") != "admin":
+        raise HTTPException(status_code=400, detail="User is not an admin")
+    if target["id"] == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot demote yourself")
+    if target.get("admin_role") == "super_admin":
+        super_count = await db.users.count_documents({"role": "admin", "admin_role": "super_admin"})
+        if super_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot demote the last super_admin")
+    admin_count = await db.users.count_documents({"role": "admin"})
+    if admin_count <= 1:
+        raise HTTPException(status_code=400, detail="Cannot demote the last admin")
+    await db.users.update_one({"id": user_id}, {"$set": {"role": "user", "admin_role": None}})
+    await _audit_log(admin, "admin.demote", "user", user_id)
+    await _create_notification(user_id, "account", "Admin access revoked", "Your admin access has been removed.")
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return fresh
 
 
 class WipeUsersRequest(BaseModel):
