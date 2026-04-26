@@ -99,6 +99,45 @@ def gen_referral_code(prefix: str = "") -> str:
     return prefix + ''.join(secrets.choice(alphabet) for _ in range(6))
 
 
+# ------------------ Super Password (Danger-zone gate) ------------------
+SUPER_PWD_SYMBOLS = "!@#$%^&*()_+-=[]{};:'\",.<>/?\\|"
+SUPER_PWD_FORMAT_DESC = (
+    "Must be exactly 10 characters: 1 digit, 3 uppercase letters, "
+    "2 symbols (!@#$%^&*()_+-=[]{};:'\",.<>/?\\|), and 4 lowercase letters."
+)
+
+
+def validate_super_password_format(pwd: str) -> None:
+    """Raises HTTPException(400) if the password does not match the required composition."""
+    if not isinstance(pwd, str) or len(pwd) != 10:
+        raise HTTPException(status_code=400, detail=f"Super password format invalid. {SUPER_PWD_FORMAT_DESC}")
+    digits = sum(1 for c in pwd if c.isdigit())
+    uppers = sum(1 for c in pwd if c.isupper())
+    lowers = sum(1 for c in pwd if c.islower())
+    syms = sum(1 for c in pwd if c in SUPER_PWD_SYMBOLS)
+    other = len(pwd) - (digits + uppers + lowers + syms)
+    if not (digits == 1 and uppers == 3 and lowers == 4 and syms == 2 and other == 0):
+        raise HTTPException(status_code=400, detail=f"Super password format invalid. {SUPER_PWD_FORMAT_DESC}")
+
+
+async def get_super_password_hash() -> Optional[str]:
+    doc = await db.settings.find_one({"id": "global"}, {"_id": 0, "super_password_hash": 1})
+    return (doc or {}).get("super_password_hash")
+
+
+async def verify_super_password(provided: str) -> bool:
+    if not provided:
+        return False
+    h = await get_super_password_hash()
+    if not h:
+        return False
+    try:
+        return verify_password(provided, h)
+    except Exception:
+        return False
+
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -933,9 +972,59 @@ async def admin_demote_user(user_id: str, admin: Dict[str, Any] = Depends(requir
     return fresh
 
 
+# ------------------ Admin: Super Password (Danger-zone gate) ------------------
+class SuperPasswordSet(BaseModel):
+    new_password: str
+    current_password: Optional[str] = None  # required if one is already set
+
+
+class SuperPasswordVerify(BaseModel):
+    super_password: str
+
+
+@api_router.get("/admin/super-password")
+async def admin_super_password_status(_: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    h = await get_super_password_hash()
+    return {"is_set": bool(h), "format": SUPER_PWD_FORMAT_DESC}
+
+
+@api_router.post("/admin/super-password")
+async def admin_set_super_password(
+    payload: SuperPasswordSet,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Set or rotate the danger-zone super password. super_admin only.
+    If one is already set, current_password must be provided and match."""
+    existing = await get_super_password_hash()
+    if existing:
+        if not payload.current_password or not verify_password(payload.current_password, existing):
+            raise HTTPException(status_code=401, detail="Current super password is incorrect")
+    validate_super_password_format(payload.new_password)
+    new_hash = hash_password(payload.new_password)
+    await db.settings.update_one(
+        {"id": "global"},
+        {"$set": {"super_password_hash": new_hash, "super_password_set_at": now_utc().isoformat()}},
+        upsert=True,
+    )
+    await _audit_log(admin, "super_password.set", "system", "global")
+    return {"ok": True}
+
+
+@api_router.post("/admin/super-password/verify")
+async def admin_verify_super_password(
+    payload: SuperPasswordVerify,
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    ok = await verify_super_password(payload.super_password)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid super password")
+    return {"ok": True}
+
+
 class WipeUsersRequest(BaseModel):
     confirm: str  # must equal "WIPE_ALL_USERS"
     keep_admins: bool = True
+    super_password: str  # required — danger-zone gate
 
 
 @api_router.post("/admin/system/wipe-users")
@@ -944,9 +1033,14 @@ async def admin_wipe_users(
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
     """DESTRUCTIVE: Deletes all (non-admin) users + their related data.
-    Caller must send confirm="WIPE_ALL_USERS". super_admin only."""
+    Caller must send confirm="WIPE_ALL_USERS" and a valid super_password. super_admin only."""
     if payload.confirm != "WIPE_ALL_USERS":
         raise HTTPException(status_code=400, detail="Send confirm='WIPE_ALL_USERS' to proceed")
+    # Danger-zone gate
+    if not await get_super_password_hash():
+        raise HTTPException(status_code=400, detail="Super password not set. Please set it in Admin → Admin access.")
+    if not await verify_super_password(payload.super_password):
+        raise HTTPException(status_code=401, detail="Invalid super password")
 
     user_query: Dict[str, Any] = {"role": {"$ne": "admin"}} if payload.keep_admins else {"id": {"$ne": admin["id"]}}
     if not payload.keep_admins:

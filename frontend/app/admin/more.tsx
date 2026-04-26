@@ -28,6 +28,7 @@ export default function More() {
   const { user, logout } = useAuth();
   const [wipeOpen, setWipeOpen] = useState(false);
   const [wipeText, setWipeText] = useState("");
+  const [wipeSuperPwd, setWipeSuperPwd] = useState("");
   const [wipeBusy, setWipeBusy] = useState(false);
 
   const onExport = async (kind: string) => {
@@ -47,9 +48,11 @@ export default function More() {
       const { data } = await api.post("/admin/system/wipe-users", {
         confirm: "WIPE_ALL_USERS",
         keep_admins: true,
+        super_password: wipeSuperPwd,
       });
       setWipeOpen(false);
       setWipeText("");
+      setWipeSuperPwd("");
       Alert.alert(
         "Wipe complete",
         `Deleted:\n• ${data.users_deleted} users\n• ${data.transactions_deleted} transactions\n• ${data.withdrawals_deleted} withdrawals\n• ${data.orders_deleted} orders\n• ${data.cart_items_deleted} cart items\n• ${data.notifications_deleted} notifications`,
@@ -124,7 +127,7 @@ export default function More() {
               This will permanently delete every non-admin user account and all their related data
               (transactions, withdrawals, orders, cart, notifications).{"\n\n"}
               Admin accounts and the system audit log are kept.{"\n\n"}
-              Type <Text style={{ fontWeight: "800" }}>WIPE</Text> to confirm.
+              Type <Text style={{ fontWeight: "800" }}>WIPE</Text> and enter the super password to confirm.
             </Text>
             <TextInput
               testID="wipe-confirm-input"
@@ -135,14 +138,24 @@ export default function More() {
               placeholderTextColor={colors.textMuted}
               style={styles.modalInput}
             />
+            <TextInput
+              testID="wipe-super-pwd"
+              value={wipeSuperPwd}
+              onChangeText={setWipeSuperPwd}
+              autoCapitalize="none"
+              secureTextEntry
+              placeholder="Super password"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.modalInput, { marginTop: 10, letterSpacing: 1, textAlign: "left", fontSize: 14 }]}
+            />
             <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-              <TouchableOpacity onPress={() => { setWipeOpen(false); setWipeText(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} testID="wipe-cancel">
+              <TouchableOpacity onPress={() => { setWipeOpen(false); setWipeText(""); setWipeSuperPwd(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} testID="wipe-cancel">
                 <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={onWipe}
-                disabled={wipeText.trim() !== "WIPE" || wipeBusy}
-                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (wipeText.trim() !== "WIPE" || wipeBusy) && { opacity: 0.5 }]}
+                disabled={wipeText.trim() !== "WIPE" || !wipeSuperPwd || wipeBusy}
+                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (wipeText.trim() !== "WIPE" || !wipeSuperPwd || wipeBusy) && { opacity: 0.5 }]}
                 testID="wipe-confirm"
               >
                 {wipeBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Yes, wipe</Text>}

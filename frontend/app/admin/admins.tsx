@@ -54,19 +54,68 @@ export default function AdminAdmins() {
   const [editFor, setEditFor] = useState<AdminUser | null>(null);
   const [editRole, setEditRole] = useState<SubRole>("manager");
 
+  // Super password
+  const [pwdStatus, setPwdStatus] = useState<{ is_set: boolean; format: string } | null>(null);
+  const [pwdOpen, setPwdOpen] = useState(false);
+  const [pwdCurrent, setPwdCurrent] = useState("");
+  const [pwdNew, setPwdNew] = useState("");
+  const [pwdNew2, setPwdNew2] = useState("");
+
+  const formatBreakdown = (p: string) => {
+    const digits = (p.match(/[0-9]/g) || []).length;
+    const upper = (p.match(/[A-Z]/g) || []).length;
+    const lower = (p.match(/[a-z]/g) || []).length;
+    const symRe = /[!@#$%^&*()_+\-=\[\]{};:'",.<>/?\\|]/g;
+    const syms = (p.match(symRe) || []).length;
+    const total = p.length;
+    const ok = digits === 1 && upper === 3 && lower === 4 && syms === 2 && total === 10;
+    return { digits, upper, lower, syms, total, ok };
+  };
+
+  const pwdBreak = formatBreakdown(pwdNew);
+  const pwdMatches = pwdNew && pwdNew === pwdNew2;
+
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get<AdminUser[]>("/admin/admins");
-      setItems(data);
+      const [adminsRes, pwdRes] = await Promise.all([
+        api.get<AdminUser[]>("/admin/admins"),
+        isSuper ? api.get<{ is_set: boolean; format: string }>("/admin/super-password") : Promise.resolve({ data: null as any }),
+      ]);
+      setItems(adminsRes.data);
+      if (pwdRes.data) setPwdStatus(pwdRes.data);
     } catch (e) {
       Alert.alert("Error", formatApiError(e));
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [isSuper]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const onSetSuperPwd = async () => {
+    if (!pwdBreak.ok) {
+      Alert.alert("Invalid format", "Password must match the required composition.");
+      return;
+    }
+    if (!pwdMatches) {
+      Alert.alert("Mismatch", "The two new password entries don't match.");
+      return;
+    }
+    setBusy("super-pwd");
+    try {
+      await api.post("/admin/super-password", {
+        new_password: pwdNew,
+        current_password: pwdStatus?.is_set ? pwdCurrent : undefined,
+      });
+      setPwdOpen(false);
+      setPwdCurrent(""); setPwdNew(""); setPwdNew2("");
+      await load();
+      Alert.alert("Saved", "Super password updated.");
+    } catch (e) {
+      Alert.alert("Save failed", formatApiError(e));
+    } finally { setBusy(null); }
+  };
 
   const onCreate = async () => {
     if (!name.trim() || !email.trim() || password.length < 6) {
@@ -197,6 +246,25 @@ export default function AdminAdmins() {
           <Text style={[styles.actionText, { color: colors.textMain }]}>Promote user</Text>
         </TouchableOpacity>
       </View>
+
+      {isSuper && (
+        <TouchableOpacity
+          onPress={() => setPwdOpen(true)}
+          style={styles.superPwdRow}
+          testID="super-pwd-row"
+        >
+          <View style={[styles.superPwdIcon, { backgroundColor: pwdStatus?.is_set ? "#E6F4EE" : "#FFF4E5" }]}>
+            <Feather name={pwdStatus?.is_set ? "shield" : "shield-off"} size={16} color={pwdStatus?.is_set ? colors.success : colors.warning} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.superPwdTitle}>Super password</Text>
+            <Text style={styles.superPwdSub}>
+              {pwdStatus?.is_set ? "Set — required for danger-zone actions" : "Not set yet — required to enable Wipe All Users"}
+            </Text>
+          </View>
+          <Feather name="chevron-right" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+      )}
 
       {loading ? (
         <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
@@ -379,7 +447,61 @@ export default function AdminAdmins() {
           </View>
         </View>
       </Modal>
+      {/* Super password modal */}
+      <Modal visible={pwdOpen} transparent animationType="slide" onRequestClose={() => setPwdOpen(false)}>
+        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={styles.modalSheet}>
+            <Text style={styles.modalTitle}>{pwdStatus?.is_set ? "Rotate" : "Set"} super password</Text>
+            <Text style={styles.modalSub}>Required for danger-zone actions like wiping all users.</Text>
+            <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 460 }}>
+              {pwdStatus?.is_set && (
+                <>
+                  <Text style={styles.fieldLabel}>Current super password</Text>
+                  <TextInput value={pwdCurrent} onChangeText={setPwdCurrent} secureTextEntry placeholder="Current" placeholderTextColor={colors.textMuted} style={styles.input} testID="super-pwd-current" />
+                </>
+              )}
+              <Text style={styles.fieldLabel}>New super password</Text>
+              <TextInput value={pwdNew} onChangeText={setPwdNew} autoCapitalize="none" placeholder="Type new password" placeholderTextColor={colors.textMuted} style={styles.input} testID="super-pwd-new" />
+              <Text style={styles.fieldLabel}>Repeat new password</Text>
+              <TextInput value={pwdNew2} onChangeText={setPwdNew2} autoCapitalize="none" placeholder="Repeat" placeholderTextColor={colors.textMuted} style={styles.input} testID="super-pwd-new2" />
+
+              <View style={styles.rulesBox}>
+                <Text style={styles.rulesTitle}>Required composition (10 chars)</Text>
+                <Rule label="1 digit (0–9)" got={pwdBreak.digits} need={1} />
+                <Rule label="3 uppercase letters (A–Z)" got={pwdBreak.upper} need={3} />
+                <Rule label="2 symbols !@#$%^&*()_+-=[]{}…" got={pwdBreak.syms} need={2} />
+                <Rule label="4 lowercase letters (a–z)" got={pwdBreak.lower} need={4} />
+                <Rule label="exactly 10 characters total" got={pwdBreak.total} need={10} />
+                <Rule label="both new entries match" got={pwdMatches ? 1 : 0} need={1} />
+              </View>
+            </ScrollView>
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+              <TouchableOpacity onPress={() => { setPwdOpen(false); setPwdCurrent(""); setPwdNew(""); setPwdNew2(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
+                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={onSetSuperPwd}
+                disabled={!pwdBreak.ok || !pwdMatches || busy === "super-pwd"}
+                style={[styles.modalBtn, { backgroundColor: colors.primary }, (!pwdBreak.ok || !pwdMatches || busy === "super-pwd") && { opacity: 0.5 }]}
+                testID="super-pwd-save"
+              >
+                {busy === "super-pwd" ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Save</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
+  );
+}
+
+function Rule({ label, got, need }: { label: string; got: number; need: number }) {
+  const ok = got === need;
+  return (
+    <View style={styles.ruleRow}>
+      <Feather name={ok ? "check-circle" : "circle"} size={14} color={ok ? colors.success : colors.textMuted} />
+      <Text style={[styles.ruleText, ok && { color: colors.textMain, fontWeight: "700" }]}>{label} <Text style={styles.ruleCount}>({got}/{need})</Text></Text>
+    </View>
   );
 }
 
@@ -420,4 +542,13 @@ const styles = StyleSheet.create({
   roleChipText: { fontSize: 12, fontWeight: "700", color: colors.textMain },
   roleHint: { fontSize: 11, color: colors.textMuted, marginTop: 8 },
   modalBtn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
+  superPwdRow: { flexDirection: "row", alignItems: "center", gap: 12, marginHorizontal: spacing.screen, padding: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 8 },
+  superPwdIcon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  superPwdTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain },
+  superPwdSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  rulesBox: { marginTop: 16, padding: 12, backgroundColor: colors.surfaceMuted, borderRadius: 12, gap: 6 },
+  rulesTitle: { fontSize: 11, color: colors.textMuted, fontWeight: "800", letterSpacing: 1, marginBottom: 4 },
+  ruleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  ruleText: { fontSize: 12, color: colors.textMuted },
+  ruleCount: { color: colors.textMuted, fontWeight: "600" },
 });
