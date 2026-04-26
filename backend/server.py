@@ -616,6 +616,7 @@ class AdminUserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     role: Optional[str] = None  # "user" or "admin"
+    admin_role: Optional[str] = None  # "super_admin" | "manager" | "support"
     wallet_balance: Optional[float] = None
     total_earned: Optional[float] = None
     registration_paid: Optional[bool] = None
@@ -699,7 +700,7 @@ async def admin_get_settings(_: Dict[str, Any] = Depends(require_admin)):
 
 
 @api_router.put("/admin/settings")
-async def admin_update_settings(payload: SettingsUpdate, _: Dict[str, Any] = Depends(require_admin)):
+async def admin_update_settings(payload: SettingsUpdate, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
     update = {k: v for k, v in payload.dict().items() if v is not None}
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")

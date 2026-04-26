@@ -1,0 +1,66 @@
+{
+  "summary": "Iteration 5 RETEST of two iter-4 fixes. (1) Backend RBAC on PUT /api/admin/settings — VERIFIED FIXED after one additional 1-line patch (see below). (2) Frontend /admin/home infinite spinner — VERIFIED FIXED: page now loads KPIs/charts on first paint, all 4 quick actions navigate, error+retry UI is wired. Full backend regression: 58 passed / 1 skipped. End-to-end user-side KYC submission and admin Users modal Quick Actions also re-validated.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "PATCH /api/admin/users/{id}",
+        "issue": "AdminUserUpdate Pydantic model was missing `admin_role` field, so {role:'admin', admin_role:'manager'} silently dropped admin_role and the user was promoted to admin with admin_role=None — which `require_admin_role` (server.py:145) defaults to super_admin, bypassing the new RBAC. Fixed in this iteration by adding `admin_role: Optional[str] = None` to AdminUserUpdate (server.py:618). Without this fix, the iter-4 require_admin_role wire-up appeared to silently regress."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "global",
+        "issues": [
+          "Carry-over: `props.pointerEvents is deprecated. Use style.pointerEvents` warning still in expo logs. Cosmetic only."
+        ]
+      }
+    ],
+    "react_native_issues": [
+      {
+        "component": "package react-native-svg",
+        "issue": "Still 15.15.4 vs Expo expected 15.12.1 — non-blocking; charts on /admin/home render correctly."
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/test_reports/pytest/iteration5.xml"
+  ],
+  "action_items": [
+    "[NONE-CRITICAL] Both reported iter-4 bugs are now fixed and verified. The 1-line model-field patch in this iteration is the only code change made by the testing agent.",
+    "[LOW] Consider adding `extra='forbid'` (Pydantic) to AdminUserUpdate so future field-mismatches fail fast instead of silently dropping.",
+    "[LOW] In `require_admin_role` (server.py:145), defaulting missing admin_role to 'super_admin' is generous — the seed admin already has admin_role='super_admin' set, so the legacy fallback can be removed and replaced with explicit 403 when admin_role is null. Defense-in-depth.",
+    "[MEDIUM] `npx expo install react-native-svg` to align package version (15.12.1)."
+  ],
+  "critical_code_review_comments": [
+    "server.py:614 AdminUserUpdate omitted admin_role — a quietly destructive bug because Pydantic v2 ignores unknown fields by default. Now fixed.",
+    "server.py:145 `sub = admin.get('admin_role') or 'super_admin'` — using `or` instead of `is None` makes empty-string also default to super_admin. Low-risk but worth tightening."
+  ],
+  "updated_files": [
+    "/app/backend/server.py — Added `admin_role: Optional[str] = None` field to AdminUserUpdate Pydantic model (line ~616) so PATCH /admin/users/{id} can promote/demote sub-roles. This was the missing piece that prevented iter-4's require_admin_role wire-up from being functionally verifiable.",
+    "/app/test_reports/iteration_5.json (new)",
+    "/app/test_reports/pytest/iteration5.xml (regenerated, 58 passed / 1 skipped)"
+  ],
+  "success_rate": {
+    "backend": "100% (58/58 executed pytest cases passed; 1 unrelated skip — last-admin demote guard test by design)",
+    "frontend": "100% on the two retested flows: /admin/home now renders KPIs+charts (kpi-new-today, kpi-new-month, kpi-paid-today, kpi-orders, period-7d/14d/30d, qa-kyc/qa-orders/qa-audit/qa-settings all present); user-side /kyc submit→pending verified; admin Users modal Quick Actions (edit-block-toggle, edit-freeze-toggle, edit-adjust-amount/reason, edit-credit, edit-debit, edit-kyc-approve) all visible and tappable."
+  },
+  "verified_features": {
+    "rbac": "super_admin PUT /admin/settings → 200; manager admin (role=admin, admin_role=manager) PUT /admin/settings → 403 with detail 'Requires admin role: super_admin'. Manager still gets 200 on GET /admin/users, GET /admin/kyc (and by inference analytics, audit-logs).",
+    "admin_home": "Login admin@app.com → /admin/home renders TOTAL REVENUE hero (₹34,600), system wallet/paid out/margin sub-KPIs, New today/New this month/Paid today/Orders cards, Transaction status (Success/Pending/Failed/Refunded), 7D/14D/30D period tabs, daily revenue bar chart. No infinite spinner. Error+Retry UI exists at testID home-retry (code path verified).",
+    "admin_quick_actions": "qa-kyc → /admin/kyc, qa-orders → /admin/orders, qa-audit → /admin/audit, qa-settings → /admin/settings — all 4 navigate correctly.",
+    "more_tab": "/admin/more shows more-logout, export-users, export-transactions, more-user-check etc.",
+    "user_kyc_submit": "Login as fresh paid user → Profile → KYC Verification card → /kyc → fill Aadhaar=123456789012 PAN=ABCDE1234F fullname='Test User' → submit returns 'KYC submitted for review' → status badge becomes 'Under review' (pending). End-to-end OK.",
+    "users_modal_quick_actions": "Tap user row in /admin/users opens Edit user modal exposing block-toggle, freeze-toggle, wallet adjust amount/reason + Credit/Debit, and inline KYC approve for pending users. All testIDs render."
+  },
+  "seed_data_creation": "Created 1 paid test user TEST_KYC_UI_710049@test.com (P@ssw0rd1) with KYC pending for end-to-end UI testing. Iter-4 ephemeral users (TEST_I4_*) re-created during pytest run.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Both iter-4 reported bugs are now closed. If the next iteration adds new admin sub-roles, ensure (a) AdminUserUpdate accepts admin_role, (b) any newly super-admin-only endpoint uses Depends(require_admin_role('super_admin')). Backend baseline test is /app/backend/tests/test_iteration4.py — TestRBAC covers manager-vs-super-admin matrix.",
+  "rca_of_issue": "Iter-4 bug RCA confirmation — Backend: server.py:702 was correctly updated to Depends(require_admin_role('super_admin')), but the companion AdminUserUpdate Pydantic model (server.py:614) did not allow the admin_role field, so promoting via PATCH was a no-op and the test couldn't actually create a manager. Fix: add `admin_role: Optional[str] = None` to AdminUserUpdate. Frontend: admin/home.tsx now (a) gates initial load on `if (!user) return` for auth hydration, (b) tracks an `error` state and (c) renders an explicit Error UI with `home-retry` button instead of a permanent spinner — verified visually."
+}

@@ -35,20 +35,42 @@ export default function AdminHome() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState(7);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (!user) return; // wait for auth hydration
+    setError(null);
     try {
       const { data } = await api.get<Analytics>(`/admin/analytics?days=${period}`);
       setData(data);
-    } catch {}
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || e?.message || "Failed to load analytics");
+    }
     finally { setLoading(false); setRefreshing(false); }
-  }, [period]);
+  }, [period, user]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  if (loading || !data) {
+  if (loading && !data) {
     return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
   }
+
+  if (error && !data) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.center}>
+          <Feather name="alert-triangle" size={32} color={colors.warning} />
+          <Text style={{ marginTop: 12, color: colors.textMain, fontWeight: "700" }}>Couldn't load dashboard</Text>
+          <Text style={{ marginTop: 4, color: colors.textMuted, fontSize: 13, textAlign: "center", paddingHorizontal: 32 }}>{error}</Text>
+          <TouchableOpacity onPress={() => { setLoading(true); load(); }} style={{ marginTop: 20, backgroundColor: colors.primary, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 99 }} testID="home-retry">
+            <Text style={{ color: colors.primaryFg, fontWeight: "700" }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!data) return null;
 
   const k = data.kpis;
 
