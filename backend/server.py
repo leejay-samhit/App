@@ -542,10 +542,11 @@ async def admin_transactions(_: Dict[str, Any] = Depends(require_admin)):
 
 @api_router.get("/admin/stats")
 async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
+    settings = await get_settings()
     total_users = await db.users.count_documents({"role": "user"})
     paid_users = await db.users.count_documents({"role": "user", "registration_paid": True})
     pending_payouts = await db.withdrawals.count_documents({"status": "pending"})
-    total_revenue = paid_users * REGISTRATION_FEE
+    total_revenue = paid_users * settings["registration_fee"]
     payout_agg = await db.transactions.aggregate([
         {"$match": {"type": "referral_payout"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
