@@ -24,7 +24,8 @@ export default function AdminLayout() {
       <Tabs.Screen name="users" options={{ title: "Users", tabBarIcon: ({ color, size }) => <Feather name="users" size={size} color={color} /> }} />
       <Tabs.Screen name="payouts" options={{ title: "Payouts", tabBarIcon: ({ color, size }) => <Feather name="dollar-sign" size={size} color={color} /> }} />
       <Tabs.Screen name="transactions" options={{ title: "Txns", tabBarIcon: ({ color, size }) => <Feather name="list" size={size} color={color} /> }} />
-      <Tabs.Screen name="profile" options={{ title: "Account", tabBarIcon: ({ color, size }) => <Feather name="settings" size={size} color={color} /> }} />
+      <Tabs.Screen name="settings" options={{ title: "Settings", tabBarIcon: ({ color, size }) => <Feather name="sliders" size={size} color={color} /> }} />
+      <Tabs.Screen name="profile" options={{ title: "Account", tabBarIcon: ({ color, size }) => <Feather name="user" size={size} color={color} /> }} />
     </Tabs>
   );
 }

@@ -1,0 +1,77 @@
+{
+  "summary": "Iteration 3 testing complete. Backend: 40/40 pytest passed (13 new iter-3 + 27 regression). Frontend: admin Users modal full edit/save/reset-password verified, self-delete disabled, settings tab math + save flow working.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "global",
+        "issues": [
+          "Pre-existing carry-over: deprecated Image style.resizeMode warning + props.pointerEvents deprecation warnings in Expo logs (non-blocking)."
+        ]
+      }
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration3.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/test_backend_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "verified_features": {
+    "backend": {
+      "settings_get_put": "GET /api/admin/settings returns full shape; PUT supports partial update and persists. Non-admin token gets 403.",
+      "settings_drives_payment": "Set directs_required=2,payout_l1=200,l2=50,l3=25 → registered sponsor under ADMIN001 + 2 directs; sponsor wallet became ₹200 on 2nd direct (L1 cycle). dashboard.directs_required=2, level_payouts.l1=200,l2=50.",
+      "admin_user_patch": "PATCH name/phone/wallet_balance/registration_paid/upi_id all persist; account notification (kind='account') created for target user.",
+      "admin_user_validation": "Email uniqueness 400, last-admin demotion blocked 400, last-admin/self delete blocked 400, reset-password min_length=6 → 422.",
+      "reset_password": "POST /admin/users/{id}/reset-password → user can immediately login with new password.",
+      "delete_user": "DELETE /admin/users/{id} removes user from list (cart_items/notifications cascade).",
+      "non_admin_403": "Regular tokens 403 on PATCH/DELETE/reset-password/admin/settings GET.",
+      "dashboard_reflects_settings": "After PUT settings (directs_required=3, l1=333, l2=33, l3=3), new user dashboard reflects same values.",
+      "regression": "27 iter-1+iter-2 tests still green (auth, payment-fee, multi-level chain L1+L2+L3, withdrawals lock/refund/approve, cart/checkout, notifications, admin endpoints)."
+    },
+    "frontend": {
+      "admin_layout": "5 bottom tabs visible: Users, Payouts, Txns, Settings, Account.",
+      "users_tab": "Search input testID admin-users-search filters live; 217 user rows render with admin-user-{id} testID; row tap opens edit Modal.",
+      "edit_modal": "All testIDs present: edit-name/email/phone/wallet/role-switch/paid-switch/upi/bank/ifsc/holder/new-password/reset-password/save/delete/user-edit-close. Code pill shows referral_code (e.g., MGGGI5).",
+      "edit_save": "Updated name 'dash' → 'dash ✓' via PATCH; row in list reflects new name immediately on modal close.",
+      "reset_password_ui": "Entering new password + tapping reset shows 'Password reset successfully' inline message (edit-msg).",
+      "self_protection": "Self-edit modal: edit-delete is aria-disabled with text 'Cannot delete yourself'.",
+      "settings_tab": "Per-cycle hero card shows Revenue/Payouts/Margin (₹400/₹1,000/-₹600 with defaults). 5 input fields with help text. Save changes shows 'Saved successfully' inline (settings-msg).",
+      "settings_persistence": "PUT /admin/settings call returns 200; subsequent GET reflects new values (directs_required=5 then restored to 4 in test)."
+    }
+  },
+  "action_items": [
+    "(Optional) Settings tab subtitle 'Tune the registration fee...' overlaps the bottom-tab area at very small viewports — already screenshots cleanly at 390x844 but consider ensuring 16px bottom safe-area on shorter devices.",
+    "(Carry-over from iter 2) server.py is now ~880 lines — split into routers (admin.py, settings.py, etc).",
+    "(Carry-over) /payment Pay button still below fold on 375x667 — sticky CTA recommended.",
+    "(Cosmetic) Replace Image style.resizeMode with prop resizeMode and migrate pointerEvents to style.pointerEvents to silence RN web warnings."
+  ],
+  "critical_code_review_comments": [
+    "users.tsx UserEditModal initializes form using a side-effect inside render body (`if (user && initFor !== user.id) { init(user); setInitFor(user.id); }`) — this can cause an extra render and is brittle. Prefer useEffect([user?.id]).",
+    "AdminUserUpdate model: setting phone/upi_id/etc to empty string is impossible because frontend strips falsy with `|| undefined`; admin can only overwrite, not clear, optional contact fields. Add explicit null support if clearing is desired.",
+    "DEFAULT_SETTINGS still loaded from env constants on first call only; once doc exists, env is ignored — document this so admins know first PUT freezes the baseline.",
+    "admin_stats.total_revenue still uses module-level REGISTRATION_FEE constant instead of dynamic settings — under-reports if admin lowers fee then mixed-priced registrations exist (acceptable since fee changes mid-flight, but flag).",
+    "PATCH /admin/users does not allow setting password directly (only via reset-password) — good separation, keep it.",
+    "Cascade on DELETE clears cart_items + notifications but not withdrawals (pending withdrawals remain referencing deleted user). Consider auto-rejecting pending withdrawals on user delete."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3.py (new — 13 tests)",
+    "/app/test_reports/iteration_3.json (new)",
+    "/app/test_reports/pytest/pytest_results.xml (regenerated)"
+  ],
+  "success_rate": {
+    "backend": "100% (40/40 pytest)",
+    "frontend": "100% on iter-3 admin flows tested (settings GET/PUT + projection card, users search + tap → modal with all fields, name save reflects in list, reset-password success, self-delete disabled, 5-tab admin layout)"
+  },
+  "seed_data_creation": "Each iter-3 test creates ephemeral TEST_<prefix>_<uuid>@test.com users; settings are restored to defaults (registration_fee=100, payout_l1=400, l2=100, l3=50, directs_required=4) at end of each settings test. Admin password was reset to Admin@123 mid-UI-test and confirmed working.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run full regression: `pytest /app/backend/tests/ -v` (40 tests). Public base URL = EXPO_BACKEND_URL on backend/.env. Useful UI testIDs: admin-users-search, admin-user-{id}, edit-name/email/phone/wallet/role-switch/paid-switch/upi/bank/ifsc/holder/new-password/reset-password/save/delete, user-edit-close, edit-msg, settings-{registration_fee|directs_required|payout_l1|payout_l2|payout_l3}, settings-save, settings-msg. Bottom tab buttons still lack testIDs (since iter 1) — best to navigate via /admin/users, /admin/settings URLs. Settings doc lives in db.settings with id='global'; deleting it returns env defaults via DEFAULT_SETTINGS.",
+  "rca_of_issue": "No bugs surfaced. Settings flow correctly drives /payment/register-fee — verified by setting directs_required=2 + payout_l1=200 and confirming sponsor's wallet hit ₹200 exactly on 2nd direct payment. Admin user PATCH validates email uniqueness, role enum, last-admin demotion; DELETE protects self & last-admin; reset-password creates valid bcrypt hash and login succeeds with new password. Notifications kind='account' written on every PATCH."
+}

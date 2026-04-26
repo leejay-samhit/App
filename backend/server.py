@@ -34,6 +34,21 @@ LEVEL_2_PAYOUT = float(os.environ.get('LEVEL_2_PAYOUT', 100))
 LEVEL_3_PAYOUT = float(os.environ.get('LEVEL_3_PAYOUT', 50))
 DIRECTS_REQUIRED = 4
 
+DEFAULT_SETTINGS = {
+    "registration_fee": REGISTRATION_FEE,
+    "payout_l1": PAYOUT_PER_LEVEL,
+    "payout_l2": LEVEL_2_PAYOUT,
+    "payout_l3": LEVEL_3_PAYOUT,
+    "directs_required": DIRECTS_REQUIRED,
+}
+
+
+async def get_settings() -> Dict[str, Any]:
+    doc = await db.settings.find_one({"id": "global"}, {"_id": 0})
+    if not doc:
+        return {**DEFAULT_SETTINGS, "id": "global"}
+    return doc
+
 # Achievement tiers based on team size
 TIERS = [
     {"name": "Diamond", "min": 200, "color": "#E0F2FF", "icon": "award"},
@@ -277,23 +292,30 @@ async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user))
     if user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Registration fee already paid")
 
+    settings = await get_settings()
+    fee = settings["registration_fee"]
+    payout_l1 = settings["payout_l1"]
+    payout_l2 = settings["payout_l2"]
+    payout_l3 = settings["payout_l3"]
+    directs_required = settings["directs_required"]
+
     txn_id = str(uuid.uuid4())
     await db.users.update_one({"id": user["id"]}, {"$set": {"registration_paid": True}})
     await db.transactions.insert_one({
         "id": txn_id,
         "user_id": user["id"],
         "type": "registration_fee",
-        "amount": REGISTRATION_FEE,
+        "amount": fee,
         "status": "paid",
         "description": "Registration fee (mocked)",
         "created_at": now_utc().isoformat(),
     })
-    await _create_notification(user["id"], "welcome", "Welcome to NetworkPay!", "Your account is now active. Start referring to earn ₹400 per 4 directs.")
+    await _create_notification(user["id"], "welcome", "Welcome to NetworkPay!", f"Your account is now active. Start referring to earn ₹{int(payout_l1)} per {directs_required} directs.")
 
     # Walk up the upline 3 levels
     sponsor_id = user.get("sponsor_id")
     if sponsor_id:
-        # Level 1: direct sponsor — increment direct count, ₹400 on every 4th
+        # Level 1: direct sponsor — increment direct count, payout on every Nth
         sponsor = await db.users.find_one({"id": sponsor_id})
         if sponsor:
             await db.users.update_one({"id": sponsor_id}, {"$inc": {"direct_referrals_count": 1}})
@@ -301,26 +323,26 @@ async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user))
             await _create_notification(
                 sponsor_id, "referral",
                 f"New referral: {user['name']}",
-                f"{user['name']} just joined your network. {DIRECTS_REQUIRED - (new_count % DIRECTS_REQUIRED or DIRECTS_REQUIRED)} more to next ₹{int(PAYOUT_PER_LEVEL)} payout.",
+                f"{user['name']} just joined your network. {directs_required - (new_count % directs_required or directs_required)} more to next ₹{int(payout_l1)} payout.",
             )
-            if new_count % DIRECTS_REQUIRED == 0:
+            if new_count % directs_required == 0:
                 fresh = await db.users.find_one({"id": sponsor_id})
-                await _credit_payout(fresh, PAYOUT_PER_LEVEL, 1, user["name"])
+                await _credit_payout(fresh, payout_l1, 1, user["name"])
 
             # Level 2
             l2_id = sponsor.get("sponsor_id")
             if l2_id:
                 l2 = await db.users.find_one({"id": l2_id})
                 if l2:
-                    await _credit_payout(l2, LEVEL_2_PAYOUT, 2, user["name"])
+                    await _credit_payout(l2, payout_l2, 2, user["name"])
                     # Level 3
                     l3_id = l2.get("sponsor_id")
                     if l3_id:
                         l3 = await db.users.find_one({"id": l3_id})
                         if l3:
-                            await _credit_payout(l3, LEVEL_3_PAYOUT, 3, user["name"])
+                            await _credit_payout(l3, payout_l3, 3, user["name"])
 
-    return {"ok": True, "transaction_id": txn_id, "amount": REGISTRATION_FEE}
+    return {"ok": True, "transaction_id": txn_id, "amount": fee}
 
 
 # ------------------ User Endpoints ------------------
@@ -331,10 +353,12 @@ async def my_dashboard(user: Dict[str, Any] = Depends(get_current_user)):
     team_size = await _count_team(user["id"])
     pending_withdrawals = await db.withdrawals.count_documents({"user_id": user["id"], "status": "pending"})
     unread_notifs = await db.notifications.count_documents({"user_id": user["id"], "read": False})
+    settings = await get_settings()
+    directs_required = settings["directs_required"]
     # Next payout progress
-    needed = DIRECTS_REQUIRED - (direct_count % DIRECTS_REQUIRED)
-    if direct_count > 0 and direct_count % DIRECTS_REQUIRED == 0:
-        needed = DIRECTS_REQUIRED  # next cycle
+    needed = directs_required - (direct_count % directs_required)
+    if direct_count > 0 and direct_count % directs_required == 0:
+        needed = directs_required  # next cycle
     tier = get_tier(team_size)
     return {
         "user": serialize_user(user),
@@ -344,13 +368,13 @@ async def my_dashboard(user: Dict[str, Any] = Depends(get_current_user)):
         "team_size": team_size,
         "payouts_received": user.get("payouts_received", 0),
         "next_payout_in": needed,
-        "directs_required": DIRECTS_REQUIRED,
+        "directs_required": directs_required,
         "registration_paid": user.get("registration_paid", False),
         "pending_withdrawals": pending_withdrawals,
         "referral_code": user.get("referral_code"),
         "unread_notifications": unread_notifs,
         "tier": tier,
-        "level_payouts": {"l1": PAYOUT_PER_LEVEL, "l2": LEVEL_2_PAYOUT, "l3": LEVEL_3_PAYOUT},
+        "level_payouts": {"l1": settings["payout_l1"], "l2": settings["payout_l2"], "l3": settings["payout_l3"]},
     }
 
 
@@ -542,6 +566,110 @@ async def admin_create_product(p: ProductCreate, _: Dict[str, Any] = Depends(req
     await db.products.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+
+# ------------------ Admin: User Management ------------------
+class AdminUserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None  # "user" or "admin"
+    wallet_balance: Optional[float] = None
+    total_earned: Optional[float] = None
+    registration_paid: Optional[bool] = None
+    upi_id: Optional[str] = None
+    bank_account: Optional[str] = None
+    ifsc: Optional[str] = None
+    account_holder: Optional[str] = None
+
+
+class AdminPasswordReset(BaseModel):
+    new_password: str = Field(min_length=6)
+
+
+@api_router.patch("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields provided")
+    if "email" in update:
+        update["email"] = update["email"].lower().strip()
+        # Check uniqueness
+        clash = await db.users.find_one({"email": update["email"], "id": {"$ne": user_id}})
+        if clash:
+            raise HTTPException(status_code=400, detail="Email already taken")
+    if "role" in update and update["role"] not in ("user", "admin"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    # Prevent demoting the last admin
+    if "role" in update and update["role"] == "user" and target.get("role") == "admin":
+        admin_count = await db.users.count_documents({"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot demote the last admin")
+    await db.users.update_one({"id": user_id}, {"$set": update})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    await _create_notification(user_id, "account", "Account updated", "Your account details were updated by admin.")
+    return fresh
+
+
+@api_router.post("/admin/users/{user_id}/reset-password")
+async def admin_reset_password(user_id: str, payload: AdminPasswordReset, _: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(payload.new_password)}})
+    await _create_notification(user_id, "account", "Password reset", "Your password was reset by admin. Please log in again.")
+    return {"ok": True}
+
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target["id"] == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    if target.get("role") == "admin":
+        admin_count = await db.users.count_documents({"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the last admin")
+    await db.users.delete_one({"id": user_id})
+    # Cascade clean: remove their cart items, notifications (keep transactions/orders for audit)
+    await db.cart_items.delete_many({"user_id": user_id})
+    await db.notifications.delete_many({"user_id": user_id})
+    return {"ok": True}
+
+
+# ------------------ Admin: Settings (Payout Structure) ------------------
+class SettingsUpdate(BaseModel):
+    registration_fee: Optional[float] = Field(default=None, ge=0)
+    payout_l1: Optional[float] = Field(default=None, ge=0)
+    payout_l2: Optional[float] = Field(default=None, ge=0)
+    payout_l3: Optional[float] = Field(default=None, ge=0)
+    directs_required: Optional[int] = Field(default=None, ge=1, le=20)
+
+
+@api_router.get("/admin/settings")
+async def admin_get_settings(_: Dict[str, Any] = Depends(require_admin)):
+    return await get_settings()
+
+
+@api_router.put("/admin/settings")
+async def admin_update_settings(payload: SettingsUpdate, _: Dict[str, Any] = Depends(require_admin)):
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields provided")
+    await db.settings.update_one(
+        {"id": "global"},
+        {"$set": update},
+        upsert=True,
+    )
+    return await get_settings()
+
+
+# ------------------ Health ------------------
 
 
 class CartItem(BaseModel):
