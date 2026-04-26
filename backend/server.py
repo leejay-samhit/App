@@ -293,6 +293,20 @@ async def register(payload: RegisterRequest):
         "kyc_submitted_at": None,
         "kyc_reviewed_at": None,
         "kyc_reject_reason": None,
+        # Admin approval gate (gates payout entry + withdrawals)
+        "approval_status": "pending",  # pending | approved | rejected
+        "approval_reviewed_at": None,
+        "approval_reviewed_by": None,
+        "approval_reject_category": None,
+        "approval_reject_reason": None,
+        "commission_triggered": False,
+        "extra_docs": {
+            "cibil_report": None,
+            "bank_statement": None,
+            "income_proof": None,
+            "other": None,
+            "submitted_at": None,
+        },
         "created_at": now_utc().isoformat(),
     }
     await db.users.insert_one(user_doc)
@@ -387,6 +401,19 @@ async def google_exchange(payload: GoogleExchange):
             "kyc_submitted_at": None,
             "kyc_reviewed_at": None,
             "kyc_reject_reason": None,
+            "approval_status": "pending",
+            "approval_reviewed_at": None,
+            "approval_reviewed_by": None,
+            "approval_reject_category": None,
+            "approval_reject_reason": None,
+            "commission_triggered": False,
+            "extra_docs": {
+                "cibil_report": None,
+                "bank_statement": None,
+                "income_proof": None,
+                "other": None,
+                "submitted_at": None,
+            },
             "created_at": now_utc().isoformat(),
         }
         await db.users.insert_one(user)
@@ -474,18 +501,56 @@ async def _create_notification(user_id: str, kind: str, title: str, body: str):
     })
 
 
+async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
+    """Pay multi-level referral commissions when a user becomes 'approved'.
+    Idempotent — sets commission_triggered on the user. Safe to call multiple times."""
+    if user.get("commission_triggered"):
+        return
+    settings = await get_settings()
+    payout_l1 = settings["payout_l1"]
+    payout_l2 = settings["payout_l2"]
+    payout_l3 = settings["payout_l3"]
+    directs_required = settings["directs_required"]
+    sponsor_id = user.get("sponsor_id")
+    # Mark first to avoid race-condition double trigger
+    await db.users.update_one({"id": user["id"]}, {"$set": {"commission_triggered": True}})
+    if not sponsor_id:
+        return
+    sponsor = await db.users.find_one({"id": sponsor_id})
+    if not sponsor:
+        return
+    await db.users.update_one({"id": sponsor_id}, {"$inc": {"direct_referrals_count": 1}})
+    new_count = sponsor.get("direct_referrals_count", 0) + 1
+    await _create_notification(
+        sponsor_id, "referral",
+        f"New referral: {user['name']}",
+        f"{user['name']} just joined your network. {directs_required - (new_count % directs_required or directs_required)} more to next ₹{int(payout_l1)} payout.",
+    )
+    if new_count % directs_required == 0:
+        fresh = await db.users.find_one({"id": sponsor_id})
+        await _credit_payout(fresh, payout_l1, 1, user["name"])
+    l2_id = sponsor.get("sponsor_id")
+    if l2_id:
+        l2 = await db.users.find_one({"id": l2_id})
+        if l2:
+            await _credit_payout(l2, payout_l2, 2, user["name"])
+            l3_id = l2.get("sponsor_id")
+            if l3_id:
+                l3 = await db.users.find_one({"id": l3_id})
+                if l3:
+                    await _credit_payout(l3, payout_l3, 3, user["name"])
+
+
 @api_router.post("/payment/register-fee")
 async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user)):
-    """Mock registration fee payment. Activates account & triggers multi-level referral payouts."""
+    """Mock registration fee payment. Marks account active.
+    Note: referral commissions are NOT triggered here anymore — they trigger only after
+    admin approves the user via /admin/approvals/{id}/approve."""
     if user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Registration fee already paid")
 
     settings = await get_settings()
     fee = settings["registration_fee"]
-    payout_l1 = settings["payout_l1"]
-    payout_l2 = settings["payout_l2"]
-    payout_l3 = settings["payout_l3"]
-    directs_required = settings["directs_required"]
 
     txn_id = str(uuid.uuid4())
     await db.users.update_one({"id": user["id"]}, {"$set": {"registration_paid": True}})
@@ -498,39 +563,13 @@ async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user))
         "description": "Registration fee (mocked)",
         "created_at": now_utc().isoformat(),
     })
-    await _create_notification(user["id"], "welcome", "Welcome to NetworkPay!", f"Your account is now active. Start referring to earn ₹{int(payout_l1)} per {directs_required} directs.")
-
-    # Walk up the upline 3 levels
-    sponsor_id = user.get("sponsor_id")
-    if sponsor_id:
-        # Level 1: direct sponsor — increment direct count, payout on every Nth
-        sponsor = await db.users.find_one({"id": sponsor_id})
-        if sponsor:
-            await db.users.update_one({"id": sponsor_id}, {"$inc": {"direct_referrals_count": 1}})
-            new_count = sponsor.get("direct_referrals_count", 0) + 1
-            await _create_notification(
-                sponsor_id, "referral",
-                f"New referral: {user['name']}",
-                f"{user['name']} just joined your network. {directs_required - (new_count % directs_required or directs_required)} more to next ₹{int(payout_l1)} payout.",
-            )
-            if new_count % directs_required == 0:
-                fresh = await db.users.find_one({"id": sponsor_id})
-                await _credit_payout(fresh, payout_l1, 1, user["name"])
-
-            # Level 2
-            l2_id = sponsor.get("sponsor_id")
-            if l2_id:
-                l2 = await db.users.find_one({"id": l2_id})
-                if l2:
-                    await _credit_payout(l2, payout_l2, 2, user["name"])
-                    # Level 3
-                    l3_id = l2.get("sponsor_id")
-                    if l3_id:
-                        l3 = await db.users.find_one({"id": l3_id})
-                        if l3:
-                            await _credit_payout(l3, payout_l3, 3, user["name"])
-
-    return {"ok": True, "transaction_id": txn_id, "amount": fee}
+    await _create_notification(
+        user["id"],
+        "welcome",
+        "Account activated — pending approval",
+        "Thanks! Your registration is paid. An admin will review your profile shortly.",
+    )
+    return {"ok": True, "transaction_id": txn_id, "amount": fee, "approval_status": "pending"}
 
 
 # ------------------ User Endpoints ------------------
@@ -618,6 +657,8 @@ async def update_bank(payload: BankUpdate, user: Dict[str, Any] = Depends(get_cu
 async def request_withdrawal(payload: WithdrawalRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if not user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Complete registration payment first")
+    if user.get("approval_status", "approved") != "approved":
+        raise HTTPException(status_code=403, detail="Account is awaiting admin approval. Withdrawals are disabled until approved.")
     if user.get("wallet_frozen"):
         raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
     if user.get("wallet_balance", 0) < payload.amount:
@@ -1441,6 +1482,207 @@ async def admin_reject_kyc(user_id: str, payload: KYCReject, admin: Dict[str, An
     return {"ok": True}
 
 
+# ------------------ Admin Approval Gate (registration → admin review → payout) ------------------
+REJECT_CATEGORIES = {
+    "cibil_score": "CIBIL score insufficient — please upload your CIBIL report",
+    "identity_mismatch": "Identity details don't match the documents",
+    "suspicious_activity": "Suspicious activity detected on the account",
+    "incomplete_documents": "Documents are incomplete or unclear",
+    "custom": "Custom reason",
+}
+
+
+@api_router.get("/admin/approvals")
+async def admin_list_approvals(
+    _: Dict[str, Any] = Depends(require_admin),
+    status: Optional[str] = Query(default="pending"),
+):
+    """List users by approval_status. Defaults to pending."""
+    if status not in ("pending", "approved", "rejected", "all"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    q: Dict[str, Any] = {"role": "user"}
+    if status != "all":
+        q["approval_status"] = status
+    projection = {
+        "_id": 0, "password_hash": 0,
+        "kyc_aadhaar_front": 0, "kyc_aadhaar_back": 0, "kyc_pan_image": 0, "kyc_selfie": 0,
+        "extra_docs": 0,
+    }
+    items = await db.users.find(q, projection).sort("created_at", -1).to_list(2000)
+    # Add sponsor email for context
+    sponsor_ids = list({i.get("sponsor_id") for i in items if i.get("sponsor_id")})
+    sponsors = {s["id"]: s for s in await db.users.find(
+        {"id": {"$in": sponsor_ids}},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "referral_code": 1},
+    ).to_list(len(sponsor_ids) or 1)} if sponsor_ids else {}
+    for it in items:
+        sp = sponsors.get(it.get("sponsor_id"))
+        it["sponsor_email"] = (sp or {}).get("email")
+        it["sponsor_name"] = (sp or {}).get("name")
+    return items
+
+
+@api_router.get("/admin/approvals/today")
+async def admin_list_approvals_today(_: Dict[str, Any] = Depends(require_admin)):
+    """Users who registered today (server clock UTC)."""
+    today = now_utc().date().isoformat()
+    items = await db.users.find(
+        {"role": "user", "created_at": {"$regex": f"^{today}"}},
+        {"_id": 0, "password_hash": 0,
+         "kyc_aadhaar_front": 0, "kyc_aadhaar_back": 0, "kyc_pan_image": 0, "kyc_selfie": 0,
+         "extra_docs": 0},
+    ).sort("created_at", -1).to_list(500)
+    sponsor_ids = list({i.get("sponsor_id") for i in items if i.get("sponsor_id")})
+    sponsors = {s["id"]: s for s in await db.users.find(
+        {"id": {"$in": sponsor_ids}}, {"_id": 0, "id": 1, "email": 1, "name": 1},
+    ).to_list(len(sponsor_ids) or 1)} if sponsor_ids else {}
+    for it in items:
+        sp = sponsors.get(it.get("sponsor_id"))
+        it["sponsor_email"] = (sp or {}).get("email")
+        it["sponsor_name"] = (sp or {}).get("name")
+    return items
+
+
+@api_router.get("/admin/approvals/{user_id}")
+async def admin_get_approval_detail(user_id: str, _: Dict[str, Any] = Depends(require_admin)):
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    sp = None
+    if u.get("sponsor_id"):
+        sp = await db.users.find_one({"id": u["sponsor_id"]}, {"_id": 0, "id": 1, "email": 1, "name": 1, "referral_code": 1})
+    u["sponsor"] = sp
+    return u
+
+
+@api_router.post("/admin/approvals/{user_id}/approve")
+async def admin_approve_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") != "user":
+        raise HTTPException(status_code=400, detail="Only regular users need approval")
+    if target.get("approval_status") == "approved":
+        return {"ok": True, "already_approved": True}
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {
+            "approval_status": "approved",
+            "approval_reviewed_at": now_utc().isoformat(),
+            "approval_reviewed_by": admin["id"],
+            "approval_reject_category": None,
+            "approval_reject_reason": None,
+        }},
+    )
+    fresh = await db.users.find_one({"id": user_id})
+    # Trigger commissions only if registration is paid (paid users entering the tree).
+    if fresh and fresh.get("registration_paid"):
+        await _trigger_referral_commissions(fresh)
+    await _create_notification(
+        user_id, "approval",
+        "Account approved",
+        "You have been approved by admin. Your sponsor's network has been credited and earnings are now active.",
+    )
+    await _audit_log(admin, "user.approve", "user", user_id)
+    return {"ok": True}
+
+
+class ApprovalReject(BaseModel):
+    category: str  # one of REJECT_CATEGORIES keys
+    reason: Optional[str] = None  # required if category == 'custom'
+
+
+@api_router.post("/admin/approvals/{user_id}/reject")
+async def admin_reject_user(user_id: str, payload: ApprovalReject, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") != "user":
+        raise HTTPException(status_code=400, detail="Only regular users can be rejected")
+    if payload.category not in REJECT_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Invalid rejection category")
+    reason = payload.reason or REJECT_CATEGORIES[payload.category]
+    if payload.category == "custom" and not (payload.reason and payload.reason.strip()):
+        raise HTTPException(status_code=400, detail="Custom reason text is required")
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {
+            "approval_status": "rejected",
+            "approval_reviewed_at": now_utc().isoformat(),
+            "approval_reviewed_by": admin["id"],
+            "approval_reject_category": payload.category,
+            "approval_reject_reason": reason,
+        }},
+    )
+    msg = (
+        f"Your account approval was rejected: {reason}. "
+        f"Please upload additional documents (CIBIL report, bank statement, income proof) "
+        f"under the 'Additional documents' section and we will re-review."
+    )
+    await _create_notification(user_id, "approval", "Account approval rejected", msg)
+    await _audit_log(admin, "user.reject", "user", user_id, {"category": payload.category, "reason": reason})
+    return {"ok": True}
+
+
+# ------------------ User: Additional Documents (CIBIL etc.) ------------------
+class ExtraDocsSubmit(BaseModel):
+    cibil_report: Optional[str] = None
+    bank_statement: Optional[str] = None
+    income_proof: Optional[str] = None
+    other: Optional[str] = None
+
+
+@api_router.post("/users/me/additional-docs")
+async def submit_additional_docs(payload: ExtraDocsSubmit, user: Dict[str, Any] = Depends(get_current_user)):
+    """Upload additional documents requested after a rejection."""
+    update_extra: Dict[str, Any] = {}
+    cb = _validate_b64_image(payload.cibil_report, "cibil_report") if payload.cibil_report else None
+    bs = _validate_b64_image(payload.bank_statement, "bank_statement") if payload.bank_statement else None
+    ip = _validate_b64_image(payload.income_proof, "income_proof") if payload.income_proof else None
+    ot = _validate_b64_image(payload.other, "other") if payload.other else None
+    if cb:
+        update_extra["extra_docs.cibil_report"] = cb
+    if bs:
+        update_extra["extra_docs.bank_statement"] = bs
+    if ip:
+        update_extra["extra_docs.income_proof"] = ip
+    if ot:
+        update_extra["extra_docs.other"] = ot
+    if not update_extra:
+        raise HTTPException(status_code=400, detail="At least one document must be provided")
+    update_extra["extra_docs.submitted_at"] = now_utc().isoformat()
+    # Move user back to 'pending' so admin sees them in the queue again, only if currently rejected.
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "approval_status": 1})
+    if fresh and fresh.get("approval_status") == "rejected":
+        update_extra["approval_status"] = "pending"
+    await db.users.update_one({"id": user["id"]}, {"$set": update_extra})
+    await _create_notification(
+        user["id"], "approval",
+        "Additional documents submitted",
+        "Thanks! Your additional documents have been re-submitted for admin review.",
+    )
+    return {"ok": True}
+
+
+@api_router.get("/users/me/additional-docs")
+async def my_additional_docs(user: Dict[str, Any] = Depends(get_current_user)):
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0, "extra_docs": 1, "approval_status": 1, "approval_reject_category": 1, "approval_reject_reason": 1})
+    return {
+        "approval_status": (u or {}).get("approval_status"),
+        "reject_category": (u or {}).get("approval_reject_category"),
+        "reject_reason": (u or {}).get("approval_reject_reason"),
+        "extra_docs": (u or {}).get("extra_docs") or {},
+    }
+
+
+@api_router.get("/admin/approvals/{user_id}/additional-docs")
+async def admin_get_user_extra_docs(user_id: str, _: Dict[str, Any] = Depends(require_admin)):
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "extra_docs": 1, "name": 1, "email": 1, "approval_status": 1})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    return u
+
+
 # ------------------ Phase 1: User Block / Wallet Admin ------------------
 class BlockRequest(BaseModel):
     reason: str
@@ -1759,6 +2001,15 @@ async def root():
 async def seed_admin():
     existing = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not existing:
+        # Pick a referral code that isn't already taken (defensive — if a previous
+        # user inherited "ADMIN001" via promotion, fall back to a random code).
+        admin_code = "ADMIN001"
+        clash = await db.users.find_one({"referral_code": admin_code})
+        if clash:
+            while True:
+                admin_code = gen_referral_code()
+                if not await db.users.find_one({"referral_code": admin_code}):
+                    break
         await db.users.insert_one({
             "id": str(uuid.uuid4()),
             "name": "Admin",
@@ -1767,7 +2018,7 @@ async def seed_admin():
             "phone": None,
             "role": "admin",
             "admin_role": "super_admin",
-            "referral_code": "ADMIN001",
+            "referral_code": admin_code,
             "referred_by": None,
             "sponsor_id": None,
             "wallet_balance": 0.0,
@@ -1829,6 +2080,28 @@ async def on_startup():
     await db.users.create_index("sponsor_id")
     await seed_admin()
     await seed_products()
+    # Backfill: any existing user without approval_status — assume approved (legacy users
+    # who joined before the approval gate existed). Admins get auto-approved too.
+    await db.users.update_many(
+        {"approval_status": {"$exists": False}},
+        {"$set": {
+            "approval_status": "approved",
+            "commission_triggered": True,
+            "approval_reviewed_at": None,
+            "approval_reviewed_by": None,
+            "approval_reject_category": None,
+            "approval_reject_reason": None,
+            "extra_docs": {
+                "cibil_report": None, "bank_statement": None,
+                "income_proof": None, "other": None, "submitted_at": None,
+            },
+        }},
+    )
+    # Always make sure admin accounts are 'approved'
+    await db.users.update_many(
+        {"role": "admin"},
+        {"$set": {"approval_status": "approved", "commission_triggered": True}},
+    )
 
 
 @app.on_event("shutdown")

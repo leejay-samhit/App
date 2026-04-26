@@ -28,6 +28,18 @@ type Analytics = {
   daily_txns: { date: string; value: number }[];
 };
 
+type NewUser = {
+  id: string;
+  name: string;
+  email: string;
+  phone?: string | null;
+  created_at: string;
+  approval_status?: string;
+  sponsor_email?: string | null;
+  sponsor_name?: string | null;
+  registration_paid?: boolean;
+};
+
 export default function AdminHome() {
   const { user } = useAuth();
   const router = useRouter();
@@ -36,13 +48,22 @@ export default function AdminHome() {
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState(7);
   const [error, setError] = useState<string | null>(null);
+  const [newToday, setNewToday] = useState<NewUser[]>([]);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!user) return; // wait for auth hydration
     setError(null);
     try {
-      const { data } = await api.get<Analytics>(`/admin/analytics?days=${period}`);
-      setData(data);
+      const [aRes, todayRes, pendingRes] = await Promise.all([
+        api.get<Analytics>(`/admin/analytics?days=${period}`),
+        api.get<NewUser[]>("/admin/approvals/today"),
+        api.get<NewUser[]>("/admin/approvals?status=pending"),
+      ]);
+      setData(aRes.data);
+      setNewToday(todayRes.data || []);
+      setPendingCount((pendingRes.data || []).length);
     } catch (e: any) {
       setError(e?.response?.data?.detail || e?.message || "Failed to load analytics");
     }
@@ -109,11 +130,106 @@ export default function AdminHome() {
         </View>
 
         <View style={styles.kpiGrid}>
-          <KPI icon="user-plus" label="New today" value={String(k.new_users_today)} testID="kpi-new-today" />
+          <KPI icon="user-plus" label="New today" value={String(k.new_users_today)} testID="kpi-new-today" onPress={() => router.push("/admin/approvals" as any)} />
           <KPI icon="calendar" label="New this month" value={String(k.new_users_month)} testID="kpi-new-month" />
           <KPI icon="check-circle" label="Paid today" value={String(k.paid_users_today)} testID="kpi-paid-today" />
           <KPI icon="shopping-bag" label="Orders" value={String(k.orders_count)} testID="kpi-orders" />
         </View>
+
+        {/* Approval queue summary */}
+        <TouchableOpacity onPress={() => router.push("/admin/approvals" as any)} style={styles.approvalsBanner} testID="approvals-banner">
+          <View style={[styles.approvalsIcon, { backgroundColor: pendingCount > 0 ? "#FFF4E5" : "#E6F4EE" }]}>
+            <Feather name={pendingCount > 0 ? "alert-circle" : "check-circle"} size={18} color={pendingCount > 0 ? colors.warning : colors.success} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.approvalsTitle}>{pendingCount > 0 ? `${pendingCount} pending approval${pendingCount === 1 ? "" : "s"}` : "Approvals all caught up"}</Text>
+            <Text style={styles.approvalsSub}>Review users before they enter the payout tree.</Text>
+          </View>
+          <Feather name="chevron-right" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
+        {/* New today carousel */}
+        {newToday.length > 0 && (
+          <>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionLabel}>NEW TODAY</Text>
+              <TouchableOpacity onPress={() => router.push("/admin/approvals" as any)} testID="new-today-all">
+                <Text style={styles.linkText}>See all →</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: spacing.screen, gap: 10 }}>
+              {newToday.map((u) => (
+                <TouchableOpacity
+                  key={u.id}
+                  onPress={() => router.push(`/admin/approvals?focus=${u.id}` as any)}
+                  style={styles.userCard}
+                  testID={`new-today-${u.id}`}
+                >
+                  <View style={styles.userTop}>
+                    <View style={styles.userAvatar}><Text style={styles.userAvatarText}>{(u.name || "?").charAt(0).toUpperCase()}</Text></View>
+                    <View style={[styles.statusPill, {
+                      backgroundColor: u.approval_status === "approved" ? colors.success
+                        : u.approval_status === "rejected" ? "#B3261E"
+                        : colors.warning,
+                    }]}>
+                      <Text style={styles.statusPillText}>{(u.approval_status || "PENDING").toUpperCase()}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.userName} numberOfLines={1}>{u.name}</Text>
+                  <Text style={styles.userEmail} numberOfLines={1}>{u.email}</Text>
+                  {u.sponsor_email ? (
+                    <Text style={styles.userMeta} numberOfLines={1}>via {u.sponsor_name || u.sponsor_email}</Text>
+                  ) : (
+                    <Text style={styles.userMeta}>No sponsor</Text>
+                  )}
+                  <View style={styles.userTimeRow}>
+                    <Feather name="clock" size={10} color={colors.textMuted} />
+                    <Text style={styles.userTime}>{new Date(u.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
+                    {!u.registration_paid && (
+                      <View style={styles.unpaidBadge}><Text style={styles.unpaidBadgeText}>UNPAID</Text></View>
+                    )}
+                  </View>
+                  {u.approval_status === "pending" && (
+                    <View style={styles.userActions}>
+                      <TouchableOpacity
+                        onPress={async (e) => {
+                          e.stopPropagation();
+                          setBusyId(u.id);
+                          try {
+                            await api.post(`/admin/approvals/${u.id}/approve`);
+                            await load();
+                          } catch {}
+                          finally { setBusyId(null); }
+                        }}
+                        disabled={busyId === u.id}
+                        style={[styles.userMiniBtn, { backgroundColor: colors.primary }]}
+                        testID={`new-today-${u.id}-approve`}
+                      >
+                        {busyId === u.id ? <ActivityIndicator size="small" color={colors.primaryFg} /> : (
+                          <>
+                            <Feather name="check" size={12} color={colors.primaryFg} />
+                            <Text style={[styles.userMiniBtnText, { color: colors.primaryFg }]}>Approve</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          router.push(`/admin/approvals?focus=${u.id}` as any);
+                        }}
+                        style={[styles.userMiniBtn, { backgroundColor: colors.surfaceMuted }]}
+                        testID={`new-today-${u.id}-review`}
+                      >
+                        <Feather name="eye" size={12} color={colors.textMain} />
+                        <Text style={styles.userMiniBtnText}>Review</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </>
+        )}
 
         <Text style={styles.sectionLabel}>TRANSACTION STATUS</Text>
         <View style={styles.txnRow}>
@@ -147,13 +263,14 @@ export default function AdminHome() {
   );
 }
 
-function KPI({ icon, label, value, testID }: { icon: any; label: string; value: string; testID?: string }) {
+function KPI({ icon, label, value, testID, onPress }: { icon: any; label: string; value: string; testID?: string; onPress?: () => void }) {
+  const Wrap: any = onPress ? TouchableOpacity : View;
   return (
-    <View style={styles.kpiCard} testID={testID}>
+    <Wrap activeOpacity={0.75} onPress={onPress} style={styles.kpiCard} testID={testID}>
       <View style={styles.kpiIcon}><Feather name={icon} size={14} color={colors.primary} /></View>
       <Text style={styles.kpiValue}>{value}</Text>
       <Text style={styles.kpiLabel}>{label}</Text>
-    </View>
+    </Wrap>
   );
 }
 
@@ -252,4 +369,26 @@ const styles = StyleSheet.create({
   quickCard: { flexBasis: "48%", flexGrow: 1, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14 },
   quickIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
   quickLabel: { fontSize: 13, fontWeight: "700", color: colors.textMain, flex: 1 },
+  approvalsBanner: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 16 },
+  approvalsIcon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  approvalsTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain },
+  approvalsSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  sectionHeaderRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  linkText: { fontSize: 12, color: colors.primary, fontWeight: "700" },
+  userCard: { width: 220, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 12 },
+  userTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  userAvatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
+  userAvatarText: { color: "#fff", fontSize: 13, fontWeight: "800" },
+  statusPill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 99 },
+  statusPillText: { color: "#fff", fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
+  userName: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  userEmail: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  userMeta: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
+  userTimeRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6 },
+  userTime: { fontSize: 10, color: colors.textMuted },
+  unpaidBadge: { backgroundColor: "#FCE9E5", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginLeft: "auto" },
+  unpaidBadgeText: { color: "#B3261E", fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
+  userActions: { flexDirection: "row", gap: 6, marginTop: 10 },
+  userMiniBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 4, paddingVertical: 8, borderRadius: 8 },
+  userMiniBtnText: { fontSize: 11, fontWeight: "700", color: colors.textMain },
 });

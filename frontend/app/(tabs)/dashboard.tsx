@@ -130,6 +130,32 @@ export default function DashboardScreen() {
           <Text style={styles.tierTeam}>{data.team_size} in network</Text>
         </Animated.View>
 
+        {/* Approval status banner — only show if not approved */}
+        {(user as any)?.approval_status && (user as any).approval_status !== "approved" && (
+          <TouchableOpacity
+            onPress={() => router.push("/extra-docs" as any)}
+            style={[styles.approvalBanner, { backgroundColor: (user as any).approval_status === "rejected" ? "#FCE9E5" : "#FFF4E5", borderColor: (user as any).approval_status === "rejected" ? "#F2B8B5" : "#FFD79A" }]}
+            testID="dashboard-approval-banner"
+          >
+            <Feather
+              name={(user as any).approval_status === "rejected" ? "alert-triangle" : "clock"}
+              size={18}
+              color={(user as any).approval_status === "rejected" ? "#B3261E" : colors.warning}
+            />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.approvalBannerTitle, { color: (user as any).approval_status === "rejected" ? "#B3261E" : "#7A5B12" }]}>
+                {(user as any).approval_status === "rejected" ? "Approval rejected" : "Approval pending"}
+              </Text>
+              <Text style={styles.approvalBannerSub} numberOfLines={2}>
+                {(user as any).approval_status === "rejected"
+                  ? `${(user as any).approval_reject_reason || "Please upload additional documents to re-verify."} Tap to upload.`
+                  : "Your account is awaiting admin approval. Withdrawals are disabled until approved."}
+              </Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+        )}
+
         <Animated.View entering={FadeInDown.duration(450).delay(120)} style={styles.heroCard}>
           <View style={styles.heroDecor} />
           <Text style={styles.heroLabel}>TOTAL EARNINGS</Text>
@@ -259,6 +285,9 @@ const styles = StyleSheet.create({
   tierText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 1.5 },
   tierDivider: { width: 1, height: 12, backgroundColor: colors.primary, opacity: 0.2 },
   tierTeam: { fontSize: 11, color: colors.primary, fontWeight: "600" },
+  approvalBanner: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, borderWidth: 1, marginBottom: 16 },
+  approvalBannerTitle: { fontSize: 13, fontWeight: "800" },
+  approvalBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, lineHeight: 16 },
   heroCard: { backgroundColor: colors.primary, borderRadius: radii.card, padding: 24, marginBottom: 16, overflow: "hidden" },
   heroDecor: { position: "absolute", right: -40, top: -40, width: 160, height: 160, borderRadius: 80, backgroundColor: "rgba(229,122,68,0.18)" },
   heroLabel: { color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: 2, fontWeight: "700" },

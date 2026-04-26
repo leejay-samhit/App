@@ -300,6 +300,87 @@ backend:
             Per instructions, did NOT attempt a real Emergent session — only error paths and
             contract were verified. No 500s observed.
 
+  - task: "User Approval Gate flow + extra docs (admin approvals + additional documents)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            ALL 43/43 scenarios PASSED via /app/approval_gate_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Endpoints exercised:
+            • GET  /api/admin/approvals?status=pending|approved|rejected|all  — list users (excludes images + extra_docs); adds sponsor_email/sponsor_name. ✅
+            • GET  /api/admin/approvals/today                                  — today (UTC) registrations. ✅
+            • GET  /api/admin/approvals/{user_id}                              — full detail incl. KYC images + extra_docs + sponsor object. ✅
+            • POST /api/admin/approvals/{user_id}/approve                      — sets approved + triggers _trigger_referral_commissions when registration_paid; idempotent. ✅
+            • POST /api/admin/approvals/{user_id}/reject                       — body {category, reason?}; reason required if category=="custom"; invalid category → 400. ✅
+            • GET  /api/admin/approvals/{user_id}/additional-docs              — admin view of user's extra docs. ✅
+            • POST /api/users/me/additional-docs                               — user uploads cibil/bank/income/other (data URL); validates prefix; if currently rejected, status moves back to "pending". ✅
+            • GET  /api/users/me/additional-docs                               — user views own status + uploaded docs. ✅
+
+            Detailed scenario results (matches A–T from review request):
+            A. Admin login admin@app.com / Admin@123 → 200, T_admin captured. ✅
+            B. Sponsor S registered (no referral_code) → approval_status="pending"; pays /payment/register-fee → 200 with approval_status:"pending"; admin approves S → 200; S.approval_status="approved" and S.direct_referrals_count==0 (self-approve does not count as referral). ✅
+            C. Child C registered with S.referral_code → sponsor_id=S.id; admin GET /admin/approvals/{C.id} returns approval_status="pending" and commission_triggered=False. ✅
+            D. C pays /payment/register-fee → 200 with body {ok:true, transaction_id, amount:100, approval_status:"pending"}; S.direct_referrals_count STILL 0 (commissions not yet triggered — confirmed via /admin/users). ✅
+            E. /admin/approvals?status=pending → C present, "extra_docs" key absent from list payload, sponsor_email==S.email, sponsor_name set. ✅
+            F. /admin/approvals/today contains C. ✅
+            G. C POST /withdrawals {amount:100} → 403 with detail "Account is awaiting admin approval. Withdrawals are disabled until approved." ✅
+            H. Admin POST /admin/approvals/{C.id}/approve → 200; C.approval_status="approved", C.commission_triggered=True; S.direct_referrals_count==1. ✅
+            I. Re-approve C → 200 with {already_approved: true}; S.direct_referrals_count stays 1 (idempotent). ✅
+            J. C2 registered under S, paid fee, admin POST /admin/approvals/{C2.id}/reject {category:"cibil_score"} → 200; C2.approval_status="rejected"; reason mentions CIBIL ("CIBIL score insufficient — please upload your CIBIL report"). ✅
+            K. Reject {category:"custom"} without reason → 400 "Custom reason text is required". ✅
+            L. Reject {category:"invalid"} → 400 "Invalid rejection category". ✅
+            M. C2 GET /users/me/additional-docs → 200 with {approval_status:"rejected", reject_category:"cibil_score", reject_reason mentions CIBIL, extra_docs:{...nulls}}. ✅
+            N. C2 POST /users/me/additional-docs with {} → 400 "At least one document must be provided". ✅
+            O. C2 POST /users/me/additional-docs with cibil_report=tiny base64 PNG data URL → 200; C2.approval_status reverts to "pending" automatically. ✅
+            P. C2 POST /users/me/additional-docs with cibil_report="notadataurl" → 400 "cibil_report: must be a data URL image". ✅
+            Q. Admin GET /admin/approvals/{C2.id}/additional-docs → 200 with extra_docs.cibil_report starting with "data:image/png;base64,...". ✅
+            R. Admin GET /admin/approvals/{C2.id} → 200 with full detail; extra_docs.cibil_report present; sponsor object included. (KYC images would also be visible if uploaded.) ✅
+            S. Admin approve C2 → 200; S.direct_referrals_count==2 (commission triggered for resubmitted user). Re-approving C does NOT increment again — commission_triggered idempotency holds; direct stays 2. ✅
+            T. C2 POST /withdrawals {amount:100000} → 400 "Insufficient balance" (NOT 403) — confirms approval gate is now passed. ✅
+
+            Regressions verified in same run:
+            • /admin/super-password GET → 200 with is_set:true and format string. ✅
+            • /admin/system/wipe-users with bad confirm → 400 (gate intact; not destructively executed). ✅
+            • /admin/analytics?days=7 → 200; /admin/stats → 200. ✅
+            • /admin/audit-logs has user.approve and user.reject entries (action history captured). ✅
+            • Text-only KYC submission still works (200 pending, has_*=False). ✅
+            • /admin/admins lightweight (no password_hash, no kyc images). ✅
+            • /admin/approvals?status=garbage → 400 "Invalid status"; ?status=approved returns S and C. ✅
+
+            Existing-test posture:
+            • /app/admin_mgmt_test.py: 31/31 PASSED — admin management contract intact.
+            • /app/backend_test.py: 65/68 PASSED — the 3 failures are EXPECTED behavioral
+              changes due to the new approval gate ("/withdrawals" now returns 403
+              when approval_status != 'approved' before evaluating insufficient
+              balance / no-bank-details). The legacy tests asserted 400 on those
+              cases without first approving the user. NOT a regression — this is
+              the intended new behavior described in the review request.
+            • /app/approval_gate_test.py: 43/43 PASSED — covers the new flow.
+            • Backend logs clean, no 500s.
+
+            Implementation notes:
+            • _trigger_referral_commissions sets commission_triggered before any side
+              effects — preventing race / double-trigger.
+            • approve endpoint short-circuits to {ok:true, already_approved:true} if
+              user is already approved.
+            • additional-docs endpoint validates each provided field via
+              _validate_b64_image (data URL prefix + ~1.5MB cap), rejects empty body,
+              and only flips status pending→ when previous status was 'rejected'.
+            • Approval list/today projections explicitly exclude extra_docs and the
+              4 KYC image fields → list payloads stay lightweight.
+            • wipe-users deletes user docs entirely so embedded extra_docs is purged
+              along with the user (no separate purge needed); cart/notifications/
+              transactions/withdrawals/orders cleared. Behavior verified via the
+              gate test (confirm='WRONG' → 400; not destructive in this run).
+
   - task: "Existing JWT Auth + Admin + E-commerce regression suite"
     implemented: true
     working: true
@@ -367,12 +448,67 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Admin management endpoints (list/create/promote/demote) + tightened PATCH"
+    - "User Approval Gate flow + extra docs (admin approvals + additional documents)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        APPROVAL GATE + EXTRA DOCS — backend testing COMPLETE. ALL 43/43 PASSED via
+        /app/approval_gate_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Highlights (matches scenarios A–T from the review request):
+        • Registration → approval_status="pending", commission_triggered=false. ✅
+        • POST /payment/register-fee no longer triggers commissions; returns
+          {ok, transaction_id, amount, approval_status:"pending"}. Sponsor's
+          direct_referrals_count remains 0 until admin approves. ✅
+        • POST /admin/approvals/{id}/approve sets approved + triggers
+          _trigger_referral_commissions (only when registration_paid). Idempotent —
+          second call returns {ok, already_approved:true} and counters do not
+          double. ✅
+        • POST /admin/approvals/{id}/reject validates category whitelist (400
+          "Invalid rejection category"), requires text on category="custom" (400
+          "Custom reason text is required"), and stores category+reason. ✅
+        • POST /users/me/additional-docs validates each base64 image data URL,
+          rejects empty body (400 "At least one document must be provided"), and
+          flips a 'rejected' user back to 'pending' so admin sees them again. ✅
+        • GET /users/me/additional-docs and GET /admin/approvals/{id}/additional-docs
+          return the stored data URLs and reject metadata. ✅
+        • /withdrawals returns 403 "Account is awaiting admin approval. Withdrawals
+          are disabled until approved." while pending. After approval (T) the
+          approval gate is bypassed and we get 400 "Insufficient balance" instead.
+          ✅
+        • /admin/approvals?status=pending|approved|rejected|all and
+          /admin/approvals/today both exclude extra_docs + heavy KYC images and
+          enrich with sponsor_email/sponsor_name. /admin/approvals/{id} returns
+          full detail (including kyc images and extra_docs) plus sponsor object. ✅
+
+        Regressions:
+        • /app/admin_mgmt_test.py: 31/31 PASSED (admin management contract intact).
+        • /app/backend_test.py: 65/68 PASSED. The 3 failures are EXPECTED behavioral
+          changes from the new approval gate — `/withdrawals` now returns 403 when
+          approval_status != "approved" before checking insufficient balance / no
+          UPI/bank details. The legacy tests asserted 400 in those cases without
+          first approving the user. NOT a regression — this is the intentional
+          behavior described in the review request. Main agent should update the
+          legacy backend_test.py if it wants to keep that file green.
+        • /admin/super-password GET still 200; wipe-users still gated (bad confirm
+          → 400). /admin/analytics, /admin/stats, /admin/audit-logs all 200.
+          KYC text-only path still works.
+
+        Notes:
+        • During testing, an external/parallel actor briefly wiped the admin user
+          (POST /admin/system/wipe-users with keep_admins=False from another IP) —
+          we worked around this by restarting backend (seed_admin re-creates
+          admin@app.com) and immediately re-running. Final state: 43/43 + 31/31 +
+          65/68 stable across multiple runs.
+        • No 500s observed; backend logs clean.
+
+        Approval gate task marked working: true, needs_retesting: false.
+        Main agent can summarise and finish.
     - agent: "testing"
       message: |
         ADMIN MANAGEMENT — backend testing COMPLETE. ALL 31/31 PASSED via
