@@ -28,6 +28,7 @@ type AuthState = {
   register: (data: { name: string; email: string; password: string; phone?: string; referral_code?: string }) => Promise<User>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
+  setSession: (token: string, user: User) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -81,13 +82,18 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  const setSession = async (token: string, u: User) => {
+    await setAuthToken(token);
+    setUser(u);
+  };
+
   const logout = async () => {
     await setAuthToken(null);
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, refresh }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, refresh, setSession }}>
       {children}
     </AuthContext.Provider>
   );

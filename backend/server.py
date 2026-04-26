@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 
 import bcrypt
+import httpx
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query
 from fastapi.responses import Response
@@ -272,6 +273,115 @@ async def login(payload: LoginRequest):
         raise HTTPException(status_code=403, detail=f"Account blocked: {reason}")
     token = create_access_token(user["id"], email, user.get("role", "user"))
     return {"token": token, "user": serialize_user(user)}
+
+
+# REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+class GoogleExchange(BaseModel):
+    session_id: str
+    referral_code: Optional[str] = None
+
+
+@api_router.post("/auth/google/exchange")
+async def google_exchange(payload: GoogleExchange):
+    """Exchange an Emergent session_id for our JWT bearer token. Creates user on first sign-in."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": payload.session_id},
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid Google session")
+    data = r.json()
+    email = (data.get("email") or "").lower().strip()
+    name = data.get("name") or "Google user"
+    picture = data.get("picture")
+    google_id = data.get("id")
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account did not return an email")
+
+    user = await db.users.find_one({"email": email})
+    is_new = False
+    if not user:
+        # Create new user
+        sponsor = None
+        sponsor_code = (payload.referral_code or "").strip().upper() or None
+        if sponsor_code:
+            sponsor = await db.users.find_one({"referral_code": sponsor_code})
+        # Generate unique referral code
+        while True:
+            code = gen_referral_code()
+            if not await db.users.find_one({"referral_code": code}):
+                break
+        user_id = str(uuid.uuid4())
+        # Random password (Google users login via Google)
+        random_password = secrets.token_hex(20)
+        user = {
+            "id": user_id,
+            "name": name,
+            "email": email,
+            "password_hash": hash_password(random_password),
+            "phone": None,
+            "role": "user",
+            "admin_role": None,
+            "google_id": google_id,
+            "picture": picture,
+            "auth_provider": "google",
+            "referral_code": code,
+            "referred_by": sponsor["referral_code"] if sponsor else None,
+            "sponsor_id": sponsor["id"] if sponsor else None,
+            "wallet_balance": 0.0,
+            "total_earned": 0.0,
+            "registration_paid": False,
+            "direct_referrals_count": 0,
+            "payouts_received": 0,
+            "upi_id": None,
+            "bank_account": None,
+            "ifsc": None,
+            "account_holder": None,
+            "is_blocked": False,
+            "block_reason": None,
+            "wallet_frozen": False,
+            "kyc_status": "none",
+            "kyc_full_name": None,
+            "kyc_aadhaar": None,
+            "kyc_pan": None,
+            "kyc_submitted_at": None,
+            "kyc_reviewed_at": None,
+            "kyc_reject_reason": None,
+            "created_at": now_utc().isoformat(),
+        }
+        await db.users.insert_one(user)
+        is_new = True
+        await _create_notification(user_id, "welcome", "Welcome to NetworkPay!", "Signed in with Google. Complete the ₹100 activation to start earning.")
+    else:
+        # Existing user: backfill google_id/picture if missing, refresh picture
+        update = {}
+        if not user.get("google_id"):
+            update["google_id"] = google_id
+        if picture and user.get("picture") != picture:
+            update["picture"] = picture
+        if update:
+            await db.users.update_one({"id": user["id"]}, {"$set": update})
+
+    if user.get("is_blocked"):
+        reason = user.get("block_reason") or "Contact support."
+        raise HTTPException(status_code=403, detail=f"Account blocked: {reason}")
+
+    token = create_access_token(user["id"], email, user.get("role", "user"))
+    return {"token": token, "user": serialize_user(user), "is_new": is_new}
+
+
+@api_router.get("/auth/google/callback")
+async def google_callback():
+    """Trivial endpoint Emergent redirects to. Returns a tiny success page; the mobile WebBrowser
+    captures this URL (with the #session_id fragment) and the app handles the exchange."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'><title>Sign in</title></head>"
+        "<body style='font-family:system-ui;text-align:center;padding:40px;background:#FAF9F6;color:#143D2E'>"
+        "<h2>You are signed in</h2><p>You can close this window.</p>"
+        "<script>setTimeout(()=>window.close(),200);</script></body></html>"
+    )
 
 
 @api_router.get("/auth/me")
