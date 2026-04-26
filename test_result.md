@@ -107,12 +107,96 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
-  - task: "Emergent Google Auth: POST /api/auth/google/exchange + GET /api/auth/google/callback"
+  - task: "KYC image uploads (base64) — submit + admin detail"
     implemented: true
     working: true
     file: "backend/server.py"
     stuck_count: 0
     priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Extended KYC flow to accept up to 4 base64 image fields per user:
+              aadhaar_front, aadhaar_back, pan_image, selfie
+            Endpoints:
+            - POST /api/users/me/kyc — now accepts {full_name, aadhaar, pan, aadhaar_front?, aadhaar_back?, pan_image?, selfie?}
+              * Each image must start with "data:image/" else 400 with field name
+              * Encoded length cap ~ floor(1_600_000 * 4/3) + 200 ≈ 2.13MB → 400 "image too large"
+              * Existing aadhaar/pan validation preserved (12 digits / 10 chars)
+              * Omitting image fields on resubmit preserves previously stored images
+            - GET /api/users/me/kyc — returns image data URLs + has_aadhaar_front/back/pan_image/selfie booleans
+            - GET /api/admin/kyc — list (no images, lightweight) — adds has_* flags via second projection pass
+            - GET /api/admin/kyc/{user_id} — NEW endpoint, returns full detail with all 4 images
+            - POST /api/admin/kyc/{user_id}/approve|reject — unchanged
+
+            Test scenarios:
+            1) User A submits KYC with valid text + small base64 PNG in aadhaar_front + pan_image + selfie → 200 status="pending"
+            2) GET /users/me/kyc → status pending, has_aadhaar_front/has_pan_image/has_selfie = true, has_aadhaar_back = false; image data URLs returned
+            3) Admin GET /admin/kyc?status=pending → A is in list, has_* flags correct, BUT raw image fields (aadhaar_front etc) NOT in payload
+            4) Admin GET /admin/kyc/{A.id} → returns aadhaar_front, pan_image, selfie as data:image/* URLs; aadhaar_back is null
+            5) User A resubmits with only aadhaar_back filled → 200; subsequent admin detail GET shows all 4 images now present (aadhaar_front etc preserved from step 1)
+            6) User submits with aadhaar_front="notadataurl" → 400 with detail containing "aadhaar_front"
+            7) User submits with aadhaar_front = "data:image/png;base64," + "A" * 2_500_000 → 400 with detail "image too large" mentioning aadhaar_front
+            8) Approve and reject still work; audit log entries created with action kyc.approve / kyc.reject
+        - working: true
+          agent: "testing"
+          comment: |
+            All KYC image upload scenarios verified — 18/18 PASSED via /app/kyc_image_test.py
+            against https://network-pay-1.preview.emergentagent.com.
+
+            Detailed results (matches the 9 scenarios + extras):
+            1) POST /users/me/kyc with valid full_name/aadhaar/pan + 1x1 PNG data URL in
+               aadhaar_front + pan_image + selfie -> 200 {"ok":true,"status":"pending"}.
+            2) GET /users/me/kyc as A -> status="pending"; has_aadhaar_front=True,
+               has_pan_image=True, has_selfie=True, has_aadhaar_back=False; the three
+               provided fields contain "data:image/png;base64,..." strings; aadhaar_back is
+               null.
+            3) Admin GET /admin/kyc?status=pending -> A's record present with has_*
+               flags correct. Confirmed payload contains NONE of the heavy fields
+               aadhaar_front / aadhaar_back / pan_image / selfie / kyc_aadhaar_front /
+               kyc_aadhaar_back / kyc_pan_image / kyc_selfie (projection working).
+            4) Admin GET /admin/kyc/{A.id} (NEW endpoint) -> returns aadhaar_front,
+               pan_image, selfie as data:image/* strings; aadhaar_back is null. Also
+               returns kyc_status, kyc_full_name, kyc_aadhaar, kyc_pan, name, email, etc.
+            5) Resubmit POST /users/me/kyc by A with ONLY aadhaar_back set (others
+               omitted) -> 200. Subsequent admin GET /admin/kyc/{A.id} shows ALL FOUR
+               images present — front/pan/selfie preserved from step 1, back newly added.
+               Preservation logic confirmed.
+            6) POST /users/me/kyc with aadhaar_front="notadataurl" -> 400 with detail
+               "aadhaar_front: must be a data URL image" (field name included).
+            7) POST /users/me/kyc with aadhaar_front = "data:image/png;base64,"+"A"*2_500_000
+               -> 400 with detail "aadhaar_front: image too large (max ~1.5MB)".
+            8) Admin POST /admin/kyc/{A.id}/approve -> 200; A's GET /users/me/kyc now
+               shows status="approved". Approval did not wipe stored images
+               (verified via re-read).
+            9) GET /admin/audit-logs returns kyc.approve action with target_id=A.id.
+
+            Backwards compatibility (extras):
+            10a) Text-only KYC submission (no image fields) by user B -> 200 pending — old
+                 contract preserved.
+            10b) GET /users/me/kyc on text-only user shows all has_*=False and image
+                 fields = null.
+            10c) Bad aadhaar (5 digits) still returns 400.
+            11) POST with aadhaar_back="data:text/plain;base64,..." -> 400 with detail
+                including "aadhaar_back" (mime-type prefix enforcement).
+
+            Full regression suite (/app/backend_test.py) re-run after image changes:
+            69/69 PASSED — auth, dashboard, network, KYC text path, bank, mock payment +
+            multi-level referral payouts, e-commerce (products/cart/checkout/orders),
+            withdrawals (request/approve/reject + refund), all admin endpoints (users,
+            KYC list/approve/reject, withdrawals, transactions + filter, settings GET/PUT,
+            audit logs, analytics, stats, all 4 CSV exports, order status, products), and
+            RBAC manager/super_admin. No 500s. Heavy image fields in admin list payload
+            confirmed absent (lightweight). Mock registration-fee payment is intentional.
+
+  - task: "Emergent Google Auth: POST /api/auth/google/exchange + GET /api/auth/google/callback"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "medium"
     needs_retesting: false
     status_history:
         - working: "NA"
@@ -208,8 +292,7 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Emergent Google Auth: POST /api/auth/google/exchange + GET /api/auth/google/callback"
-    - "Existing JWT Auth + Admin + E-commerce regression suite"
+    - "KYC image uploads (base64) — submit + admin detail"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -252,3 +335,34 @@ agent_communication:
 
         Both backend tasks marked working: true, needs_retesting: false. Main agent can
         proceed to summarise/finish.
+    - agent: "testing"
+      message: |
+        KYC IMAGE UPLOAD — backend testing COMPLETE. ALL 18/18 tests PASSED via
+        /app/kyc_image_test.py against https://network-pay-1.preview.emergentagent.com.
+
+        Summary of the 9 review scenarios (all green):
+        1) Submit KYC with 3 base64 PNG images -> 200 pending. ✅
+        2) GET /users/me/kyc returns image data URLs + correct has_* flags
+           (has_aadhaar_back=False; others True). ✅
+        3) Admin GET /admin/kyc?status=pending omits all heavy image fields
+           (aadhaar_front/aadhaar_back/pan_image/selfie/kyc_*) but includes correct has_*
+           flags. ✅
+        4) Admin GET /admin/kyc/{user_id} (NEW) returns the 3 images as data:image/* URLs;
+           aadhaar_back null. ✅
+        5) Resubmit with only aadhaar_back -> 200; subsequent admin detail GET shows ALL
+           4 images present (front/pan/selfie preserved from step 1). ✅
+        6) Bad data URL ("notadataurl") -> 400 with "aadhaar_front" in detail. ✅
+        7) Oversize image (~2.5MB base64) -> 400 "image too large" mentioning aadhaar_front. ✅
+        8) Admin approve -> 200; A's GET /users/me/kyc shows status=approved. ✅
+        9) /admin/audit-logs has kyc.approve action with target_id=A.id. ✅
+
+        Backwards compatibility: TEXT-ONLY KYC submission still works (200 pending,
+        all has_*=False). Bad aadhaar still 400. Non-image data URL ("data:text/plain;...")
+        rejected with field name. ✅
+
+        Re-ran full regression: 69/69 PASSED — no regressions in JWT auth, admin,
+        e-commerce, withdrawals, settings, RBAC, analytics, or exports. Backend logs clean,
+        no 500s observed.
+
+        Task "KYC image uploads (base64) — submit + admin detail" marked working: true,
+        needs_retesting: false. Main agent can summarise and finish.

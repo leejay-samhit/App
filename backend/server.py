@@ -966,6 +966,22 @@ class KYCSubmit(BaseModel):
     full_name: str
     aadhaar: str
     pan: str
+    aadhaar_front: Optional[str] = None  # base64 data URL ("data:image/jpeg;base64,...")
+    aadhaar_back: Optional[str] = None
+    pan_image: Optional[str] = None
+    selfie: Optional[str] = None
+
+
+def _validate_b64_image(s: Optional[str], field: str, max_bytes: int = 1_600_000) -> Optional[str]:
+    """Lightly validate a data URL base64 image. Returns the string or None."""
+    if not s:
+        return None
+    if not s.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail=f"{field}: must be a data URL image")
+    # Approx decoded size (base64 expands by ~4/3)
+    if len(s) > int(max_bytes * 4 / 3) + 200:
+        raise HTTPException(status_code=400, detail=f"{field}: image too large (max ~1.5MB)")
+    return s
 
 
 @api_router.post("/users/me/kyc")
@@ -976,31 +992,55 @@ async def submit_kyc(payload: KYCSubmit, user: Dict[str, Any] = Depends(get_curr
         raise HTTPException(status_code=400, detail="Aadhaar must be 12 digits")
     if len(pan) != 10:
         raise HTTPException(status_code=400, detail="PAN must be 10 characters")
-    await db.users.update_one(
-        {"id": user["id"]},
-        {"$set": {
-            "kyc_status": "pending",
-            "kyc_full_name": payload.full_name.strip(),
-            "kyc_aadhaar": aadhaar,
-            "kyc_pan": pan,
-            "kyc_submitted_at": now_utc().isoformat(),
-            "kyc_reject_reason": None,
-        }},
-    )
+
+    update: Dict[str, Any] = {
+        "kyc_status": "pending",
+        "kyc_full_name": payload.full_name.strip(),
+        "kyc_aadhaar": aadhaar,
+        "kyc_pan": pan,
+        "kyc_submitted_at": now_utc().isoformat(),
+        "kyc_reject_reason": None,
+    }
+    # Only overwrite image fields when caller actually sent something — lets users keep
+    # previously uploaded images on resubmit.
+    af = _validate_b64_image(payload.aadhaar_front, "aadhaar_front")
+    ab = _validate_b64_image(payload.aadhaar_back, "aadhaar_back")
+    pi = _validate_b64_image(payload.pan_image, "pan_image")
+    sf = _validate_b64_image(payload.selfie, "selfie")
+    if af is not None:
+        update["kyc_aadhaar_front"] = af
+    if ab is not None:
+        update["kyc_aadhaar_back"] = ab
+    if pi is not None:
+        update["kyc_pan_image"] = pi
+    if sf is not None:
+        update["kyc_selfie"] = sf
+
+    await db.users.update_one({"id": user["id"]}, {"$set": update})
     await _create_notification(user["id"], "kyc", "KYC submitted", "Your KYC details are under review.")
     return {"ok": True, "status": "pending"}
 
 
 @api_router.get("/users/me/kyc")
 async def my_kyc(user: Dict[str, Any] = Depends(get_current_user)):
+    # Re-fetch to include image fields not in cached dependency
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0}) or user
     return {
-        "status": user.get("kyc_status", "none"),
-        "full_name": user.get("kyc_full_name"),
-        "aadhaar": user.get("kyc_aadhaar"),
-        "pan": user.get("kyc_pan"),
-        "submitted_at": user.get("kyc_submitted_at"),
-        "reviewed_at": user.get("kyc_reviewed_at"),
-        "reject_reason": user.get("kyc_reject_reason"),
+        "status": u.get("kyc_status", "none"),
+        "full_name": u.get("kyc_full_name"),
+        "aadhaar": u.get("kyc_aadhaar"),
+        "pan": u.get("kyc_pan"),
+        "submitted_at": u.get("kyc_submitted_at"),
+        "reviewed_at": u.get("kyc_reviewed_at"),
+        "reject_reason": u.get("kyc_reject_reason"),
+        "aadhaar_front": u.get("kyc_aadhaar_front"),
+        "aadhaar_back": u.get("kyc_aadhaar_back"),
+        "pan_image": u.get("kyc_pan_image"),
+        "selfie": u.get("kyc_selfie"),
+        "has_aadhaar_front": bool(u.get("kyc_aadhaar_front")),
+        "has_aadhaar_back": bool(u.get("kyc_aadhaar_back")),
+        "has_pan_image": bool(u.get("kyc_pan_image")),
+        "has_selfie": bool(u.get("kyc_selfie")),
     }
 
 
@@ -1009,8 +1049,61 @@ async def admin_list_kyc(_: Dict[str, Any] = Depends(require_admin), status: Opt
     q: Dict[str, Any] = {"kyc_status": {"$ne": "none"}}
     if status:
         q["kyc_status"] = status
-    items = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("kyc_submitted_at", -1).to_list(2000)
+    # Exclude heavy base64 image fields from list — fetch via /admin/kyc/{id} for detail.
+    projection = {
+        "_id": 0,
+        "password_hash": 0,
+        "kyc_aadhaar_front": 0,
+        "kyc_aadhaar_back": 0,
+        "kyc_pan_image": 0,
+        "kyc_selfie": 0,
+    }
+    items = await db.users.find(q, projection).sort("kyc_submitted_at", -1).to_list(2000)
+    # Add lightweight has_* flags so admin UI can show "image attached" badges
+    for it in items:
+        it["has_aadhaar_front"] = False
+        it["has_aadhaar_back"] = False
+        it["has_pan_image"] = False
+        it["has_selfie"] = False
+    # Cheap second pass: fetch only the boolean presence of images
+    presence = await db.users.find(
+        q,
+        {"_id": 0, "id": 1,
+         "kyc_aadhaar_front": 1, "kyc_aadhaar_back": 1,
+         "kyc_pan_image": 1, "kyc_selfie": 1},
+    ).to_list(2000)
+    pmap = {p["id"]: p for p in presence}
+    for it in items:
+        p = pmap.get(it.get("id"), {})
+        it["has_aadhaar_front"] = bool(p.get("kyc_aadhaar_front"))
+        it["has_aadhaar_back"] = bool(p.get("kyc_aadhaar_back"))
+        it["has_pan_image"] = bool(p.get("kyc_pan_image"))
+        it["has_selfie"] = bool(p.get("kyc_selfie"))
     return items
+
+
+@api_router.get("/admin/kyc/{user_id}")
+async def admin_get_kyc_detail(user_id: str, _: Dict[str, Any] = Depends(require_admin)):
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "id": u.get("id"),
+        "name": u.get("name"),
+        "email": u.get("email"),
+        "phone": u.get("phone"),
+        "kyc_status": u.get("kyc_status"),
+        "kyc_full_name": u.get("kyc_full_name"),
+        "kyc_aadhaar": u.get("kyc_aadhaar"),
+        "kyc_pan": u.get("kyc_pan"),
+        "kyc_submitted_at": u.get("kyc_submitted_at"),
+        "kyc_reviewed_at": u.get("kyc_reviewed_at"),
+        "kyc_reject_reason": u.get("kyc_reject_reason"),
+        "aadhaar_front": u.get("kyc_aadhaar_front"),
+        "aadhaar_back": u.get("kyc_aadhaar_back"),
+        "pan_image": u.get("kyc_pan_image"),
+        "selfie": u.get("kyc_selfie"),
+    }
 
 
 @api_router.post("/admin/kyc/{user_id}/approve")
