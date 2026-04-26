@@ -795,6 +795,77 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
     return {"ok": True}
 
 
+class WipeUsersRequest(BaseModel):
+    confirm: str  # must equal "WIPE_ALL_USERS"
+    keep_admins: bool = True
+
+
+@api_router.post("/admin/system/wipe-users")
+async def admin_wipe_users(
+    payload: WipeUsersRequest,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """DESTRUCTIVE: Deletes all (non-admin) users + their related data.
+    Caller must send confirm="WIPE_ALL_USERS". super_admin only."""
+    if payload.confirm != "WIPE_ALL_USERS":
+        raise HTTPException(status_code=400, detail="Send confirm='WIPE_ALL_USERS' to proceed")
+
+    user_query: Dict[str, Any] = {"role": {"$ne": "admin"}} if payload.keep_admins else {"id": {"$ne": admin["id"]}}
+    if not payload.keep_admins:
+        # never wipe self
+        user_query = {"id": {"$ne": admin["id"]}}
+
+    # Snapshot ids before delete (so we can purge their dependent data)
+    targets = await db.users.find(user_query, {"_id": 0, "id": 1, "email": 1, "role": 1}).to_list(100000)
+    target_ids = [t["id"] for t in targets]
+
+    users_deleted = await db.users.delete_many(user_query)
+
+    # Wipe related collections fully — cleanest slate
+    cart_deleted = await db.cart_items.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
+    notif_deleted = await db.notifications.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
+    tx_deleted = await db.transactions.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
+    wd_deleted = await db.withdrawals.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
+    orders_deleted = await db.orders.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
+
+    # Reset wallet/referral counters on remaining (admin) users so the system starts clean
+    await db.users.update_many(
+        {},
+        {"$set": {
+            "wallet_balance": 0.0,
+            "total_earned": 0.0,
+            "direct_referrals_count": 0,
+            "payouts_received": 0,
+        }},
+    )
+
+    await _audit_log(
+        admin,
+        "system.wipe_users",
+        "system",
+        "all",
+        {
+            "users_deleted": users_deleted.deleted_count,
+            "transactions_deleted": tx_deleted.deleted_count,
+            "withdrawals_deleted": wd_deleted.deleted_count,
+            "orders_deleted": orders_deleted.deleted_count,
+            "cart_items_deleted": cart_deleted.deleted_count,
+            "notifications_deleted": notif_deleted.deleted_count,
+            "keep_admins": payload.keep_admins,
+        },
+    )
+
+    return {
+        "ok": True,
+        "users_deleted": users_deleted.deleted_count,
+        "transactions_deleted": tx_deleted.deleted_count,
+        "withdrawals_deleted": wd_deleted.deleted_count,
+        "orders_deleted": orders_deleted.deleted_count,
+        "cart_items_deleted": cart_deleted.deleted_count,
+        "notifications_deleted": notif_deleted.deleted_count,
+    }
+
+
 # ------------------ Admin: Settings (Payout Structure) ------------------
 class SettingsUpdate(BaseModel):
     registration_fee: Optional[float] = Field(default=None, ge=0)
