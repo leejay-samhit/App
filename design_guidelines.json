@@ -1,0 +1,133 @@
+{
+  "project_name": "Referral & E-commerce Platform Mobile App",
+  "theme_and_archetype": {
+    "theme": "Light",
+    "archetype": "Archetype 1 (Organic & Earthy)",
+    "rationale": "For an Indian referral and e-commerce platform dealing with money (₹100 registration, payouts), we must project absolute trust, stability, and growth. Avoiding generic tech-bro neon or dark themes. We use a grounded, organic palette based on Deep Forest Green and warm Off-Whites to make the app feel established, premium, and safe."
+  },
+  "colors": {
+    "background": "#FAF9F6",
+    "surface": "#FFFFFF",
+    "surface_muted": "#F3F1EC",
+    "primary": "#143D2E",
+    "primary_foreground": "#FFFFFF",
+    "accent": "#E57A44",
+    "accent_foreground": "#FFFFFF",
+    "success": "#2E7D52",
+    "warning": "#D9A05B",
+    "text_main": "#1C2520",
+    "text_muted": "#6B7280",
+    "border": "#E5E4E0",
+    "tailwind_config_extension": {
+      "brand": {
+        "50": "#F1F5F3",
+        "100": "#DDE8E2",
+        "500": "#2C6B50",
+        "900": "#143D2E",
+        "accent": "#E57A44",
+        "bg": "#FAF9F6"
+      }
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Outfit",
+      "body": "Manrope"
+    },
+    "scale": {
+      "h1": "text-5xl tracking-tight leading-tight",
+      "h2": "text-3xl tracking-tight",
+      "h3": "text-xl font-semibold tracking-tight",
+      "body": "text-base leading-relaxed",
+      "label": "text-xs tracking-[0.1em] uppercase font-bold text-gray-500"
+    },
+    "rules": [
+      "Headings MUST use the Outfit font with tight letter spacing.",
+      "Never use pure black; text is #1C2520.",
+      "Overlines for sections (like 'YOUR NETWORK') must be uppercase, tiny, and widely spaced."
+    ]
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous Spacing Philosophy. Native mobile screens shouldn't feel cramped.",
+    "screen_padding": "px-6",
+    "section_gap": "gap-8",
+    "card_padding": "p-5",
+    "border_radius": {
+      "cards": "rounded-2xl",
+      "buttons": "rounded-full",
+      "inputs": "rounded-xl"
+    },
+    "surfaces": {
+      "cards": "bg-white border border-[#E5E4E0] shadow-sm",
+      "floating_nav": "bg-white/90 border border-white/20 shadow-[0_8px_32px_rgba(20,61,46,0.1)]"
+    }
+  },
+  "media": {
+    "onboarding_hero": {
+      "url": "https://images.pexels.com/photos/5849577/pexels-photo-5849577.jpeg",
+      "description": "Illustration of wallet with money banknotes coins and bank card, arrows up. Use for onboarding or empty state of wallet."
+    },
+    "avatars": [
+      {
+        "url": "https://images.unsplash.com/photo-1649433658557-54cf58577c68",
+        "description": "Indian professional man smiling (User avatar 1)"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1598411435746-47bfecc3ea98",
+        "description": "Indian professional man in black shirt (User avatar 2)"
+      },
+      {
+        "url": "https://images.pexels.com/photos/7580822/pexels-photo-7580822.jpeg",
+        "description": "Confident Indian professional woman (User avatar 3)"
+      },
+      {
+        "url": "https://images.pexels.com/photos/7580940/pexels-photo-7580940.jpeg",
+        "description": "Smiling Indian professional man in vest (User avatar 4)"
+      }
+    ],
+    "products": [
+      {
+        "url": "https://images.pexels.com/photos/5650016/pexels-photo-5650016.jpeg",
+        "description": "White shopping bag with red sale tag and mini shopping cart (E-com product placeholder 1)"
+      },
+      {
+        "url": "https://images.pexels.com/photos/5632407/pexels-photo-5632407.jpeg",
+        "description": "Shopping cart with cosmetics and white paper bag (E-com product placeholder 2)"
+      }
+    ]
+  },
+  "screens": {
+    "authentication": {
+      "layout": "Clean white background. Large typography for 'Join the Network'.",
+      "features": "Phone number/Email login, OTP verification. ₹100 Registration Fee payment modal using Razorpay/UPI intent styling."
+    },
+    "user_dashboard": {
+      "hero": "Large numerical display of 'Total Earnings' (e.g., ₹12,450) using text-5xl Outfit, with a subtle 'Withdraw' text button.",
+      "bento_stats": "2x2 flex grid mapping out 'Direct Referrals', 'Team Size', 'Pending Payout', 'Rank'. Flat white cards with #143D2E text.",
+      "actions": "Quick action row for 'Copy Invite Link' and 'Update UPI'."
+    },
+    "referral_tree": {
+      "layout": "Vertical tiered list instead of a messy horizontal graph. Root node at top (current user). Vertical line drawn using a 2px View or SVG, connecting to 4 direct child cards.",
+      "cards": "Each child card shows Avatar, Name, Join Date, and an 'Expand' chevron to see their downline. Use nested FlatLists or accordions."
+    },
+    "wallet_and_payouts": {
+      "layout": "Split view: Top half shows Available Balance with Terracotta (#E57A44) CTA button 'Request Withdrawal'. Bottom half is a Transaction History list.",
+      "inputs": "Bank/UPI update screen with clear, large text inputs, rounded-xl, subtle border."
+    },
+    "ecommerce_shop": {
+      "layout": "2-column Masonry or flat grid for product catalog. Large images (max height 200px), minimal text (Title, Price). Add to cart button is just a minimal '+' icon button."
+    },
+    "admin_dashboard": {
+      "layout": "List-heavy view. Segments for 'Pending Payouts', 'User Management', 'Transactions'. Focus on bulk approval UI (Checkboxes + 'Approve Selected' sticky bottom button)."
+    }
+  },
+  "instructions_to_main_agent": [
+    "TECH STACK: Expo React Native. Use NativeWind for Tailwind styling. NEVER use web-only HTML/CSS like <div> or <p>.",
+    "ICONS: Use @expo/vector-icons (Feather or Ionicons) or lucide-react-native. DO NOT USE EMOJIS.",
+    "NAVIGATION: Use a floating Bottom Tab Navigation style. A floating pill anchored to the bottom (e.g., bottom-6, mx-6, rounded-full, blurred background if possible).",
+    "REFERRAL TREE: Do not try to find a 3rd party tree library. Build a custom vertical hierarchy using nested Views/Flatlists and vertical borders (border-l-2) to simulate branches.",
+    "IMAGES: ONLY use the provided URLs in the media section. Do NOT use placeholder domains (no via.placeholder.com).",
+    "COLORS: Stick to the Organic Earthy palette. No generic neon purple or blue gradients. Use #143D2E for Primary brand moments and #E57A44 for CTAs.",
+    "TESTING: Ensure interactive elements have standard React Native testID attributes (e.g., testID=\"login-submit-button\")."
+  ]
+}
