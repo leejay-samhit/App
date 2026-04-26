@@ -167,10 +167,10 @@ export default function DashboardScreen() {
         <Animated.View entering={FadeInDown.duration(450).delay(240)}>
           <Text style={styles.sectionLabel}>YOUR NETWORK</Text>
           <View style={styles.bento}>
-            <StatCard icon="user-plus" label="Direct referrals" value={String(data.direct_referrals)} testID="stat-direct" />
-            <StatCard icon="users" label="Team size" value={String(data.team_size)} testID="stat-team" />
-            <StatCard icon="award" label="Payouts" value={String(data.payouts_received)} testID="stat-payouts" />
-            <StatCard icon="clock" label="Pending W/D" value={String(data.pending_withdrawals)} testID="stat-pending" />
+            <StatCard icon="user-plus" label="Direct referrals" value={String(data.direct_referrals)} testID="stat-direct" onPress={() => router.push("/(tabs)/network")} />
+            <StatCard icon="users" label="Team size" value={String(data.team_size)} testID="stat-team" onPress={() => router.push("/(tabs)/network")} />
+            <StatCard icon="award" label="Payouts" value={String(data.payouts_received)} testID="stat-payouts" onPress={() => router.push("/(tabs)/wallet")} />
+            <StatCard icon="clock" label="Pending W/D" value={String(data.pending_withdrawals)} testID="stat-pending" onPress={() => router.push("/(tabs)/wallet")} />
           </View>
         </Animated.View>
 
@@ -226,13 +226,19 @@ export default function DashboardScreen() {
   );
 }
 
-function StatCard({ icon, label, value, testID }: { icon: any; label: string; value: string; testID?: string }) {
+function StatCard({ icon, label, value, testID, onPress }: { icon: any; label: string; value: string; testID?: string; onPress?: () => void }) {
+  const Wrap: any = onPress ? TouchableOpacity : View;
   return (
-    <View style={styles.statCard} testID={testID}>
+    <Wrap activeOpacity={0.75} onPress={onPress} style={styles.statCard} testID={testID}>
       <View style={styles.statIconWrap}><Feather name={icon} size={16} color={colors.primary} /></View>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
-    </View>
+      {onPress ? (
+        <View style={styles.statChev}>
+          <Feather name="chevron-right" size={12} color={colors.textMuted} />
+        </View>
+      ) : null}
+    </Wrap>
   );
 }
 
@@ -275,10 +281,11 @@ const styles = StyleSheet.create({
   levelChipValue: { fontSize: 13, fontWeight: "800", color: colors.primary, marginTop: 2 },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12 },
   bento: { flexDirection: "row", flexWrap: "wrap", gap: 12, marginBottom: 24 },
-  statCard: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 16 },
+  statCard: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 16, position: "relative" },
   statIconWrap: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
   statValue: { fontSize: 24, fontWeight: "800", color: colors.textMain, marginTop: 12, letterSpacing: -0.5 },
   statLabel: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  statChev: { position: "absolute", top: 14, right: 14, width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted },
   codeCard: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 16, marginBottom: 12, gap: 10 },
   codeLabel: { fontSize: 10, letterSpacing: 2, color: colors.textMuted, fontWeight: "700" },
   codeValue: { fontSize: 20, fontWeight: "800", color: colors.textMain, letterSpacing: 2, marginTop: 4 },
