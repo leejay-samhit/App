@@ -1,5 +1,5 @@
 import { Tabs } from "expo-router";
-import { Feather } from "@expo/vector-icons";
+import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { Platform } from "react-native";
 import { colors } from "../../src/theme";
 
@@ -23,7 +23,7 @@ export default function AdminLayout() {
     >
       <Tabs.Screen name="home" options={{ title: "Home", tabBarIcon: ({ color, size }) => <Feather name="grid" size={size} color={color} /> }} />
       <Tabs.Screen name="users" options={{ title: "Users", tabBarIcon: ({ color, size }) => <Feather name="users" size={size} color={color} /> }} />
-      <Tabs.Screen name="payouts" options={{ title: "Payouts", tabBarIcon: ({ color, size }) => <Feather name="dollar-sign" size={size} color={color} /> }} />
+      <Tabs.Screen name="payouts" options={{ title: "Payouts", tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="currency-inr" size={size} color={color} /> }} />
       <Tabs.Screen name="transactions" options={{ title: "Txns", tabBarIcon: ({ color, size }) => <Feather name="list" size={size} color={color} /> }} />
       <Tabs.Screen name="more" options={{ title: "More", tabBarIcon: ({ color, size }) => <Feather name="more-horizontal" size={size} color={color} /> }} />
       <Tabs.Screen name="settings" options={{ href: null }} />
@@ -32,6 +32,8 @@ export default function AdminLayout() {
       <Tabs.Screen name="orders" options={{ href: null }} />
       <Tabs.Screen name="audit" options={{ href: null }} />
       <Tabs.Screen name="roadmap" options={{ href: null }} />
+      <Tabs.Screen name="admins" options={{ href: null }} />
+      <Tabs.Screen name="approvals" options={{ href: null }} />
     </Tabs>
   );
 }

@@ -20,7 +20,7 @@ const ITEMS = [
 const EXPORTS = [
   { kind: "users", label: "Users CSV", icon: "users" },
   { kind: "transactions", label: "Transactions CSV", icon: "list" },
-  { kind: "withdrawals", label: "Withdrawals CSV", icon: "dollar-sign" },
+  { kind: "withdrawals", label: "Withdrawals CSV", icon: "trending-down" },
   { kind: "orders", label: "Orders CSV", icon: "shopping-bag" },
 ] as const;
 
