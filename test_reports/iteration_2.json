@@ -1,0 +1,68 @@
+{
+  "summary": "Iteration 2 testing complete. Backend: 27/27 pytest passed (10 new iteration-2 + 17 regression). Frontend: all critical mobile flows verified end-to-end on the public Expo web preview.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "global",
+        "issues": [
+          "Pre-existing: Image style.resizeMode deprecation warning. Cosmetic, non-blocking."
+        ]
+      }
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_api.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "verified_features": {
+    "backend": {
+      "dashboard_new_fields": "GET /api/users/me/dashboard returns unread_notifications:int, tier{name,min,color,icon}, level_payouts{l1:400,l2:100,l3:50}. Bronze tier returned for team_size 0.",
+      "multi_level_payouts": "Verified S→A→4 directs: A wallet=₹400 (L1), S wallet=₹400 (4×L2 ₹100). Then E under D1 → S +₹50 L3 (=₹450), A +₹100 L2 (=₹500). transactions/me records level=2 and level=3 referral_payouts.",
+      "notifications": "Welcome on registration-fee, referral on direct signup, payout on credit, withdrawal request/approve/reject, order on checkout. unread_only=true filters; POST /api/notifications/me/read-all clears unread; dashboard.unread_notifications reflects count.",
+      "cart_orders": "POST /api/cart/add creates/increments; GET /api/cart returns items with product, line_total, total, count; remove + clear work; checkout 400 on empty/insufficient wallet, 200 on valid → order persisted with items array, wallet deducted, cart cleared, order notification created; GET /api/orders/me lists desc.",
+      "regression": "Admin login (ADMIN001), register, payment-fee idempotent (re-pay 400), 1+4 L1 payout still ₹400, withdrawal lock/refund-on-reject/approve+re-approve 400, admin endpoints (users/withdrawals/transactions/stats), products list — all green."
+    },
+    "frontend": {
+      "dashboard": "BRONZE TIER pill renders, '0 in network' shown, L1 ₹400 / L2 ₹100 / L3 ₹50 chips visible, RECENT ACTIVITY section appears once notifications exist, dashboard-bell testID works.",
+      "notifications_screen": "Tap bell → /notifications, lists 'Welcome to NetworkPay!' with timestamp; navigation back works.",
+      "shop": "shop-cart-btn (top-right) shows count badge, product-add-{id} testIDs add items (verified count badge incremented to 2), bottom checkout bar 'shop-go-checkout' appears as 'N items in cart'.",
+      "cart": "Item image + 'Classic Cotton Tote ₹499 × 2 ₹998' rendered, wallet vs total displayed, 'Insufficient wallet balance' warning, 'Pay with wallet' (cart-checkout testID) auto-disabled when wallet < total, cart-remove-{id} removes line and cart returns to empty state.",
+      "orders": "Empty state 'No orders yet' renders with back button (orders-back).",
+      "register_to_payment_to_dashboard": "Register with sponsor ADMIN001 → /payment → 'Pay ₹100 via UPI' click activates account → routes to /dashboard with valid data."
+    }
+  },
+  "action_items": [
+    "(Optional) Pay button on /payment is below the fold on small viewports (375x667) — consider sticky-bottom CTA for better mobile UX.",
+    "(Optional) Replace deprecated Image style.resizeMode with prop resizeMode (warning still present from iteration 1)."
+  ],
+  "critical_code_review_comments": [
+    "server.py grew to 760 lines — exceeds the 700-line guideline. Recommend splitting into routers (auth.py, payment.py, withdrawals.py, cart_orders.py, notifications.py, admin.py).",
+    "DRY: cart_get and orders/checkout duplicate the 'enrich items with product + line_total' loop — extract a helper.",
+    "_credit_payout uses inc_dict mutation; if PAYOUT_PER_LEVEL or LEVEL_*_PAYOUT is float, wallet_balance ends up float. assertions in tests use ints which is fine but consider Decimal for currency.",
+    "BankUpdate.dict() / ProductCreate.dict() are pydantic v1 patterns; on v2 use model_dump() to silence DeprecationWarnings.",
+    "/api/notifications/me hard-caps at 100 — fine for now but no pagination cursor; document as known limitation.",
+    "Orders use embedded item snapshots (good for price-history), but no stock decrement on checkout — products.stock is never updated."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration2.py (new)",
+    "/app/test_reports/iteration_2.json (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (27/27 pytest)",
+    "frontend": "100% on critical iteration-2 flows tested (dashboard tier+chips+bell+activity, /notifications, shop add+badge+checkout-bar, cart line/total/disabled-CTA/remove, orders empty state, register→pay→dashboard)"
+  },
+  "seed_data_creation": "Each backend test creates ephemeral TEST_<uuid>@test.com users; cart/orders/notifications scoped to those users. UI test created shop_<uuid>@test.com sponsored by ADMIN001 (paid).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Regression suite: /app/backend/tests/test_backend_api.py + test_iteration2.py (run via `pytest /app/backend/tests/ -v`). Public base = EXPO_PUBLIC_BACKEND_URL. Useful UI testIDs: dashboard-bell, dashboard-copy-code, dashboard-share-code, shop-cart-btn, shop-go-checkout, product-add-{id}, cart-checkout, cart-remove-{id}, orders-back. Pay button on /payment screen needs scroll-into-view OR JS click fallback because it sits below the fold on 375x667. Bottom-tab buttons still lack testIDs (carry-over from iter 1).",
+  "rca_of_issue": "No bugs surfaced. Multi-level payout chain confirmed: registration-fee handler walks sponsor → L2 → L3 sequentially, crediting fixed amounts; L1 only triggers on direct_referrals_count % 4 == 0. Notifications are idempotently inserted at every business event. Cart enriches items at GET-time so price changes are reflected, but checkout snapshots prices into the order record."
+}
