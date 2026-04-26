@@ -1,0 +1,133 @@
+import { useState, useEffect } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TextInput,
+  TouchableOpacity,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Alert,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Feather } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import { api, formatApiError } from "../../src/api";
+import { useAuth } from "../../src/auth";
+import { colors, radii, spacing } from "../../src/theme";
+
+export default function ProfileScreen() {
+  const { user, logout, refresh } = useAuth();
+  const router = useRouter();
+  const [upi, setUpi] = useState("");
+  const [bank, setBank] = useState("");
+  const [ifsc, setIfsc] = useState("");
+  const [holder, setHolder] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    setUpi(user?.upi_id || "");
+    setBank(user?.bank_account || "");
+    setIfsc(user?.ifsc || "");
+    setHolder(user?.account_holder || "");
+  }, [user]);
+
+  const onSave = async () => {
+    setSaving(true);
+    setMsg("");
+    try {
+      await api.post("/users/me/bank", {
+        upi_id: upi.trim() || null,
+        bank_account: bank.trim() || null,
+        ifsc: ifsc.trim() || null,
+        account_holder: holder.trim() || null,
+      });
+      await refresh();
+      setMsg("Saved successfully");
+    } catch (e) {
+      setMsg(formatApiError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onLogout = async () => {
+    await logout();
+    router.replace("/login");
+  };
+
+  return (
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+          <Text style={styles.overline}>PROFILE</Text>
+          <Text style={styles.h1}>{user?.name}</Text>
+          <Text style={styles.subtitle}>{user?.email}</Text>
+
+          <View style={styles.codeCard}>
+            <View>
+              <Text style={styles.codeLabel}>YOUR REFERRAL CODE</Text>
+              <Text style={styles.code}>{user?.referral_code}</Text>
+            </View>
+            <Feather name="copy" size={20} color={colors.primaryFg} />
+          </View>
+
+          <Text style={styles.sectionLabel}>PAYOUT DETAILS</Text>
+          <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>UPI ID</Text>
+            <TextInput testID="profile-upi" value={upi} onChangeText={setUpi} placeholder="name@upi" placeholderTextColor={colors.textMuted} autoCapitalize="none" style={styles.input} />
+          </View>
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>Bank account number</Text>
+            <TextInput testID="profile-bank" value={bank} onChangeText={setBank} placeholder="XXXXXXXXXX" placeholderTextColor={colors.textMuted} keyboardType="numeric" style={styles.input} />
+          </View>
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>IFSC code</Text>
+            <TextInput testID="profile-ifsc" value={ifsc} onChangeText={(t) => setIfsc(t.toUpperCase())} placeholder="HDFC0000123" placeholderTextColor={colors.textMuted} autoCapitalize="characters" style={styles.input} />
+          </View>
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>Account holder name</Text>
+            <TextInput testID="profile-holder" value={holder} onChangeText={setHolder} placeholder="As per bank record" placeholderTextColor={colors.textMuted} style={styles.input} />
+          </View>
+
+          {msg ? <Text style={[styles.msg, { color: msg === "Saved successfully" ? colors.success : "#B3261E" }]} testID="profile-msg">{msg}</Text> : null}
+
+          <TouchableOpacity onPress={onSave} disabled={saving} style={[styles.saveBtn, saving && { opacity: 0.7 }]} testID="profile-save">
+            {saving ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={styles.saveBtnText}>Save details</Text>}
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={onLogout} style={styles.logoutBtn} testID="profile-logout">
+            <Feather name="log-out" size={16} color="#B3261E" />
+            <Text style={styles.logoutText}>Logout</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.background },
+  container: { padding: spacing.screen, paddingBottom: 60 },
+  overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 8 },
+  h1: { fontSize: 30, fontWeight: "800", color: colors.textMain, letterSpacing: -1 },
+  subtitle: { fontSize: 14, color: colors.textMuted, marginTop: 4, marginBottom: 20 },
+  codeCard: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: colors.primary, borderRadius: radii.card, padding: 20, marginBottom: 28 },
+  codeLabel: { color: "rgba(255,255,255,0.7)", fontSize: 10, letterSpacing: 2, fontWeight: "700" },
+  code: { color: colors.primaryFg, fontSize: 26, fontWeight: "800", letterSpacing: 3, marginTop: 4 },
+  sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 6 },
+  helperText: { fontSize: 13, color: colors.textMuted, marginBottom: 16 },
+  formGroup: { marginBottom: 14 },
+  label: { fontSize: 12, color: colors.textMuted, marginBottom: 6, fontWeight: "600" },
+  input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 16, paddingVertical: 14, fontSize: 15, color: colors.textMain },
+  msg: { fontSize: 13, marginTop: 8 },
+  saveBtn: { backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 16, alignItems: "center", marginTop: 16 },
+  saveBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 15 },
+  logoutBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 16, padding: 12 },
+  logoutText: { color: "#B3261E", fontSize: 14, fontWeight: "700" },
+});
