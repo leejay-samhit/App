@@ -35,7 +35,7 @@ export default function Login() {
     setLoading(true);
     try {
       const u = await login(email.trim(), password);
-      if (u.role === "admin") router.replace("/admin/users");
+      if (u.role === "admin") router.replace("/admin/home");
       else if (!u.registration_paid) router.replace("/payment");
       else router.replace("/(tabs)/dashboard");
     } catch (e) {

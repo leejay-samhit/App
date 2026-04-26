@@ -75,6 +75,15 @@ export default function ProfileScreen() {
             <Feather name="copy" size={20} color={colors.primaryFg} />
           </View>
 
+          <TouchableOpacity onPress={() => router.push("/kyc")} style={styles.kycCard} testID="profile-kyc-link">
+            <View style={[styles.kycDot, { backgroundColor: (user as any)?.kyc_status === "approved" ? colors.success : (user as any)?.kyc_status === "pending" ? colors.warning : (user as any)?.kyc_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.kycTitle}>KYC Verification</Text>
+              <Text style={styles.kycSub}>{(user as any)?.kyc_status ? ((user as any).kyc_status as string).toUpperCase() : "NOT SUBMITTED"}</Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+
           <Text style={styles.sectionLabel}>PAYOUT DETAILS</Text>
           <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
 
@@ -120,6 +129,10 @@ const styles = StyleSheet.create({
   codeCard: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: colors.primary, borderRadius: radii.card, padding: 20, marginBottom: 28 },
   codeLabel: { color: "rgba(255,255,255,0.7)", fontSize: 10, letterSpacing: 2, fontWeight: "700" },
   code: { color: colors.primaryFg, fontSize: 26, fontWeight: "800", letterSpacing: 3, marginTop: 4 },
+  kycCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 16, borderRadius: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginBottom: 28 },
+  kycDot: { width: 10, height: 10, borderRadius: 5 },
+  kycTitle: { fontSize: 14, fontWeight: "700", color: colors.textMain },
+  kycSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, letterSpacing: 1, fontWeight: "700" },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 6 },
   helperText: { fontSize: 13, color: colors.textMuted, marginBottom: 16 },
   formGroup: { marginBottom: 14 },

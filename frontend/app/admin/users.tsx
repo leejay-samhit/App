@@ -161,6 +161,8 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
   const [ifsc, setIfsc] = useState("");
   const [holder, setHolder] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustReason, setAdjustReason] = useState("");
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
@@ -323,6 +325,119 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
             <Field label="IFSC"><TextInput testID="edit-ifsc" value={ifsc} onChangeText={(t) => setIfsc(t.toUpperCase())} autoCapitalize="characters" style={modalStyles.input} placeholderTextColor={colors.textMuted} /></Field>
             <Field label="Account holder"><TextInput testID="edit-holder" value={holder} onChangeText={setHolder} style={modalStyles.input} placeholderTextColor={colors.textMuted} /></Field>
 
+            <Text style={modalStyles.section}>QUICK ACTIONS</Text>
+            <View style={{ flexDirection: "row", gap: 8, marginBottom: 12 }}>
+              <TouchableOpacity
+                onPress={async () => {
+                  setBusy("block");
+                  try {
+                    if (user.role === "admin" && (user as any).is_blocked !== true) {
+                      Alert.alert("Cannot block admin", "Demote to user first.");
+                      setBusy(null); return;
+                    }
+                    if ((user as any).is_blocked) {
+                      await api.post(`/admin/users/${user.id}/unblock`);
+                    } else {
+                      await api.post(`/admin/users/${user.id}/block`, { reason: "Blocked by admin" });
+                    }
+                    onSaved();
+                  } catch (e) { setMsg(formatApiError(e)); setBusy(null); }
+                }}
+                disabled={isSelf || busy === "block"}
+                style={[modalStyles.qaBtn, (isSelf || busy === "block") && { opacity: 0.5 }]}
+                testID="edit-block-toggle"
+              >
+                <Feather name={(user as any).is_blocked ? "user-check" : "user-x"} size={14} color={(user as any).is_blocked ? colors.success : "#B3261E"} />
+                <Text style={[modalStyles.qaBtnText, { color: (user as any).is_blocked ? colors.success : "#B3261E" }]}>
+                  {(user as any).is_blocked ? "Unblock" : "Block"}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={async () => {
+                  setBusy("freeze");
+                  try {
+                    await api.post(`/admin/users/${user.id}/wallet/freeze`);
+                    onSaved();
+                  } catch (e) { setMsg(formatApiError(e)); setBusy(null); }
+                }}
+                disabled={busy === "freeze"}
+                style={[modalStyles.qaBtn, busy === "freeze" && { opacity: 0.5 }]}
+                testID="edit-freeze-toggle"
+              >
+                <Feather name={(user as any).wallet_frozen ? "unlock" : "lock"} size={14} color={colors.primary} />
+                <Text style={modalStyles.qaBtnText}>{(user as any).wallet_frozen ? "Unfreeze" : "Freeze"} wallet</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={modalStyles.section}>WALLET ADJUST</Text>
+            <View style={{ flexDirection: "row", gap: 8, marginBottom: 8 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 11, color: colors.textMuted, fontWeight: "600", marginBottom: 4 }}>Amount (₹)</Text>
+                <TextInput testID="edit-adjust-amount" value={adjustAmount} onChangeText={setAdjustAmount} keyboardType="numeric" style={modalStyles.input} placeholderTextColor={colors.textMuted} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 11, color: colors.textMuted, fontWeight: "600", marginBottom: 4 }}>Reason</Text>
+                <TextInput testID="edit-adjust-reason" value={adjustReason} onChangeText={setAdjustReason} style={modalStyles.input} placeholder="e.g. Bonus" placeholderTextColor={colors.textMuted} />
+              </View>
+            </View>
+            <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
+              <TouchableOpacity
+                onPress={async () => {
+                  if (!adjustAmount || !adjustReason) { setMsg("Enter amount and reason"); return; }
+                  setBusy("credit");
+                  try {
+                    await api.post(`/admin/users/${user.id}/wallet`, { amount: parseFloat(adjustAmount), type: "credit", reason: adjustReason });
+                    setAdjustAmount(""); setAdjustReason("");
+                    onSaved();
+                  } catch (e) { setMsg(formatApiError(e)); setBusy(null); }
+                }}
+                disabled={busy === "credit"}
+                style={[modalStyles.qaBtn, { borderColor: colors.success }, busy === "credit" && { opacity: 0.5 }]}
+                testID="edit-credit"
+              >
+                <Feather name="plus-circle" size={14} color={colors.success} />
+                <Text style={[modalStyles.qaBtnText, { color: colors.success }]}>Credit</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={async () => {
+                  if (!adjustAmount || !adjustReason) { setMsg("Enter amount and reason"); return; }
+                  setBusy("debit");
+                  try {
+                    await api.post(`/admin/users/${user.id}/wallet`, { amount: parseFloat(adjustAmount), type: "debit", reason: adjustReason });
+                    setAdjustAmount(""); setAdjustReason("");
+                    onSaved();
+                  } catch (e) { setMsg(formatApiError(e)); setBusy(null); }
+                }}
+                disabled={busy === "debit"}
+                style={[modalStyles.qaBtn, { borderColor: "#B3261E" }, busy === "debit" && { opacity: 0.5 }]}
+                testID="edit-debit"
+              >
+                <Feather name="minus-circle" size={14} color="#B3261E" />
+                <Text style={[modalStyles.qaBtnText, { color: "#B3261E" }]}>Debit</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={modalStyles.section}>KYC STATUS</Text>
+            <View style={modalStyles.kycRow}>
+              <View style={[modalStyles.kycPill, { backgroundColor: (user as any).kyc_status === "approved" ? colors.success : (user as any).kyc_status === "rejected" ? "#B3261E" : (user as any).kyc_status === "pending" ? colors.warning : colors.textMuted }]}>
+                <Text style={modalStyles.kycPillText}>{((user as any).kyc_status || "none").toUpperCase()}</Text>
+              </View>
+              <Text style={modalStyles.kycName}>{(user as any).kyc_full_name || "Not submitted"}</Text>
+            </View>
+            {(user as any).kyc_status === "pending" && (
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                <TouchableOpacity
+                  onPress={async () => { setBusy("kyc-approve"); try { await api.post(`/admin/kyc/${user.id}/approve`); onSaved(); } catch (e) { setMsg(formatApiError(e)); setBusy(null); } }}
+                  disabled={busy === "kyc-approve"}
+                  style={[modalStyles.qaBtn, busy === "kyc-approve" && { opacity: 0.5 }]}
+                  testID="edit-kyc-approve"
+                >
+                  <Feather name="check" size={14} color={colors.primary} />
+                  <Text style={modalStyles.qaBtnText}>Approve KYC</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
             <Text style={modalStyles.section}>RESET PASSWORD</Text>
             <Field label="New password (min 6 chars)">
               <TextInput
@@ -441,6 +556,12 @@ const modalStyles = StyleSheet.create({
   saveBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 15 },
   secondaryBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: colors.brand100, paddingVertical: 12, borderRadius: radii.button, marginTop: 6 },
   secondaryBtnText: { color: colors.primary, fontWeight: "700", fontSize: 13 },
+  qaBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 99, borderWidth: 1, borderColor: colors.primary },
+  qaBtnText: { fontSize: 12, fontWeight: "700", color: colors.primary },
+  kycRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 },
+  kycPill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  kycPillText: { color: "#fff", fontSize: 9, fontWeight: "800", letterSpacing: 1 },
+  kycName: { fontSize: 14, color: colors.textMain, fontWeight: "600", flex: 1 },
   deleteBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 14, borderRadius: radii.button, marginTop: 12, borderWidth: 1, borderColor: "#B3261E" },
   deleteBtnText: { color: "#B3261E", fontWeight: "700", fontSize: 14 },
 });

@@ -13,7 +13,7 @@ export default function Index() {
     if (user === null) {
       router.replace("/login");
     } else if (user.role === "admin") {
-      router.replace("/admin/users");
+      router.replace("/admin/home");
     } else if (!user.registration_paid) {
       router.replace("/payment");
     } else {

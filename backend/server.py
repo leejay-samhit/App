@@ -14,7 +14,8 @@ from typing import List, Optional, Dict, Any
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query
+from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -138,6 +139,30 @@ async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dic
     return user
 
 
+def require_admin_role(*allowed: str):
+    """Restrict an endpoint to specific admin sub-roles (super_admin, manager, support)."""
+    async def checker(admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+        sub = admin.get("admin_role") or "super_admin"  # legacy admins default super
+        if sub not in allowed:
+            raise HTTPException(status_code=403, detail=f"Requires admin role: {' or '.join(allowed)}")
+        return admin
+    return checker
+
+
+async def _audit_log(admin: Dict[str, Any], action: str, target_type: str = "", target_id: str = "", details: Optional[Dict[str, Any]] = None):
+    await db.audit_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "admin_id": admin["id"],
+        "admin_email": admin.get("email"),
+        "admin_role": admin.get("admin_role") or "super_admin",
+        "action": action,
+        "target_type": target_type,
+        "target_id": target_id,
+        "details": details or {},
+        "created_at": now_utc().isoformat(),
+    })
+
+
 # ------------------ Models ------------------
 class RegisterRequest(BaseModel):
     name: str
@@ -205,6 +230,7 @@ async def register(payload: RegisterRequest):
         "password_hash": hash_password(payload.password),
         "phone": payload.phone,
         "role": "user",
+        "admin_role": None,
         "referral_code": code,
         "referred_by": sponsor["referral_code"] if sponsor else None,
         "sponsor_id": sponsor["id"] if sponsor else None,
@@ -212,11 +238,21 @@ async def register(payload: RegisterRequest):
         "total_earned": 0.0,
         "registration_paid": False,
         "direct_referrals_count": 0,
-        "payouts_received": 0,  # how many ₹400 cycles paid
+        "payouts_received": 0,
         "upi_id": None,
         "bank_account": None,
         "ifsc": None,
         "account_holder": None,
+        "is_blocked": False,
+        "block_reason": None,
+        "wallet_frozen": False,
+        "kyc_status": "none",
+        "kyc_full_name": None,
+        "kyc_aadhaar": None,
+        "kyc_pan": None,
+        "kyc_submitted_at": None,
+        "kyc_reviewed_at": None,
+        "kyc_reject_reason": None,
         "created_at": now_utc().isoformat(),
     }
     await db.users.insert_one(user_doc)
@@ -231,6 +267,9 @@ async def login(payload: LoginRequest):
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if user.get("is_blocked"):
+        reason = user.get("block_reason") or "Contact support."
+        raise HTTPException(status_code=403, detail=f"Account blocked: {reason}")
     token = create_access_token(user["id"], email, user.get("role", "user"))
     return {"token": token, "user": serialize_user(user)}
 
@@ -430,6 +469,8 @@ async def update_bank(payload: BankUpdate, user: Dict[str, Any] = Depends(get_cu
 async def request_withdrawal(payload: WithdrawalRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if not user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Complete registration payment first")
+    if user.get("wallet_frozen"):
+        raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
     if user.get("wallet_balance", 0) < payload.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
     if not (user.get("upi_id") or user.get("bank_account")):
@@ -733,6 +774,8 @@ async def cart_clear(user: Dict[str, Any] = Depends(get_current_user)):
 
 @api_router.post("/orders/checkout")
 async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
+    if user.get("wallet_frozen"):
+        raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
     items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
     if not items:
         raise HTTPException(status_code=400, detail="Cart is empty")
@@ -807,6 +850,398 @@ async def read_all_notifications(user: Dict[str, Any] = Depends(get_current_user
     return {"ok": True}
 
 
+# ------------------ Phase 1: KYC ------------------
+class KYCSubmit(BaseModel):
+    full_name: str
+    aadhaar: str
+    pan: str
+
+
+@api_router.post("/users/me/kyc")
+async def submit_kyc(payload: KYCSubmit, user: Dict[str, Any] = Depends(get_current_user)):
+    aadhaar = payload.aadhaar.strip().replace(" ", "")
+    pan = payload.pan.strip().upper()
+    if len(aadhaar) != 12 or not aadhaar.isdigit():
+        raise HTTPException(status_code=400, detail="Aadhaar must be 12 digits")
+    if len(pan) != 10:
+        raise HTTPException(status_code=400, detail="PAN must be 10 characters")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "kyc_status": "pending",
+            "kyc_full_name": payload.full_name.strip(),
+            "kyc_aadhaar": aadhaar,
+            "kyc_pan": pan,
+            "kyc_submitted_at": now_utc().isoformat(),
+            "kyc_reject_reason": None,
+        }},
+    )
+    await _create_notification(user["id"], "kyc", "KYC submitted", "Your KYC details are under review.")
+    return {"ok": True, "status": "pending"}
+
+
+@api_router.get("/users/me/kyc")
+async def my_kyc(user: Dict[str, Any] = Depends(get_current_user)):
+    return {
+        "status": user.get("kyc_status", "none"),
+        "full_name": user.get("kyc_full_name"),
+        "aadhaar": user.get("kyc_aadhaar"),
+        "pan": user.get("kyc_pan"),
+        "submitted_at": user.get("kyc_submitted_at"),
+        "reviewed_at": user.get("kyc_reviewed_at"),
+        "reject_reason": user.get("kyc_reject_reason"),
+    }
+
+
+@api_router.get("/admin/kyc")
+async def admin_list_kyc(_: Dict[str, Any] = Depends(require_admin), status: Optional[str] = None):
+    q: Dict[str, Any] = {"kyc_status": {"$ne": "none"}}
+    if status:
+        q["kyc_status"] = status
+    items = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("kyc_submitted_at", -1).to_list(2000)
+    return items
+
+
+@api_router.post("/admin/kyc/{user_id}/approve")
+async def admin_approve_kyc(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"kyc_status": "approved", "kyc_reviewed_at": now_utc().isoformat(), "kyc_reject_reason": None}},
+    )
+    await _create_notification(user_id, "kyc", "KYC approved", "Your KYC has been verified.")
+    await _audit_log(admin, "kyc.approve", "user", user_id)
+    return {"ok": True}
+
+
+class KYCReject(BaseModel):
+    reason: str
+
+
+@api_router.post("/admin/kyc/{user_id}/reject")
+async def admin_reject_kyc(user_id: str, payload: KYCReject, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"kyc_status": "rejected", "kyc_reviewed_at": now_utc().isoformat(), "kyc_reject_reason": payload.reason}},
+    )
+    await _create_notification(user_id, "kyc", "KYC rejected", payload.reason)
+    await _audit_log(admin, "kyc.reject", "user", user_id, {"reason": payload.reason})
+    return {"ok": True}
+
+
+# ------------------ Phase 1: User Block / Wallet Admin ------------------
+class BlockRequest(BaseModel):
+    reason: str
+
+
+@api_router.post("/admin/users/{user_id}/block")
+async def admin_block_user(user_id: str, payload: BlockRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target["id"] == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot block yourself")
+    await db.users.update_one({"id": user_id}, {"$set": {"is_blocked": True, "block_reason": payload.reason}})
+    await _audit_log(admin, "user.block", "user", user_id, {"reason": payload.reason})
+    return {"ok": True}
+
+
+@api_router.post("/admin/users/{user_id}/unblock")
+async def admin_unblock_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    await db.users.update_one({"id": user_id}, {"$set": {"is_blocked": False, "block_reason": None}})
+    await _audit_log(admin, "user.unblock", "user", user_id)
+    return {"ok": True}
+
+
+class WalletAdjust(BaseModel):
+    amount: float = Field(gt=0)
+    type: str
+    reason: str
+
+
+@api_router.post("/admin/users/{user_id}/wallet")
+async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[str, Any] = Depends(require_admin)):
+    if payload.type not in ("credit", "debit"):
+        raise HTTPException(status_code=400, detail="type must be credit or debit")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    delta = payload.amount if payload.type == "credit" else -payload.amount
+    if delta < 0 and target.get("wallet_balance", 0) + delta < 0:
+        raise HTTPException(status_code=400, detail="Cannot debit beyond available balance")
+    inc = {"wallet_balance": delta}
+    if payload.type == "credit":
+        inc["total_earned"] = payload.amount
+    await db.users.update_one({"id": user_id}, {"$inc": inc})
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "type": "admin_adjust",
+        "amount": delta,
+        "status": "credited" if delta > 0 else "debited",
+        "description": f"Admin {payload.type}: {payload.reason}",
+        "created_at": now_utc().isoformat(),
+    })
+    await _create_notification(user_id, "wallet", f"Wallet {payload.type}ed by ₹{int(payload.amount)}", payload.reason)
+    await _audit_log(admin, f"wallet.{payload.type}", "user", user_id, {"amount": payload.amount, "reason": payload.reason})
+    return {"ok": True}
+
+
+@api_router.post("/admin/users/{user_id}/wallet/freeze")
+async def admin_wallet_freeze(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    new_state = not target.get("wallet_frozen", False)
+    await db.users.update_one({"id": user_id}, {"$set": {"wallet_frozen": new_state}})
+    await _audit_log(admin, "wallet.freeze" if new_state else "wallet.unfreeze", "user", user_id)
+    await _create_notification(
+        user_id, "wallet",
+        "Wallet frozen" if new_state else "Wallet unfrozen",
+        "Your wallet has been frozen by admin." if new_state else "Your wallet is active again.",
+    )
+    return {"ok": True, "frozen": new_state}
+
+
+# ------------------ Phase 1: Transactions admin actions ------------------
+@api_router.get("/admin/transactions/filter")
+async def admin_filter_transactions(
+    _: Dict[str, Any] = Depends(require_admin),
+    type: Optional[str] = None,
+    status: Optional[str] = None,
+    user_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    q: Optional[str] = None,
+):
+    query: Dict[str, Any] = {}
+    if type:
+        query["type"] = type
+    if status:
+        query["status"] = status
+    if user_id:
+        query["user_id"] = user_id
+    if date_from or date_to:
+        rng: Dict[str, Any] = {}
+        if date_from:
+            rng["$gte"] = date_from
+        if date_to:
+            rng["$lte"] = date_to
+        query["created_at"] = rng
+    if q:
+        query["description"] = {"$regex": q, "$options": "i"}
+    items = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).limit(2000).to_list(2000)
+    return items
+
+
+class TxnStatusUpdate(BaseModel):
+    status: str
+
+
+@api_router.patch("/admin/transactions/{txn_id}")
+async def admin_update_txn_status(txn_id: str, payload: TxnStatusUpdate, admin: Dict[str, Any] = Depends(require_admin)):
+    txn = await db.transactions.find_one({"id": txn_id})
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    await db.transactions.update_one({"id": txn_id}, {"$set": {"status": payload.status}})
+    await _audit_log(admin, "txn.status", "transaction", txn_id, {"status": payload.status})
+    return {"ok": True}
+
+
+@api_router.post("/admin/transactions/{txn_id}/refund")
+async def admin_refund_txn(txn_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    txn = await db.transactions.find_one({"id": txn_id})
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if txn.get("status") == "refunded":
+        raise HTTPException(status_code=400, detail="Already refunded")
+    refund_amount = abs(txn["amount"])
+    await db.users.update_one({"id": txn["user_id"]}, {"$inc": {"wallet_balance": refund_amount}})
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": txn["user_id"],
+        "type": "refund",
+        "amount": refund_amount,
+        "status": "credited",
+        "description": f"Refund for txn #{txn_id[:8]}",
+        "ref_txn_id": txn_id,
+        "created_at": now_utc().isoformat(),
+    })
+    await db.transactions.update_one({"id": txn_id}, {"$set": {"status": "refunded"}})
+    await _create_notification(txn["user_id"], "wallet", "Refund processed", f"₹{int(refund_amount)} has been refunded to your wallet.")
+    await _audit_log(admin, "txn.refund", "transaction", txn_id, {"amount": refund_amount})
+    return {"ok": True}
+
+
+# ------------------ Phase 1: Orders Admin ------------------
+@api_router.get("/admin/orders")
+async def admin_list_orders(_: Dict[str, Any] = Depends(require_admin), status: Optional[str] = None):
+    q: Dict[str, Any] = {}
+    if status:
+        q["status"] = status
+    items = await db.orders.find(q, {"_id": 0}).sort("created_at", -1).limit(1000).to_list(1000)
+    return items
+
+
+class OrderStatusUpdate(BaseModel):
+    status: str
+
+
+@api_router.patch("/admin/orders/{order_id}/status")
+async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, admin: Dict[str, Any] = Depends(require_admin)):
+    if payload.status not in ("placed", "shipped", "delivered", "cancelled"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    order = await db.orders.find_one({"id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    prev_status = order.get("status")
+    await db.orders.update_one({"id": order_id}, {"$set": {"status": payload.status}})
+    if payload.status == "cancelled" and prev_status != "cancelled":
+        await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": order["total"]}})
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": order["user_id"],
+            "type": "refund",
+            "amount": order["total"],
+            "status": "credited",
+            "description": f"Order #{order_id[:8]} cancelled - refund",
+            "created_at": now_utc().isoformat(),
+        })
+        await _create_notification(order["user_id"], "order", "Order cancelled", f"₹{int(order['total'])} refunded to your wallet.")
+    else:
+        await _create_notification(order["user_id"], "order", f"Order {payload.status}", f"Your order is now {payload.status}.")
+    await _audit_log(admin, "order.status", "order", order_id, {"status": payload.status, "prev": prev_status})
+    return {"ok": True}
+
+
+# ------------------ Phase 1: Audit Log ------------------
+@api_router.get("/admin/audit-logs")
+async def admin_audit_logs(_: Dict[str, Any] = Depends(require_admin), limit: int = 200):
+    items = await db.audit_logs.find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    return items
+
+
+# ------------------ Phase 1: Analytics ------------------
+@api_router.get("/admin/analytics")
+async def admin_analytics(_: Dict[str, Any] = Depends(require_admin), days: int = 30):
+    today = now_utc().date()
+
+    today_iso = today.isoformat()
+    month_start = today.replace(day=1).isoformat()
+    new_users_today = await db.users.count_documents({"role": "user", "created_at": {"$gte": today_iso}})
+    new_users_month = await db.users.count_documents({"role": "user", "created_at": {"$gte": month_start}})
+    paid_users_today = await db.users.count_documents({"role": "user", "registration_paid": True, "created_at": {"$gte": today_iso}})
+
+    success_txns = await db.transactions.count_documents({"status": {"$in": ["paid", "credited", "approved"]}})
+    failed_txns = await db.transactions.count_documents({"status": "failed"})
+    pending_txns = await db.transactions.count_documents({"status": "pending"})
+    refunded_txns = await db.transactions.count_documents({"status": "refunded"})
+
+    bal_agg = await db.users.aggregate([
+        {"$match": {"role": "user"}},
+        {"$group": {"_id": None, "total": {"$sum": "$wallet_balance"}}},
+    ]).to_list(1)
+    system_wallet = bal_agg[0]["total"] if bal_agg else 0
+
+    rev_agg = await db.transactions.aggregate([
+        {"$match": {"type": "registration_fee"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    total_revenue = rev_agg[0]["total"] if rev_agg else 0
+
+    payout_agg = await db.transactions.aggregate([
+        {"$match": {"type": "referral_payout"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    total_payouts = payout_agg[0]["total"] if payout_agg else 0
+
+    orders_count = await db.orders.count_documents({})
+    orders_revenue_agg = await db.orders.aggregate([
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}},
+    ]).to_list(1)
+    orders_revenue = orders_revenue_agg[0]["total"] if orders_revenue_agg else 0
+
+    daily_users = []
+    daily_revenue = []
+    daily_txns = []
+    for i in range(days):
+        d = (today - timedelta(days=days - 1 - i))
+        d_start = d.isoformat()
+        d_end = (d + timedelta(days=1)).isoformat()
+        u = await db.users.count_documents({"role": "user", "created_at": {"$gte": d_start, "$lt": d_end}})
+        r_agg = await db.transactions.aggregate([
+            {"$match": {"type": "registration_fee", "created_at": {"$gte": d_start, "$lt": d_end}}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        r = r_agg[0]["total"] if r_agg else 0
+        t = await db.transactions.count_documents({"created_at": {"$gte": d_start, "$lt": d_end}})
+        daily_users.append({"date": d_start, "value": u})
+        daily_revenue.append({"date": d_start, "value": r})
+        daily_txns.append({"date": d_start, "value": t})
+
+    return {
+        "kpis": {
+            "new_users_today": new_users_today,
+            "new_users_month": new_users_month,
+            "paid_users_today": paid_users_today,
+            "total_revenue": total_revenue,
+            "system_wallet": system_wallet,
+            "total_payouts": total_payouts,
+            "success_txns": success_txns,
+            "failed_txns": failed_txns,
+            "pending_txns": pending_txns,
+            "refunded_txns": refunded_txns,
+            "orders_count": orders_count,
+            "orders_revenue": orders_revenue,
+        },
+        "daily_users": daily_users,
+        "daily_revenue": daily_revenue,
+        "daily_txns": daily_txns,
+    }
+
+
+# ------------------ Phase 1: CSV Export ------------------
+def _to_csv(rows: List[Dict[str, Any]], fields: List[str]) -> str:
+    import csv
+    import io
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(fields)
+    for r in rows:
+        writer.writerow([str(r.get(f, "")) for f in fields])
+    return buf.getvalue()
+
+
+@api_router.get("/admin/export/{kind}")
+async def admin_export(kind: str, admin: Dict[str, Any] = Depends(require_admin)):
+    if kind == "users":
+        rows = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(10000)
+        fields = ["id", "name", "email", "phone", "role", "referral_code", "referred_by", "wallet_balance", "total_earned", "registration_paid", "is_blocked", "kyc_status", "created_at"]
+    elif kind == "transactions":
+        rows = await db.transactions.find({}, {"_id": 0}).to_list(10000)
+        fields = ["id", "user_id", "type", "amount", "status", "description", "created_at"]
+    elif kind == "withdrawals":
+        rows = await db.withdrawals.find({}, {"_id": 0}).to_list(10000)
+        fields = ["id", "user_id", "user_email", "amount", "status", "upi_id", "bank_account", "ifsc", "created_at", "processed_at"]
+    elif kind == "orders":
+        rows = await db.orders.find({}, {"_id": 0}).to_list(10000)
+        fields = ["id", "user_id", "total", "status", "paid_via", "created_at"]
+    else:
+        raise HTTPException(status_code=400, detail="Invalid export kind")
+    csv_data = _to_csv(rows, fields)
+    await _audit_log(admin, "export", kind, "", {"rows": len(rows)})
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={kind}.csv"},
+    )
+
+
 # ------------------ Health ------------------
 @api_router.get("/")
 async def root():
@@ -824,6 +1259,7 @@ async def seed_admin():
             "password_hash": hash_password(ADMIN_PASSWORD),
             "phone": None,
             "role": "admin",
+            "admin_role": "super_admin",
             "referral_code": "ADMIN001",
             "referred_by": None,
             "sponsor_id": None,
@@ -836,6 +1272,16 @@ async def seed_admin():
             "bank_account": None,
             "ifsc": None,
             "account_holder": None,
+            "is_blocked": False,
+            "block_reason": None,
+            "wallet_frozen": False,
+            "kyc_status": "approved",
+            "kyc_full_name": "Admin",
+            "kyc_aadhaar": None,
+            "kyc_pan": None,
+            "kyc_submitted_at": None,
+            "kyc_reviewed_at": None,
+            "kyc_reject_reason": None,
             "created_at": now_utc().isoformat(),
         })
         logger.info("Admin user seeded")
@@ -845,6 +1291,12 @@ async def seed_admin():
             await db.users.update_one(
                 {"email": ADMIN_EMAIL.lower()},
                 {"$set": {"password_hash": hash_password(ADMIN_PASSWORD)}},
+            )
+        # Backfill admin_role for legacy admin
+        if not existing.get("admin_role"):
+            await db.users.update_one(
+                {"email": ADMIN_EMAIL.lower()},
+                {"$set": {"admin_role": "super_admin"}},
             )
 
 

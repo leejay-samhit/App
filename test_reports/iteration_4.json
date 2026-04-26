@@ -1,0 +1,105 @@
+{
+  "summary": "Iteration 4 testing complete. Backend: 57/58 pytest passed across all suites (19 new iter-4 + 40 regression) — 1 critical RBAC failure. Frontend: 5-tab admin layout verified (Home/Users/Payouts/Txns/More). /admin/more, /admin/orders, /admin/audit render with full testID coverage. /admin/home is stuck on an infinite loading spinner when the analytics call doesn't succeed (silent catch + loading-gate bug); KYC / quick-action UI could not be visually verified through this code path.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/admin/settings",
+        "issue": "RBAC not enforced — endpoint uses require_admin (line 702 of server.py) instead of require_admin_role('super_admin'). A 'manager' admin (role=admin, admin_role=manager) successfully updated settings and got 200 OK. Helper `require_admin_role` is defined at server.py:142 but is NEVER called anywhere. Other admin endpoints (users, kyc, withdrawals, orders, txns, audit) correctly use require_admin so manager/support can access — that part works. Only settings RBAC is missing.",
+        "priority": "CRITICAL",
+        "fix_hint": "Change the dependency on PUT /admin/settings to `Depends(require_admin_role('super_admin'))` and add an explicit 403 message. Optionally also gate POST /admin/products if intended."
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "/admin/home (AdminHome)",
+        "issue": "Page is stuck on ActivityIndicator forever if `/api/admin/analytics` fails for any reason (e.g., token not yet bootstrapped, network blip, 401). Root cause: `try { ... } catch {}` swallows the error silently AND the render gate `if (loading || !data) return <Spinner />` keeps spinner on screen because `data` stays null. Reproduced by directly navigating to /admin/home; saw 401 in console followed by infinite spinner. Quick-action buttons (qa-kyc/qa-orders/qa-audit/qa-settings), KPI cards (kpi-new-today/...), period tabs, charts and hero card all become unreachable in this state.",
+        "testID": "kpi-new-today, qa-kyc, period-7d (none rendered)",
+        "priority": "HIGH",
+        "fix_hint": "Render an error UI with a Retry button when the API fails. Also wait for auth bootstrap before firing the first request, OR have the api client retry once after auth restoration."
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Admin login → /admin/home redirect",
+        "issue": "Login.tsx has `if (u.role === 'admin') router.replace('/admin/home')` — code path looks correct; navigation lands on /admin/home, but because of the spinner bug above the user sees a blank loading screen on a fresh session. Admin layout's bottom 5 tabs (Home/Users/Payouts/Txns/More) are fine.",
+        "affected_testIDs": ["kpi-new-today", "qa-kyc", "period-7d", "period-14d", "period-30d"]
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "global",
+        "issues": [
+          "Pre-existing carry-over warning: `props.pointerEvents is deprecated. Use style.pointerEvents` (RN web)."
+        ]
+      }
+    ],
+    "react_native_issues": [
+      {
+        "component": "package react-native-svg",
+        "issue": "Expo doctor reports react-native-svg@15.15.4 vs expected 15.12.1 for current Expo SDK. Bar charts on /admin/home use it; not verified at runtime due to spinner bug. Consider `npx expo install react-native-svg` to resolve."
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/backend/tests/test_iteration3.py",
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/test_backend_api.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/iteration4.xml"
+  ],
+  "action_items": [
+    "[CRITICAL] Apply require_admin_role('super_admin') dependency to PUT /api/admin/settings. Verify 403 for managers, 200 for super_admin.",
+    "[HIGH] Fix /admin/home AdminHome: surface API errors instead of swallowing, and render an error/retry UI when analytics fails. Optionally delay first call until auth.user is hydrated.",
+    "[MEDIUM] Run `npx expo install react-native-svg` to align with Expo SDK (15.12.1).",
+    "[LOW] server.py is now ~1342 lines — long-overdue split into routers (admin/, kyc/, orders/, settings/).",
+    "[LOW] Carry-over: replace deprecated `props.pointerEvents` with `style.pointerEvents` to silence RN web warnings."
+  ],
+  "critical_code_review_comments": [
+    "server.py:142 defines `require_admin_role(*allowed)` but it is unused project-wide — dead code that gives a false sense of RBAC. Wire it into PUT /admin/settings (and any super-admin-only endpoint).",
+    "admin/home.tsx:39-45 has `try { ... } catch {}` then `setLoading(false)`; if the request fails, the page enters a permanent spinner because `if (loading || !data) return <Spinner/>` short-circuits on null `data`. Either keep `loading` true on error OR gate on `error` separately so users see a retry button.",
+    "Backend `_audit_log` is auto-fired by every admin write — good. But /admin/audit-logs has no pagination cursor; only `limit` is supported. Consider `?before=<created_at>` for scrollback.",
+    "/admin/transactions/{id}/refund refunds `abs(amount)` regardless of original txn direction — refunding a payout that was already a credit will double-credit the user. Consider restricting refund to debit-style txns (e.g., type in {registration_fee, order_purchase}).",
+    "KYC validation only checks length (12 digits / 10 chars). PAN format is technically `[A-Z]{5}[0-9]{4}[A-Z]` — current 'ABCDE1234F' passes, but '1234567890' would also pass. Tighten with regex if real KYC compliance matters.",
+    "/admin/users/{id}/wallet/freeze toggles state without idempotency — a double-tap from UI would unfreeze. Consider passing explicit `{frozen: bool}` payload."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4.py (new — 19 tests, 1 expected RBAC failure documenting backend bug)",
+    "/app/test_reports/iteration_4.json (new)",
+    "/app/test_reports/pytest/pytest_results.xml (regenerated, 57 passed / 1 failed / 1 skipped)",
+    "/app/test_reports/pytest/iteration4.xml (new)"
+  ],
+  "success_rate": {
+    "backend": "98.3% (57/58 pytest, 1 critical RBAC failure on PUT /admin/settings)",
+    "frontend": "Partial — admin layout, more, audit, orders verified visually with testIDs OK; admin/home, /admin/kyc and /kyc user-side could not be visually verified due to home-page spinner bug. Code-level testIDs for those screens are present and well-formed."
+  },
+  "verified_features": {
+    "backend_iter4": {
+      "analytics": "GET /admin/analytics?days=7 returns correct shape — all 12 kpis, daily_users/daily_revenue/daily_txns each length 7 with {date,value}",
+      "kyc": "POST /users/me/kyc validates aadhaar==12 digits / pan==10 chars; sets status=pending; admin GET /admin/kyc?status=pending lists; approve/reject set correct status, reject persists reason, both create user notifications",
+      "block": "POST /admin/users/{id}/block + reason → /auth/login returns 403 with reason; unblock → 200 login; cannot self-block (400)",
+      "wallet_adjust": "credit increases wallet & total_earned + creates type='admin_adjust' txn; debit decreases; debit beyond balance → 400",
+      "wallet_freeze": "Toggle works; while frozen POST /withdrawals → 403, POST /orders/checkout → 403; unfreeze restores",
+      "txn_filter_refund": "/admin/transactions/filter supports type/status/user_id/q/date_from/date_to and is sorted desc; PATCH updates status; refund credits user wallet, marks original 'refunded', creates 'refund' txn",
+      "orders_admin": "GET /admin/orders?status filter works; PATCH /admin/orders/{id}/status validates enum (placed/shipped/delivered/cancelled); cancelling refunds order.total to wallet and creates refund txn",
+      "audit_logs": "All admin writes (block, wallet adjust, freeze, kyc approve/reject, txn refund/status, order status, settings, exports) auto-create audit entries; sorted desc",
+      "csv_exports": "users/transactions/withdrawals/orders all return 200, content-type text/csv, header row + data rows; bogus kind → 400",
+      "rbac_super_admin": "super_admin PUT /admin/settings → 200 OK",
+      "rbac_manager": "❌ FAILS — manager admin PUT /admin/settings returns 200 instead of 403"
+    },
+    "frontend": {
+      "admin_layout_5_tabs": "Bottom-tab bar shows Home/Users/Payouts/Txns/More on every admin route",
+      "admin_more": "All 4 ops links (more-user-check, more-package, more-file-text, more-sliders), 4 exports (export-users/transactions/withdrawals/orders), more-logout — all testIDs OK",
+      "admin_orders": "Tabs (order-tab-all/placed/shipped/delivered/cancelled) and orders-back testIDs OK; empty state 'No orders match this filter' renders correctly",
+      "admin_audit": "Page renders with audit-back; 'No audit entries yet' empty state works (audit log was empty in seeded DB at test time)"
+    }
+  },
+  "seed_data_creation": "Each iter-4 test creates ephemeral TEST_I4_*_<uuid>@test.com users (paid, KYC-pending, blocked variants). One promoted manager admin (TEST_I4_MGR_*). Settings briefly written by RBAC test then restored to defaults at end (registration_fee=100, l1=400, l2=100, l3=50, directs_required=4). Note: iter-2 tests are sensitive to settings drift — running suites in sequence may leave settings non-default mid-flight; prefer running iter4 last or restoring defaults in module fixture next iteration.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v` (58 tests). After fix, only TestRBAC::test_manager_blocked_from_settings should flip to PASS. Frontend testIDs to focus on after spinner fix: kpi-new-today/new-month/paid-today/orders, period-7d/14d/30d, qa-kyc/qa-orders/qa-audit/qa-settings on /admin/home; kyc-tab-pending/approved/rejected, kyc-approve-{id}, kyc-reject-{id}, kyc-reject-reason, kyc-reject-submit on /admin/kyc; order-ship-{id}/order-deliver-{id}/order-cancel-{id} on /admin/orders; kyc-fullname/kyc-aadhaar/kyc-pan/kyc-submit on /kyc (user). Use mobile viewport 390x844. To get into admin/home reliably, login via UI then wait 5s for auth bootstrap before asserting testIDs.",
+  "rca_of_issue": "RBAC bug: server.py:702 defines admin_update_settings with `_: ... = Depends(require_admin)`. The intended super-admin guard `require_admin_role` is implemented in server.py:142 but never wired up. Manager admin (role=admin, admin_role=manager) successfully PUT-updates settings — confirmed reproduction in TestRBAC. Mitigation: replace dependency with `Depends(require_admin_role('super_admin'))`. AdminHome spinner bug: admin/home.tsx:39-51 — load() catches all errors silently, then render gate `if (loading || !data) return <Spinner/>` traps the screen forever. Mitigation: track an `error` state, render an error UI with a Retry button, and only render spinner when actually loading."
+}
