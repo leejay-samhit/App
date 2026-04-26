@@ -31,6 +31,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="kyc" options={{ href: null }} />
       <Tabs.Screen name="orders" options={{ href: null }} />
       <Tabs.Screen name="audit" options={{ href: null }} />
+      <Tabs.Screen name="roadmap" options={{ href: null }} />
     </Tabs>
   );
 }
