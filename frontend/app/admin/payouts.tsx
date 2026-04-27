@@ -11,18 +11,20 @@ type Withdrawal = {
   user_name: string;
   user_email: string;
   amount: number;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "processing" | "success" | "rejected";
   upi_id?: string | null;
   bank_account?: string | null;
   ifsc?: string | null;
   created_at: string;
+  estimated_completion_at?: string | null;
+  completed_at?: string | null;
 };
 
 export default function AdminPayouts() {
   const [items, setItems] = useState<Withdrawal[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [tab, setTab] = useState<"pending" | "approved" | "rejected">("pending");
+  const [tab, setTab] = useState<"pending" | "processing" | "success" | "rejected">("pending");
 
   const load = useCallback(async () => {
     try {
@@ -34,7 +36,7 @@ export default function AdminPayouts() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const action = async (id: string, type: "approve" | "reject") => {
+  const action = async (id: string, type: "approve" | "reject" | "complete") => {
     try {
       await api.post(`/admin/withdrawals/${id}/${type}`);
       await load();
@@ -43,13 +45,19 @@ export default function AdminPayouts() {
     }
   };
 
+  const statusColor = (s: string) =>
+    s === "success" || s === "approved" ? colors.success
+    : s === "rejected" ? "#B3261E"
+    : s === "processing" ? colors.brand500
+    : colors.warning;
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
-        <Text style={styles.overline}>ADMIN</Text>
-        <Text style={styles.h1}>Payouts</Text>
+        <Text style={styles.overline}>ADMIN · FINANCE</Text>
+        <Text style={styles.h1}>Withdrawals</Text>
         <View style={styles.tabs}>
-          {(["pending", "approved", "rejected"] as const).map((t) => (
+          {(["pending", "processing", "success", "rejected"] as const).map((t) => (
             <TouchableOpacity key={t} onPress={() => setTab(t)} style={[styles.tab, tab === t && styles.tabActive]} testID={`payouts-tab-${t}`}>
               <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>{t.toUpperCase()}</Text>
             </TouchableOpacity>
@@ -72,7 +80,7 @@ export default function AdminPayouts() {
                   <Text style={styles.amount}>{formatINR(item.amount)}</Text>
                   <Text style={styles.subText}>{item.user_name} · {item.user_email}</Text>
                 </View>
-                <View style={[styles.pill, { backgroundColor: item.status === "approved" ? colors.success : item.status === "rejected" ? "#B3261E" : colors.warning }]}>
+                <View style={[styles.pill, { backgroundColor: statusColor(item.status) }]}>
                   <Text style={styles.pillText}>{item.status.toUpperCase()}</Text>
                 </View>
               </View>
@@ -81,6 +89,8 @@ export default function AdminPayouts() {
                 {item.upi_id ? <Text style={styles.metaText}>UPI: <Text style={styles.bold}>{item.upi_id}</Text></Text> : null}
                 {item.bank_account ? <Text style={styles.metaText}>Bank: <Text style={styles.bold}>{item.bank_account}</Text> ({item.ifsc})</Text> : null}
                 <Text style={styles.metaText}>Requested: {new Date(item.created_at).toLocaleString()}</Text>
+                {item.estimated_completion_at && <Text style={styles.metaText}>ETA: {new Date(item.estimated_completion_at).toLocaleString()}</Text>}
+                {item.completed_at && <Text style={styles.metaText}>Paid: {new Date(item.completed_at).toLocaleString()}</Text>}
               </View>
               {item.status === "pending" && (
                 <View style={styles.actions}>
@@ -91,6 +101,14 @@ export default function AdminPayouts() {
                   <TouchableOpacity onPress={() => action(item.id, "approve")} style={[styles.actionBtn, { backgroundColor: colors.primary }]} testID={`payout-approve-${item.id}`}>
                     <Feather name="check" size={16} color={colors.primaryFg} />
                     <Text style={{ color: colors.primaryFg, fontWeight: "700" }}>Approve</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {item.status === "processing" && (
+                <View style={styles.actions}>
+                  <TouchableOpacity onPress={() => action(item.id, "complete")} style={[styles.actionBtn, { backgroundColor: colors.success }]} testID={`payout-complete-${item.id}`}>
+                    <Feather name="check-circle" size={16} color="#fff" />
+                    <Text style={{ color: "#fff", fontWeight: "700" }}>Mark paid</Text>
                   </TouchableOpacity>
                 </View>
               )}

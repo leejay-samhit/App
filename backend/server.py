@@ -195,13 +195,26 @@ async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dic
 
 
 def require_admin_role(*allowed: str):
-    """Restrict an endpoint to specific admin sub-roles (super_admin, manager, support)."""
+    """Restrict an endpoint to specific admin sub-roles (super_admin, manager, support, finance)."""
     async def checker(admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
         sub = admin.get("admin_role") or "super_admin"  # legacy admins default super
         if sub not in allowed:
             raise HTTPException(status_code=403, detail=f"Requires admin role: {' or '.join(allowed)}")
         return admin
     return checker
+
+
+# Finance is a restricted role — it can ONLY work with withdrawals/transactions read-only.
+# All other admin write endpoints (users, KYC, settings, products, orders, approvals, admin
+# management, system wipe, super-password, audit) explicitly exclude "finance".
+ADMIN_ROLES_NON_FINANCE = ("super_admin", "manager", "support")
+
+
+async def require_admin_not_finance(admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    sub = admin.get("admin_role") or "super_admin"
+    if sub == "finance":
+        raise HTTPException(status_code=403, detail="Finance role cannot perform this action — only withdrawals.")
+    return admin
 
 
 async def _audit_log(admin: Dict[str, Any], action: str, target_type: str = "", target_id: str = "", details: Optional[Dict[str, Any]] = None):
@@ -721,6 +734,72 @@ async def my_transactions(user: Dict[str, Any] = Depends(get_current_user)):
     return items
 
 
+# ------------------ Wallet-to-wallet transfer ------------------
+class WalletTransfer(BaseModel):
+    recipient: str = Field(..., description="Recipient email or referral code")
+    amount: float = Field(..., gt=0)
+    note: Optional[str] = None
+
+
+@api_router.post("/wallet/transfer")
+async def wallet_transfer(payload: WalletTransfer, user: Dict[str, Any] = Depends(get_current_user)):
+    """Transfer funds from this user's wallet to another user's wallet."""
+    if user.get("wallet_frozen"):
+        raise HTTPException(status_code=403, detail="Your wallet is frozen. Contact support.")
+    if user.get("approval_status", "approved") != "approved":
+        raise HTTPException(status_code=403, detail="Account is awaiting admin approval.")
+    if (user.get("wallet_balance") or 0) < payload.amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+    rec_query = payload.recipient.strip()
+    if "@" in rec_query:
+        recipient = await db.users.find_one({"email": rec_query.lower()})
+    else:
+        recipient = await db.users.find_one({"referral_code": rec_query.upper()})
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    if recipient["id"] == user["id"]:
+        raise HTTPException(status_code=400, detail="Cannot transfer to yourself")
+    if recipient.get("is_blocked"):
+        raise HTTPException(status_code=400, detail="Recipient account is blocked")
+    if recipient.get("approval_status", "approved") != "approved":
+        raise HTTPException(status_code=400, detail="Recipient is not approved yet")
+
+    # Atomic-ish transfer (Mongo without transactions on standalone — best effort).
+    await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -payload.amount}})
+    await db.users.update_one({"id": recipient["id"]}, {"$inc": {"wallet_balance": payload.amount}})
+
+    ts = now_utc().isoformat()
+    transfer_id = str(uuid.uuid4())
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "type": "transfer_out",
+        "amount": -payload.amount,
+        "status": "success",
+        "description": f"Transferred ₹{int(payload.amount)} to {recipient.get('name')} ({recipient.get('email')})" + (f" — {payload.note}" if payload.note else ""),
+        "transfer_id": transfer_id,
+        "counterparty_id": recipient["id"],
+        "created_at": ts,
+    })
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": recipient["id"],
+        "type": "transfer_in",
+        "amount": payload.amount,
+        "status": "success",
+        "description": f"Received ₹{int(payload.amount)} from {user.get('name')} ({user.get('email')})" + (f" — {payload.note}" if payload.note else ""),
+        "transfer_id": transfer_id,
+        "counterparty_id": user["id"],
+        "created_at": ts,
+    })
+    await _create_notification(
+        recipient["id"], "transfer",
+        f"₹{int(payload.amount)} received",
+        f"{user.get('name')} sent you ₹{int(payload.amount)}" + (f" — {payload.note}" if payload.note else ""),
+    )
+    return {"ok": True, "transfer_id": transfer_id, "amount": payload.amount}
+
+
 # ------------------ Products (E-commerce placeholder) ------------------
 @api_router.get("/products")
 async def list_products():
@@ -745,31 +824,68 @@ async def admin_list_withdrawals(_: Dict[str, Any] = Depends(require_admin), sta
 
 
 @api_router.post("/admin/withdrawals/{wid}/approve")
-async def admin_approve_withdrawal(wid: str, _: Dict[str, Any] = Depends(require_admin)):
+async def admin_approve_withdrawal(wid: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
+    """Finance/admin approves a withdrawal. Moves status pending → processing with an ETA.
+    The actual money-out is marked via /complete once paid."""
     w = await db.withdrawals.find_one({"id": wid})
     if not w:
         raise HTTPException(status_code=404, detail="Withdrawal not found")
     if w["status"] != "pending":
         raise HTTPException(status_code=400, detail="Already processed")
+    eta = (now_utc() + timedelta(hours=48)).isoformat()
     await db.withdrawals.update_one(
         {"id": wid},
-        {"$set": {"status": "approved", "processed_at": now_utc().isoformat()}},
+        {"$set": {
+            "status": "processing",
+            "processed_at": now_utc().isoformat(),
+            "approved_by": admin["id"],
+            "estimated_completion_at": eta,
+        }},
     )
     await db.transactions.insert_one({
         "id": str(uuid.uuid4()),
         "user_id": w["user_id"],
         "type": "withdrawal",
         "amount": -w["amount"],
-        "status": "approved",
-        "description": f"Withdrawal approved (₹{w['amount']})",
+        "status": "processing",
+        "description": f"Withdrawal in process (₹{int(w['amount'])}) — ETA 48h",
         "created_at": now_utc().isoformat(),
     })
-    await _create_notification(w["user_id"], "withdrawal", "Withdrawal approved", f"₹{int(w['amount'])} has been sent to your account.")
+    await _create_notification(
+        w["user_id"], "withdrawal", "Withdrawal in process",
+        f"₹{int(w['amount'])} approved. Funds will reach your bank within 48 hours.",
+    )
+    await _audit_log(admin, "withdrawal.approve", "withdrawal", wid, {"amount": w["amount"]})
+    return {"ok": True, "estimated_completion_at": eta}
+
+
+@api_router.post("/admin/withdrawals/{wid}/complete")
+async def admin_complete_withdrawal(wid: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
+    """Mark a processing withdrawal as successfully paid out."""
+    w = await db.withdrawals.find_one({"id": wid})
+    if not w:
+        raise HTTPException(status_code=404, detail="Withdrawal not found")
+    if w["status"] != "processing":
+        raise HTTPException(status_code=400, detail="Withdrawal is not in processing state")
+    await db.withdrawals.update_one(
+        {"id": wid},
+        {"$set": {"status": "success", "completed_at": now_utc().isoformat(), "completed_by": admin["id"]}},
+    )
+    # Update the matching processing transaction → success
+    await db.transactions.update_many(
+        {"user_id": w["user_id"], "type": "withdrawal", "status": "processing", "amount": -w["amount"]},
+        {"$set": {"status": "success", "description": f"Withdrawal paid (₹{int(w['amount'])})"}},
+    )
+    await _create_notification(
+        w["user_id"], "withdrawal", "Withdrawal successful",
+        f"₹{int(w['amount'])} has been paid to your bank account.",
+    )
+    await _audit_log(admin, "withdrawal.complete", "withdrawal", wid, {"amount": w["amount"]})
     return {"ok": True}
 
 
 @api_router.post("/admin/withdrawals/{wid}/reject")
-async def admin_reject_withdrawal(wid: str, _: Dict[str, Any] = Depends(require_admin)):
+async def admin_reject_withdrawal(wid: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
     w = await db.withdrawals.find_one({"id": wid})
     if not w:
         raise HTTPException(status_code=404, detail="Withdrawal not found")
@@ -779,9 +895,10 @@ async def admin_reject_withdrawal(wid: str, _: Dict[str, Any] = Depends(require_
     await db.users.update_one({"id": w["user_id"]}, {"$inc": {"wallet_balance": w["amount"]}})
     await db.withdrawals.update_one(
         {"id": wid},
-        {"$set": {"status": "rejected", "processed_at": now_utc().isoformat()}},
+        {"$set": {"status": "rejected", "processed_at": now_utc().isoformat(), "rejected_by": admin["id"]}},
     )
     await _create_notification(w["user_id"], "withdrawal", "Withdrawal rejected", f"₹{int(w['amount'])} has been refunded to your wallet.")
+    await _audit_log(admin, "withdrawal.reject", "withdrawal", wid, {"amount": w["amount"]})
     return {"ok": True}
 
 
@@ -813,7 +930,7 @@ async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
 
 
 @api_router.post("/admin/products")
-async def admin_create_product(p: ProductCreate, _: Dict[str, Any] = Depends(require_admin)):
+async def admin_create_product(p: ProductCreate, _: Dict[str, Any] = Depends(require_admin_not_finance)):
     doc = {"id": str(uuid.uuid4()), **p.dict(), "created_at": now_utc().isoformat()}
     await db.products.insert_one(doc)
     doc.pop("_id", None)
@@ -841,7 +958,7 @@ class AdminPasswordReset(BaseModel):
 
 
 @api_router.patch("/admin/users/{user_id}")
-async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -861,7 +978,7 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
             raise HTTPException(status_code=400, detail="Email already taken")
     if "role" in update and update["role"] not in ("user", "admin"):
         raise HTTPException(status_code=400, detail="Invalid role")
-    if "admin_role" in update and update["admin_role"] not in ("super_admin", "manager", "support", None):
+    if "admin_role" in update and update["admin_role"] not in ("super_admin", "manager", "support", "finance", None):
         raise HTTPException(status_code=400, detail="Invalid admin_role")
     # Prevent demoting/changing the last super_admin
     if target.get("admin_role") == "super_admin":
@@ -887,7 +1004,7 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
 
 
 @api_router.post("/admin/users/{user_id}/reset-password")
-async def admin_reset_password(user_id: str, payload: AdminPasswordReset, _: Dict[str, Any] = Depends(require_admin)):
+async def admin_reset_password(user_id: str, payload: AdminPasswordReset, _: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -897,7 +1014,7 @@ async def admin_reset_password(user_id: str, payload: AdminPasswordReset, _: Dic
 
 
 @api_router.delete("/admin/users/{user_id}")
-async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -936,7 +1053,7 @@ class AdminCreate(BaseModel):
 @api_router.post("/admin/admins")
 async def admin_create_admin(payload: AdminCreate, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
     """Create a new admin account directly (no public registration)."""
-    if payload.admin_role not in ("super_admin", "manager", "support"):
+    if payload.admin_role not in ("super_admin", "manager", "support", "finance"):
         raise HTTPException(status_code=400, detail="Invalid admin_role")
     email = payload.email.lower().strip()
     if await db.users.find_one({"email": email}):
@@ -992,7 +1109,7 @@ class PromoteRequest(BaseModel):
 @api_router.post("/admin/users/{user_id}/promote")
 async def admin_promote_user(user_id: str, payload: PromoteRequest, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
     """Promote an existing user to admin with a sub-role."""
-    if payload.admin_role not in ("super_admin", "manager", "support"):
+    if payload.admin_role not in ("super_admin", "manager", "support", "finance"):
         raise HTTPException(status_code=400, detail="Invalid admin_role")
     target = await db.users.find_one({"id": user_id})
     if not target:
@@ -1478,7 +1595,7 @@ async def admin_get_kyc_detail(user_id: str, _: Dict[str, Any] = Depends(require
 
 
 @api_router.post("/admin/kyc/{user_id}/approve")
-async def admin_approve_kyc(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_approve_kyc(user_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1496,7 +1613,7 @@ class KYCReject(BaseModel):
 
 
 @api_router.post("/admin/kyc/{user_id}/reject")
-async def admin_reject_kyc(user_id: str, payload: KYCReject, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_reject_kyc(user_id: str, payload: KYCReject, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1583,7 +1700,7 @@ async def admin_get_approval_detail(user_id: str, _: Dict[str, Any] = Depends(re
 
 
 @api_router.post("/admin/approvals/{user_id}/approve")
-async def admin_approve_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_approve_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1620,7 +1737,7 @@ class ApprovalReject(BaseModel):
 
 
 @api_router.post("/admin/approvals/{user_id}/reject")
-async def admin_reject_user(user_id: str, payload: ApprovalReject, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_reject_user(user_id: str, payload: ApprovalReject, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1716,7 +1833,7 @@ class BlockRequest(BaseModel):
 
 
 @api_router.post("/admin/users/{user_id}/block")
-async def admin_block_user(user_id: str, payload: BlockRequest, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_block_user(user_id: str, payload: BlockRequest, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1728,7 +1845,7 @@ async def admin_block_user(user_id: str, payload: BlockRequest, admin: Dict[str,
 
 
 @api_router.post("/admin/users/{user_id}/unblock")
-async def admin_unblock_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_unblock_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     await db.users.update_one({"id": user_id}, {"$set": {"is_blocked": False, "block_reason": None}})
     await _audit_log(admin, "user.unblock", "user", user_id)
     return {"ok": True}
@@ -1741,7 +1858,7 @@ class WalletAdjust(BaseModel):
 
 
 @api_router.post("/admin/users/{user_id}/wallet")
-async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     if payload.type not in ("credit", "debit"):
         raise HTTPException(status_code=400, detail="type must be credit or debit")
     target = await db.users.find_one({"id": user_id})
@@ -1769,7 +1886,7 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
 
 
 @api_router.post("/admin/users/{user_id}/wallet/freeze")
-async def admin_wallet_freeze(user_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_wallet_freeze(user_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1820,7 +1937,7 @@ class TxnStatusUpdate(BaseModel):
 
 
 @api_router.patch("/admin/transactions/{txn_id}")
-async def admin_update_txn_status(txn_id: str, payload: TxnStatusUpdate, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_update_txn_status(txn_id: str, payload: TxnStatusUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     txn = await db.transactions.find_one({"id": txn_id})
     if not txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
@@ -1830,7 +1947,7 @@ async def admin_update_txn_status(txn_id: str, payload: TxnStatusUpdate, admin: 
 
 
 @api_router.post("/admin/transactions/{txn_id}/refund")
-async def admin_refund_txn(txn_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_refund_txn(txn_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     txn = await db.transactions.find_one({"id": txn_id})
     if not txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
@@ -1869,7 +1986,7 @@ class OrderStatusUpdate(BaseModel):
 
 
 @api_router.patch("/admin/orders/{order_id}/status")
-async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     if payload.status not in ("placed", "shipped", "delivered", "cancelled"):
         raise HTTPException(status_code=400, detail="Invalid status")
     order = await db.orders.find_one({"id": order_id})

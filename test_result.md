@@ -512,15 +512,112 @@ frontend:
             /api/auth/google/exchange, then setSession(token, user). Frontend testing not requested
             yet — will only be called with explicit user permission.
 
+  - task: "Finance role + withdrawal processing flow + wallet-to-wallet transfer"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            ALL 62/62 scenarios PASSED via /app/finance_withdrawal_transfer_test.py
+            against https://network-pay-1.preview.emergentagent.com.
+
+            Scenarios A–AA covered (matches review request exactly):
+            A. Super admin login admin@app.com / Admin@123 → 200 (T_super captured). ✅
+            B. POST /admin/admins {admin_role:"finance"} → 200; created admin has
+               admin_role="finance"; finance login → T_fin captured. ✅
+            C. Register U1, pay /payment/register-fee, super approves → 200; U1 login
+               post-approval. ✅
+            D. As T_fin: GET /admin/users → 200 (read OK for finance). ✅
+            E. As T_fin: PATCH /admin/users/{U1.id} {name} → 403 (finance blocked
+               from user mods). ✅
+            F. As T_fin: POST /admin/users/{U1.id}/block → 403. ✅
+            G. As T_fin: PUT /admin/settings → 403. ✅
+            H. As T_fin: POST /admin/admins → 403. ✅
+            I. As T_fin: POST /admin/approvals/{id}/approve → 403. ✅
+            J. As T_super: PATCH U1 {wallet_balance:1000} → 200; U1 /auth/me confirms
+               wallet_balance==1000. U1 added UPI. ✅
+            K. U1 POST /withdrawals {amount:300} → 200, status="pending"; wallet drops
+               to 700 (locked). ✅
+            L. As T_fin: GET /admin/withdrawals?status=pending → 200, includes the new
+               request. ✅
+            M. As T_fin: POST /admin/withdrawals/{wid}/approve → 200, returns
+               estimated_completion_at; withdrawal.status="processing" with
+               estimated_completion_at populated. ✅
+            N. U1 GET /transactions/me → contains row {type:"withdrawal",
+               status:"processing", amount:-300, description mentions "ETA 48h"}. ✅
+            O. As T_fin: POST /admin/withdrawals/{wid}/complete → 200; status="success". ✅
+            P. U1 GET /transactions/me → matching row's status flipped to "success",
+               description "Withdrawal paid (₹300)". ✅
+            Q. U1 GET /withdrawals/me → status="success", completed_at populated. ✅
+            R. WALLET TRANSFER: register U2 + pay fee + super approves; U1 balance
+               (700) → POST /wallet/transfer {recipient:U2.email, amount:200,
+               note:"test"} → 200, returns transfer_id. ✅
+            S. /auth/me confirms U1 wallet_balance==500, U2 wallet_balance==200. ✅
+            T. /transactions/me on U1 has transfer_out -200; U2 has transfer_in +200
+               (linked via shared transfer_id). ✅
+            U. Transfer to self → 400 "Cannot transfer to yourself". ✅
+            V. Transfer to non-existent email → 404 "Recipient not found". ✅
+            W. Transfer with amount=-10 → 422 (Pydantic gt=0 validation). ✅
+            X. Transfer with amount=9999 (insufficient) → 400 "Insufficient balance". ✅
+            Y. Register U3 (don't approve). U1 transfer to U3 → 400 "Recipient is not
+               approved yet". ✅
+            Z. U3 (pending) attempting /wallet/transfer → 403 "Account is awaiting
+               admin approval." ✅
+            AA. Cleanup: super DELETE U1, U2, U3, finance admin → 200 each. ✅
+
+            Regression sanity:
+            • Finance GET /admin/transactions → 200 (read-only allowed). ✅
+            • Finance GET /admin/users → 200. ✅
+            • Non-admin user POST /admin/withdrawals/{id}/approve → 403. ✅
+            • No-auth POST /admin/withdrawals/{id}/approve → 403 (HTTPBearer
+              auto_error=False causes 403 in get_current_user "Not authenticated"). ✅
+            • Super POST /admin/users/{id}/promote {admin_role:"finance"} → 200,
+              admin_role=="finance". ✅
+            • Super PATCH /admin/users/{id} {admin_role:"finance"} → 200. ✅
+            • Manager-role admin can approve AND complete withdrawals (REG8/REG9). ✅
+            • Withdrawal endpoints (approve/complete/reject) accept super_admin,
+              manager, support, finance — confirmed via require_admin_role decorator
+              on all three. ✅
+
+            Implementation observations:
+            • require_admin_not_finance dependency wired on every admin write endpoint
+              (PATCH user, block/unblock, wallet adjust, wallet freeze, KYC
+              approve/reject, approvals approve/reject, products create, orders
+              status, transactions PATCH/refund, super_password, system wipe-users,
+              admin/admins POST, promote, demote, delete user, reset-password).
+            • Withdrawals 3-state machine works: pending → processing (after approve,
+              48h ETA, processing transaction inserted with amount=-w.amount) →
+              success (after complete, transaction promoted to success and
+              description updated to "Withdrawal paid (₹X)"). Reject path still
+              refunds and is unchanged.
+            • /wallet/transfer validates: own approval (403), wallet frozen (403),
+              insufficient balance (400), recipient lookup by email or referral_code,
+              recipient missing (404), self-transfer (400), recipient blocked (400),
+              recipient not approved (400). Creates transfer_out/transfer_in
+              transactions with shared transfer_id and counterparty_id. Sends
+              notification to recipient.
+            • POST /admin/admins and POST /admin/users/{id}/promote both whitelist
+              admin_role∈{super_admin, manager, support, finance}.
+            • PATCH /admin/users/{id} admin_role validation also accepts "finance".
+
+            Backend logs clean, no 500s. Cleanup completed (U1/U2/U3/finance admin
+            all deleted). Manager test admin also deleted. Database left with only
+            admin@app.com.
+
 metadata:
   created_by: "main_agent"
-  version: "1.1"
-  test_sequence: 6
+  version: "1.2"
+  test_sequence: 7
   run_ui: false
 
 test_plan:
   current_focus:
-    - "10-level payout structure (settings + cascade + dashboard)"
+    - "Finance role + withdrawal processing flow + wallet-to-wallet transfer"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -687,6 +784,50 @@ agent_communication:
 
         Both backend tasks marked working: true, needs_retesting: false. Main agent can
         proceed to summarise/finish.
+    - agent: "testing"
+      message: |
+        FINANCE ROLE + WITHDRAWAL PROCESSING + WALLET TRANSFER — backend testing
+        COMPLETE. ALL 62/62 PASSED via /app/finance_withdrawal_transfer_test.py
+        against https://network-pay-1.preview.emergentagent.com.
+
+        Highlights (matches scenarios A–AA from the review request):
+        • Finance admin created via POST /admin/admins {admin_role:"finance"} → 200;
+          login works; admin_role correctly stored. ✅
+        • Finance role write-blocking confirmed on every admin/* write endpoint
+          tested: PATCH user, block user, PUT settings, POST /admin/admins, POST
+          /admin/approvals/*/approve — ALL return 403. Read-only GETs still work
+          (/admin/users, /admin/transactions, /admin/withdrawals). ✅
+        • Withdrawal 3-state flow: pending → processing (after finance approve;
+          ETA 48h returned + processing tx with amount=-w.amount inserted) →
+          success (after finance complete; processing tx promoted to status:success
+          with description "Withdrawal paid (₹X)"). Withdrawal record gets
+          completed_at timestamp on completion. ✅
+        • POST /wallet/transfer fully validated:
+            - happy path: U1→U2 by email transfers funds, creates linked
+              transfer_out / transfer_in transactions sharing transfer_id and
+              counterparty_id; balances correctly debited/credited. ✅
+            - self-transfer → 400 "Cannot transfer to yourself" ✅
+            - non-existent recipient → 404 "Recipient not found" ✅
+            - negative amount → 422 (Pydantic gt=0) ✅
+            - insufficient balance → 400 "Insufficient balance" ✅
+            - recipient pending → 400 "Recipient is not approved yet" ✅
+            - sender pending → 403 "Account is awaiting admin approval." ✅
+        • Admin role validation: POST /admin/admins, POST
+          /admin/users/{id}/promote, and PATCH /admin/users/{id} all accept
+          admin_role="finance" (whitelist updated to {super_admin, manager,
+          support, finance}). ✅
+        • Withdrawal approve/complete/reject endpoints accept all four admin
+          sub-roles (finance, super_admin, manager, support); manager-role
+          regression test verified end-to-end (REG8/REG9). Non-admin user → 403,
+          no-auth → 403. ✅
+
+        Cleanup: U1, U2, U3, finance admin, manager test admin all DELETED via
+        super_admin DELETE. DB left with only admin@app.com. Backend logs clean,
+        no 500s observed.
+
+        Task "Finance role + withdrawal processing flow + wallet-to-wallet
+        transfer" marked working: true, needs_retesting: false. Main agent can
+        summarise and finish.
     - agent: "testing"
       message: |
         KYC IMAGE UPLOAD — backend testing COMPLETE. ALL 18/18 tests PASSED via

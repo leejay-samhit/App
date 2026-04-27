@@ -23,9 +23,11 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 type Withdrawal = {
   id: string;
   amount: number;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "processing" | "success" | "rejected";
   created_at: string;
   processed_at?: string | null;
+  estimated_completion_at?: string | null;
+  completed_at?: string | null;
 };
 
 type Txn = {
@@ -47,6 +49,13 @@ export default function WalletScreen() {
   const [amount, setAmount] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  // Wallet-to-wallet transfer state
+  const [showTransfer, setShowTransfer] = useState(false);
+  const [recipient, setRecipient] = useState("");
+  const [transferAmt, setTransferAmt] = useState("");
+  const [transferNote, setTransferNote] = useState("");
+  const [transferring, setTransferring] = useState(false);
+  const [transferError, setTransferError] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -81,6 +90,32 @@ export default function WalletScreen() {
     }
   };
 
+  const onTransfer = async () => {
+    setTransferError("");
+    const amt = parseFloat(transferAmt);
+    if (!recipient.trim()) { setTransferError("Enter recipient email or referral code"); return; }
+    if (!amt || amt <= 0) { setTransferError("Enter valid amount"); return; }
+    if (amt > (user?.wallet_balance || 0)) { setTransferError("Insufficient balance"); return; }
+    setTransferring(true);
+    try {
+      await api.post("/wallet/transfer", {
+        recipient: recipient.trim(),
+        amount: amt,
+        note: transferNote.trim() || undefined,
+      });
+      setShowTransfer(false);
+      setRecipient("");
+      setTransferAmt("");
+      setTransferNote("");
+      await load();
+      Alert.alert("Sent", `₹${amt} transferred successfully.`);
+    } catch (e) {
+      setTransferError(formatApiError(e));
+    } finally {
+      setTransferring(false);
+    }
+  };
+
   if (loading) {
     return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
   }
@@ -109,63 +144,96 @@ export default function WalletScreen() {
               <Text style={styles.statRowValue}>{user?.payouts_received || 0}</Text>
             </View>
           </View>
-          <TouchableOpacity
-            style={[styles.withdrawBtn, !hasPayoutMethod && { opacity: 0.5 }]}
-            onPress={() => {
-              if (!hasPayoutMethod) {
-                Alert.alert("Add UPI / Bank", "Please add UPI or bank details from your profile first.");
-                return;
-              }
-              setShowModal(true);
-            }}
-            testID="wallet-request-withdraw"
-          >
-            <Feather name="arrow-up-right" size={18} color={colors.accentFg} />
-            <Text style={styles.withdrawBtnText}>Request withdrawal</Text>
-          </TouchableOpacity>
+          <View style={styles.actionsRow}>
+            <TouchableOpacity
+              style={[styles.withdrawBtn, { flex: 1 }, !hasPayoutMethod && { opacity: 0.5 }]}
+              onPress={() => {
+                if (!hasPayoutMethod) {
+                  Alert.alert("Add UPI / Bank", "Please add UPI or bank details from your profile first.");
+                  return;
+                }
+                setShowModal(true);
+              }}
+              testID="wallet-request-withdraw"
+            >
+              <Feather name="arrow-up-right" size={18} color={colors.accentFg} />
+              <Text style={styles.withdrawBtnText}>Schedule withdrawal</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.transferBtn, { flex: 1 }]}
+              onPress={() => setShowTransfer(true)}
+              testID="wallet-transfer"
+            >
+              <Feather name="send" size={18} color={colors.primary} />
+              <Text style={styles.transferBtnText}>Send to user</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         <Text style={styles.sectionLabel}>WITHDRAWAL HISTORY</Text>
         {withdrawals.length === 0 ? (
           <Text style={styles.empty}>No withdrawals yet.</Text>
         ) : (
-          withdrawals.map((w) => (
-            <View key={w.id} style={styles.row} testID={`withdrawal-${w.id}`}>
-              <View style={styles.rowLeft}>
-                <View style={[styles.rowDot, { backgroundColor: w.status === "approved" ? colors.success : w.status === "rejected" ? "#B3261E" : colors.warning }]} />
-                <View>
-                  <Text style={styles.rowTitle}>{formatINR(w.amount)}</Text>
-                  <Text style={styles.rowSub}>{new Date(w.created_at).toLocaleDateString()}</Text>
+          withdrawals.map((w) => {
+            const color = w.status === "success" || w.status === "approved" ? colors.success
+              : w.status === "rejected" ? "#B3261E"
+              : w.status === "processing" ? colors.brand500
+              : colors.warning;
+            return (
+              <View key={w.id} style={styles.row} testID={`withdrawal-${w.id}`}>
+                <View style={styles.rowLeft}>
+                  <View style={[styles.rowDot, { backgroundColor: color }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.rowTitle}>{formatINR(w.amount)}</Text>
+                    <Text style={styles.rowSub}>
+                      {new Date(w.created_at).toLocaleDateString()}
+                      {w.status === "processing" && w.estimated_completion_at
+                        ? ` · ETA ${new Date(w.estimated_completion_at).toLocaleDateString()}`
+                        : ""}
+                      {w.status === "success" && w.completed_at
+                        ? ` · paid ${new Date(w.completed_at).toLocaleDateString()}`
+                        : ""}
+                    </Text>
+                  </View>
                 </View>
+                <Text style={[styles.statusPill, { color }]}>{w.status.toUpperCase()}</Text>
               </View>
-              <Text style={[styles.statusPill, { color: w.status === "approved" ? colors.success : w.status === "rejected" ? "#B3261E" : colors.warning }]}>{w.status.toUpperCase()}</Text>
-            </View>
-          ))
+            );
+          })
         )}
 
         <Text style={styles.sectionLabel}>TRANSACTIONS</Text>
         {txns.length === 0 ? (
           <Text style={styles.empty}>No transactions yet.</Text>
         ) : (
-          txns.map((t) => (
-            <View key={t.id} style={styles.row}>
-              <View style={styles.rowLeft}>
-                <Feather
-                  name={t.type === "referral_payout" ? "trending-up" : t.type === "withdrawal" ? "arrow-up-right" : "credit-card"}
-                  size={18}
-                  color={t.amount > 0 ? colors.success : colors.textMain}
-                  style={{ marginRight: 12 }}
-                />
-                <View>
-                  <Text style={styles.rowTitle}>{t.description || t.type}</Text>
-                  <Text style={styles.rowSub}>{new Date(t.created_at).toLocaleDateString()}</Text>
+          txns.map((t) => {
+            const icon = t.type === "referral_payout" ? "trending-up"
+              : t.type === "withdrawal" ? "arrow-up-right"
+              : t.type === "transfer_out" ? "send"
+              : t.type === "transfer_in" ? "download"
+              : "credit-card";
+            const statusColor = t.status === "processing" ? colors.brand500
+              : t.status === "success" ? colors.success
+              : t.status === "rejected" ? "#B3261E"
+              : null;
+            return (
+              <View key={t.id} style={styles.row}>
+                <View style={styles.rowLeft}>
+                  <Feather name={icon as any} size={18} color={t.amount > 0 ? colors.success : colors.textMain} style={{ marginRight: 12 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.rowTitle} numberOfLines={2}>{t.description || t.type}</Text>
+                    <Text style={styles.rowSub}>
+                      {new Date(t.created_at).toLocaleDateString()}
+                      {statusColor ? ` · ${t.status}` : ""}
+                    </Text>
+                  </View>
                 </View>
+                <Text style={[styles.amountText, { color: t.amount >= 0 ? colors.success : statusColor || "#B3261E" }]}>
+                  {t.amount >= 0 ? "+" : ""}{formatINR(t.amount)}
+                </Text>
               </View>
-              <Text style={[styles.amountText, { color: t.amount >= 0 ? colors.success : "#B3261E" }]}>
-                {t.amount >= 0 ? "+" : ""}{formatINR(t.amount)}
-              </Text>
-            </View>
-          ))
+            );
+          })
         )}
       </ScrollView>
 
@@ -173,8 +241,8 @@ export default function WalletScreen() {
         <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.modalSheet}>
             <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>Request withdrawal</Text>
-            <Text style={styles.modalSub}>Available: {formatINR(user?.wallet_balance || 0)}</Text>
+            <Text style={styles.modalTitle}>Schedule withdrawal</Text>
+            <Text style={styles.modalSub}>Available: {formatINR(user?.wallet_balance || 0)}{"\n"}Funds reach your bank within 48 hours after admin approval.</Text>
             <TextInput
               testID="withdraw-amount-input"
               value={amount}
@@ -196,6 +264,51 @@ export default function WalletScreen() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      <Modal visible={showTransfer} transparent animationType="slide" onRequestClose={() => setShowTransfer(false)}>
+        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <Text style={styles.modalTitle}>Send to another user</Text>
+            <Text style={styles.modalSub}>Wallet-to-wallet transfer · Available: {formatINR(user?.wallet_balance || 0)}</Text>
+            <TextInput
+              testID="transfer-recipient"
+              value={recipient}
+              onChangeText={setRecipient}
+              autoCapitalize="none"
+              placeholder="Recipient email or referral code"
+              placeholderTextColor={colors.textMuted}
+              style={styles.modalInput}
+            />
+            <TextInput
+              testID="transfer-amount"
+              value={transferAmt}
+              onChangeText={setTransferAmt}
+              placeholder="Amount in ₹"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="numeric"
+              style={[styles.modalInput, { marginTop: 10 }]}
+            />
+            <TextInput
+              testID="transfer-note"
+              value={transferNote}
+              onChangeText={setTransferNote}
+              placeholder="Note (optional)"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.modalInput, { marginTop: 10 }]}
+            />
+            {transferError ? <Text style={styles.errorText}>{transferError}</Text> : null}
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+              <TouchableOpacity onPress={() => { setShowTransfer(false); setTransferError(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
+                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={onTransfer} disabled={transferring} style={[styles.modalBtn, { backgroundColor: colors.primary }]} testID="transfer-submit">
+                {transferring ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={{ color: colors.primaryFg, fontWeight: "700" }}>Send</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -212,8 +325,11 @@ const styles = StyleSheet.create({
   statsRow: { flexDirection: "row", gap: 32, marginTop: 16 },
   statRowLabel: { color: "rgba(255,255,255,0.6)", fontSize: 12 },
   statRowValue: { color: colors.primaryFg, fontSize: 16, fontWeight: "700", marginTop: 2 },
-  withdrawBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.accent, paddingVertical: 14, borderRadius: radii.button, marginTop: 18, gap: 8 },
-  withdrawBtnText: { color: colors.accentFg, fontWeight: "700", fontSize: 15 },
+  withdrawBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.accent, paddingVertical: 14, borderRadius: radii.button, gap: 8 },
+  withdrawBtnText: { color: colors.accentFg, fontWeight: "700", fontSize: 14 },
+  actionsRow: { flexDirection: "row", gap: 10, marginTop: 18 },
+  transferBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#fff", paddingVertical: 14, borderRadius: radii.button, gap: 8 },
+  transferBtnText: { color: colors.primary, fontWeight: "700", fontSize: 14 },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12, marginTop: 8 },
   empty: { color: colors.textMuted, fontSize: 13, padding: 16, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, marginBottom: 16 },
   row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 8 },

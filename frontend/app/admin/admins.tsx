@@ -22,12 +22,13 @@ type AdminUser = {
   created_at?: string;
 };
 
-type SubRole = "super_admin" | "manager" | "support";
+type SubRole = "super_admin" | "manager" | "support" | "finance";
 
 const ROLES: { key: SubRole; label: string; tint: string; desc: string }[] = [
   { key: "super_admin", label: "Super Admin", tint: "#143D2E", desc: "Full access — settings, payouts, admin management" },
   { key: "manager", label: "Manager", tint: "#1E6B4F", desc: "All operational access; cannot edit settings or admins" },
   { key: "support", label: "Support", tint: "#A07A2C", desc: "Operational access; cannot edit settings or admins" },
+  { key: "finance", label: "Finance", tint: "#3D5A80", desc: "Withdrawals only — approve / reject / mark paid. No user mods." },
 ];
 
 export default function AdminAdmins() {
