@@ -36,11 +36,24 @@ LEVEL_2_PAYOUT = float(os.environ.get('LEVEL_2_PAYOUT', 100))
 LEVEL_3_PAYOUT = float(os.environ.get('LEVEL_3_PAYOUT', 50))
 DIRECTS_REQUIRED = 4
 
-DEFAULT_SETTINGS = {
-    "registration_fee": REGISTRATION_FEE,
+# Default payout amounts per level (10 levels). L1 is paid every Nth direct;
+# L2..L10 are credited per qualifying down-line activation.
+DEFAULT_LEVEL_PAYOUTS = {
     "payout_l1": PAYOUT_PER_LEVEL,
     "payout_l2": LEVEL_2_PAYOUT,
     "payout_l3": LEVEL_3_PAYOUT,
+    "payout_l4": 25.0,
+    "payout_l5": 15.0,
+    "payout_l6": 10.0,
+    "payout_l7": 8.0,
+    "payout_l8": 5.0,
+    "payout_l9": 3.0,
+    "payout_l10": 2.0,
+}
+
+DEFAULT_SETTINGS = {
+    "registration_fee": REGISTRATION_FEE,
+    **DEFAULT_LEVEL_PAYOUTS,
     "directs_required": DIRECTS_REQUIRED,
 }
 
@@ -49,7 +62,9 @@ async def get_settings() -> Dict[str, Any]:
     doc = await db.settings.find_one({"id": "global"}, {"_id": 0})
     if not doc:
         return {**DEFAULT_SETTINGS, "id": "global"}
-    return doc
+    # Backfill any missing level keys with defaults so older docs still work
+    merged = {**DEFAULT_SETTINGS, **doc}
+    return merged
 
 # Achievement tiers based on team size
 TIERS = [
@@ -503,42 +518,47 @@ async def _create_notification(user_id: str, kind: str, title: str, body: str):
 
 async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     """Pay multi-level referral commissions when a user becomes 'approved'.
-    Idempotent — sets commission_triggered on the user. Safe to call multiple times."""
+    Walks up to 10 levels of upline. L1 is paid every Nth direct, L2..L10 are
+    credited per qualifying activation. Idempotent via commission_triggered flag."""
     if user.get("commission_triggered"):
         return
     settings = await get_settings()
-    payout_l1 = settings["payout_l1"]
-    payout_l2 = settings["payout_l2"]
-    payout_l3 = settings["payout_l3"]
     directs_required = settings["directs_required"]
+    level_payouts = [settings.get(f"payout_l{i}", 0) or 0 for i in range(1, 11)]  # 10 levels
     sponsor_id = user.get("sponsor_id")
     # Mark first to avoid race-condition double trigger
     await db.users.update_one({"id": user["id"]}, {"$set": {"commission_triggered": True}})
     if not sponsor_id:
         return
+
+    # Level 1 — direct sponsor: increment direct count, payout on every Nth
     sponsor = await db.users.find_one({"id": sponsor_id})
     if not sponsor:
         return
     await db.users.update_one({"id": sponsor_id}, {"$inc": {"direct_referrals_count": 1}})
     new_count = sponsor.get("direct_referrals_count", 0) + 1
+    payout_l1 = level_payouts[0]
     await _create_notification(
         sponsor_id, "referral",
         f"New referral: {user['name']}",
         f"{user['name']} just joined your network. {directs_required - (new_count % directs_required or directs_required)} more to next ₹{int(payout_l1)} payout.",
     )
-    if new_count % directs_required == 0:
+    if new_count % directs_required == 0 and payout_l1 > 0:
         fresh = await db.users.find_one({"id": sponsor_id})
         await _credit_payout(fresh, payout_l1, 1, user["name"])
-    l2_id = sponsor.get("sponsor_id")
-    if l2_id:
-        l2 = await db.users.find_one({"id": l2_id})
-        if l2:
-            await _credit_payout(l2, payout_l2, 2, user["name"])
-            l3_id = l2.get("sponsor_id")
-            if l3_id:
-                l3 = await db.users.find_one({"id": l3_id})
-                if l3:
-                    await _credit_payout(l3, payout_l3, 3, user["name"])
+
+    # Walk up levels 2..10 — credit per qualifying activation if amount > 0
+    current_id = sponsor.get("sponsor_id")
+    for level in range(2, 11):
+        if not current_id:
+            break
+        upline = await db.users.find_one({"id": current_id})
+        if not upline:
+            break
+        amt = level_payouts[level - 1]
+        if amt > 0:
+            await _credit_payout(upline, amt, level, user["name"])
+        current_id = upline.get("sponsor_id")
 
 
 @api_router.post("/payment/register-fee")
@@ -601,7 +621,7 @@ async def my_dashboard(user: Dict[str, Any] = Depends(get_current_user)):
         "referral_code": user.get("referral_code"),
         "unread_notifications": unread_notifs,
         "tier": tier,
-        "level_payouts": {"l1": settings["payout_l1"], "l2": settings["payout_l2"], "l3": settings["payout_l3"]},
+        "level_payouts": {f"l{i}": settings.get(f"payout_l{i}", 0) or 0 for i in range(1, 11)},
     }
 
 
@@ -1145,6 +1165,13 @@ class SettingsUpdate(BaseModel):
     payout_l1: Optional[float] = Field(default=None, ge=0)
     payout_l2: Optional[float] = Field(default=None, ge=0)
     payout_l3: Optional[float] = Field(default=None, ge=0)
+    payout_l4: Optional[float] = Field(default=None, ge=0)
+    payout_l5: Optional[float] = Field(default=None, ge=0)
+    payout_l6: Optional[float] = Field(default=None, ge=0)
+    payout_l7: Optional[float] = Field(default=None, ge=0)
+    payout_l8: Optional[float] = Field(default=None, ge=0)
+    payout_l9: Optional[float] = Field(default=None, ge=0)
+    payout_l10: Optional[float] = Field(default=None, ge=0)
     directs_required: Optional[int] = Field(default=None, ge=1, le=20)
 
 

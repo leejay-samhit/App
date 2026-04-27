@@ -381,6 +381,78 @@ backend:
               transactions/withdrawals/orders cleared. Behavior verified via the
               gate test (confirm='WRONG' → 400; not destructive in this run).
 
+  - task: "10-level payout structure (settings + cascade + dashboard)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            ALL 135/135 scenarios PASSED via /app/payout_10_levels_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Detailed scenario results (A–H from review request):
+            A. GET /admin/settings — payout_l1..payout_l10 all present as floats >= 0
+               (current admin had directs_required=6 — expected per review). Defaults
+               applied to back-fill any missing keys via get_settings(). ✅
+            B. PUT /admin/settings {"payout_l4":50, "payout_l5":40, "payout_l6":30,
+               "payout_l7":20, "payout_l8":10, "payout_l9":5, "payout_l10":1} → 200 with
+               those 7 fields updated. payout_l1, payout_l2, payout_l3 remained
+               unchanged (merge semantics confirmed). ✅
+            C. PUT /admin/settings {"payout_l5": -5} → 422 Pydantic
+               "greater_than_equal" (Field ge=0 enforced for all 10 levels). ✅
+            D. PUT /admin/settings with full default body
+               {directs_required:4, payout_l1..l10 = 400/100/50/25/15/10/8/5/3/2}
+               → 200, all 11 keys set to defaults. ✅
+            E. /api/users/me/dashboard for fresh paid+approved user → returns
+               level_payouts as a dict with EXACTLY keys {l1..l10} and values that
+               equal settings.payout_l1..payout_l10. ✅
+            F. End-to-end 10-level cascade — built U1→U2→...→U11 (each user uses
+               previous user's referral_code), paid registration, admin-approved each
+               in order. With directs_required=4 and only 1 direct per upline, the L1
+               cycle does NOT fire (1 % 4 != 0); L2..L10 fire on every qualifying
+               down-line activation. Verified:
+                 • U1 wallet=218 (= L2+L3+L4+L5+L6+L7+L8+L9+L10 = 100+50+25+15+10+8+5+3+2)
+                 • U2 wallet=216 (= L2+L3+L4+L5+L6+L7+L8+L9       = 216)
+                 • U3 wallet=213 / U4=208 / U5=200 / U6=190 / U7=175 / U8=150
+                 • U9 wallet=100 (only U10 below contributes — at L2)
+                 • U10 wallet=0 (only U11 contributes — at L1, but cycle doesn't fire)
+                 • U11 wallet=0 (no down-line)
+               When U11's approval fired, transactions exist for:
+                 • U10: NO L1 (cycle didn't trigger — 1 % 4 != 0). ✅
+                 • U9 L2 ₹100, U8 L3 ₹50, U7 L4 ₹25, U6 L5 ₹15, U5 L6 ₹10,
+                   U4 L7 ₹8, U3 L8 ₹5, U2 L9 ₹3, U1 L10 ₹2 — ALL present with
+                   description "Level N payout from Chain F U11" and exact amounts. ✅
+                 • direct_referrals_count: U1..U10 == 1, U11 == 0. ✅
+            G. Disabled L5 by setting payout_l5=0, built another 11-deep chain.
+               No L5 referral_payout transactions were created on ANY of the 11 users.
+               U6 wallet (which would normally include L5=15) was correctly reduced
+               from 190 → 175. Other levels still fired correctly. ✅
+            H. Restored defaults via PUT — all 10 levels back to 400/100/50/25/15/10/
+               8/5/3/2, directs_required=4. ✅
+
+            Regression sanity (no regressions detected):
+            • Approval gate: pending user POST /withdrawals → 403 "Account is
+              awaiting admin approval...". After approve → 400 "Insufficient
+              balance". ✅
+            • KYC text-only submission → 200 pending; GET /users/me/kyc returns
+              status="pending". ✅
+            • Admin management: GET /admin/admins → 200; admin@app.com present;
+              no password_hash leaked. ✅
+            • Super password: GET /admin/super-password → 200 with is_set=true and
+              format string. ✅
+            • Wipe-users gate: POST /admin/system/wipe-users with confirm="WRONG"
+              → 400 "Send confirm='WIPE_ALL_USERS' to proceed" (gate intact, NOT
+              destructively executed). ✅
+
+            Cleanup: All 24 test users created during this run were deleted via
+            DELETE /admin/users/{id} (200 each). Settings restored to defaults.
+            Backend logs clean, no 500s observed.
+
   - task: "Existing JWT Auth + Admin + E-commerce regression suite"
     implemented: true
     working: true
@@ -448,12 +520,51 @@ metadata:
 
 test_plan:
   current_focus:
-    - "User Approval Gate flow + extra docs (admin approvals + additional documents)"
+    - "10-level payout structure (settings + cascade + dashboard)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        10-LEVEL PAYOUT STRUCTURE — backend testing COMPLETE. ALL 135/135 PASSED via
+        /app/payout_10_levels_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Highlights (matches scenarios A–H from the review request):
+        • A. GET /admin/settings exposes payout_l1..payout_l10 (all floats >= 0).
+          get_settings() back-fills missing keys with defaults
+          (400/100/50/25/15/10/8/5/3/2). directs_required currently 6 in DB
+          (admin already changed); scenario respects this. ✅
+        • B. PUT /admin/settings with {payout_l4..payout_l10} updates only those
+          fields; payout_l1..l3 preserved. Merge upsert working. ✅
+        • C. PUT /admin/settings {"payout_l5":-5} → 422 Pydantic
+          "greater_than_equal" — Field(ge=0) enforced for all 10 levels. ✅
+        • D. PUT defaults body → 200, all 11 keys reset. ✅
+        • E. /api/users/me/dashboard returns level_payouts as dict with EXACT
+          keys {l1..l10} matching settings.payout_l1..payout_l10. ✅
+        • F. Built U1→...→U11 chain. Each Uk has direct_referrals_count==1. With
+          directs_required=4, L1 cycle does NOT fire (1 % 4 != 0).
+          When U11 approved, transactions fire on uplines:
+            U10 NO L1 (cycle), U9 L2 ₹100, U8 L3 ₹50, U7 L4 ₹25, U6 L5 ₹15,
+            U5 L6 ₹10, U4 L7 ₹8, U3 L8 ₹5, U2 L9 ₹3, U1 L10 ₹2.
+          Wallet balances confirmed: U1=218, U2=216, U3=213, U4=208, U5=200,
+          U6=190, U7=175, U8=150, U9=100, U10=0, U11=0 (sum of L2..L_min(11-k,10)). ✅
+        • G. Set payout_l5=0, build new 11-deep chain. ZERO L5 referral_payout
+          transactions across all 11 users; other levels still fire correctly.
+          U6 wallet correctly drops from 190→175. ✅
+        • H. Defaults restored. ✅
+
+        Regression sanity: approval-gate (403 pending → 400 post-approve), KYC,
+        admin management (/admin/admins lightweight), super-password GET, and
+        wipe-users gate (bad confirm → 400) all still pass.
+
+        Cleanup: 24 created users deleted via DELETE /admin/users/{id} (all 200).
+        Settings restored to defaults at end. Backend logs clean, no 500s.
+
+        Task "10-level payout structure (settings + cascade + dashboard)" marked
+        working: true, needs_retesting: false. Main agent can summarise and finish.
     - agent: "testing"
       message: |
         APPROVAL GATE + EXTRA DOCS — backend testing COMPLETE. ALL 43/43 PASSED via
