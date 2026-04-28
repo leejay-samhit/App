@@ -24,8 +24,9 @@ export default function AdminLayout() {
       <Tabs.Screen name="home" options={{ title: "Home", tabBarIcon: ({ color, size }) => <Feather name="grid" size={size} color={color} /> }} />
       <Tabs.Screen name="users" options={{ title: "Users", tabBarIcon: ({ color, size }) => <Feather name="users" size={size} color={color} /> }} />
       <Tabs.Screen name="payouts" options={{ title: "Payouts", tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="currency-inr" size={size} color={color} /> }} />
-      <Tabs.Screen name="transactions" options={{ title: "Txns", tabBarIcon: ({ color, size }) => <Feather name="list" size={size} color={color} /> }} />
+      <Tabs.Screen name="wallet" options={{ title: "Wallet", tabBarIcon: ({ color, size }) => <Feather name="credit-card" size={size} color={color} /> }} />
       <Tabs.Screen name="more" options={{ title: "More", tabBarIcon: ({ color, size }) => <Feather name="more-horizontal" size={size} color={color} /> }} />
+      <Tabs.Screen name="transactions" options={{ href: null }} />
       <Tabs.Screen name="settings" options={{ href: null }} />
       <Tabs.Screen name="profile" options={{ href: null }} />
       <Tabs.Screen name="kyc" options={{ href: null }} />
@@ -34,6 +35,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="roadmap" options={{ href: null }} />
       <Tabs.Screen name="admins" options={{ href: null }} />
       <Tabs.Screen name="approvals" options={{ href: null }} />
+      <Tabs.Screen name="backups" options={{ href: null }} />
     </Tabs>
   );
 }

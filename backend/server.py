@@ -6,6 +6,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 import os
 import logging
+import asyncio
 import secrets
 import string
 import uuid
@@ -2217,6 +2218,136 @@ async def seed_products():
     logger.info("Sample products seeded")
 
 
+# ------------------ Data Backup / Restore (admin) ------------------
+BACKUP_COLLECTIONS = (
+    "users", "transactions", "withdrawals", "orders", "cart_items",
+    "notifications", "products", "settings", "audit_logs",
+)
+BACKUP_INTERVAL_SECONDS = int(os.environ.get("BACKUP_INTERVAL_SECONDS", 15 * 60))  # 15 min default
+BACKUP_RETENTION = int(os.environ.get("BACKUP_RETENTION", 24))  # keep last 24 snapshots
+
+
+async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
+                         created_by: Optional[str] = None) -> Dict[str, Any]:
+    """Capture a full snapshot of all key collections into the db_snapshots collection."""
+    snap_id = str(uuid.uuid4())
+    payload: Dict[str, Any] = {}
+    counts: Dict[str, int] = {}
+    for coll in BACKUP_COLLECTIONS:
+        rows = await db[coll].find({}, {"_id": 0}).to_list(100000)
+        payload[coll] = rows
+        counts[coll] = len(rows)
+    doc = {
+        "id": snap_id,
+        "kind": kind,  # "auto" | "manual"
+        "note": note,
+        "created_by": created_by,
+        "created_at": now_utc().isoformat(),
+        "counts": counts,
+        "data": payload,
+    }
+    await db.db_snapshots.insert_one(doc)
+    # Retention: keep only the last BACKUP_RETENTION
+    extras = await db.db_snapshots.find(
+        {}, {"_id": 0, "id": 1, "created_at": 1}
+    ).sort("created_at", -1).skip(BACKUP_RETENTION).to_list(1000)
+    if extras:
+        await db.db_snapshots.delete_many({"id": {"$in": [e["id"] for e in extras]}})
+    return {"id": snap_id, "counts": counts, "created_at": doc["created_at"]}
+
+
+async def _restore_snapshot(snap_id: str) -> Dict[str, Any]:
+    """Restore the DB to the state captured in a snapshot. Wipes current rows in
+    backed-up collections then re-inserts. Snapshots collection itself is preserved."""
+    snap = await db.db_snapshots.find_one({"id": snap_id})
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    data = snap.get("data") or {}
+    restored: Dict[str, int] = {}
+    for coll in BACKUP_COLLECTIONS:
+        rows = data.get(coll) or []
+        await db[coll].delete_many({})
+        if rows:
+            # Strip _id if present (we projected it out, but be defensive)
+            cleaned = [{k: v for k, v in r.items() if k != "_id"} for r in rows]
+            await db[coll].insert_many(cleaned)
+        restored[coll] = len(rows)
+    return {"ok": True, "restored": restored, "snapshot_id": snap_id}
+
+
+async def _backup_scheduler():
+    """Background task: take an automatic snapshot at the configured interval."""
+    # Initial small delay so we don't snapshot at the same instant as startup migrations.
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await _take_snapshot(kind="auto", note="Automatic snapshot")
+        except Exception as e:
+            logging.warning(f"Auto-backup failed: {e}")
+        await asyncio.sleep(BACKUP_INTERVAL_SECONDS)
+
+
+@api_router.get("/admin/backups")
+async def admin_list_backups(_: Dict[str, Any] = Depends(require_admin_not_finance)):
+    """List snapshots — newest first, without the heavy `data` payload."""
+    items = await db.db_snapshots.find(
+        {}, {"_id": 0, "data": 0}
+    ).sort("created_at", -1).to_list(BACKUP_RETENTION + 5)
+    return {
+        "backups": items,
+        "interval_seconds": BACKUP_INTERVAL_SECONDS,
+        "retention": BACKUP_RETENTION,
+    }
+
+
+class TakeBackupRequest(BaseModel):
+    note: Optional[str] = None
+
+
+@api_router.post("/admin/backups")
+async def admin_take_backup(payload: TakeBackupRequest,
+                            admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Take a manual snapshot. super_admin only."""
+    snap = await _take_snapshot(kind="manual", note=payload.note, created_by=admin["id"])
+    await _audit_log(admin, "backup.create", "snapshot", snap["id"])
+    return snap
+
+
+class RestoreBackupRequest(BaseModel):
+    super_password: str
+
+
+@api_router.post("/admin/backups/{snap_id}/restore")
+async def admin_restore_backup(snap_id: str, payload: RestoreBackupRequest,
+                               admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Restore the DB to a snapshot. super_admin only + super-password gate."""
+    if not await get_super_password_hash():
+        raise HTTPException(status_code=400, detail="Super password not set. Set it in Admin → Admin access.")
+    if not await verify_super_password(payload.super_password):
+        raise HTTPException(status_code=401, detail="Invalid super password")
+    res = await _restore_snapshot(snap_id)
+    await _audit_log(admin, "backup.restore", "snapshot", snap_id, res["restored"])
+    return res
+
+
+@api_router.delete("/admin/backups/{snap_id}")
+async def admin_delete_backup(snap_id: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    r = await db.db_snapshots.delete_one({"id": snap_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    await _audit_log(admin, "backup.delete", "snapshot", snap_id)
+    return {"ok": True}
+
+
+@api_router.get("/admin/changes")
+async def admin_list_changes(_: Dict[str, Any] = Depends(require_admin_not_finance),
+                             limit: int = 200):
+    """View the per-action change log (sourced from audit_logs — every admin write
+    is recorded here with before/after detail in audit_logs.details)."""
+    items = await db.audit_logs.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit).to_list(limit)
+    return items
+
+
 @app.on_event("startup")
 async def on_startup():
     await db.users.create_index("email", unique=True)
@@ -2246,6 +2377,8 @@ async def on_startup():
         {"role": "admin"},
         {"$set": {"approval_status": "approved", "commission_triggered": True}},
     )
+    # Kick off the periodic backup task
+    asyncio.create_task(_backup_scheduler())
 
 
 @app.on_event("shutdown")

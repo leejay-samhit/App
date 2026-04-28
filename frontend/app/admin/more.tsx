@@ -10,9 +10,11 @@ import { colors, radii, spacing } from "../../src/theme";
 const ITEMS = [
   { icon: "shield", label: "Admin access", route: "/admin/admins" },
   { icon: "user-check", label: "User approvals", route: "/admin/approvals" },
+  { icon: "hard-drive", label: "Data backups", route: "/admin/backups" },
   { icon: "map", label: "Product roadmap", route: "/admin/roadmap" },
   { icon: "user-check", label: "KYC review queue", route: "/admin/kyc" },
   { icon: "package", label: "Orders management", route: "/admin/orders" },
+  { icon: "list", label: "Transactions", route: "/admin/transactions" },
   { icon: "file-text", label: "Admin audit log", route: "/admin/audit" },
   { icon: "sliders", label: "Payout structure", route: "/admin/settings" },
 ];
