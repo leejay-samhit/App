@@ -39,6 +39,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="products" options={{ href: null }} />
       <Tabs.Screen name="branding" options={{ href: null }} />
       <Tabs.Screen name="rejected" options={{ href: null }} />
+      <Tabs.Screen name="approved" options={{ href: null }} />
     </Tabs>
   );
 }

@@ -2301,7 +2301,10 @@ async def admin_get_approval_detail(user_id: str, _: Dict[str, Any] = Depends(re
 
 
 @api_router.post("/admin/approvals/{user_id}/approve")
-async def admin_approve_user(user_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
+async def admin_approve_user(
+    user_id: str,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -2323,12 +2326,127 @@ async def admin_approve_user(user_id: str, admin: Dict[str, Any] = Depends(requi
     # Trigger commissions only if registration is paid (paid users entering the tree).
     if fresh and fresh.get("registration_paid"):
         await _trigger_referral_commissions(fresh)
+    # Archive into approved_registrations bucket (a separate "category" of data,
+    # distinct from products and from rejected_registrations). Finance approvals
+    # are tagged as auto_approved so they can be filtered in the admin UI.
+    if fresh:
+        await _archive_approved_user(fresh, admin)
     await _create_notification(
         user_id, "approval",
         "Account approved",
         "You have been approved by admin. Your sponsor's network has been credited and earnings are now active.",
     )
-    await _audit_log(admin, "user.approve", "user", user_id)
+    await _audit_log(admin, "user.approve", "user", user_id, {"approver_role": admin.get("admin_role") or "super_admin"})
+    return {"ok": True}
+
+
+async def _archive_approved_user(user_doc: Dict[str, Any], admin: Dict[str, Any]) -> Dict[str, Any]:
+    """Write/refresh a record in approved_registrations. The collection is a
+    'separate data category' that holds an audit trail of every user who has
+    been approved (by finance, super_admin, manager, or support). Finance-approved
+    users are flagged auto_approved=True so they're easy to filter."""
+    approver_role = admin.get("admin_role") or "super_admin"
+    record = {
+        "id": str(uuid.uuid4()),
+        "original_user_id": user_doc["id"],
+        "email": user_doc.get("email"),
+        "name": user_doc.get("name"),
+        "phone": user_doc.get("phone"),
+        "referral_code": user_doc.get("referral_code"),
+        "referred_by": user_doc.get("referred_by"),
+        "sponsor_id": user_doc.get("sponsor_id"),
+        "registration_paid": bool(user_doc.get("registration_paid")),
+        "payment_method": user_doc.get("payment_method"),
+        "wallet_balance_at_approval": float(user_doc.get("wallet_balance") or 0),
+        "approver_role": approver_role,
+        "approver_id": admin["id"],
+        "approver_email": admin.get("email"),
+        "auto_approved": approver_role == "finance",
+        "source": "admin_created" if user_doc.get("created_by_admin") else (
+            "google" if user_doc.get("auth_provider") == "google" else "self"
+        ),
+        "approved_at": now_utc().isoformat(),
+        "snapshot": {k: v for k, v in user_doc.items() if k not in {
+            "_id", "password_hash",
+            "kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan_image", "kyc_selfie",
+            "extra_docs",
+        }},
+    }
+    # Avoid duplicate archive entries if the same user is approved twice — replace existing.
+    await db.approved_registrations.delete_many({"original_user_id": user_doc["id"]})
+    await db.approved_registrations.insert_one(record)
+    return record
+
+
+# ------------------ Admin: Approved registrations bucket ------------------
+@api_router.get("/admin/approved-registrations")
+async def admin_list_approved_registrations(
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance", "manager", "support")),
+    role_filter: Optional[str] = Query(default=None),  # all | finance | super_admin | manager | support | auto
+    search: Optional[str] = Query(default=None),
+    limit: int = Query(default=500, le=2000),
+):
+    q: Dict[str, Any] = {}
+    if role_filter and role_filter != "all":
+        if role_filter == "auto":
+            q["auto_approved"] = True
+        elif role_filter in {"super_admin", "finance", "manager", "support"}:
+            q["approver_role"] = role_filter
+        else:
+            raise HTTPException(status_code=400, detail="Invalid role filter")
+    if search:
+        s = search.strip()
+        q["$or"] = [
+            {"email": {"$regex": s, "$options": "i"}},
+            {"name": {"$regex": s, "$options": "i"}},
+            {"phone": {"$regex": s, "$options": "i"}},
+            {"referral_code": {"$regex": s, "$options": "i"}},
+        ]
+    items = await db.approved_registrations.find(q, {"_id": 0, "snapshot": 0}).sort("approved_at", -1).to_list(limit)
+    pipeline = [{"$group": {"_id": "$approver_role", "n": {"$sum": 1}}}]
+    agg = await db.approved_registrations.aggregate(pipeline).to_list(100)
+    counts = {row["_id"]: row["n"] for row in agg if row["_id"]}
+    counts["all"] = sum(counts.values())
+    counts["auto"] = await db.approved_registrations.count_documents({"auto_approved": True})
+    return {"items": items, "counts": counts}
+
+
+@api_router.get("/admin/approved-registrations/export")
+async def admin_export_approved(
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance")),
+    role_filter: Optional[str] = Query(default=None),
+):
+    q: Dict[str, Any] = {}
+    if role_filter and role_filter != "all":
+        if role_filter == "auto":
+            q["auto_approved"] = True
+        elif role_filter in {"super_admin", "finance", "manager", "support"}:
+            q["approver_role"] = role_filter
+        else:
+            raise HTTPException(status_code=400, detail="Invalid role filter")
+    items = await db.approved_registrations.find(q, {"_id": 0, "snapshot": 0}).sort("approved_at", -1).to_list(20000)
+    def esc(v: Any) -> str:
+        s = "" if v is None else str(v)
+        if any(ch in s for ch in [",", "\"", "\n"]):
+            s = '"' + s.replace('"', '""') + '"'
+        return s
+    fields = ["id", "original_user_id", "name", "email", "phone", "referral_code", "referred_by",
+              "registration_paid", "payment_method", "wallet_balance_at_approval", "source",
+              "approver_role", "approver_email", "auto_approved", "approved_at"]
+    header = ",".join(fields)
+    lines = [header]
+    for it in items:
+        lines.append(",".join(esc(it.get(f)) for f in fields))
+    return Response(content="\n".join(lines), media_type="text/csv")
+
+
+@api_router.delete("/admin/approved-registrations/{rec_id}")
+async def admin_delete_approved(rec_id: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Removes the archive record only. Does NOT remove the underlying user."""
+    r = await db.approved_registrations.delete_one({"id": rec_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await _audit_log(admin, "approved.delete_record", "approved_registration", rec_id)
     return {"ok": True}
 
 

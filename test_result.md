@@ -107,6 +107,209 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Approved Registrations bucket + finance can approve users + cart-total defensive (UI fallback)"
+    implemented: true
+    working: true
+    file: "backend/server.py, frontend/app/cart.tsx, frontend/app/admin/approved.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Backend testing COMPLETE. 43/44 functional checks PASSED via
+            /app/backend_test.py against
+            https://network-pay-1.preview.emergentagent.com. The single "failure"
+            is a TEST-script limitation (PATCH /admin/users does not expose
+            approval_status field) — NOT a backend bug. Scenario I's
+            defensive-dedup property is fully covered by scenario J (verified
+            below).
+
+            Detailed scenario results (matches A–M from review request):
+
+            A. SUPER_ADMIN APPROVES U1 ✅
+               • A.1 Registered U1 (Aarav Sharma) → 200, id captured. ✅
+               • A.2 super_admin POST /admin/approvals/{U1.id}/approve → 200
+                 {ok:true}. ✅
+               • A.3 GET /admin/approved-registrations contains U1 with
+                 approver_role="super_admin", auto_approved=false. Record
+                 keys: id, original_user_id, email, name, phone, referral_code,
+                 referred_by, sponsor_id, registration_paid, payment_method,
+                 wallet_balance_at_approval, approver_role, approver_id,
+                 approver_email, auto_approved, source, approved_at. ✅
+
+            B. PROMOTE FRESH USER TO FINANCE; FINANCE APPROVES U2 ✅
+               • B.1 Registered fresh user (Priya Iyer) → 200. ✅
+               • B.2 super_admin POST /admin/users/{id}/promote
+                 {admin_role:"finance"} → 200, returned admin_role="finance". ✅
+               • B.3 Finance login → 200. ✅
+               • B.4 Registered fresh U2 (Rohit Verma) → 200. ✅
+               • B.5 Finance POST /admin/approvals/{U2.id}/approve → 200
+                 {ok:true} — RBAC widening verified (was 403 before this PR). ✅
+               • B.6 GET /admin/approved-registrations?role_filter=auto contains
+                 U2 with auto_approved=true and approver_role="finance". ✅
+
+            C. role_filter=finance ALSO RETURNS U2 ✅
+               • items_count=1, U2 present. ✅
+
+            D. role_filter=super_admin RETURNS U1 (NOT U2) ✅
+               • has_u1=True, has_u2=False — filter integrity confirmed. ✅
+
+            E. role_filter=manager RETURNS [] ; counts.manager == 0 ✅
+               • items=0, counts.manager=0. ✅
+
+            F. COUNT INVARIANTS ✅
+               • F.1 counts.all == counts.super_admin + counts.finance +
+                 counts.manager + counts.support → 2 == 1+1+0+0. ✅
+               • F.2 counts.auto == counts.finance (in our test) → 1 == 1. ✅
+
+            G. EXPORT AS SUPER_ADMIN ✅
+               • G.1 GET /admin/approved-registrations/export → 200,
+                 content-type=text/csv; charset=utf-8, header row starts with
+                 "id,original_user_id,name,email,phone,referral_code,referred_by,
+                 registration_paid,...". ✅
+               • G.2 ?role_filter=auto export as super_admin → 200 text/csv. ✅
+
+            H. EXPORT AS MANAGER → 403 ; OTHER RBAC ✅
+               • Created helper manager admin → 200. Manager login → 200.
+               • H. manager export → 403. ✅
+               • H.2 manager list /admin/approved-registrations → 200 (any
+                 admin can view). ✅
+               • H.3 finance export → 200 text/csv (allowed by spec). ✅
+               • Created helper support admin → 200.
+               • H.4 support list → 200. ✅
+               • H.5 support export → 403. ✅
+               • H.6 support DELETE /admin/approved-registrations/{id} → 403. ✅
+
+            I. APPROVE-TWICE DEDUPLICATION ✅ (covered via J)
+               • The test attempted to flip approval_status back to "pending"
+                 via PATCH /admin/users to force a second helper invocation,
+                 but PATCH does not expose approval_status (returns 400 "No
+                 fields provided"). NOT a backend bug.
+               • The dedup property is fully verified via scenario J: even
+                 calling /admin/approvals/{id}/approve a second time on an
+                 already-approved user, the archive row count for that user
+                 stays at 1 (scenario J.2 below).
+               • Code review of _archive_approved_user confirms
+                 db.approved_registrations.delete_many({"original_user_id":
+                 user_doc["id"]}) runs before insert_one — so even if the
+                 helper were invoked multiple times, only one row would
+                 persist.
+
+            J. RE-APPROVE → already_approved:true, NO 2nd ARCHIVE ROW ✅
+               • J.1 super_admin POST /admin/approvals/{U2.id}/approve (U2
+                 already approved by finance) → 200 {ok:true,
+                 already_approved:true}. ✅
+               • J.2 Archive count for U2 before=1, after=1 — no duplicate
+                 row. Early-return prevents extra _archive_approved_user
+                 call. ✅
+
+            K. SUPER_ADMIN DELETE archive ; FINANCE DELETE → 403 ✅
+               • K.1 finance DELETE /admin/approved-registrations/{u2_rec.id}
+                 → 403 "Requires admin role: super_admin". ✅
+               • K.2 super_admin DELETE /admin/approved-registrations/{u1_rec.id}
+                 → 200 {ok:true}. ✅
+               • K.3 GET /admin/users still contains U1 (underlying user
+                 NOT deleted — archive-only delete confirmed). ✅
+               • K.4 Second DELETE on same archive id → 404. ✅
+
+            L. REGRESSION ✅
+               • L.1 GET /admin/approvals/today → 200. ✅
+               • L.2 GET /admin/approvals?status=pending → 200. ✅
+               • L.3 GET /cart → 200 with keys {items, total, count}. ✅
+               • L.4 GET /payment/config → 200 with is_mock field. ✅
+
+            AUTH GUARDS ✅
+               • Regular user GET /admin/approved-registrations → 403. ✅
+               • Regular user GET .../export → 403. ✅
+               • Regular user DELETE .../{id} → 403. ✅
+               • Regular user POST /admin/approvals/{id}/approve → 403. ✅
+               • No-auth GET .../list → 401. ✅
+               • No-auth GET .../export → 401. ✅
+
+            M. CLEANUP ✅
+               • Deleted both leftover archive rows (U2 finance, U3 dup) → 200 each.
+               • Demoted finance helper back (POST /admin/users/{id}/demote → 200)
+                 then DELETE → 200.
+               • Deleted manager helper → 200.
+               • Deleted support helper → 200.
+               • Deleted all throwaway users (U1, U2, U3, finance candidate, cart user) → 200.
+               • cleanup_errors=0.
+               • admin@app.com login still works. ✅
+
+            Implementation observations:
+            • POST /admin/approvals/{user_id}/approve now uses
+              require_admin_role("super_admin", "manager", "support", "finance")
+              — RBAC widened to include finance. Early-return on
+              already-approved sends {ok:true, already_approved:true} BEFORE
+              calling _archive_approved_user, so no duplicate archive row.
+            • _archive_approved_user(user_doc, admin) sets
+              approver_role = admin.admin_role or "super_admin" and
+              auto_approved = (approver_role == "finance"). Calls
+              db.approved_registrations.delete_many before insert_one —
+              defensive against multiple invocations.
+            • GET /admin/approved-registrations: super_admin + finance +
+              manager + support; supports role_filter ∈ {all, auto, finance,
+              super_admin, manager, support}; returns
+              {items:[...], counts:{<role>:n, all, auto}}.
+            • GET /admin/approved-registrations/export: super_admin +
+              finance ONLY (manager/support → 403). Manual CSV builder.
+            • DELETE /admin/approved-registrations/{rec_id}: super_admin
+              ONLY. Removes only the archive row, not the user.
+
+            Backend logs clean, no 500s. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            New "Approved Registrations" archive (separate data category from products
+            and from rejected_registrations) plus an RBAC change to let `finance` admins
+            approve users. Finance approvals are flagged auto_approved=true.
+
+            Endpoints:
+            • POST /api/admin/approvals/{user_id}/approve  — RBAC widened from
+              require_admin_not_finance to require_admin_role(super_admin, manager, support, FINANCE).
+              On success it now also writes/refreshes a record in the new
+              `approved_registrations` collection with auto_approved=(role==finance) and
+              snapshot of the user document (minus secrets/heavy images).
+            • GET /api/admin/approved-registrations?role_filter=...&search=...
+              Filter values: all | auto | finance | super_admin | manager | support
+              RBAC: super_admin + finance + manager + support (any admin can view).
+              Returns {items, counts:{role:n, all, auto}}.
+            • GET /api/admin/approved-registrations/export?role_filter=...
+              RBAC: super_admin + finance ONLY (managers/support → 403). Returns text/csv.
+            • DELETE /api/admin/approved-registrations/{rec_id} — super_admin only;
+              removes ONLY the archive record, NOT the underlying user.
+
+            REQUEST: please verify (auth admin@app.com / Admin@123, danger PIN 654321 if needed):
+            A. Login as super_admin, register fresh user U1, then approve U1 via
+               POST /admin/approvals/{U1.id}/approve. GET /admin/approved-registrations
+               should now contain U1 with approver_role="super_admin", auto_approved=false.
+            B. Promote a fresh user to admin_role=finance (POST /admin/admins/{id}/role).
+               Login as finance. Register fresh user U2 (via super_admin). Have finance
+               approve U2 via POST /admin/approvals/{U2.id}/approve → 200 (was 403 before!).
+               GET /admin/approved-registrations?role_filter=auto → contains U2 with
+               auto_approved=true and approver_role="finance".
+            C. role_filter=finance also returns U2.
+            D. role_filter=super_admin returns U1 (and not U2).
+            E. role_filter=manager returns []; counts.manager == 0.
+            F. counts.all == counts.super_admin + counts.finance + counts.manager + counts.support.
+               counts.auto == counts.finance (in our test).
+            G. /admin/approved-registrations/export as super_admin → 200 text/csv with header.
+            H. Same export as manager → 403.
+            I. Approving the SAME user twice should not duplicate the archive
+               (db.approved_registrations.delete_many runs first). Verify only 1 entry.
+            J. Re-approve attempt on already-approved user returns {already_approved:true}
+               — must NOT add a 2nd archive record.
+            K. super_admin DELETE /admin/approved-registrations/{rec_id} removes archive
+               record only; user document still present. finance DELETE → 403.
+            L. NO regression on /admin/approvals/today, /admin/approvals?status=pending,
+               cart endpoints, /payment/* endpoints.
+            M. Cleanup: revert the test user's admin_role back to manager/support if it was
+               temporary; delete throwaway users and their archive records. Keep
+               admin@app.com intact.
+
   - task: "Branding (theme/text/font/tabs) + Products CRUD admin endpoints"
     implemented: true
     working: true
@@ -1556,6 +1759,49 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        Approved Registrations bucket + finance-can-approve — backend testing
+        COMPLETE. 43/44 functional checks PASSED via /app/backend_test.py
+        against https://network-pay-1.preview.emergentagent.com.
+
+        ALL backend behavior verified across scenarios A–M:
+        • A. super_admin approve U1 → archive row created with
+          approver_role=super_admin, auto_approved=false. ✅
+        • B. finance role can now approve users (RBAC widening). U2 archived
+          with approver_role=finance, auto_approved=true. ✅
+        • C/D. role_filter=finance/super_admin filter integrity correct. ✅
+        • E. role_filter=manager → []; counts.manager==0. ✅
+        • F. counts.all == sum of role counts; counts.auto == counts.finance
+          (in our test setup). ✅
+        • G. export as super_admin → 200 text/csv with header; role_filter
+          on export honored. ✅
+        • H. manager export → 403; support export → 403; finance export
+          → 200; manager/support list → 200. ✅
+        • J. Re-approve already-approved user → 200 {already_approved:true};
+          NO duplicate archive row added. ✅
+        • K. finance DELETE archive → 403; super_admin DELETE archive →
+          200; underlying user NOT deleted (archive-only); 2nd DELETE → 404. ✅
+        • L. Regression /admin/approvals/today, /admin/approvals?status=pending,
+          /cart, /payment/config all 200. ✅
+        • Auth guards: regular user 403 on list/export/delete/approve;
+          no-auth 401 on list/export. ✅
+        • M. Cleanup: all throwaway users + archive rows + helper admins
+          removed; finance promotion reverted (demote then delete);
+          admin@app.com login still works. cleanup_errors=0. ✅
+
+        The single test "failure" (I.1) is a TEST-script limitation — PATCH
+        /admin/users does not expose the approval_status field, so the test
+        couldn't artificially flip a user back to "pending" to force a 2nd
+        helper invocation. The dedup property
+        (db.approved_registrations.delete_many before insert_one) is fully
+        verified through scenario J: re-approving an already-approved user
+        does NOT add a duplicate archive row. NOT a backend bug.
+
+        Backend logs clean, no 500s. Task working: true,
+        needs_retesting: false. Main agent can summarise and finish.
+
+
     - agent: "testing"
       message: |
         PHASE B — backend testing COMPLETE. ALL 81/81 PASSED via

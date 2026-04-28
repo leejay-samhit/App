@@ -10,6 +10,7 @@ import { colors, radii, spacing } from "../../src/theme";
 const ITEMS = [
   { icon: "shield", label: "Admin access", route: "/admin/admins" },
   { icon: "user-check", label: "User approvals", route: "/admin/approvals" },
+  { icon: "check-circle", label: "Approved registrations", route: "/admin/approved" },
   { icon: "user-x", label: "Rejected registrations", route: "/admin/rejected" },
   { icon: "package", label: "Products", route: "/admin/products" },
   { icon: "edit-3", label: "Branding & theme", route: "/admin/branding" },

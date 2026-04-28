@@ -1,561 +1,429 @@
 """
-NetworkPay Backend Regression Suite
-- Emergent Google Auth endpoints (callback HTML + exchange error paths)
-- JWT auth, dashboard, network, KYC, bank, withdrawals, transactions
-- Mock payment / referral payouts
-- E-commerce: products, cart, orders
-- Admin: users, KYC, withdrawals, transactions, settings, audit, analytics, stats, exports, orders, products
-- RBAC: super_admin only PUT /admin/settings
-"""
+Backend test for: Approved Registrations bucket + finance can approve users.
 
-import os
+Scenarios A–M from /app/test_result.md.
+"""
 import sys
 import time
 import uuid
-import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 import requests
 
-# ---- Backend URL (public) ----
-BACKEND_URL = "https://network-pay-1.preview.emergentagent.com"
-API = f"{BACKEND_URL}/api"
+BASE = "https://network-pay-1.preview.emergentagent.com"
+API = f"{BASE}/api"
 
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
+DANGER_PIN = "654321"
 
-results = []  # list of (name, status, info)
+results: List[Tuple[str, bool, str]] = []
+created_user_ids: List[str] = []
+created_archive_ids: List[str] = []
+promoted_admin_ids: List[Dict[str, Any]] = []  # entries {id, email, is_promoted_user}
 
-def log(name: str, ok: bool, info: str = ""):
-    results.append((name, ok, info))
-    icon = "PASS" if ok else "FAIL"
-    print(f"[{icon}] {name} :: {info}")
 
-def auth_headers(token: str) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+def log(name: str, ok: bool, detail: str = ""):
+    results.append((name, ok, detail))
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
 
-def unique_email(prefix: str = "user") -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:10]}@networkpay-test.com"
 
+def post(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
+    headers = kwargs.pop("headers", {}) or {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return requests.post(f"{API}{path}", headers=headers, timeout=60, **kwargs)
 
-# =========================================================================
-# 1. Emergent Google Auth endpoints
-# =========================================================================
-def test_google_auth_endpoints():
-    print("\n=== Google Auth Endpoints ===")
-    # GET callback returns 200 HTML
-    r = requests.get(f"{API}/auth/google/callback")
-    ok = r.status_code == 200 and "html" in r.headers.get("content-type", "").lower()
-    log("GET /auth/google/callback returns 200 HTML", ok,
-        f"status={r.status_code} ct={r.headers.get('content-type')}")
 
-    # Invalid session -> 401
-    r = requests.post(f"{API}/auth/google/exchange",
-                      json={"session_id": "INVALID_TEST_SESSION_ID_12345"})
-    detail = ""
-    try:
-        detail = r.json().get("detail", "")
-    except Exception:
-        pass
-    ok = r.status_code == 401 and detail == "Invalid Google session"
-    log("POST /auth/google/exchange invalid session -> 401", ok,
-        f"status={r.status_code} detail={detail}")
+def get(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
+    headers = kwargs.pop("headers", {}) or {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return requests.get(f"{API}{path}", headers=headers, timeout=60, **kwargs)
 
-    # Empty body -> 422
-    r = requests.post(f"{API}/auth/google/exchange", json={})
-    log("POST /auth/google/exchange empty body -> 422", r.status_code == 422,
-        f"status={r.status_code}")
 
-    # Missing session_id only referral_code -> 422
-    r = requests.post(f"{API}/auth/google/exchange", json={"referral_code": "ADMIN001"})
-    log("POST /auth/google/exchange missing session_id -> 422", r.status_code == 422,
-        f"status={r.status_code}")
+def delete(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
+    headers = kwargs.pop("headers", {}) or {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return requests.delete(f"{API}{path}", headers=headers, timeout=60, **kwargs)
 
-    # Invalid session WITH referral_code still returns 401 (referral_code only consumed once valid)
-    r = requests.post(f"{API}/auth/google/exchange",
-                      json={"session_id": "INVALID_TEST_SESSION_ID_67890",
-                            "referral_code": "ADMIN001"})
-    detail = ""
-    try:
-        detail = r.json().get("detail", "")
-    except Exception:
-        pass
-    ok = r.status_code == 401 and detail == "Invalid Google session"
-    log("POST /auth/google/exchange invalid session+referral -> 401", ok,
-        f"status={r.status_code} detail={detail}")
 
+def patch(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
+    headers = kwargs.pop("headers", {}) or {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return requests.patch(f"{API}{path}", headers=headers, timeout=60, **kwargs)
 
-# =========================================================================
-# 2. Auth: register, login, /auth/me, /auth/logout
-# =========================================================================
-def test_auth_basic():
-    print("\n=== Basic Auth ===")
-    out = {}
-    # Admin login
-    r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    ok = r.status_code == 200 and "token" in r.json()
-    log("Admin login", ok, f"status={r.status_code}")
-    if not ok:
-        return None
-    out["admin_token"] = r.json()["token"]
-    out["admin_user"] = r.json()["user"]
 
-    # Register user A (referred by ADMIN001)
-    email_a = unique_email("alice")
-    r = requests.post(f"{API}/auth/register",
-                      json={"name": "Alice Sharma", "email": email_a,
-                            "password": "Secret@123", "phone": "9876543210",
-                            "referral_code": "ADMIN001"})
-    ok = r.status_code == 200 and "token" in r.json()
-    log("Register user A (referred by ADMIN001)", ok, f"status={r.status_code}")
-    if not ok:
-        return None
-    out["a_token"] = r.json()["token"]
-    out["a_user"] = r.json()["user"]
-    out["a_email"] = email_a
-
-    # Register user B (referred by A)
-    email_b = unique_email("bob")
-    r = requests.post(f"{API}/auth/register",
-                      json={"name": "Bob Patel", "email": email_b,
-                            "password": "Secret@123",
-                            "referral_code": out["a_user"]["referral_code"]})
-    ok = r.status_code == 200
-    log("Register user B (referred by A)", ok, f"status={r.status_code}")
-    out["b_token"] = r.json()["token"]
-    out["b_user"] = r.json()["user"]
-
-    # Duplicate email -> 400
-    r = requests.post(f"{API}/auth/register",
-                      json={"name": "x", "email": email_a, "password": "Secret@123"})
-    log("Register duplicate email -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # Invalid referral code -> 400
-    r = requests.post(f"{API}/auth/register",
-                      json={"name": "x", "email": unique_email("x"),
-                            "password": "Secret@123",
-                            "referral_code": "INVALIDXX"})
-    log("Register invalid referral -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # Login wrong password -> 401
-    r = requests.post(f"{API}/auth/login", json={"email": email_a, "password": "wrong"})
-    log("Login wrong password -> 401", r.status_code == 401, f"status={r.status_code}")
-
-    # /auth/me
-    r = requests.get(f"{API}/auth/me", headers=auth_headers(out["a_token"]))
-    log("/auth/me with valid token", r.status_code == 200 and r.json().get("email") == email_a,
-        f"status={r.status_code}")
-
-    # /auth/me without token -> 401
-    r = requests.get(f"{API}/auth/me")
-    log("/auth/me no token -> 401", r.status_code == 401, f"status={r.status_code}")
-
-    # /auth/logout
-    r = requests.post(f"{API}/auth/logout", headers=auth_headers(out["a_token"]))
-    log("/auth/logout", r.status_code == 200, f"status={r.status_code}")
-
-    return out
-
-
-# =========================================================================
-# 3. User: dashboard, network, kyc, bank, withdrawals, transactions
-# =========================================================================
-def test_user_endpoints(ctx):
-    print("\n=== User Endpoints ===")
-    a_tok = ctx["a_token"]
-    b_tok = ctx["b_token"]
-
-    # Dashboard
-    r = requests.get(f"{API}/users/me/dashboard", headers=auth_headers(a_tok))
-    ok = r.status_code == 200 and "wallet_balance" in r.json() and "tier" in r.json()
-    log("GET /users/me/dashboard", ok, f"status={r.status_code}")
-
-    # Network
-    r = requests.get(f"{API}/users/me/network", headers=auth_headers(a_tok))
-    ok = r.status_code == 200 and "children" in r.json()
-    log("GET /users/me/network", ok, f"status={r.status_code}")
-
-    # KYC submit (valid)
-    r = requests.post(f"{API}/users/me/kyc",
-                      headers=auth_headers(a_tok),
-                      json={"full_name": "Alice Sharma", "aadhaar": "123456789012",
-                            "pan": "ABCDE1234F"})
-    log("POST /users/me/kyc valid", r.status_code == 200 and r.json().get("status") == "pending",
-        f"status={r.status_code}")
-
-    # KYC submit (bad aadhaar)
-    r = requests.post(f"{API}/users/me/kyc",
-                      headers=auth_headers(a_tok),
-                      json={"full_name": "x", "aadhaar": "123",
-                            "pan": "ABCDE1234F"})
-    log("POST /users/me/kyc bad aadhaar -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # GET KYC
-    r = requests.get(f"{API}/users/me/kyc", headers=auth_headers(a_tok))
-    log("GET /users/me/kyc", r.status_code == 200 and r.json().get("status") == "pending",
-        f"status={r.status_code}")
-
-    # Bank update
-    r = requests.post(f"{API}/users/me/bank",
-                      headers=auth_headers(a_tok),
-                      json={"upi_id": "alice@upi", "bank_account": "1234567890",
-                            "ifsc": "HDFC0000001", "account_holder": "Alice Sharma"})
-    ok = r.status_code == 200 and r.json().get("upi_id") == "alice@upi"
-    log("POST /users/me/bank", ok, f"status={r.status_code}")
-
-    # Bank empty -> 400
-    r = requests.post(f"{API}/users/me/bank", headers=auth_headers(a_tok), json={})
-    log("POST /users/me/bank empty -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # Withdrawal without registration_paid -> 400
-    r = requests.post(f"{API}/withdrawals", headers=auth_headers(a_tok), json={"amount": 100})
-    log("POST /withdrawals before reg fee -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # Pay registration fee for B (so admin gets L1 referral count + maybe payout)
-    r = requests.post(f"{API}/payment/register-fee", headers=auth_headers(b_tok))
-    log("POST /payment/register-fee for B", r.status_code == 200, f"status={r.status_code}")
-
-    # Pay registration fee for A
-    r = requests.post(f"{API}/payment/register-fee", headers=auth_headers(a_tok))
-    log("POST /payment/register-fee for A", r.status_code == 200, f"status={r.status_code}")
-
-    # Re-pay -> 400
-    r = requests.post(f"{API}/payment/register-fee", headers=auth_headers(a_tok))
-    log("POST /payment/register-fee duplicate -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # Transactions list
-    r = requests.get(f"{API}/transactions/me", headers=auth_headers(a_tok))
-    ok = r.status_code == 200 and isinstance(r.json(), list)
-    log("GET /transactions/me", ok, f"status={r.status_code} count={len(r.json()) if ok else '?'}")
-
-    # Withdrawals: insufficient balance -> 400
-    r = requests.post(f"{API}/withdrawals", headers=auth_headers(a_tok), json={"amount": 999999})
-    log("POST /withdrawals insufficient balance -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # Withdrawals list (empty for A)
-    r = requests.get(f"{API}/withdrawals/me", headers=auth_headers(a_tok))
-    log("GET /withdrawals/me", r.status_code == 200 and isinstance(r.json(), list),
-        f"status={r.status_code}")
-
-
-# =========================================================================
-# 4. E-commerce: products, cart, orders
-# =========================================================================
-def test_ecommerce(ctx):
-    print("\n=== E-commerce ===")
-    a_tok = ctx["a_token"]
-    admin_tok = ctx["admin_token"]
-
-    # Products list (public-ish, requires no auth)
-    r = requests.get(f"{API}/products")
-    ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) > 0
-    log("GET /products", ok, f"status={r.status_code} count={len(r.json()) if ok else '?'}")
-    if not ok:
-        return
-    products = r.json()
-    ctx["product_id"] = products[0]["id"]
-    ctx["product_price"] = products[0]["price"]
-
-    # Cart add
-    r = requests.post(f"{API}/cart/add", headers=auth_headers(a_tok),
-                      json={"product_id": ctx["product_id"], "qty": 2})
-    log("POST /cart/add", r.status_code == 200, f"status={r.status_code}")
-
-    # Cart add invalid product -> 404
-    r = requests.post(f"{API}/cart/add", headers=auth_headers(a_tok),
-                      json={"product_id": "no-such", "qty": 1})
-    log("POST /cart/add invalid product -> 404", r.status_code == 404, f"status={r.status_code}")
-
-    # Cart get
-    r = requests.get(f"{API}/cart", headers=auth_headers(a_tok))
-    ok = r.status_code == 200 and r.json()["count"] >= 2
-    log("GET /cart", ok, f"status={r.status_code}")
-
-    # Cart remove
-    r = requests.post(f"{API}/cart/remove", headers=auth_headers(a_tok),
-                      json={"product_id": ctx["product_id"]})
-    log("POST /cart/remove", r.status_code == 200, f"status={r.status_code}")
-
-    # Cart clear
-    r = requests.post(f"{API}/cart/clear", headers=auth_headers(a_tok))
-    log("POST /cart/clear", r.status_code == 200, f"status={r.status_code}")
-
-    # Checkout empty cart -> 400
-    r = requests.post(f"{API}/orders/checkout", headers=auth_headers(a_tok))
-    log("POST /orders/checkout empty -> 400", r.status_code == 400, f"status={r.status_code}")
-
-    # Credit A's wallet via admin so we can checkout
-    a_id = ctx["a_user"]["id"]
-    needed = ctx["product_price"] + 100
-    r = requests.post(f"{API}/admin/users/{a_id}/wallet",
-                      headers=auth_headers(admin_tok),
-                      json={"amount": needed, "type": "credit", "reason": "test top-up"})
-    log("Admin credit wallet for checkout", r.status_code == 200, f"status={r.status_code}")
-
-    # Add product back, checkout
-    requests.post(f"{API}/cart/add", headers=auth_headers(a_tok),
-                  json={"product_id": ctx["product_id"], "qty": 1})
-    r = requests.post(f"{API}/orders/checkout", headers=auth_headers(a_tok))
-    ok = r.status_code == 200 and r.json().get("status") == "placed"
-    log("POST /orders/checkout success", ok, f"status={r.status_code}")
-    if ok:
-        ctx["order_id"] = r.json()["id"]
-
-    # GET /orders/me
-    r = requests.get(f"{API}/orders/me", headers=auth_headers(a_tok))
-    ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) >= 1
-    log("GET /orders/me", ok, f"status={r.status_code}")
-
-
-# =========================================================================
-# 5. Admin endpoints
-# =========================================================================
-def test_admin_endpoints(ctx):
-    print("\n=== Admin Endpoints ===")
-    admin_tok = ctx["admin_token"]
-    a_id = ctx["a_user"]["id"]
-    b_id = ctx["b_user"]["id"]
-
-    # Users list
-    r = requests.get(f"{API}/admin/users", headers=auth_headers(admin_tok))
-    ok = r.status_code == 200 and isinstance(r.json(), list)
-    log("GET /admin/users", ok, f"status={r.status_code} count={len(r.json()) if ok else '?'}")
-
-    # Edit user (PATCH)
-    r = requests.patch(f"{API}/admin/users/{a_id}",
-                       headers=auth_headers(admin_tok),
-                       json={"phone": "9999999999"})
-    log("PATCH /admin/users/{id} phone", r.status_code == 200 and r.json().get("phone") == "9999999999",
-        f"status={r.status_code}")
-
-    # Block / unblock
-    r = requests.post(f"{API}/admin/users/{b_id}/block",
-                      headers=auth_headers(admin_tok),
-                      json={"reason": "test block"})
-    log("POST /admin/users/{id}/block", r.status_code == 200, f"status={r.status_code}")
-
-    r = requests.post(f"{API}/admin/users/{b_id}/unblock",
-                      headers=auth_headers(admin_tok))
-    log("POST /admin/users/{id}/unblock", r.status_code == 200, f"status={r.status_code}")
-
-    # Wallet credit
-    r = requests.post(f"{API}/admin/users/{a_id}/wallet",
-                      headers=auth_headers(admin_tok),
-                      json={"amount": 500, "type": "credit", "reason": "bonus"})
-    log("POST /admin/users/{id}/wallet credit", r.status_code == 200, f"status={r.status_code}")
-
-    # Wallet freeze toggle (twice -> back to unfrozen)
-    r = requests.post(f"{API}/admin/users/{a_id}/wallet/freeze",
-                      headers=auth_headers(admin_tok))
-    ok1 = r.status_code == 200
-    r = requests.post(f"{API}/admin/users/{a_id}/wallet/freeze",
-                      headers=auth_headers(admin_tok))
-    log("POST /admin/users/{id}/wallet/freeze toggle x2", ok1 and r.status_code == 200,
-        f"status={r.status_code}")
-
-    # KYC list (any)
-    r = requests.get(f"{API}/admin/kyc", headers=auth_headers(admin_tok))
-    log("GET /admin/kyc", r.status_code == 200, f"status={r.status_code}")
-
-    # KYC list pending
-    r = requests.get(f"{API}/admin/kyc?status=pending", headers=auth_headers(admin_tok))
-    log("GET /admin/kyc?status=pending", r.status_code == 200, f"status={r.status_code}")
-
-    # We'll approve A's KYC (already submitted)
-    r = requests.post(f"{API}/admin/kyc/{a_id}/approve",
-                      headers=auth_headers(admin_tok))
-    log("POST /admin/kyc/{id}/approve", r.status_code == 200, f"status={r.status_code}")
-
-    # Submit B KYC then reject
-    r = requests.post(f"{API}/users/me/kyc",
-                      headers=auth_headers(ctx["b_token"]),
-                      json={"full_name": "Bob Patel", "aadhaar": "987654321098",
-                            "pan": "FGHIJ5678K"})
-    submitted = r.status_code == 200
-    r = requests.post(f"{API}/admin/kyc/{b_id}/reject",
-                      headers=auth_headers(admin_tok),
-                      json={"reason": "documents unclear"})
-    log("POST /admin/kyc/{id}/reject (after fresh submit)", submitted and r.status_code == 200,
-        f"status={r.status_code}")
-
-    # Withdrawals: create one for A then approve another for B (need wallet)
-    # First withdrawal: create one for A (has balance from credit)
-    r = requests.post(f"{API}/withdrawals", headers=auth_headers(ctx["a_token"]),
-                      json={"amount": 50})
-    ok_w = r.status_code == 200
-    wid = r.json().get("id") if ok_w else None
-    log("POST /withdrawals (A)", ok_w, f"status={r.status_code}")
-
-    # Admin list withdrawals pending
-    r = requests.get(f"{API}/admin/withdrawals?status=pending",
-                     headers=auth_headers(admin_tok))
-    log("GET /admin/withdrawals?status=pending", r.status_code == 200, f"status={r.status_code}")
-
-    # Approve
-    if wid:
-        r = requests.post(f"{API}/admin/withdrawals/{wid}/approve",
-                          headers=auth_headers(admin_tok))
-        log("POST /admin/withdrawals/{id}/approve", r.status_code == 200, f"status={r.status_code}")
-
-    # Create another withdrawal for A and reject it
-    r = requests.post(f"{API}/withdrawals", headers=auth_headers(ctx["a_token"]),
-                      json={"amount": 25})
+def login(email: str, password: str) -> Optional[str]:
+    r = post("/auth/login", json={"email": email, "password": password})
     if r.status_code == 200:
-        wid2 = r.json()["id"]
-        r = requests.post(f"{API}/admin/withdrawals/{wid2}/reject",
-                          headers=auth_headers(admin_tok))
-        log("POST /admin/withdrawals/{id}/reject", r.status_code == 200, f"status={r.status_code}")
-    else:
-        log("POST /admin/withdrawals reject (setup)", False,
-            f"setup withdrawal failed status={r.status_code}")
-
-    # Transactions list & filter
-    r = requests.get(f"{API}/admin/transactions", headers=auth_headers(admin_tok))
-    log("GET /admin/transactions", r.status_code == 200 and isinstance(r.json(), list),
-        f"status={r.status_code}")
-    r = requests.get(f"{API}/admin/transactions/filter?type=registration_fee",
-                     headers=auth_headers(admin_tok))
-    log("GET /admin/transactions/filter?type=registration_fee", r.status_code == 200,
-        f"status={r.status_code}")
-
-    # Settings GET (any admin, super_admin OK)
-    r = requests.get(f"{API}/admin/settings", headers=auth_headers(admin_tok))
-    log("GET /admin/settings", r.status_code == 200 and "registration_fee" in r.json(),
-        f"status={r.status_code}")
-
-    # Settings PUT super_admin
-    r = requests.put(f"{API}/admin/settings", headers=auth_headers(admin_tok),
-                     json={"payout_l1": 400})
-    log("PUT /admin/settings super_admin", r.status_code == 200, f"status={r.status_code}")
-
-    # Audit logs
-    r = requests.get(f"{API}/admin/audit-logs", headers=auth_headers(admin_tok))
-    log("GET /admin/audit-logs", r.status_code == 200 and isinstance(r.json(), list),
-        f"status={r.status_code}")
-
-    # Analytics
-    r = requests.get(f"{API}/admin/analytics?days=7", headers=auth_headers(admin_tok))
-    log("GET /admin/analytics?days=7", r.status_code == 200 and "kpis" in r.json(),
-        f"status={r.status_code}")
-
-    # Stats
-    r = requests.get(f"{API}/admin/stats", headers=auth_headers(admin_tok))
-    log("GET /admin/stats", r.status_code == 200 and "total_users" in r.json(),
-        f"status={r.status_code}")
-
-    # Exports
-    for kind in ("users", "transactions", "withdrawals", "orders"):
-        r = requests.get(f"{API}/admin/export/{kind}", headers=auth_headers(admin_tok))
-        ok = r.status_code == 200 and "text/csv" in r.headers.get("content-type", "")
-        log(f"GET /admin/export/{kind}", ok,
-            f"status={r.status_code} ct={r.headers.get('content-type')}")
-
-    # Order status update
-    if ctx.get("order_id"):
-        r = requests.patch(f"{API}/admin/orders/{ctx['order_id']}/status",
-                           headers=auth_headers(admin_tok),
-                           json={"status": "shipped"})
-        log("PATCH /admin/orders/{id}/status shipped", r.status_code == 200, f"status={r.status_code}")
-    else:
-        log("PATCH /admin/orders/{id}/status shipped", False, "no order_id from earlier")
-
-    # Products create
-    r = requests.post(f"{API}/admin/products",
-                      headers=auth_headers(admin_tok),
-                      json={"name": "Test Product " + uuid.uuid4().hex[:6],
-                            "price": 199, "image_url": "https://example.com/p.jpg",
-                            "description": "test", "stock": 10})
-    log("POST /admin/products", r.status_code == 200, f"status={r.status_code}")
+        return r.json().get("token")
+    return None
 
 
-# =========================================================================
-# 6. RBAC: non-super_admin cannot PUT /api/admin/settings
-# =========================================================================
-def test_rbac(ctx):
-    print("\n=== RBAC Settings ===")
-    admin_tok = ctx["admin_token"]
-
-    # Promote user A to admin with admin_role=manager
-    a_id = ctx["a_user"]["id"]
-    r = requests.patch(f"{API}/admin/users/{a_id}",
-                       headers=auth_headers(admin_tok),
-                       json={"role": "admin", "admin_role": "manager"})
-    promoted = r.status_code == 200
-    log("Promote A to admin/manager (setup)", promoted, f"status={r.status_code}")
-    if not promoted:
-        return
-
-    # Login A again to get a new token with role=admin
-    r = requests.post(f"{API}/auth/login",
-                      json={"email": ctx["a_email"], "password": "Secret@123"})
-    if r.status_code != 200:
-        log("Manager re-login (setup)", False, f"status={r.status_code}")
-        return
-    manager_tok = r.json()["token"]
-
-    # Manager tries to GET /admin/settings -> 200 allowed
-    r = requests.get(f"{API}/admin/settings", headers=auth_headers(manager_tok))
-    log("Manager GET /admin/settings allowed", r.status_code == 200, f"status={r.status_code}")
-
-    # Manager tries to PUT /admin/settings -> 403
-    r = requests.put(f"{API}/admin/settings",
-                     headers=auth_headers(manager_tok),
-                     json={"payout_l1": 401})
-    log("Manager PUT /admin/settings -> 403", r.status_code == 403, f"status={r.status_code}")
-
-    # Demote back
-    r = requests.patch(f"{API}/admin/users/{a_id}",
-                       headers=auth_headers(admin_tok),
-                       json={"role": "user", "admin_role": None})
-    # Demoting via None requires a different approach since None is filtered out;
-    # we'll just leave admin_role=manager but role=user
-    r = requests.patch(f"{API}/admin/users/{a_id}",
-                       headers=auth_headers(admin_tok),
-                       json={"role": "user"})
-    log("Demote A back to user (cleanup)", r.status_code == 200, f"status={r.status_code}")
+def register_user(name: str, email: str, password: str = "Test@123",
+                  referral_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    body = {"name": name, "email": email, "password": password,
+            "phone": f"99{int(time.time()*1000) % 100000000:08d}"}
+    if referral_code:
+        body["referral_code"] = referral_code
+    r = post("/auth/register", json=body)
+    if r.status_code == 200:
+        return r.json()
+    print(f"   register failed: {r.status_code} {r.text[:120]}")
+    return None
 
 
-# =========================================================================
-# Main
-# =========================================================================
 def main():
-    print(f"Backend URL: {BACKEND_URL}")
+    rand = uuid.uuid4().hex[:8]
 
-    # 1. Google Auth (no creds needed)
-    test_google_auth_endpoints()
+    # ADMIN LOGIN
+    admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    if not admin_token:
+        log("Admin login", False, "Could not login as admin@app.com")
+        return False
+    me = get("/auth/me", admin_token).json()
+    super_admin_id = me["id"]
+    log("Admin login (super_admin)", True, f"id={super_admin_id}")
 
-    # 2. Auth basic
-    ctx = test_auth_basic()
-    if not ctx:
-        print("FATAL: cannot proceed without auth")
-        sys.exit(1)
+    # A. super_admin approves U1
+    u1_email = f"u1.appr.{rand}@netpay.example.com"
+    u1_reg = register_user("Aarav Sharma", u1_email)
+    if not u1_reg:
+        log("A.1 Register U1", False)
+        return False
+    u1_id = u1_reg["user"]["id"]
+    created_user_ids.append(u1_id)
+    log("A.1 Register U1", True, f"id={u1_id}")
 
-    # 3. User
-    test_user_endpoints(ctx)
+    r = post(f"/admin/approvals/{u1_id}/approve", admin_token)
+    log("A.2 super_admin approve U1",
+        r.status_code == 200 and r.json().get("ok"),
+        f"{r.status_code} {r.text[:120]}")
 
-    # 4. E-commerce
-    test_ecommerce(ctx)
+    r = get("/admin/approved-registrations", admin_token)
+    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+    u1_rec = next((it for it in items if it.get("original_user_id") == u1_id), None)
+    cond = u1_rec is not None and u1_rec.get("approver_role") == "super_admin" and u1_rec.get("auto_approved") is False
+    log("A.3 U1 in archive (approver_role=super_admin, auto_approved=false)",
+        cond, f"rec_keys={list(u1_rec.keys()) if u1_rec else None}")
+    if u1_rec:
+        created_archive_ids.append(u1_rec["id"])
 
-    # 5. Admin
-    test_admin_endpoints(ctx)
+    # B. Promote a fresh user to finance, approve U2
+    fin_email = f"finance.{rand}@netpay.example.com"
+    fin_reg = register_user("Priya Iyer", fin_email)
+    if not fin_reg:
+        log("B.1 Register finance candidate", False)
+        return False
+    fin_id = fin_reg["user"]["id"]
+    log("B.1 Register finance candidate", True, f"id={fin_id}")
 
-    # 6. RBAC
-    test_rbac(ctx)
+    r = post(f"/admin/users/{fin_id}/promote", admin_token, json={"admin_role": "finance"})
+    log("B.2 Promote candidate to finance",
+        r.status_code == 200 and r.json().get("admin_role") == "finance",
+        f"{r.status_code} {r.text[:120]}")
+    promoted_admin_ids.append({"id": fin_id, "email": fin_email, "is_promoted_user": True})
+
+    fin_token = login(fin_email, "Test@123")
+    log("B.3 Finance login", fin_token is not None)
+
+    u2_email = f"u2.appr.{rand}@netpay.example.com"
+    u2_reg = register_user("Rohit Verma", u2_email)
+    if not u2_reg:
+        log("B.4 Register U2", False)
+        return False
+    u2_id = u2_reg["user"]["id"]
+    created_user_ids.append(u2_id)
+    log("B.4 Register U2", True, f"id={u2_id}")
+
+    r = post(f"/admin/approvals/{u2_id}/approve", fin_token)
+    log("B.5 Finance approve U2 (RBAC widened) → 200",
+        r.status_code == 200 and r.json().get("ok"),
+        f"{r.status_code} {r.text[:160]}")
+
+    r = get("/admin/approved-registrations?role_filter=auto", admin_token)
+    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+    u2_rec = next((it for it in items if it.get("original_user_id") == u2_id), None)
+    cond = (
+        u2_rec is not None
+        and u2_rec.get("auto_approved") is True
+        and u2_rec.get("approver_role") == "finance"
+    )
+    log("B.6 role_filter=auto returns U2 (auto_approved=true, approver_role=finance)",
+        cond, f"rec_present={u2_rec is not None}")
+    if u2_rec:
+        created_archive_ids.append(u2_rec["id"])
+
+    # C. role_filter=finance returns U2
+    r = get("/admin/approved-registrations?role_filter=finance", admin_token)
+    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+    cond = any(it.get("original_user_id") == u2_id for it in items)
+    log("C. role_filter=finance contains U2", cond, f"items_count={len(items)}")
+
+    # D. role_filter=super_admin returns U1 (and not U2)
+    r = get("/admin/approved-registrations?role_filter=super_admin", admin_token)
+    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+    has_u1 = any(it.get("original_user_id") == u1_id for it in items)
+    has_u2 = any(it.get("original_user_id") == u2_id for it in items)
+    log("D. role_filter=super_admin contains U1 and not U2",
+        has_u1 and not has_u2, f"has_u1={has_u1} has_u2={has_u2}")
+
+    # E. role_filter=manager → []; counts.manager == 0
+    r = get("/admin/approved-registrations?role_filter=manager", admin_token)
+    body = r.json() if r.status_code == 200 else {}
+    items = body.get("items", [])
+    counts = body.get("counts", {}) or {}
+    cond_e = (len(items) == 0) and (counts.get("manager", 0) == 0)
+    log("E. role_filter=manager returns [] and counts.manager==0",
+        cond_e, f"items={len(items)} counts.manager={counts.get('manager', 0)}")
+
+    # F. counts.all == sum(super_admin+finance+manager+support); counts.auto == counts.finance
+    r = get("/admin/approved-registrations", admin_token)
+    body = r.json() if r.status_code == 200 else {}
+    counts = body.get("counts", {}) or {}
+    sa = counts.get("super_admin", 0)
+    fn = counts.get("finance", 0)
+    mg = counts.get("manager", 0)
+    sp = counts.get("support", 0)
+    all_c = counts.get("all", 0)
+    auto_c = counts.get("auto", 0)
+    cond_f1 = all_c == sa + fn + mg + sp
+    cond_f2 = auto_c == fn
+    log("F.1 counts.all == sum of role counts", cond_f1,
+        f"all={all_c} sum={sa+fn+mg+sp} ({sa},{fn},{mg},{sp})")
+    log("F.2 counts.auto == counts.finance (in our test)", cond_f2,
+        f"auto={auto_c} finance={fn}")
+
+    # G. export as super_admin → 200 text/csv with header
+    r = get("/admin/approved-registrations/export", admin_token)
+    ct = r.headers.get("content-type", "")
+    first_line = r.text.splitlines()[0] if r.text else ""
+    cond_g = (r.status_code == 200 and ct.startswith("text/csv")
+              and first_line.startswith("id,original_user_id"))
+    log("G.1 export as super_admin → 200 text/csv with header",
+        cond_g, f"{r.status_code} ct={ct} first_line={first_line[:80]}")
+
+    r2 = get("/admin/approved-registrations/export?role_filter=auto", admin_token)
+    log("G.2 export role_filter=auto super_admin → 200",
+        r2.status_code == 200 and r2.headers.get("content-type", "").startswith("text/csv"),
+        f"{r2.status_code}")
+
+    # H. export as manager → 403
+    mgr_email = f"manager.{rand}@netpay.example.com"
+    r = post("/admin/admins", admin_token, json={
+        "name": "Manager Mehta", "email": mgr_email,
+        "password": "Test@123", "admin_role": "manager"
+    })
+    mgr_token = None
+    if r.status_code != 200:
+        log("Helper: create manager", False, f"{r.status_code} {r.text[:120]}")
+    else:
+        mgr_id = r.json()["id"]
+        promoted_admin_ids.append({"id": mgr_id, "email": mgr_email, "is_promoted_user": False})
+        log("Helper: create manager", True, f"id={mgr_id}")
+        mgr_token = login(mgr_email, "Test@123")
+        log("Helper: login manager", mgr_token is not None)
+        r = get("/admin/approved-registrations/export", mgr_token)
+        log("H. export as manager → 403", r.status_code == 403, f"{r.status_code}")
+        r = get("/admin/approved-registrations", mgr_token)
+        log("H.2 list as manager → 200", r.status_code == 200, f"{r.status_code}")
+
+    # finance export → 200
+    r = get("/admin/approved-registrations/export", fin_token)
+    log("H.3 export as finance → 200 text/csv",
+        r.status_code == 200 and r.headers.get("content-type", "").startswith("text/csv"),
+        f"{r.status_code}")
+
+    # support helper
+    sup_email = f"support.{rand}@netpay.example.com"
+    r = post("/admin/admins", admin_token, json={
+        "name": "Support Singh", "email": sup_email,
+        "password": "Test@123", "admin_role": "support"
+    })
+    sup_token = None
+    if r.status_code == 200:
+        sup_id = r.json()["id"]
+        promoted_admin_ids.append({"id": sup_id, "email": sup_email, "is_promoted_user": False})
+        sup_token = login(sup_email, "Test@123")
+        r = get("/admin/approved-registrations", sup_token)
+        log("H.4 list as support → 200", r.status_code == 200, f"{r.status_code}")
+        r = get("/admin/approved-registrations/export", sup_token)
+        log("H.5 export as support → 403", r.status_code == 403, f"{r.status_code}")
+        if u2_rec:
+            r = delete(f"/admin/approved-registrations/{u2_rec['id']}", sup_token)
+            log("H.6 DELETE as support → 403", r.status_code == 403, f"{r.status_code}")
+    else:
+        log("Helper: create support", False, f"{r.status_code} {r.text[:120]}")
+
+    # I. Approving same user twice does NOT duplicate archive
+    # First approach: create U3, approve, flip to pending, approve again → expect 1 archive row
+    u3_email = f"u3.dup.{rand}@netpay.example.com"
+    u3_reg = register_user("Sneha Patel", u3_email)
+    u3_archive_id = None
+    if u3_reg:
+        u3_id = u3_reg["user"]["id"]
+        created_user_ids.append(u3_id)
+        r = post(f"/admin/approvals/{u3_id}/approve", admin_token)
+        log("I.0 Approve U3 first time", r.status_code == 200, f"{r.status_code}")
+        # Flip back via PATCH /admin/users
+        rp = patch(f"/admin/users/{u3_id}", admin_token, json={"approval_status": "pending"})
+        if rp.status_code == 200:
+            r = post(f"/admin/approvals/{u3_id}/approve", admin_token)
+            log("I.1 Re-approve U3 after revert",
+                r.status_code == 200 and r.json().get("ok") is True,
+                f"{r.status_code} {r.text[:120]}")
+            r = get("/admin/approved-registrations", admin_token)
+            items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+            u3_rows = [it for it in items if it.get("original_user_id") == u3_id]
+            log("I.2 Approving same user twice → only 1 archive entry (helper deletes prior rows)",
+                len(u3_rows) == 1, f"rows={len(u3_rows)}")
+            for it in u3_rows:
+                if it.get("id") not in created_archive_ids:
+                    created_archive_ids.append(it["id"])
+                    u3_archive_id = it["id"]
+        else:
+            log("I.1 PATCH approval_status=pending (admin)",
+                False, f"{rp.status_code} {rp.text[:140]}")
+
+    # J. Re-approve attempt on already-approved user returns {already_approved:true}, no extra archive
+    r = get("/admin/approved-registrations?role_filter=finance", admin_token)
+    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+    u2_count_before = sum(1 for it in items if it.get("original_user_id") == u2_id)
+
+    r = post(f"/admin/approvals/{u2_id}/approve", admin_token)
+    body = r.json() if r.status_code == 200 else {}
+    cond_j = r.status_code == 200 and body.get("already_approved") is True
+    log("J.1 Re-approve already-approved user returns {already_approved:true}",
+        cond_j, f"{r.status_code} {body}")
+
+    r = get("/admin/approved-registrations?role_filter=finance", admin_token)
+    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+    u2_count_after = sum(1 for it in items if it.get("original_user_id") == u2_id)
+    log("J.2 No 2nd archive row added on already_approved",
+        u2_count_after == u2_count_before,
+        f"before={u2_count_before} after={u2_count_after}")
+
+    # K. super_admin DELETE archive removes archive only; finance DELETE → 403
+    if u2_rec:
+        r = delete(f"/admin/approved-registrations/{u2_rec['id']}", fin_token)
+        log("K.1 finance DELETE archive → 403",
+            r.status_code == 403, f"{r.status_code} {r.text[:120]}")
+
+    if u1_rec:
+        u1_archive_id = u1_rec["id"]
+        r = delete(f"/admin/approved-registrations/{u1_archive_id}", admin_token)
+        log("K.2 super_admin DELETE archive → 200",
+            r.status_code == 200 and r.json().get("ok"),
+            f"{r.status_code} {r.text[:120]}")
+        if u1_archive_id in created_archive_ids:
+            created_archive_ids.remove(u1_archive_id)
+
+        r = get("/admin/users", admin_token)
+        users = r.json() if r.status_code == 200 else []
+        still_present = any(u.get("id") == u1_id for u in users)
+        log("K.3 Underlying U1 user still present after archive delete",
+            still_present, f"present={still_present}")
+
+        r = delete(f"/admin/approved-registrations/{u1_archive_id}", admin_token)
+        log("K.4 Second DELETE same archive id → 404",
+            r.status_code == 404, f"{r.status_code}")
+
+    # L. Regression
+    r = get("/admin/approvals/today", admin_token)
+    log("L.1 GET /admin/approvals/today → 200", r.status_code == 200, f"{r.status_code}")
+
+    r = get("/admin/approvals?status=pending", admin_token)
+    log("L.2 GET /admin/approvals?status=pending → 200",
+        r.status_code == 200, f"{r.status_code}")
+
+    cart_email = f"cart.{rand}@netpay.example.com"
+    cart_reg = register_user("Cart User", cart_email)
+    cart_token = None
+    if cart_reg:
+        cart_token = cart_reg["token"]
+        cart_id = cart_reg["user"]["id"]
+        created_user_ids.append(cart_id)
+        r = get("/cart", cart_token)
+        body = r.json() or {}
+        log("L.3 GET /cart → 200 with total/items/count",
+            r.status_code == 200 and "total" in body and "items" in body and "count" in body,
+            f"{r.status_code} keys={list(body.keys())}")
+
+        r = get("/payment/config", cart_token)
+        log("L.4 GET /payment/config → 200",
+            r.status_code == 200 and "is_mock" in (r.json() or {}),
+            f"{r.status_code}")
+
+    # Non-admin user accessing approved-registrations endpoints → 401/403
+    if cart_token:
+        r = get("/admin/approved-registrations", cart_token)
+        log("Auth: regular user GET list → 401/403",
+            r.status_code in (401, 403), f"{r.status_code}")
+        r = get("/admin/approved-registrations/export", cart_token)
+        log("Auth: regular user GET export → 401/403",
+            r.status_code in (401, 403), f"{r.status_code}")
+        r = delete("/admin/approved-registrations/some-fake-id", cart_token)
+        log("Auth: regular user DELETE → 401/403",
+            r.status_code in (401, 403), f"{r.status_code}")
+        r = post(f"/admin/approvals/{u1_id}/approve", cart_token)
+        log("Auth: regular user POST approve → 401/403",
+            r.status_code in (401, 403), f"{r.status_code}")
+
+    # No-auth checks
+    r = requests.get(f"{API}/admin/approved-registrations", timeout=30)
+    log("Auth: no-auth GET list → 401/403", r.status_code in (401, 403), f"{r.status_code}")
+    r = requests.get(f"{API}/admin/approved-registrations/export", timeout=30)
+    log("Auth: no-auth GET export → 401/403", r.status_code in (401, 403), f"{r.status_code}")
+
+    # M. Cleanup
+    print("\n--- Cleanup phase ---")
+    cleanup_errors = 0
+    r = get("/admin/approved-registrations", admin_token)
+    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
+    test_ids = {u1_id, u2_id} | set(created_user_ids)
+    for it in items:
+        if it.get("original_user_id") in test_ids:
+            rr = delete(f"/admin/approved-registrations/{it['id']}", admin_token)
+            print(f"   archive del {it['id']}: {rr.status_code}")
+            if rr.status_code != 200:
+                cleanup_errors += 1
+
+    for adm in promoted_admin_ids:
+        if adm.get("is_promoted_user"):
+            rr = post(f"/admin/users/{adm['id']}/demote", admin_token)
+            print(f"   demote {adm['email']}: {rr.status_code}")
+        rr = delete(f"/admin/users/{adm['id']}", admin_token)
+        print(f"   delete admin {adm['email']}: {rr.status_code}")
+        if rr.status_code != 200:
+            cleanup_errors += 1
+
+    for uid in created_user_ids:
+        rr = delete(f"/admin/users/{uid}", admin_token)
+        if rr.status_code not in (200, 404):
+            cleanup_errors += 1
+            print(f"   delete user {uid}: {rr.status_code}")
+
+    t = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    log("M. admin@app.com still works after cleanup", t is not None,
+        f"cleanup_errors={cleanup_errors}")
 
     # Summary
-    total = len(results)
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
     passed = sum(1 for _, ok, _ in results if ok)
-    failed = total - passed
-    print("\n========================================")
-    print(f"PASSED: {passed}/{total}    FAILED: {failed}")
-    print("========================================")
+    failed = sum(1 for _, ok, _ in results if not ok)
+    print(f"Total: {len(results)}  Passed: {passed}  Failed: {failed}")
     if failed:
-        print("\nFailed tests:")
-        for name, ok, info in results:
+        print("\nFailed checks:")
+        for name, ok, detail in results:
             if not ok:
-                print(f"  - {name} :: {info}")
-    sys.exit(0 if failed == 0 else 1)
+                print(f"  - {name}: {detail}")
+    return failed == 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)
