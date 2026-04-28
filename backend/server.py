@@ -377,11 +377,28 @@ async def login(payload: LoginRequest):
     email = payload.email.lower().strip()
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(payload.password, user["password_hash"]):
+        # Before returning a generic 401, check if this email belongs to a rejected
+        # registration archive record — give the user a category-specific message
+        # so they know why they can't log in. Only do this on a plain not-found case
+        # (we don't want to reveal password validity, so we still require the
+        # password field to be present).
+        if not user and payload.password:
+            archived = await db.rejected_registrations.find_one(
+                {"email": email}, {"_id": 0, "category": 1, "remarks": 1}, sort=[("rejected_at", -1)],
+            )
+            if archived:
+                cat = archived.get("category") or "other"
+                msg_map = {
+                    "payment_unsuccessful": "Your registration payment was unsuccessful. Please contact support to re-register.",
+                    "referral_code_mistake": "Your referral code was invalid. Please contact support to re-register.",
+                    "other": archived.get("remarks") or "Your registration was rejected. Please contact support.",
+                }
+                raise HTTPException(status_code=403, detail=msg_map.get(cat, msg_map["other"]))
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if user.get("is_blocked"):
         reason = user.get("block_reason") or "Contact support."
         raise HTTPException(status_code=403, detail=f"Account blocked: {reason}")
-    # Non-admin users whose registration was rejected cannot sign in.
+    # Non-admin users whose registration was rejected (legacy in-place) cannot sign in.
     if user.get("role") == "user" and user.get("approval_status") == "rejected":
         cat = user.get("approval_reject_category") or "other"
         msg_map = {
