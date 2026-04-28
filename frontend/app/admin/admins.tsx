@@ -55,35 +55,26 @@ export default function AdminAdmins() {
   const [editFor, setEditFor] = useState<AdminUser | null>(null);
   const [editRole, setEditRole] = useState<SubRole>("manager");
 
-  // Super password
-  const [pwdStatus, setPwdStatus] = useState<{ is_set: boolean; format: string } | null>(null);
-  const [pwdOpen, setPwdOpen] = useState(false);
-  const [pwdCurrent, setPwdCurrent] = useState("");
-  const [pwdNew, setPwdNew] = useState("");
-  const [pwdNew2, setPwdNew2] = useState("");
+  // Danger PIN (6-digit) — gates Wipe + Restore
+  const [pinStatus, setPinStatus] = useState<{ is_set: boolean; format: string } | null>(null);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pinCurrent, setPinCurrent] = useState("");
+  const [pinNew, setPinNew] = useState("");
+  const [pinNew2, setPinNew2] = useState("");
 
-  const formatBreakdown = (p: string) => {
-    const digits = (p.match(/[0-9]/g) || []).length;
-    const upper = (p.match(/[A-Z]/g) || []).length;
-    const lower = (p.match(/[a-z]/g) || []).length;
-    const symRe = /[!@#$%^&*()_+\-=\[\]{};:'",.<>/?\\|]/g;
-    const syms = (p.match(symRe) || []).length;
-    const total = p.length;
-    const ok = digits === 1 && upper === 3 && lower === 4 && syms === 2 && total === 10;
-    return { digits, upper, lower, syms, total, ok };
-  };
-
-  const pwdBreak = formatBreakdown(pwdNew);
-  const pwdMatches = pwdNew && pwdNew === pwdNew2;
+  const isPin = (p: string) => /^[0-9]{6}$/.test(p);
+  const pinNewOk = isPin(pinNew);
+  const pinMatches = !!pinNew && pinNew === pinNew2;
+  const pinCurrentOk = !pinStatus?.is_set || isPin(pinCurrent);
 
   const load = useCallback(async () => {
     try {
-      const [adminsRes, pwdRes] = await Promise.all([
+      const [adminsRes, pinRes] = await Promise.all([
         api.get<AdminUser[]>("/admin/admins"),
-        isSuper ? api.get<{ is_set: boolean; format: string }>("/admin/super-password") : Promise.resolve({ data: null as any }),
+        isSuper ? api.get<{ is_set: boolean; format: string }>("/admin/danger-pin") : Promise.resolve({ data: null as any }),
       ]);
       setItems(adminsRes.data);
-      if (pwdRes.data) setPwdStatus(pwdRes.data);
+      if (pinRes.data) setPinStatus(pinRes.data);
     } catch (e) {
       Alert.alert("Error", formatApiError(e));
     } finally {
@@ -94,25 +85,29 @@ export default function AdminAdmins() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const onSetSuperPwd = async () => {
-    if (!pwdBreak.ok) {
-      Alert.alert("Invalid format", "Password must match the required composition.");
+  const onSetDangerPin = async () => {
+    if (!pinNewOk) {
+      Alert.alert("Invalid PIN", "PIN must be exactly 6 digits (0–9).");
       return;
     }
-    if (!pwdMatches) {
-      Alert.alert("Mismatch", "The two new password entries don't match.");
+    if (!pinMatches) {
+      Alert.alert("Mismatch", "The two new PIN entries don't match.");
       return;
     }
-    setBusy("super-pwd");
+    if (pinStatus?.is_set && !pinCurrentOk) {
+      Alert.alert("Current PIN required", "Enter your current 6-digit Danger PIN.");
+      return;
+    }
+    setBusy("danger-pin");
     try {
-      await api.post("/admin/super-password", {
-        new_password: pwdNew,
-        current_password: pwdStatus?.is_set ? pwdCurrent : undefined,
+      await api.post("/admin/danger-pin", {
+        new_pin: pinNew,
+        current_pin: pinStatus?.is_set ? pinCurrent : undefined,
       });
-      setPwdOpen(false);
-      setPwdCurrent(""); setPwdNew(""); setPwdNew2("");
+      setPinOpen(false);
+      setPinCurrent(""); setPinNew(""); setPinNew2("");
       await load();
-      Alert.alert("Saved", "Super password updated.");
+      Alert.alert("Saved", "Danger PIN updated.");
     } catch (e) {
       Alert.alert("Save failed", formatApiError(e));
     } finally { setBusy(null); }
@@ -250,17 +245,17 @@ export default function AdminAdmins() {
 
       {isSuper && (
         <TouchableOpacity
-          onPress={() => setPwdOpen(true)}
+          onPress={() => setPinOpen(true)}
           style={styles.superPwdRow}
-          testID="super-pwd-row"
+          testID="danger-pin-row"
         >
-          <View style={[styles.superPwdIcon, { backgroundColor: pwdStatus?.is_set ? "#E6F4EE" : "#FFF4E5" }]}>
-            <Feather name={pwdStatus?.is_set ? "shield" : "shield-off"} size={16} color={pwdStatus?.is_set ? colors.success : colors.warning} />
+          <View style={[styles.superPwdIcon, { backgroundColor: pinStatus?.is_set ? "#E6F4EE" : "#FFF4E5" }]}>
+            <Feather name={pinStatus?.is_set ? "shield" : "shield-off"} size={16} color={pinStatus?.is_set ? colors.success : colors.warning} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.superPwdTitle}>Super password</Text>
+            <Text style={styles.superPwdTitle}>Danger PIN (6 digits)</Text>
             <Text style={styles.superPwdSub}>
-              {pwdStatus?.is_set ? "Set — required for danger-zone actions" : "Not set yet — required to enable Wipe All Users"}
+              {pinStatus?.is_set ? "Set — required to Wipe users or Restore backups" : "Not set — required to enable Wipe / Restore"}
             </Text>
           </View>
           <Feather name="chevron-right" size={18} color={colors.textMuted} />
@@ -448,45 +443,71 @@ export default function AdminAdmins() {
           </View>
         </View>
       </Modal>
-      {/* Super password modal */}
-      <Modal visible={pwdOpen} transparent animationType="slide" onRequestClose={() => setPwdOpen(false)}>
+      {/* Danger PIN modal */}
+      <Modal visible={pinOpen} transparent animationType="slide" onRequestClose={() => setPinOpen(false)}>
         <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.modalSheet}>
-            <Text style={styles.modalTitle}>{pwdStatus?.is_set ? "Rotate" : "Set"} super password</Text>
-            <Text style={styles.modalSub}>Required for danger-zone actions like wiping all users.</Text>
+            <Text style={styles.modalTitle}>{pinStatus?.is_set ? "Rotate" : "Set"} Danger PIN</Text>
+            <Text style={styles.modalSub}>A single 6-digit numeric PIN. Required to Wipe users or Restore backups.</Text>
             <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 460 }}>
-              {pwdStatus?.is_set && (
+              {pinStatus?.is_set && (
                 <>
-                  <Text style={styles.fieldLabel}>Current super password</Text>
-                  <TextInput value={pwdCurrent} onChangeText={setPwdCurrent} secureTextEntry placeholder="Current" placeholderTextColor={colors.textMuted} style={styles.input} testID="super-pwd-current" />
+                  <Text style={styles.fieldLabel}>Current Danger PIN</Text>
+                  <TextInput
+                    value={pinCurrent}
+                    onChangeText={(v) => setPinCurrent(v.replace(/[^0-9]/g, "").slice(0, 6))}
+                    secureTextEntry
+                    keyboardType="number-pad"
+                    maxLength={6}
+                    placeholder="••••••"
+                    placeholderTextColor={colors.textMuted}
+                    style={[styles.input, styles.pinInput]}
+                    testID="danger-pin-current"
+                  />
                 </>
               )}
-              <Text style={styles.fieldLabel}>New super password</Text>
-              <TextInput value={pwdNew} onChangeText={setPwdNew} autoCapitalize="none" placeholder="Type new password" placeholderTextColor={colors.textMuted} style={styles.input} testID="super-pwd-new" />
-              <Text style={styles.fieldLabel}>Repeat new password</Text>
-              <TextInput value={pwdNew2} onChangeText={setPwdNew2} autoCapitalize="none" placeholder="Repeat" placeholderTextColor={colors.textMuted} style={styles.input} testID="super-pwd-new2" />
+              <Text style={styles.fieldLabel}>New Danger PIN</Text>
+              <TextInput
+                value={pinNew}
+                onChangeText={(v) => setPinNew(v.replace(/[^0-9]/g, "").slice(0, 6))}
+                secureTextEntry
+                keyboardType="number-pad"
+                maxLength={6}
+                placeholder="6 digits"
+                placeholderTextColor={colors.textMuted}
+                style={[styles.input, styles.pinInput]}
+                testID="danger-pin-new"
+              />
+              <Text style={styles.fieldLabel}>Repeat new PIN</Text>
+              <TextInput
+                value={pinNew2}
+                onChangeText={(v) => setPinNew2(v.replace(/[^0-9]/g, "").slice(0, 6))}
+                secureTextEntry
+                keyboardType="number-pad"
+                maxLength={6}
+                placeholder="Repeat"
+                placeholderTextColor={colors.textMuted}
+                style={[styles.input, styles.pinInput]}
+                testID="danger-pin-new2"
+              />
 
               <View style={styles.rulesBox}>
-                <Text style={styles.rulesTitle}>Required composition (10 chars)</Text>
-                <Rule label="1 digit (0–9)" got={pwdBreak.digits} need={1} />
-                <Rule label="3 uppercase letters (A–Z)" got={pwdBreak.upper} need={3} />
-                <Rule label="2 symbols !@#$%^&*()_+-=[]{}…" got={pwdBreak.syms} need={2} />
-                <Rule label="4 lowercase letters (a–z)" got={pwdBreak.lower} need={4} />
-                <Rule label="exactly 10 characters total" got={pwdBreak.total} need={10} />
-                <Rule label="both new entries match" got={pwdMatches ? 1 : 0} need={1} />
+                <Text style={styles.rulesTitle}>Rules</Text>
+                <Rule label="Exactly 6 digits (0–9)" got={pinNewOk ? 1 : 0} need={1} />
+                <Rule label="Both new entries match" got={pinMatches ? 1 : 0} need={1} />
               </View>
             </ScrollView>
             <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-              <TouchableOpacity onPress={() => { setPwdOpen(false); setPwdCurrent(""); setPwdNew(""); setPwdNew2(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
+              <TouchableOpacity onPress={() => { setPinOpen(false); setPinCurrent(""); setPinNew(""); setPinNew2(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
                 <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={onSetSuperPwd}
-                disabled={!pwdBreak.ok || !pwdMatches || busy === "super-pwd"}
-                style={[styles.modalBtn, { backgroundColor: colors.primary }, (!pwdBreak.ok || !pwdMatches || busy === "super-pwd") && { opacity: 0.5 }]}
-                testID="super-pwd-save"
+                onPress={onSetDangerPin}
+                disabled={!pinNewOk || !pinMatches || (!!pinStatus?.is_set && !pinCurrentOk) || busy === "danger-pin"}
+                style={[styles.modalBtn, { backgroundColor: colors.primary }, (!pinNewOk || !pinMatches || (!!pinStatus?.is_set && !pinCurrentOk) || busy === "danger-pin") && { opacity: 0.5 }]}
+                testID="danger-pin-save"
               >
-                {busy === "super-pwd" ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Save</Text>}
+                {busy === "danger-pin" ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Save PIN</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -538,6 +559,7 @@ const styles = StyleSheet.create({
   modalSub: { fontSize: 13, color: colors.textMuted, marginTop: 4, marginBottom: 14 },
   fieldLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600", marginTop: 12, marginBottom: 6 },
   input: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, padding: 14, fontSize: 14, color: colors.textMain },
+  pinInput: { textAlign: "center", letterSpacing: 8, fontSize: 22, fontWeight: "700", paddingVertical: 16 },
   roleRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   roleChip: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 99, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   roleChipText: { fontSize: 12, fontWeight: "700", color: colors.textMain },

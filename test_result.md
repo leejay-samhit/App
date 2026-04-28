@@ -107,6 +107,101 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Danger PIN (6-digit unified gate for Wipe + Restore)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            ALL 31/31 PASSED via /app/danger_pin_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Detailed scenario results:
+            1) Super admin login admin@app.com / Admin@123 -> 200, token captured.
+            2) GET /api/admin/danger-pin -> 200 {is_set:false, format:"PIN must be
+               exactly 6 digits (0-9)."} (initially unset). After set, GET returns
+               is_set:true.
+            3) Format validation (with valid current_pin):
+               - new_pin="12345" (too short) -> 400
+               - new_pin="abcdef" (non-digit) -> 400
+               - new_pin="1234567" (too long) -> 400
+            4) First-time POST /admin/danger-pin {new_pin:"111111"} (no current_pin)
+               -> 200; subsequent GET shows is_set:true.
+            5) Rotation flow:
+               - POST without current_pin when set -> 401.
+               - POST with wrong current_pin "999999" -> 401.
+               - POST with correct current_pin -> 200 (rotated 111111 -> 222222).
+               - After rotation, OLD pin "111111" no longer works -> 401.
+               - Rotated final to "654321" -> 200.
+            6) POST /admin/system/wipe-users {keep_admins:true, danger_pin:"000000"}
+               -> 401 with detail "Invalid Danger PIN".
+            7) POST /admin/system/wipe-users {keep_admins:true, danger_pin:"654321"}
+               -> 200 with users_deleted/transactions_deleted/withdrawals_deleted/
+               orders_deleted/cart_items_deleted/notifications_deleted counts. Pre-
+               registered a throwaway user so deletion was observable. Admin
+               account preserved (keep_admins=true) and post-wipe /auth/me still
+               returns 200.
+            8) POST /admin/backups {note:"danger-pin-test"} (super_admin) -> 200,
+               snapshot id captured.
+            9) POST /admin/backups/{snap_id}/restore {danger_pin:"111111"} -> 401
+               with "Invalid Danger PIN".
+            10) POST /admin/backups/{snap_id}/restore {danger_pin:"654321"} -> 200
+                {ok:true, restored:{...}, snapshot_id}.
+            11) RBAC (manager admin):
+                - GET /admin/danger-pin -> 403 "Requires admin role: super_admin".
+                - POST /admin/danger-pin -> 403.
+                - POST /admin/system/wipe-users with valid pin -> 403.
+                - POST /admin/backups -> 403 (super_admin only).
+                - POST /admin/backups/{id}/restore with valid pin -> 403.
+                - Cleanup: super_admin DELETE manager -> 200.
+            12) Regression: GET /admin/admins, /admin/users,
+                /admin/approvals?status=pending, /admin/backups all 200.
+            13) Final state confirmed: PIN is "654321" (no-op rotation 654321 ->
+                654321 with correct current_pin -> 200). Frontend can use this PIN.
+
+            No 500s, backend logs clean. Task working: true, needs_retesting: false.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Replaced legacy "super password" + typed-phrase confirmations with a
+            single 6-digit numeric Danger PIN that gates BOTH:
+              - POST /api/admin/system/wipe-users
+              - POST /api/admin/backups/{snap_id}/restore
+
+            New endpoints:
+            • GET  /api/admin/danger-pin  → {is_set, format} (super_admin only)
+            • POST /api/admin/danger-pin  → {new_pin, current_pin?} (super_admin only)
+              - Format validator: must be exactly 6 digits (0–9), else 400.
+              - If a PIN is already set, current_pin is required and must match (else 401).
+              - Hash stored in settings.danger_pin_hash via bcrypt.
+
+            Updated request schemas:
+            • WipeUsersRequest: {keep_admins: bool, danger_pin: str}
+            • RestoreBackupRequest: {danger_pin: str}
+
+            Wipe + Restore behavior:
+            • If danger_pin_hash is missing → 400 "Danger PIN not set..."
+            • If pin invalid → 401 "Invalid Danger PIN"
+            • If valid → proceed (wipes / restores), audit log written.
+
+            REQUEST: please verify
+            1) GET /admin/danger-pin returns is_set=false initially, then true after POST.
+            2) POST /admin/danger-pin with non-6-digit (e.g. "12345", "abcdef", "1234567") → 400.
+            3) POST /admin/danger-pin without current_pin when one is already set → 401.
+            4) POST /admin/danger-pin rotation flow (correct current_pin → 200; wrong → 401).
+            5) POST /admin/system/wipe-users with wrong PIN → 401, with correct PIN → 200.
+            6) POST /admin/backups/{snap_id}/restore with wrong PIN → 401, correct → 200.
+            7) Non super_admin (manager/support/finance) hitting any of these → 403.
+            8) Confirm legacy super-password endpoints continue to work for backwards
+               compat (or, if removed, return 404 cleanly — don't crash).
+            Use admin@app.com / Admin@123. Cleanup: leave Danger PIN set to "654321"
+            so frontend testing can use it.
+
   - task: "Admin management endpoints (list/create/promote/demote) + tightened PATCH"
     implemented: true
     working: true
@@ -723,8 +818,7 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Data Backup / Restore + Per-Action Change Log"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -965,4 +1059,48 @@ agent_communication:
         no 500s observed.
 
         Task "KYC image uploads (base64) — submit + admin detail" marked working: true,
+        needs_retesting: false. Main agent can summarise and finish.
+    - agent: "testing"
+      message: |
+        DANGER PIN (unified Wipe + Restore gate) — backend testing COMPLETE.
+        ALL 31/31 PASSED via /app/danger_pin_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Coverage (matches the review request 1-7):
+        1) GET /api/admin/danger-pin -> 200 with {is_set, format}; format string
+           returned is "PIN must be exactly 6 digits (0-9)." ✅
+        2) POST /api/admin/danger-pin format validation on bad new_pin
+           ("12345"/"abcdef"/"1234567") -> 400. First-time set with valid 6-digit
+           "111111" -> 200; subsequent GET returns is_set:true. With PIN set:
+           POST without current_pin -> 401; POST with wrong current_pin "999999"
+           -> 401; POST with correct current_pin and new valid pin -> 200
+           (rotation). Old PIN no longer works after rotation (401). Final PIN
+           rotated to "654321". ✅
+        3) POST /admin/system/wipe-users {keep_admins:true, danger_pin:"000000"}
+           -> 401 "Invalid Danger PIN". With danger_pin="654321" -> 200 with
+           users_deleted/transactions_deleted/withdrawals_deleted/orders_deleted/
+           cart_items_deleted/notifications_deleted counts. Pre-registered a
+           throwaway non-admin user so the wipe was observable. admin@app.com
+           preserved (keep_admins=true) and post-wipe /auth/me works. ✅
+        4) POST /admin/backups {note:"danger-pin-test"} (super_admin) -> 200 with
+           snapshot id captured. ✅
+        5) POST /admin/backups/{snap_id}/restore with danger_pin="111111" -> 401
+           "Invalid Danger PIN". With danger_pin="654321" -> 200 with
+           {ok:true, restored:{...}, snapshot_id}. ✅
+        6) RBAC with manager admin (created via POST /admin/admins
+           {admin_role:"manager"}):
+             - GET /admin/danger-pin -> 403
+             - POST /admin/danger-pin -> 403
+             - POST /admin/system/wipe-users with valid danger_pin -> 403
+             - POST /admin/backups -> 403 (super_admin only)
+             - POST /admin/backups/{id}/restore with valid danger_pin -> 403
+           Cleanup: super_admin DELETE manager -> 200. ✅
+        7) Regression: GET /admin/admins, /admin/users,
+           /admin/approvals?status=pending, /admin/backups all 200. ✅
+
+        Final state: Danger PIN is set to "654321" (verified via no-op rotation
+        654321 -> 654321 with correct current_pin -> 200). Frontend testing can
+        use this PIN.
+
+        Backend logs clean, no 500s. Task marked working: true,
         needs_retesting: false. Main agent can summarise and finish.

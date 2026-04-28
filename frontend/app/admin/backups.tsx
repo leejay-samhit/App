@@ -36,8 +36,8 @@ export default function AdminBackups() {
 
   // Restore modal
   const [restoreFor, setRestoreFor] = useState<Backup | null>(null);
-  const [restoreSuperPwd, setRestoreSuperPwd] = useState("");
-  const [restoreConfirm, setRestoreConfirm] = useState("");
+  const [restorePin, setRestorePin] = useState("");
+  const isPin = (p: string) => /^[0-9]{6}$/.test(p);
 
   const load = useCallback(async () => {
     try {
@@ -69,18 +69,17 @@ export default function AdminBackups() {
 
   const onRestore = async () => {
     if (!restoreFor) return;
-    if (restoreConfirm.trim() !== "RESTORE") {
-      Alert.alert("Type RESTORE", "Please type RESTORE to confirm.");
+    if (!isPin(restorePin)) {
+      Alert.alert("Invalid PIN", "Enter your 6-digit Danger PIN to confirm.");
       return;
     }
     setBusy(restoreFor.id);
     try {
       const { data } = await api.post(`/admin/backups/${restoreFor.id}/restore`, {
-        super_password: restoreSuperPwd,
+        danger_pin: restorePin,
       });
       setRestoreFor(null);
-      setRestoreSuperPwd("");
-      setRestoreConfirm("");
+      setRestorePin("");
       await load();
       Alert.alert(
         "Restore complete",
@@ -240,35 +239,27 @@ export default function AdminBackups() {
               <Text style={{ fontWeight: "800", color: colors.textMain }}>
                 {restoreFor ? new Date(restoreFor.created_at).toLocaleString() : ""}
               </Text>{"\n\n"}
-              Type <Text style={{ fontWeight: "800" }}>RESTORE</Text> and enter the super password to confirm.
+              Enter your <Text style={{ fontWeight: "800" }}>6-digit Danger PIN</Text> to confirm.
             </Text>
             <TextInput
-              value={restoreConfirm}
-              onChangeText={setRestoreConfirm}
-              autoCapitalize="characters"
-              placeholder="Type RESTORE"
-              placeholderTextColor={colors.textMuted}
-              style={[styles.input, { textAlign: "center", letterSpacing: 4, fontWeight: "800" }]}
-              testID="backup-restore-confirm"
-            />
-            <TextInput
-              value={restoreSuperPwd}
-              onChangeText={setRestoreSuperPwd}
-              autoCapitalize="none"
+              value={restorePin}
+              onChangeText={(v) => setRestorePin(v.replace(/[^0-9]/g, "").slice(0, 6))}
               secureTextEntry
-              placeholder="Super password"
+              keyboardType="number-pad"
+              maxLength={6}
+              placeholder="••••••"
               placeholderTextColor={colors.textMuted}
-              style={[styles.input, { marginTop: 10 }]}
-              testID="backup-restore-pwd"
+              style={[styles.input, { textAlign: "center", letterSpacing: 8, fontWeight: "800", fontSize: 22, paddingVertical: 16 }]}
+              testID="backup-restore-pin"
             />
             <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-              <TouchableOpacity onPress={() => { setRestoreFor(null); setRestoreSuperPwd(""); setRestoreConfirm(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
+              <TouchableOpacity onPress={() => { setRestoreFor(null); setRestorePin(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
                 <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={onRestore}
-                disabled={restoreConfirm.trim() !== "RESTORE" || !restoreSuperPwd || !!busy}
-                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (restoreConfirm.trim() !== "RESTORE" || !restoreSuperPwd || !!busy) && { opacity: 0.5 }]}
+                disabled={!isPin(restorePin) || !!busy}
+                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (!isPin(restorePin) || !!busy) && { opacity: 0.5 }]}
                 testID="backup-restore-submit"
               >
                 {busy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Restore</Text>}
