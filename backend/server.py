@@ -832,21 +832,46 @@ async def payment_failure(payload: PaymentFailureRequest, user: Dict[str, Any] =
     attempts = int(user.get("payment_attempts") or 0) + 1
     archived = False
 
+    if attempts >= MAX_PAYMENT_ATTEMPTS:
+        # Phase B: archive to rejected_registrations + delete user record.
+        # Merge the increment into the doc so the snapshot reflects the final count.
+        user["payment_attempts"] = attempts
+        user["last_payment_failure_at"] = now_utc().isoformat()
+        user["last_payment_failure_reason"] = (payload.reason or "Payment failed")[:500]
+        reason_text = (
+            f"Auto-rejected after {MAX_PAYMENT_ATTEMPTS} failed payment attempts. "
+            f"Last reason: {payload.reason or 'unknown'}"
+        )
+        record = await _archive_and_delete_user(
+            user, category="payment_unsuccessful", remarks=reason_text, rejected_by="system",
+        )
+        archived = True
+        # Log a failed transaction for trail
+        settings = await get_settings()
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "registration_fee",
+            "amount": settings["registration_fee"],
+            "status": "failed",
+            "description": f"Payment failed (attempt {attempts}/{MAX_PAYMENT_ATTEMPTS}) — archived",
+            "razorpay_order_id": payload.razorpay_order_id,
+            "created_at": now_utc().isoformat(),
+        })
+        return {
+            "ok": True,
+            "attempts_used": attempts,
+            "attempts_remaining": 0,
+            "archived": True,
+            "category": "payment_unsuccessful",
+            "archive_id": record["id"],
+        }
+
     update_doc: Dict[str, Any] = {
         "payment_attempts": attempts,
         "last_payment_failure_at": now_utc().isoformat(),
         "last_payment_failure_reason": (payload.reason or "Payment failed")[:500],
     }
-    if attempts >= MAX_PAYMENT_ATTEMPTS:
-        archived = True
-        update_doc.update({
-            "approval_status": "rejected",
-            "approval_reviewed_at": now_utc().isoformat(),
-            "approval_reviewed_by": "system",
-            "approval_reject_category": "payment_unsuccessful",
-            "approval_reject_reason": f"Auto-rejected after {MAX_PAYMENT_ATTEMPTS} failed payment attempts. Last reason: {payload.reason or 'unknown'}",
-        })
-
     await db.users.update_one({"id": user["id"]}, {"$set": update_doc})
 
     # Log a pending-failed transaction for traceability
@@ -867,7 +892,7 @@ async def payment_failure(payload: PaymentFailureRequest, user: Dict[str, Any] =
         "attempts_used": attempts,
         "attempts_remaining": max(0, MAX_PAYMENT_ATTEMPTS - attempts),
         "archived": archived,
-        "category": "payment_unsuccessful" if archived else None,
+        "category": None,
     }
 
 
@@ -1924,12 +1949,55 @@ async def admin_reject_kyc(user_id: str, payload: KYCReject, admin: Dict[str, An
 
 # ------------------ Admin Approval Gate (registration → admin review → payout) ------------------
 REJECT_CATEGORIES = {
+    # New unified 3-category system (finance-approval flow)
+    "payment_unsuccessful": "Payment unsuccessful",
+    "referral_code_mistake": "Referral code was incorrect",
+    "other": "Other",
+    # Legacy categories (kept for backfill — UI no longer surfaces these for new rejections)
     "cibil_score": "CIBIL score insufficient — please upload your CIBIL report",
     "identity_mismatch": "Identity details don't match the documents",
     "suspicious_activity": "Suspicious activity detected on the account",
     "incomplete_documents": "Documents are incomplete or unclear",
     "custom": "Custom reason",
 }
+
+# Categories that archive + delete the user (new policy). Legacy ones stay in-place.
+ARCHIVE_ON_REJECT_CATEGORIES = {"payment_unsuccessful", "referral_code_mistake", "other"}
+
+
+async def _archive_and_delete_user(user_doc: Dict[str, Any], *, category: str, remarks: str, rejected_by: str) -> Dict[str, Any]:
+    """Move a user into rejected_registrations + delete from the active users
+    collection. Returns the created archive record."""
+    record = {
+        "id": str(uuid.uuid4()),
+        "original_user_id": user_doc["id"],
+        "email": user_doc.get("email"),
+        "name": user_doc.get("name"),
+        "phone": user_doc.get("phone"),
+        "referral_code": user_doc.get("referral_code"),
+        "referred_by": user_doc.get("referred_by"),
+        "sponsor_id": user_doc.get("sponsor_id"),
+        "category": category,
+        "remarks": remarks,
+        "rejected_at": now_utc().isoformat(),
+        "rejected_by": rejected_by,
+        "registration_paid": bool(user_doc.get("registration_paid")),
+        "payment_method": user_doc.get("payment_method"),
+        "payment_attempts": int(user_doc.get("payment_attempts") or 0),
+        # Snapshot the full original doc (minus password hash & heavy image fields) for audit.
+        "snapshot": {k: v for k, v in user_doc.items() if k not in {
+            "_id", "password_hash",
+            "kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan_image", "kyc_selfie",
+            "extra_docs",
+        }},
+        "created_at": now_utc().isoformat(),
+    }
+    await db.rejected_registrations.insert_one(record)
+    # Purge the user + their dependent data (keep transactions for finance trail).
+    await db.users.delete_one({"id": user_doc["id"]})
+    await db.cart_items.delete_many({"user_id": user_doc["id"]})
+    await db.notifications.delete_many({"user_id": user_doc["id"]})
+    return record
 
 
 @api_router.get("/admin/approvals")
@@ -2029,7 +2097,7 @@ async def admin_approve_user(user_id: str, admin: Dict[str, Any] = Depends(requi
 
 class ApprovalReject(BaseModel):
     category: str  # one of REJECT_CATEGORIES keys
-    reason: Optional[str] = None  # required if category == 'custom'
+    reason: Optional[str] = None  # optional remarks; required for the new "other" category
 
 
 @api_router.post("/admin/approvals/{user_id}/reject")
@@ -2041,9 +2109,23 @@ async def admin_reject_user(user_id: str, payload: ApprovalReject, admin: Dict[s
         raise HTTPException(status_code=400, detail="Only regular users can be rejected")
     if payload.category not in REJECT_CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid rejection category")
-    reason = payload.reason or REJECT_CATEGORIES[payload.category]
-    if payload.category == "custom" and not (payload.reason and payload.reason.strip()):
-        raise HTTPException(status_code=400, detail="Custom reason text is required")
+    # "other" (new) requires free-text remarks; legacy "custom" also requires remarks.
+    if payload.category in ("other", "custom") and not (payload.reason and payload.reason.strip()):
+        raise HTTPException(status_code=400, detail="Remarks are required for this category")
+    reason = (payload.reason or REJECT_CATEGORIES[payload.category]).strip()
+
+    # NEW policy: the 3 finance-gate categories archive + delete the user record.
+    if payload.category in ARCHIVE_ON_REJECT_CATEGORIES:
+        record = await _archive_and_delete_user(
+            target, category=payload.category, remarks=reason, rejected_by=admin["id"],
+        )
+        await _audit_log(
+            admin, "user.reject", "user", user_id,
+            {"category": payload.category, "reason": reason, "archived": True, "archive_id": record["id"]},
+        )
+        return {"ok": True, "archived": True, "archive_id": record["id"]}
+
+    # Legacy categories — keep the user but flip approval_status (enables the extra-docs re-apply flow).
     await db.users.update_one(
         {"id": user_id},
         {"$set": {
@@ -2060,7 +2142,180 @@ async def admin_reject_user(user_id: str, payload: ApprovalReject, admin: Dict[s
         f"under the 'Additional documents' section and we will re-review."
     )
     await _create_notification(user_id, "approval", "Account approval rejected", msg)
-    await _audit_log(admin, "user.reject", "user", user_id, {"category": payload.category, "reason": reason})
+    await _audit_log(admin, "user.reject", "user", user_id, {"category": payload.category, "reason": reason, "archived": False})
+    return {"ok": True, "archived": False}
+
+
+# ------------------ Admin: Create user (offline-paid) ------------------
+class AdminCreateUserRequest(BaseModel):
+    name: str
+    email: EmailStr
+    password: str = Field(min_length=6)
+    phone: Optional[str] = None
+    referral_code: Optional[str] = None  # sponsor code
+    mark_paid_offline: bool = True  # admin collected the fee outside the app
+
+
+@api_router.post("/admin/users/create")
+async def admin_create_user(
+    payload: AdminCreateUserRequest,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support")),
+):
+    """Create a user account from the admin panel (admin, support, super_admin).
+    The account is marked paid-offline and routed to finance for approval."""
+    email = payload.email.lower().strip()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    sponsor = None
+    sponsor_code = (payload.referral_code or "").strip().upper() or None
+    if sponsor_code:
+        sponsor = await db.users.find_one({"referral_code": sponsor_code})
+        if not sponsor:
+            raise HTTPException(status_code=400, detail="Invalid referral code")
+
+    user_id = str(uuid.uuid4())
+    while True:
+        code = gen_referral_code()
+        if not await db.users.find_one({"referral_code": code}):
+            break
+
+    settings = await get_settings()
+    now = now_utc().isoformat()
+
+    user_doc = {
+        "id": user_id,
+        "name": payload.name.strip(),
+        "email": email,
+        "password_hash": hash_password(payload.password),
+        "phone": payload.phone,
+        "role": "user",
+        "admin_role": None,
+        "referral_code": code,
+        "referred_by": sponsor["referral_code"] if sponsor else None,
+        "sponsor_id": sponsor["id"] if sponsor else None,
+        "wallet_balance": 0.0,
+        "total_earned": 0.0,
+        "registration_paid": bool(payload.mark_paid_offline),
+        "payment_method": "admin_offline" if payload.mark_paid_offline else None,
+        "paid_at": now if payload.mark_paid_offline else None,
+        "payment_attempts": 0,
+        "last_payment_failure_at": None,
+        "direct_referrals_count": 0,
+        "payouts_received": 0,
+        "upi_id": None,
+        "bank_account": None,
+        "ifsc": None,
+        "account_holder": None,
+        "is_blocked": False,
+        "block_reason": None,
+        "wallet_frozen": False,
+        "kyc_status": "none",
+        "kyc_full_name": None,
+        "kyc_aadhaar": None,
+        "kyc_pan": None,
+        "kyc_submitted_at": None,
+        "kyc_reviewed_at": None,
+        "kyc_reject_reason": None,
+        "approval_status": "pending",
+        "approval_reviewed_at": None,
+        "approval_reviewed_by": None,
+        "approval_reject_category": None,
+        "approval_reject_reason": None,
+        "commission_triggered": False,
+        "created_by_admin": admin["id"],
+        "extra_docs": {
+            "cibil_report": None, "bank_statement": None, "income_proof": None, "other": None, "submitted_at": None,
+        },
+        "created_at": now,
+    }
+    await db.users.insert_one(user_doc)
+
+    # Log an offline-paid transaction for bookkeeping
+    if payload.mark_paid_offline:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "type": "registration_fee",
+            "amount": settings["registration_fee"],
+            "status": "paid",
+            "description": f"Registration fee — offline (admin {admin.get('email')})",
+            "created_at": now,
+        })
+
+    await _create_notification(
+        user_id, "welcome",
+        "Account created by admin",
+        "Your account was created by our team. It is awaiting final finance approval before login access is enabled.",
+    )
+    await _audit_log(admin, "user.admin_create", "user", user_id, {"email": email, "mark_paid_offline": payload.mark_paid_offline})
+    return {"ok": True, "user": serialize_user(user_doc)}
+
+
+# ------------------ Admin: Rejected registrations archive ------------------
+@api_router.get("/admin/rejected-registrations")
+async def admin_list_rejected_registrations(
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance", "manager", "support")),
+    category: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    limit: int = Query(default=500, le=2000),
+):
+    q: Dict[str, Any] = {}
+    if category and category != "all":
+        if category not in REJECT_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Invalid category")
+        q["category"] = category
+    if search:
+        s = search.strip()
+        q["$or"] = [
+            {"email": {"$regex": s, "$options": "i"}},
+            {"name": {"$regex": s, "$options": "i"}},
+            {"phone": {"$regex": s, "$options": "i"}},
+            {"referral_code": {"$regex": s, "$options": "i"}},
+        ]
+    items = await db.rejected_registrations.find(q, {"_id": 0, "snapshot": 0}).sort("rejected_at", -1).to_list(limit)
+
+    # Counts per category for the UI tabs
+    pipeline = [{"$group": {"_id": "$category", "n": {"$sum": 1}}}]
+    agg = await db.rejected_registrations.aggregate(pipeline).to_list(100)
+    counts = {row["_id"]: row["n"] for row in agg}
+    counts["all"] = sum(counts.values())
+    return {"items": items, "counts": counts}
+
+
+@api_router.get("/admin/rejected-registrations/export")
+async def admin_export_rejected(
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance")),
+    category: Optional[str] = Query(default=None),
+):
+    q: Dict[str, Any] = {}
+    if category and category != "all":
+        if category not in REJECT_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Invalid category")
+        q["category"] = category
+    items = await db.rejected_registrations.find(q, {"_id": 0, "snapshot": 0}).sort("rejected_at", -1).to_list(20000)
+    # Manual CSV (to avoid pulling new deps)
+    def esc(v: Any) -> str:
+        s = "" if v is None else str(v)
+        if any(ch in s for ch in [",", "\"", "\n"]):
+            s = '"' + s.replace('"', '""') + '"'
+        return s
+    fields = ["id", "original_user_id", "name", "email", "phone", "referral_code", "referred_by",
+              "category", "remarks", "registration_paid", "payment_method", "payment_attempts",
+              "rejected_at", "rejected_by"]
+    header = ",".join(fields)
+    lines = [header]
+    for it in items:
+        lines.append(",".join(esc(it.get(f)) for f in fields))
+    return Response(content="\n".join(lines), media_type="text/csv")
+
+
+@api_router.delete("/admin/rejected-registrations/{rec_id}")
+async def admin_delete_rejected(rec_id: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    r = await db.rejected_registrations.delete_one({"id": rec_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Record not found")
+    await _audit_log(admin, "rejected.delete", "rejected_registration", rec_id)
     return {"ok": True}
 
 

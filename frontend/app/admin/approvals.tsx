@@ -43,12 +43,10 @@ type ApprovalDetail = ApprovalUser & {
   sponsor?: { id: string; name: string; email: string; referral_code: string } | null;
 };
 
-const REJECT_REASONS: { key: string; label: string }[] = [
-  { key: "cibil_score", label: "CIBIL score insufficient" },
-  { key: "identity_mismatch", label: "Identity mismatch" },
-  { key: "suspicious_activity", label: "Suspicious activity" },
-  { key: "incomplete_documents", label: "Documents incomplete" },
-  { key: "custom", label: "Custom reason" },
+const REJECT_REASONS: { key: string; label: string; requiresRemarks?: boolean }[] = [
+  { key: "payment_unsuccessful", label: "Payment unsuccessful" },
+  { key: "referral_code_mistake", label: "Referral code mistake" },
+  { key: "other", label: "Other (enter remarks)", requiresRemarks: true },
 ];
 
 export default function AdminApprovals() {
@@ -63,7 +61,7 @@ export default function AdminApprovals() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
   const [rejectFor, setRejectFor] = useState<ApprovalUser | null>(null);
-  const [rejectCat, setRejectCat] = useState<string>("cibil_score");
+  const [rejectCat, setRejectCat] = useState<string>("payment_unsuccessful");
   const [rejectCustom, setRejectCustom] = useState("");
 
   const load = useCallback(async () => {
@@ -112,21 +110,22 @@ export default function AdminApprovals() {
 
   const submitReject = async () => {
     if (!rejectFor) return;
-    if (rejectCat === "custom" && !rejectCustom.trim()) {
-      Alert.alert("Reason required", "Please provide a custom reason.");
+    if (rejectCat === "other" && !rejectCustom.trim()) {
+      Alert.alert("Remarks required", "Please enter remarks for this category.");
       return;
     }
     setBusy(rejectFor.id);
     try {
       await api.post(`/admin/approvals/${rejectFor.id}/reject`, {
         category: rejectCat,
-        reason: rejectCat === "custom" ? rejectCustom.trim() : undefined,
+        reason: rejectCustom.trim() || undefined,
       });
       setRejectFor(null);
-      setRejectCat("cibil_score");
+      setRejectCat("payment_unsuccessful");
       setRejectCustom("");
       setDetailFor(null);
       await load();
+      Alert.alert("Rejected", "User moved to the Rejected Registrations archive.");
     } catch (e) {
       Alert.alert("Reject failed", formatApiError(e));
     } finally { setBusy(null); }
@@ -323,8 +322,8 @@ export default function AdminApprovals() {
         <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.modalSheet}>
             <Text style={styles.modalTitle}>Reject {rejectFor?.name}</Text>
-            <Text style={styles.modalSub}>The user will be asked to upload additional documents.</Text>
-            <Text style={styles.fieldLabel}>Reason</Text>
+            <Text style={styles.modalSub}>The user will be archived to the Rejected Registrations list and removed from active users.</Text>
+            <Text style={styles.fieldLabel}>Category</Text>
             {REJECT_REASONS.map((r) => (
               <TouchableOpacity key={r.key} onPress={() => setRejectCat(r.key)} style={styles.reasonRow} testID={`reject-reason-${r.key}`}>
                 <View style={[styles.radio, rejectCat === r.key && styles.radioActive]}>
@@ -333,28 +332,29 @@ export default function AdminApprovals() {
                 <Text style={styles.reasonText}>{r.label}</Text>
               </TouchableOpacity>
             ))}
-            {rejectCat === "custom" && (
-              <TextInput
-                value={rejectCustom}
-                onChangeText={setRejectCustom}
-                placeholder="Type the reason"
-                placeholderTextColor={colors.textMuted}
-                style={styles.input}
-                multiline
-                testID="reject-custom"
-              />
-            )}
+            <Text style={[styles.fieldLabel, { marginTop: 12 }]}>
+              Remarks{rejectCat === "other" ? " (required)" : " (optional)"}
+            </Text>
+            <TextInput
+              value={rejectCustom}
+              onChangeText={setRejectCustom}
+              placeholder={rejectCat === "other" ? "Type the reason" : "Any additional notes"}
+              placeholderTextColor={colors.textMuted}
+              style={styles.input}
+              multiline
+              testID="reject-remarks"
+            />
             <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
-              <TouchableOpacity onPress={() => { setRejectFor(null); setRejectCat("cibil_score"); setRejectCustom(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
+              <TouchableOpacity onPress={() => { setRejectFor(null); setRejectCat("payment_unsuccessful"); setRejectCustom(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
                 <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={submitReject}
-                disabled={!!busy || (rejectCat === "custom" && !rejectCustom.trim())}
-                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (!!busy || (rejectCat === "custom" && !rejectCustom.trim())) && { opacity: 0.5 }]}
+                disabled={!!busy || (rejectCat === "other" && !rejectCustom.trim())}
+                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (!!busy || (rejectCat === "other" && !rejectCustom.trim())) && { opacity: 0.5 }]}
                 testID="reject-submit"
               >
-                {busy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Reject</Text>}
+                {busy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Reject & archive</Text>}
               </TouchableOpacity>
             </View>
           </View>

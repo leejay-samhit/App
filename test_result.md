@@ -107,7 +107,226 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
-  - task: "Payment Gateway (Razorpay mock) + 3-attempt cap + login gate"
+  - task: "Phase B — Admin user-create + rejection archive + rejected-registrations"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            PHASE B — backend testing COMPLETE. ALL 81/81 checks PASSED via
+            /app/phase_b_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Detailed scenario results (matches review request A–G):
+
+            A. ADMIN USER-CREATE ✅
+               • A.1 super_admin POST /admin/users/create
+                 {name,email,password,mark_paid_offline:true} → 200; verified via
+                 /admin/users that registration_paid=true,
+                 payment_method="admin_offline", approval_status="pending". ✅
+               • A.2 Duplicate email → 400 "Email already registered". ✅
+               • A.3 Invalid referral_code (non-existent code) → 400
+                 "Invalid referral code". ✅
+               • A.4 mark_paid_offline=false → 200 with registration_paid=false. ✅
+               • A.5 RBAC: manager → 200, support → 200, finance → 403
+                 "Requires admin role: super_admin/manager/support". ✅
+
+            B. REJECT + ARCHIVE FLOW ✅
+               • B.1 Throwaway T registered. super_admin
+                 /admin/approvals/{T.id}/reject {category:"payment_unsuccessful"}
+                 → 200 {ok:true, archived:true, archive_id:"<uuid>"}. ✅
+               • B.2 GET /admin/users — T is no longer present (deleted from
+                 active users collection). ✅
+               • B.3 GET /admin/rejected-registrations?category=payment_unsuccessful
+                 — T present with category="payment_unsuccessful", remarks set,
+                 original_user_id matches T.id, plus name/email/phone/referral_code/
+                 referred_by/sponsor_id/registration_paid/payment_method/
+                 payment_attempts/rejected_at/rejected_by populated. counts={
+                 payment_unsuccessful:1, all:1}. ✅
+               • B.4 reject {category:"other", reason:""} → 400
+                 "Remarks are required for this category"; whitespace-only reason
+                 also → 400. ✅
+               • B.5 reject {category:"other", reason:"test"} → 200
+                 {archived:true, archive_id}. ✅
+               • B.6 Legacy reject {category:"cibil_score"} → 200
+                 {archived:false}. User remains in users collection with
+                 approval_status="rejected" (in-place flip preserved for legacy
+                 categories — additional-docs re-apply flow still works). ✅
+
+            C. AUTO-ARCHIVE AFTER 3 PAYMENT FAILURES ✅
+               • Fresh user P registered.
+               • C.1a /payment/failure {reason:"Card declined #1"} → 200
+                 {archived:false, attempts_remaining:2}. ✅
+               • C.1b /payment/failure 2nd → {archived:false,
+                 attempts_remaining:1}. ✅
+               • C.2 /payment/failure 3rd → 200 {archived:true,
+                 archive_id:"<uuid>", category:"payment_unsuccessful",
+                 attempts_remaining:0}. ✅
+               • C.3 GET /admin/users — P is no longer present. ✅
+               • C.4 GET /admin/rejected-registrations?category=payment_unsuccessful
+                 — P appears with remarks containing "Auto-rejected after 3 failed
+                 payment attempts." (rejected_by="system"). ✅
+
+            D. LIST / EXPORT / DELETE ✅
+               • D.1 GET /admin/rejected-registrations (no filter) → 200 with
+                 {items:[...], counts:{payment_unsuccessful:N, other:M, all:N+M}}. ✅
+               • D.1b ?category=payment_unsuccessful — every returned item has
+                 category="payment_unsuccessful" (filter integrity). ✅
+               • D.2 GET /admin/rejected-registrations/export → 200 with
+                 content-type=text/csv; header row contains id, original_user_id,
+                 name, email, phone, referral_code, referred_by, category,
+                 remarks, registration_paid, payment_method, payment_attempts,
+                 rejected_at, rejected_by; row count matches archive total. ✅
+               • D.2b ?category=payment_unsuccessful export → 200 text/csv. ✅
+               • D.3 finance role: list → 200, export → 200. ✅
+               • D.4 super_admin DELETE /admin/rejected-registrations/{id} → 200
+                 {ok:true}; second DELETE same id → 404 "Record not found". ✅
+               • D.5 finance DELETE → 403 (only super_admin can delete). ✅
+
+            E. RBAC ✅
+               • manager GET list → 200; manager export → 403; manager DELETE → 403. ✅
+               • support GET list → 200; support export → 403; support DELETE → 403. ✅
+
+            F. REGRESSION ✅
+               • GET /admin/users → 200. ✅
+               • POST /auth/login as admin@app.com / Admin@123 → 200. ✅
+               • Did NOT re-test Danger PIN or Razorpay-mock per request. ✅
+
+            G. CLEANUP ✅
+               • Deleted 2 remaining archive records (D.4 already deleted 1; B.5
+                 archive_id, plus C.4 P's archive_id remained — both DELETED). ✅
+               • Deleted 5 throwaway users still in users collection
+                 (A.1, A.4, A.5-mgr-created, A.5-support-created, B.6 legacy). ✅
+               • Deleted 3 helper RBAC admins (manager/support/finance). ✅
+               • POST /auth/login admin@app.com → 200 still works. ✅
+               • Final search ?search=phaseb.test → 0 leftover items. DB clean. ✅
+
+            Implementation observations:
+            • REJECT_CATEGORIES = {payment_unsuccessful, referral_code_mistake,
+              other, cibil_score, identity_mismatch, suspicious_activity,
+              incomplete_documents, custom}. ARCHIVE_ON_REJECT_CATEGORIES =
+              {payment_unsuccessful, referral_code_mistake, other}.
+            • _archive_and_delete_user(): inserts a document into
+              rejected_registrations with id, original_user_id, name, email,
+              phone, referral_code, referred_by, sponsor_id, category, remarks,
+              rejected_at, rejected_by, registration_paid, payment_method,
+              payment_attempts, snapshot (full user doc minus password_hash and
+              KYC images and extra_docs); then deletes the user, their
+              cart_items, and their notifications. Transactions are PRESERVED for
+              the finance trail.
+            • POST /admin/users/create accepts super_admin/manager/support
+              (require_admin_role). Validates email uniqueness + referral_code
+              presence. When mark_paid_offline=true, sets registration_paid=true,
+              payment_method="admin_offline", paid_at, and inserts a
+              registration_fee transaction with status="paid" and description
+              referring to the calling admin's email. Audit log action
+              "user.admin_create" written.
+            • POST /admin/approvals/{user_id}/reject for new categories
+              (payment_unsuccessful/referral_code_mistake/other) calls the
+              archive helper and returns {ok:true, archived:true, archive_id}.
+              For "other" (and legacy "custom"), reason is required (else 400).
+              Legacy categories continue with the in-place flip and return
+              {ok:true, archived:false}.
+            • POST /payment/failure 3rd strike now archives + deletes the user
+              (rejected_by="system"), returns {archived:true, archive_id,
+              category:"payment_unsuccessful", attempts_remaining:0} and logs a
+              status="failed" registration_fee transaction with description
+              "Payment failed (attempt 3/3) — archived".
+            • GET /admin/rejected-registrations: super_admin + finance + manager
+              + support; returns {items, counts}; excludes heavy snapshot field
+              from the list payload; supports search filter (regex on
+              email/name/phone/referral_code) and limit (default 500, max 2000).
+            • GET /admin/rejected-registrations/export: super_admin + finance
+              only; manual CSV builder (no extra deps), Response media_type
+              "text/csv".
+            • DELETE /admin/rejected-registrations/{rec_id}: super_admin only.
+              404 on missing id. Audit log "rejected.delete".
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            PHASE B of the finance-gate flow. Three new capabilities:
+
+            1) POST /api/admin/users/create (super_admin + manager + support)
+               Body: {name, email, password>=6, phone?, referral_code?, mark_paid_offline=true}
+               - Creates a user with approval_status="pending", registration_paid=<mark_paid_offline>.
+               - payment_method="admin_offline" when mark_paid_offline=true.
+               - Logs an offline-paid transaction row.
+               - Audit log action "user.admin_create".
+               - finance role must be 403.
+
+            2) Extended POST /api/admin/approvals/{user_id}/reject
+               - New categories: "payment_unsuccessful", "referral_code_mistake", "other".
+               - "other" requires non-empty reason (else 400).
+               - For these 3 new categories: user is SNAPSHOTTED into rejected_registrations
+                 collection AND the users document is DELETED (plus user's cart_items and
+                 notifications). Returns {ok:true, archived:true, archive_id}.
+               - Legacy categories (cibil_score etc.) still work the old way (in-place flip).
+
+            3) POST /api/payment/failure — on the 3rd strike now archives + deletes the user
+               instead of flipping approval_status. Returns {archived:true, archive_id}.
+
+            4) GET /api/admin/rejected-registrations (super_admin + finance + manager + support)
+               Query: category=payment_unsuccessful|referral_code_mistake|other|all, search, limit.
+               Returns {items:[...], counts:{category:n, all:total}}.
+
+            5) GET /api/admin/rejected-registrations/export?category=... (super_admin + finance)
+               Returns CSV text (header + rows).
+
+            6) DELETE /api/admin/rejected-registrations/{rec_id} (super_admin only)
+               Permanently removes the archived record.
+
+            REQUEST — please verify:
+            A. Admin user-create:
+               1. super_admin creates {name,email,password,mark_paid_offline:true} → 200, user
+                  has registration_paid=true, payment_method="admin_offline", approval_status="pending".
+               2. Duplicate email → 400.
+               3. Invalid referral_code → 400.
+               4. Create with mark_paid_offline=false → 200, registration_paid=false.
+               5. manager creates → 200. support creates → 200. finance creates → 403.
+
+            B. Reject + archive flow:
+               1. Create a throwaway user T. super_admin calls /admin/approvals/{T.id}/reject
+                  with {category:"payment_unsuccessful"} → 200 {archived:true, archive_id}.
+               2. GET /api/admin/users — T is NOT present.
+               3. GET /api/admin/rejected-registrations?category=payment_unsuccessful — T is
+                  present with the record fields populated.
+               4. Reject with category="other" and empty reason → 400.
+               5. Reject with category="other" and reason="test" → 200, archived.
+               6. Reject legacy category "cibil_score" → 200 {archived:false}, user stays in
+                  users with approval_status="rejected".
+
+            C. Auto-archive after 3 payment failures:
+               1. Register fresh user P. /payment/failure x2 → attempts_remaining=1, archived=false.
+               2. /payment/failure 3rd → archived=true, archive_id returned.
+               3. /api/admin/users — P is gone.
+               4. /admin/rejected-registrations?category=payment_unsuccessful — P appears with
+                  remarks mentioning "Auto-rejected after 3 failed payment attempts".
+
+            D. List / export / delete:
+               1. /admin/rejected-registrations returns correct counts.
+               2. /admin/rejected-registrations/export returns text/csv with header row and
+                  proper row count.
+               3. finance role: /admin/rejected-registrations 200, export 200.
+               4. super_admin DELETE /admin/rejected-registrations/{id} → 200; subsequent
+                  GET shows 404 for that id.
+               5. finance DELETE → 403.
+
+            E. RBAC: manager/support see /admin/rejected-registrations (200) but export is
+               only super_admin+finance; DELETE is super_admin only.
+
+            F. Regression: /admin/users works, /auth/login works, Danger PIN still works
+               (pin=654321).
+
+            G. Cleanup: super_admin DELETE all throwaway users + archived records created
+               during the test. admin@app.com must remain.
     implemented: true
     working: true
     file: "backend/server.py"
@@ -998,6 +1217,41 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        PHASE B — backend testing COMPLETE. ALL 81/81 PASSED via
+        /app/phase_b_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Scenarios A–G all green:
+        A. /admin/users/create — super 200 (paid+offline+pending verified),
+           duplicate email 400, invalid referral 400, mark_paid_offline=false
+           200, manager 200, support 200, finance 403.
+        B. /admin/approvals/{id}/reject — payment_unsuccessful 200
+           {archived:true, archive_id}; user removed from /admin/users; archive
+           list shows the snapshot. category=other empty/whitespace reason 400;
+           with reason 200 archived. Legacy cibil_score 200 archived=false (user
+           kept with approval_status=rejected — additional-docs flow intact).
+        C. /payment/failure — 1st/2nd attempts archived=false; 3rd archived=true
+           with archive_id and category=payment_unsuccessful; user removed from
+           /admin/users; archive entry has remarks containing "Auto-rejected
+           after 3 failed payment attempts." (rejected_by=system).
+        D. /admin/rejected-registrations — counts {category:N, all:total}; CSV
+           export header has all 14 columns, content-type=text/csv; filtered
+           list integrity OK; finance can list + export. super_admin DELETE
+           200, second DELETE same id 404; finance DELETE 403.
+        E. RBAC — manager/support GET list 200; export 403; DELETE 403.
+        F. Regression — /admin/users 200, admin@app.com login 200. Did NOT
+           re-test Danger PIN or Razorpay-mock per request.
+        G. Cleanup — All throwaway users + RBAC helper admins (mgr/support/
+           finance) + remaining archive records DELETED. admin@app.com login
+           still 200. Final search shows 0 leftover items.
+
+        Backend logs clean, no 500s. Task "Phase B — Admin user-create +
+        rejection archive + rejected-registrations" marked working: true,
+        needs_retesting: false. Main agent can summarise and finish.
+
+
     - agent: "testing"
       message: |
         RAZORPAY-MOCK PAYMENT FLOW (Phase A) — backend testing COMPLETE.

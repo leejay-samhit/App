@@ -57,6 +57,11 @@ export default function AdminUsers() {
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  const canCreate = ["super_admin", "manager", "support"].includes(
+    (currentAdmin as any)?.admin_role || "super_admin",
+  );
 
   const load = useCallback(async () => {
     try {
@@ -94,6 +99,12 @@ export default function AdminUsers() {
                 <Stat label="Revenue" value={formatINR(stats.total_revenue)} />
                 <Stat label="Payouts paid" value={formatINR(stats.total_referral_payouts)} />
               </View>
+            )}
+            {canCreate && (
+              <TouchableOpacity onPress={() => setCreateOpen(true)} style={styles.newUserBtn} testID="admin-user-new">
+                <Feather name="user-plus" size={16} color={colors.primaryFg} />
+                <Text style={styles.newUserBtnText}>  Add new user (offline-paid)</Text>
+              </TouchableOpacity>
             )}
             <View style={styles.searchWrap}>
               <Feather name="search" size={16} color={colors.textMuted} style={{ marginLeft: 12 }} />
@@ -145,9 +156,103 @@ export default function AdminUsers() {
         onClose={() => setEditing(null)}
         onSaved={async () => { setEditing(null); await load(); }}
       />
+
+      <NewUserModal
+        visible={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={async () => { setCreateOpen(false); await load(); }}
+      />
     </SafeAreaView>
   );
 }
+
+function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClose: () => void; onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
+  const [sponsor, setSponsor] = useState("");
+  const [markPaid, setMarkPaid] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const reset = () => { setName(""); setEmail(""); setPhone(""); setPassword(""); setSponsor(""); setMarkPaid(true); };
+
+  const onSubmit = async () => {
+    if (!name.trim() || !email.trim() || password.length < 6) {
+      Alert.alert("Missing fields", "Name, email, and a 6+ char password are required.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.post("/admin/users/create", {
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        password,
+        phone: phone.trim() || undefined,
+        referral_code: sponsor.trim().toUpperCase() || undefined,
+        mark_paid_offline: markPaid,
+      });
+      Alert.alert("User created", markPaid
+        ? "Account created and marked as paid. It now awaits finance approval."
+        : "Account created — awaiting payment + finance approval.");
+      reset();
+      onCreated();
+    } catch (e) {
+      Alert.alert("Create failed", formatApiError(e));
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView style={nuStyles.overlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={nuStyles.sheet}>
+          <Text style={nuStyles.title}>Add new user</Text>
+          <Text style={nuStyles.sub}>Create a user account on behalf of a customer. The account will route to finance for approval.</Text>
+          <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 460 }}>
+            <Text style={nuStyles.fieldLabel}>Full name</Text>
+            <TextInput value={name} onChangeText={setName} placeholder="e.g. Aman Verma" placeholderTextColor={colors.textMuted} style={nuStyles.input} testID="new-user-name" />
+            <Text style={nuStyles.fieldLabel}>Email</Text>
+            <TextInput value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" placeholder="user@email.com" placeholderTextColor={colors.textMuted} style={nuStyles.input} testID="new-user-email" />
+            <Text style={nuStyles.fieldLabel}>Password (min 6 chars)</Text>
+            <TextInput value={password} onChangeText={setPassword} secureTextEntry placeholder="Temporary password" placeholderTextColor={colors.textMuted} style={nuStyles.input} testID="new-user-password" />
+            <Text style={nuStyles.fieldLabel}>Phone (optional)</Text>
+            <TextInput value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="+91 ..." placeholderTextColor={colors.textMuted} style={nuStyles.input} testID="new-user-phone" />
+            <Text style={nuStyles.fieldLabel}>Sponsor referral code (optional)</Text>
+            <TextInput value={sponsor} onChangeText={(v) => setSponsor(v.toUpperCase())} autoCapitalize="characters" placeholder="e.g. NET5XY9Z" placeholderTextColor={colors.textMuted} style={[nuStyles.input, { letterSpacing: 1 }]} testID="new-user-sponsor" />
+            <View style={nuStyles.switchRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={nuStyles.switchTitle}>Mark registration fee as paid (offline)</Text>
+                <Text style={nuStyles.switchSub}>Turn ON if the customer has paid in cash / other channels. Turn OFF if they'll pay via the app.</Text>
+              </View>
+              <Switch value={markPaid} onValueChange={setMarkPaid} testID="new-user-mark-paid" />
+            </View>
+          </ScrollView>
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+            <TouchableOpacity onPress={() => { reset(); onClose(); }} style={[nuStyles.btn, { backgroundColor: colors.surfaceMuted }]}>
+              <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onSubmit} disabled={saving} style={[nuStyles.btn, { backgroundColor: colors.primary }, saving && { opacity: 0.5 }]} testID="new-user-submit">
+              {saving ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Create user</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+const nuStyles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
+  sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 40 },
+  title: { fontSize: 20, fontWeight: "800", color: colors.textMain },
+  sub: { fontSize: 13, color: colors.textMuted, marginTop: 4, marginBottom: 14 },
+  fieldLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600", marginTop: 12, marginBottom: 6 },
+  input: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, padding: 14, fontSize: 14, color: colors.textMain },
+  switchRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 16, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  switchTitle: { fontSize: 13, fontWeight: "700", color: colors.textMain },
+  switchSub: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 16 },
+  btn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
+});
 
 function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: AdminUser | null; currentAdminId?: string; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState("");
@@ -522,6 +627,8 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 22, fontWeight: "800", color: colors.textMain, letterSpacing: -0.5 },
   statLabel: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
   searchWrap: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16, gap: 8 },
+  newUserBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 14, marginBottom: 16 },
+  newUserBtnText: { color: colors.primaryFg, fontSize: 14, fontWeight: "800" },
   searchInput: { flex: 1, paddingVertical: 12, paddingHorizontal: 8, fontSize: 14, color: colors.textMain },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12 },
   userRow: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 12, marginBottom: 10, gap: 12 },
