@@ -5,6 +5,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { downloadText } from "../../src/download";
 import { colors, radii, spacing } from "../../src/theme";
 
 type RejectedRecord = {
@@ -77,8 +78,17 @@ export default function AdminRejected() {
         { responseType: "text" },
       );
       const data = (res.data as unknown) as string;
-      const lines = (typeof data === "string" ? data : "").split("\n").length - 1;
-      Alert.alert("Export ready", `${lines} records exported as CSV.\n\nIn production this triggers a file download.`);
+      const csv = typeof data === "string" ? data : "";
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const filename = `rejected-registrations-${tab}-${stamp}.csv`;
+      const out = await downloadText({ filename, content: csv, mimeType: "text/csv" });
+      if (out.ok) {
+        const lines = csv.split("\n").length - 1;
+        Alert.alert(
+          "Export ready",
+          `${lines} record${lines === 1 ? "" : "s"} exported.${out.method === "browser" ? "\n\nCheck your browser's Downloads folder." : ""}`,
+        );
+      }
     } catch (e) {
       Alert.alert("Export failed", formatApiError(e));
     }

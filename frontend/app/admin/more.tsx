@@ -5,6 +5,7 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { downloadText } from "../../src/download";
 import { colors, radii, spacing } from "../../src/theme";
 
 const ITEMS = [
@@ -43,8 +44,17 @@ export default function More() {
     try {
       const res = await api.get(`/admin/export/${kind}`, { responseType: "text" });
       const data = (res.data as unknown) as string;
-      const lines = (typeof data === "string" ? data : "").split("\n").length - 1;
-      Alert.alert("Export ready", `${lines} ${kind} rows exported.\n\nIn production this triggers a file download. Preview shows row count for now.`);
+      const csv = typeof data === "string" ? data : "";
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const filename = `${kind}-${stamp}.csv`;
+      const out = await downloadText({ filename, content: csv, mimeType: "text/csv" });
+      if (out.ok) {
+        const lines = csv.split("\n").length - 1;
+        Alert.alert(
+          "Export ready",
+          `${lines} ${kind} row${lines === 1 ? "" : "s"} exported.${out.method === "browser" ? "\n\nCheck your browser's Downloads folder." : ""}`,
+        );
+      }
     } catch {
       Alert.alert("Export failed", "Please try again.");
     }
