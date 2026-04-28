@@ -14,6 +14,7 @@ import { colors, radii, spacing } from "../src/theme";
 export default function PendingApproval() {
   const router = useRouter();
   const { user, refresh, logout } = useAuth();
+  const { pending_hero } = useBranding();
   const [refreshing, setRefreshing] = useState(false);
 
   const status = (user as any)?.approval_status || "pending";
@@ -42,7 +43,7 @@ export default function PendingApproval() {
   );
 
   const isRejected = status === "rejected";
-  const title = isRejected ? "Registration rejected" : "Awaiting finance approval";
+  const title = isRejected ? "Registration rejected" : pending_hero;
   const iconName: any = isRejected ? "x-octagon" : "clock";
   const tint = isRejected ? "#B3261E" : colors.warning;
   const tintBg = isRejected ? "#FCE9E5" : "#FFF4E5";

@@ -11,6 +11,8 @@ const ITEMS = [
   { icon: "shield", label: "Admin access", route: "/admin/admins" },
   { icon: "user-check", label: "User approvals", route: "/admin/approvals" },
   { icon: "user-x", label: "Rejected registrations", route: "/admin/rejected" },
+  { icon: "package", label: "Products", route: "/admin/products" },
+  { icon: "edit-3", label: "Branding & theme", route: "/admin/branding" },
   { icon: "hard-drive", label: "Data backups", route: "/admin/backups" },
   { icon: "map", label: "Product roadmap", route: "/admin/roadmap" },
   { icon: "user-check", label: "KYC review queue", route: "/admin/kyc" },

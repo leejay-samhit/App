@@ -5,6 +5,7 @@ import { Feather } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
+import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
 type PayMethod = "upi" | "card" | "netbanking";
@@ -26,6 +27,7 @@ type PayConfig = {
 
 export default function Payment() {
   const { user, refresh, logout } = useAuth();
+  const { app_name, payment_hero } = useBranding();
   const router = useRouter();
 
   const [config, setConfig] = useState<PayConfig | null>(null);
@@ -154,7 +156,7 @@ export default function Payment() {
           style={styles.hero}
         />
         <Text style={styles.overline}>ACTIVATION</Text>
-        <Text style={styles.h1}>Complete your{"\n"}registration</Text>
+        <Text style={styles.h1}>{payment_hero}</Text>
         <Text style={styles.subtitle}>
           Pay the one-time {formatINR(config.amount)} activation fee to unlock your referral code and start earning.
         </Text>
@@ -228,7 +230,7 @@ export default function Payment() {
                 <Feather name="users" size={18} color={colors.primary} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.rzpMerchantName}>NetworkPay</Text>
+                <Text style={styles.rzpMerchantName}>{app_name}</Text>
                 <Text style={styles.rzpMerchantDesc}>{config.description}</Text>
               </View>
               <Text style={styles.rzpAmount}>{formatINR(config.amount)}</Text>

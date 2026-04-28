@@ -5,8 +5,10 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+import json
 import logging
 import asyncio
+import re
 import secrets
 import string
 import uuid
@@ -289,6 +291,64 @@ class ProductCreate(BaseModel):
     image_url: str
     description: Optional[str] = ""
     stock: int = 100
+    category: Optional[str] = None
+    is_published: bool = True
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+    description: Optional[str] = None
+    stock: Optional[int] = None
+    category: Optional[str] = None
+    is_published: Optional[bool] = None
+
+
+# ------------------ Branding (public-readable, super_admin writable) ------------------
+DEFAULT_BRANDING: Dict[str, Any] = {
+    "app_name": "NetworkPay",
+    "tagline": "Track your referrals, earnings and grow your team.",
+    "login_subtitle": "Sign in to your network",
+    "payment_hero": "Complete your registration",
+    "pending_hero": "Awaiting finance approval",
+    "colors": {
+        "primary": "#143D2E",
+        "primaryFg": "#FFFFFF",
+        "accent": "#E57A44",
+        "accentFg": "#FFFFFF",
+        "background": "#FAF9F6",
+        "surface": "#FFFFFF",
+        "surfaceMuted": "#F3F1EC",
+        "success": "#2E7D52",
+        "warning": "#D9A05B",
+        "textMain": "#1C2520",
+        "textMuted": "#6B7280",
+        "border": "#E5E4E0",
+    },
+    "font": "system",  # one of: system | inter | poppins | jakarta | manrope | dmsans
+    "tabs": [
+        {"key": "dashboard", "label": "Dashboard", "icon": "home", "visible": True},
+        {"key": "network", "label": "Network", "icon": "git-branch", "visible": True},
+        {"key": "wallet", "label": "Wallet", "icon": "credit-card", "visible": True},
+        {"key": "shop", "label": "Shop", "icon": "shopping-bag", "visible": True},
+        {"key": "profile", "label": "Profile", "icon": "user", "visible": True},
+    ],
+}
+
+ALLOWED_FONTS = {"system", "inter", "poppins", "jakarta", "manrope", "dmsans"}
+ALLOWED_TAB_KEYS = {"dashboard", "network", "wallet", "shop", "profile"}
+
+
+class BrandingPayload(BaseModel):
+    app_name: Optional[str] = None
+    tagline: Optional[str] = None
+    login_subtitle: Optional[str] = None
+    payment_hero: Optional[str] = None
+    pending_hero: Optional[str] = None
+    colors: Optional[Dict[str, str]] = None
+    font: Optional[str] = None
+    tabs: Optional[List[Dict[str, Any]]] = None
 
 
 # ------------------ FastAPI App ------------------
@@ -1111,8 +1171,135 @@ async def wallet_transfer(payload: WalletTransfer, user: Dict[str, Any] = Depend
 # ------------------ Products (E-commerce placeholder) ------------------
 @api_router.get("/products")
 async def list_products():
-    items = await db.products.find({}, {"_id": 0}).to_list(1000)
+    items = await db.products.find(
+        {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(1000)
     return items
+
+
+# ------------------ Branding (public read, super_admin write) ------------------
+async def _get_branding_doc() -> Dict[str, Any]:
+    doc = await db.settings.find_one({"id": "branding"}, {"_id": 0})
+    if not doc:
+        doc = {"id": "branding", **DEFAULT_BRANDING}
+        await db.settings.insert_one(doc)
+    return doc
+
+
+def _merge_branding(stored: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge stored branding over defaults so partial docs always serve a complete object."""
+    out: Dict[str, Any] = json.loads(json.dumps(DEFAULT_BRANDING))
+    for k, v in stored.items():
+        if k == "_id" or k == "id":
+            continue
+        if k == "colors" and isinstance(v, dict):
+            out["colors"].update(v)
+        elif k == "tabs" and isinstance(v, list) and v:
+            # keep ordering from stored, drop unknown tab keys
+            seen = set()
+            merged: List[Dict[str, Any]] = []
+            for t in v:
+                if not isinstance(t, dict):
+                    continue
+                key = t.get("key")
+                if key in ALLOWED_TAB_KEYS and key not in seen:
+                    default_t = next((d for d in DEFAULT_BRANDING["tabs"] if d["key"] == key), {})
+                    merged.append({
+                        "key": key,
+                        "label": t.get("label") or default_t.get("label", key.title()),
+                        "icon": t.get("icon") or default_t.get("icon", "circle"),
+                        "visible": bool(t.get("visible", True)),
+                    })
+                    seen.add(key)
+            # Append any tabs missing from stored as visible-by-default in their original order
+            for d in DEFAULT_BRANDING["tabs"]:
+                if d["key"] not in seen:
+                    merged.append(dict(d))
+            out["tabs"] = merged
+        else:
+            out[k] = v
+    return out
+
+
+@api_router.get("/branding")
+async def get_branding():
+    """PUBLIC endpoint — returns current branding so the app can theme itself
+    before the user is authenticated."""
+    stored = await _get_branding_doc()
+    return _merge_branding(stored)
+
+
+@api_router.put("/admin/branding")
+async def admin_update_branding(
+    payload: BrandingPayload,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    update: Dict[str, Any] = {}
+    if payload.app_name is not None:
+        update["app_name"] = payload.app_name.strip()[:60] or DEFAULT_BRANDING["app_name"]
+    if payload.tagline is not None:
+        update["tagline"] = payload.tagline.strip()[:200]
+    if payload.login_subtitle is not None:
+        update["login_subtitle"] = payload.login_subtitle.strip()[:120]
+    if payload.payment_hero is not None:
+        update["payment_hero"] = payload.payment_hero.strip()[:120]
+    if payload.pending_hero is not None:
+        update["pending_hero"] = payload.pending_hero.strip()[:120]
+    if payload.colors is not None:
+        # Only accept hex-like values for known keys
+        clean: Dict[str, str] = {}
+        for k, v in payload.colors.items():
+            if k in DEFAULT_BRANDING["colors"] and isinstance(v, str):
+                v = v.strip()
+                if re.match(r"^#[0-9A-Fa-f]{3,8}$", v):
+                    clean[k] = v
+        if clean:
+            existing = (await _get_branding_doc()).get("colors") or {}
+            existing.update(clean)
+            update["colors"] = existing
+    if payload.font is not None:
+        if payload.font not in ALLOWED_FONTS:
+            raise HTTPException(status_code=400, detail=f"Font must be one of: {sorted(ALLOWED_FONTS)}")
+        update["font"] = payload.font
+    if payload.tabs is not None:
+        cleaned: List[Dict[str, Any]] = []
+        seen: set = set()
+        for t in payload.tabs:
+            key = t.get("key")
+            if key in ALLOWED_TAB_KEYS and key not in seen:
+                default_t = next((d for d in DEFAULT_BRANDING["tabs"] if d["key"] == key), {})
+                cleaned.append({
+                    "key": key,
+                    "label": (t.get("label") or default_t.get("label", key.title())).strip()[:24],
+                    "icon": t.get("icon") or default_t.get("icon", "circle"),
+                    "visible": bool(t.get("visible", True)),
+                })
+                seen.add(key)
+        # Ensure all known tabs are present (append the missing ones at the end as visible)
+        for d in DEFAULT_BRANDING["tabs"]:
+            if d["key"] not in seen:
+                cleaned.append(dict(d))
+        # Require at least 1 visible tab
+        if not any(t["visible"] for t in cleaned):
+            raise HTTPException(status_code=400, detail="At least one tab must be visible")
+        update["tabs"] = cleaned
+
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields provided")
+
+    await db.settings.update_one({"id": "branding"}, {"$set": update}, upsert=True)
+    await _audit_log(admin, "branding.update", "branding", "global", {"fields": list(update.keys())})
+    stored = await _get_branding_doc()
+    return _merge_branding(stored)
+
+
+@api_router.post("/admin/branding/reset")
+async def admin_reset_branding(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    await db.settings.update_one({"id": "branding"}, {"$set": dict(DEFAULT_BRANDING)}, upsert=True)
+    await _audit_log(admin, "branding.reset", "branding", "global")
+    stored = await _get_branding_doc()
+    return _merge_branding(stored)
 
 
 # ------------------ Admin Endpoints ------------------
@@ -1238,11 +1425,44 @@ async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
 
 
 @api_router.post("/admin/products")
-async def admin_create_product(p: ProductCreate, _: Dict[str, Any] = Depends(require_admin_not_finance)):
+async def admin_create_product(p: ProductCreate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     doc = {"id": str(uuid.uuid4()), **p.dict(), "created_at": now_utc().isoformat()}
     await db.products.insert_one(doc)
     doc.pop("_id", None)
+    await _audit_log(admin, "product.create", "product", doc["id"], {"name": p.name, "price": p.price})
     return doc
+
+
+@api_router.get("/admin/products")
+async def admin_list_products(_: Dict[str, Any] = Depends(require_admin)):
+    items = await db.products.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return items
+
+
+@api_router.patch("/admin/products/{product_id}")
+async def admin_update_product(product_id: str, payload: ProductUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
+    target = await db.products.find_one({"id": product_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="Product not found")
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields provided")
+    await db.products.update_one({"id": product_id}, {"$set": update})
+    await _audit_log(admin, "product.update", "product", product_id, {"fields": list(update.keys())})
+    fresh = await db.products.find_one({"id": product_id}, {"_id": 0})
+    return fresh
+
+
+@api_router.delete("/admin/products/{product_id}")
+async def admin_delete_product(product_id: str, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
+    target = await db.products.find_one({"id": product_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="Product not found")
+    await db.products.delete_one({"id": product_id})
+    # Also remove from any open carts
+    await db.cart_items.delete_many({"product_id": product_id})
+    await _audit_log(admin, "product.delete", "product", product_id, {"name": target.get("name")})
+    return {"ok": True}
 
 
 # ------------------ Admin: User Management ------------------

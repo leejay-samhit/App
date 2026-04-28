@@ -107,7 +107,188 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
-  - task: "Phase B — Admin user-create + rejection archive + rejected-registrations"
+  - task: "Branding (theme/text/font/tabs) + Products CRUD admin endpoints"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            ALL 87/87 checks PASSED via /app/branding_products_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Detailed scenario results (matches review-request A–N):
+
+            A. PUBLIC GET /branding (no auth) ✅
+               • A.1 GET /api/branding without auth → 200 with full object containing
+                 app_name, tagline, login_subtitle, payment_hero, pending_hero, colors{...},
+                 font, tabs[]. colors is a dict with primary/accent/etc; tabs is a non-empty
+                 list with all 5 standard keys (dashboard, network, wallet, shop, profile).
+               • A.2 Idempotent — second GET returns identical JSON.
+
+            B. SUPER_ADMIN PUT /admin/branding ✅
+               • B.1 PUT {app_name:"BrandX", colors:{primary:"#FF0066"}, font:"poppins"} → 200.
+                 Response echoes app_name=BrandX, colors.primary=#FF0066, font=poppins.
+               • B.2 GET /branding immediately reflects all 3 changes; other default colors
+                 (e.g. accent) preserved (merge semantics).
+
+            C. INVALID HEX SILENTLY DROPPED ✅
+               • PUT {colors:{primary:"not-a-color", accent:"#00AABB"}} → 200.
+               • Subsequent GET shows primary stayed at previous valid value (#FF0066) —
+                 invalid hex was dropped — and accent updated to #00AABB.
+
+            D. FONT VALIDATION ✅
+               • PUT {font:"not-a-font"} → 400 with detail listing allowed fonts
+                 [system, inter, poppins, jakarta, manrope, dmsans].
+
+            E. TABS VISIBLE-AT-LEAST-ONE GUARD ✅
+               • PUT with all 5 tabs visible:false → 400 "At least one tab must be visible".
+
+            F. TABS REORDER ✅
+               • PUT tabs with wallet-first order → 200; subsequent GET returns tabs in
+                 ['wallet', 'dashboard', 'network', 'shop', 'profile'] — order preserved.
+                 All 5 standard keys still present.
+
+            G. RBAC ON BRANDING ✅
+               • PUT /admin/branding as manager → 403 ✅
+               • PUT /admin/branding as support → 403 ✅
+               • PUT /admin/branding as finance → 403 ✅
+               • PUT /admin/branding as regular user → 403 ✅
+               • PUT /admin/branding with no auth → 401 ✅
+               • POST /admin/branding/reset as manager/support/finance → 403 ✅
+
+            H. RESET ✅
+               • POST /admin/branding/reset as super_admin → 200; returns full default
+                 object: app_name="NetworkPay", font="system", colors.primary="#143D2E",
+                 tabs in default order [dashboard, network, wallet, shop, profile].
+
+            I. CREATE PRODUCTS WITH IS_PUBLISHED ✅
+               • super_admin POST /admin/products {name, price, image_url, description, stock,
+                 category, is_published:false} → 200 (unpublished/draft product created).
+               • super_admin POST published product → 200.
+               • finance POST /admin/products → 403 "Finance role cannot perform this
+                 action — only withdrawals." ✅
+               • manager POST /admin/products → 200.
+               • support POST /admin/products → 200.
+               • Public GET /api/products HIDES is_published=false products (draft_id and
+                 support's unpublished sup_pid both absent).
+               • Public GET /api/products INCLUDES published products (pub_id, mgr_pid).
+               • super_admin GET /admin/products → 200 and INCLUDES all 4 created products
+                 (drafts + published).
+               • finance GET /admin/products → 200 (any admin can list).
+
+            J. PATCH PRODUCTS ✅
+               • super_admin PATCH draft {price:299.99, is_published:true,
+                 category:"updated-cat"} → 200; persisted; previously-draft now visible
+                 in public /products list (transition draft→published works).
+               • PATCH non-existent id → 404 "Product not found".
+               • finance PATCH → 403.
+               • manager PATCH price → 200.
+               • support PATCH stock → 200.
+
+            K. DELETE PRODUCTS ✅
+               • super_admin DELETE /admin/products/{pub_id} → 200 {ok:true}.
+               • Second DELETE same id → 404 "Product not found".
+               • finance DELETE → 403.
+
+            L. CART CASCADE ON DELETE ✅
+               • Regular user POST /api/cart/add {product_id, qty:1} → 200, cart now contains
+                 pub_id.
+               • super_admin DELETE /admin/products/{pub_id} → 200.
+               • Same user GET /api/cart → product no longer present (db.cart_items.delete_many
+                 cascade verified).
+
+            M. CLEANUP ✅
+               • Deleted 3 remaining temporary products (draft, mgr, sup) — all 200.
+               • POST /admin/branding/reset → 200 (clean state).
+               • Deleted 3 helper admins (manager/support/finance) → all 200.
+               • Deleted 1 regular test user → 200.
+               • Final GET /branding confirms defaults (app_name=NetworkPay, font=system,
+                 colors.primary=#143D2E). ✅
+
+            N. REGRESSION ON LEGACY /api/products ✅
+               • GET /api/products → 200 returns list. No is_published=false products
+                 leaked (legacy products without the field still appear via the
+                 $or clause {is_published:true} | {is_published:{$exists:false}}).
+
+            Implementation observations:
+            • DEFAULT_BRANDING includes app_name="NetworkPay", tagline, login_subtitle,
+              payment_hero, pending_hero, full colors palette (primary, primaryFg, accent,
+              accentFg, background, surface, surfaceMuted, success, warning, textMain,
+              textMuted, border), font="system", and 5 standard tabs.
+            • ALLOWED_FONTS = {system, inter, poppins, jakarta, manrope, dmsans}.
+            • ALLOWED_TAB_KEYS = {dashboard, network, wallet, shop, profile}.
+            • PUT /admin/branding (require_admin_role("super_admin")) — invalid hex codes
+              filtered out via regex ^#[0-9A-Fa-f]{3,8}$, font validated, tabs sanitized
+              with at-least-one-visible guard, audit log "branding.update" written.
+            • POST /admin/branding/reset overwrites settings doc id="branding" with
+              defaults, audit log "branding.reset" written.
+            • _merge_branding() ensures GET /branding always returns a complete object
+              even if stored doc is partial.
+            • Public GET /api/products query: {$or:[{is_published:true},
+              {is_published:{$exists:false}}]} — preserves legacy products while hiding
+              new drafts.
+            • POST/PATCH/DELETE /admin/products use require_admin_not_finance dependency
+              (super_admin/manager/support; finance excluded).
+            • DELETE /admin/products/{id} also calls
+              db.cart_items.delete_many({"product_id": product_id}) — cart cascade verified
+              end-to-end.
+
+            Backend logs clean, no 500s. Final state: branding reset to defaults; no
+            leftover test products; helper admins + test user deleted; admin@app.com
+            still working. Task working: true, needs_retesting: false.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            New endpoints added for admin app customization:
+
+            BRANDING:
+            • GET  /api/branding (PUBLIC, no auth) — returns app_name, tagline,
+              login_subtitle, payment_hero, pending_hero, colors{...}, font, tabs[].
+              Always returns a complete object (defaults merged on top).
+            • PUT  /api/admin/branding (super_admin only) — partial update payload:
+              {app_name?, tagline?, login_subtitle?, payment_hero?, pending_hero?,
+               colors?{key:hex}, font?, tabs?[{key,label,icon,visible}]}.
+              - hex values validated with regex; invalid keys silently dropped.
+              - font must be one of: system|inter|poppins|jakarta|manrope|dmsans (else 400).
+              - tabs: at least one must remain visible (else 400). Unknown keys dropped,
+                missing standard keys appended at the end.
+            • POST /api/admin/branding/reset (super_admin only) — restores defaults.
+            • Non super_admin (manager/support/finance/regular user) hitting PUT or RESET
+              must return 403.
+
+            PRODUCT CRUD:
+            • POST   /api/admin/products (super_admin/manager/support; finance 403) —
+              now also accepts category, is_published.
+            • GET    /api/admin/products (any admin) — returns ALL products including
+              unpublished drafts.
+            • PATCH  /api/admin/products/{id} — partial update (super_admin/manager/support).
+            • DELETE /api/admin/products/{id} — also removes the product from any open carts.
+            • Public GET /api/products now filters by is_published (legacy products without
+              the field still appear).
+
+            REQUEST — please verify:
+            A. GET /branding without auth → 200 with full default object on first request,
+               and is idempotent.
+            B. super_admin PUT /admin/branding {app_name:"BrandX", colors:{primary:"#FF0066"}, font:"poppins"} → 200,
+               next GET /branding reflects the change.
+            C. PUT with invalid hex color → invalid key silently ignored, valid ones applied.
+            D. PUT with font="not-a-font" → 400.
+            E. PUT with tabs all visible:false → 400.
+            F. PUT reorder tabs (e.g. wallet first) → 200, GET returns new order.
+            G. manager PUT /admin/branding → 403; finance PUT → 403; user → 401/403.
+            H. POST /admin/branding/reset → 200 returns default branding.
+            I. PRODUCT: super_admin POST /admin/products with all fields incl. is_published=false → 200.
+               GET /api/products (public) does NOT include the unpublished one. GET /admin/products DOES.
+            J. PATCH product → updates and persists; non-existent id → 404; finance role → 403.
+            K. DELETE product → 200 and product gone; second delete → 404.
+            L. After product delete, /api/cart for any test user that had it added must not show it.
+            M. Cleanup any temporary test products.
+            N. NO regression on existing products endpoint (legacy /api/products still works for users).
     implemented: true
     working: true
     file: "backend/server.py"

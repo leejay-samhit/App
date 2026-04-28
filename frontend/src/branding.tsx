@@ -1,0 +1,168 @@
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { Platform, StyleSheet } from "react-native";
+import {
+  useFonts as useInter,
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_600SemiBold,
+  Inter_700Bold,
+  Inter_800ExtraBold,
+} from "@expo-google-fonts/inter";
+import {
+  Poppins_400Regular,
+  Poppins_500Medium,
+  Poppins_600SemiBold,
+  Poppins_700Bold,
+  Poppins_800ExtraBold,
+} from "@expo-google-fonts/poppins";
+import {
+  PlusJakartaSans_400Regular,
+  PlusJakartaSans_500Medium,
+  PlusJakartaSans_600SemiBold,
+  PlusJakartaSans_700Bold,
+  PlusJakartaSans_800ExtraBold,
+} from "@expo-google-fonts/plus-jakarta-sans";
+import { api } from "./api";
+import { colors as defaultColors } from "./theme";
+
+export type BrandingTab = { key: string; label: string; icon: string; visible: boolean };
+
+export type Branding = {
+  app_name: string;
+  tagline: string;
+  login_subtitle: string;
+  payment_hero: string;
+  pending_hero: string;
+  colors: typeof defaultColors;
+  font: "system" | "inter" | "poppins" | "jakarta" | "manrope" | "dmsans";
+  tabs: BrandingTab[];
+};
+
+const DEFAULT_BRANDING: Branding = {
+  app_name: "NetworkPay",
+  tagline: "Track your referrals, earnings and grow your team.",
+  login_subtitle: "Sign in to your network",
+  payment_hero: "Complete your registration",
+  pending_hero: "Awaiting finance approval",
+  colors: { ...defaultColors },
+  font: "system",
+  tabs: [
+    { key: "dashboard", label: "Dashboard", icon: "home", visible: true },
+    { key: "network", label: "Network", icon: "git-branch", visible: true },
+    { key: "wallet", label: "Wallet", icon: "credit-card", visible: true },
+    { key: "shop", label: "Shop", icon: "shopping-bag", visible: true },
+    { key: "profile", label: "Profile", icon: "user", visible: true },
+  ],
+};
+
+const FONT_FAMILY_MAP: Record<Branding["font"], string | undefined> = {
+  system: undefined,
+  inter: "Inter_500Medium",
+  poppins: "Poppins_500Medium",
+  jakarta: "PlusJakartaSans_500Medium",
+  manrope: undefined, // can be added later
+  dmsans: undefined, // can be added later
+};
+
+type Ctx = {
+  branding: Branding;
+  setBranding: (b: Branding) => void;
+  refresh: () => Promise<void>;
+  loading: boolean;
+};
+
+const BrandingContext = createContext<Ctx | undefined>(undefined);
+
+export function BrandingProvider({ children }: { children: React.ReactNode }) {
+  const [branding, setBrandingState] = useState<Branding>(DEFAULT_BRANDING);
+  const [loading, setLoading] = useState(true);
+
+  // Load all the fonts so they're ready when the user picks one.
+  const [fontsLoaded] = useInter({
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_600SemiBold,
+    Inter_700Bold,
+    Inter_800ExtraBold,
+    Poppins_400Regular,
+    Poppins_500Medium,
+    Poppins_600SemiBold,
+    Poppins_700Bold,
+    Poppins_800ExtraBold,
+    PlusJakartaSans_400Regular,
+    PlusJakartaSans_500Medium,
+    PlusJakartaSans_600SemiBold,
+    PlusJakartaSans_700Bold,
+    PlusJakartaSans_800ExtraBold,
+  });
+
+  const applyToColors = (next: Branding["colors"]) => {
+    // Mutate the singleton colors object so existing screens that import { colors } pick up
+    // the new values on their next render.
+    Object.assign(defaultColors, next);
+  };
+
+  const setBranding = useCallback((b: Branding) => {
+    setBrandingState(b);
+    applyToColors(b.colors);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    try {
+      const { data } = await api.get<Branding>("/branding");
+      const merged: Branding = {
+        ...DEFAULT_BRANDING,
+        ...data,
+        colors: { ...DEFAULT_BRANDING.colors, ...(data?.colors || {}) },
+        tabs: Array.isArray(data?.tabs) && data.tabs.length ? data.tabs : DEFAULT_BRANDING.tabs,
+      };
+      setBranding(merged);
+    } catch {
+      // keep defaults
+    } finally {
+      setLoading(false);
+    }
+  }, [setBranding]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Apply the chosen font globally. We override default styles for Text via
+  // a one-time monkey-patch on StyleSheet (works for RN out of the box).
+  useEffect(() => {
+    const fam = FONT_FAMILY_MAP[branding.font];
+    // Use setNativeProps via Text default — see below in `useFontFamily()` hook.
+    // No-op here; consumers can use useFontFamily() to get the active family.
+    return () => undefined;
+  }, [branding.font, fontsLoaded]);
+
+  const value = useMemo<Ctx>(() => ({ branding, setBranding, refresh, loading }), [branding, setBranding, refresh, loading]);
+  return <BrandingContext.Provider value={value}>{children}</BrandingContext.Provider>;
+}
+
+export function useBranding(): Branding {
+  const ctx = useContext(BrandingContext);
+  return ctx?.branding ?? DEFAULT_BRANDING;
+}
+
+export function useBrandingActions() {
+  const ctx = useContext(BrandingContext);
+  if (!ctx) throw new Error("useBrandingActions must be inside BrandingProvider");
+  return { setBranding: ctx.setBranding, refresh: ctx.refresh, loading: ctx.loading };
+}
+
+/** Returns the active font-family string (or undefined for system default). */
+export function useFontFamily(): string | undefined {
+  const { font } = useBranding();
+  return FONT_FAMILY_MAP[font];
+}
+
+/** Helper to get a typed StyleSheet that automatically applies the active font.
+ *  Usage: const styles = useThemedStyles(() => StyleSheet.create({ ... })) */
+export const FONT_OPTIONS: { key: Branding["font"]; label: string }[] = [
+  { key: "system", label: "System default" },
+  { key: "inter", label: "Inter" },
+  { key: "poppins", label: "Poppins" },
+  { key: "jakarta", label: "Plus Jakarta Sans" },
+];

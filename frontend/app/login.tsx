@@ -15,12 +15,14 @@ import { useRouter, Link } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../src/auth";
+import { useBranding } from "../src/branding";
 import { colors, radii, spacing } from "../src/theme";
 import { formatApiError } from "../src/api";
 import { signInWithGoogle } from "../src/google";
 
 export default function Login() {
   const { login, setSession } = useAuth();
+  const { app_name, tagline, login_subtitle } = useBranding();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -79,13 +81,13 @@ export default function Login() {
             <View style={styles.logoBox}>
               <Feather name="git-merge" size={22} color={colors.primaryFg} />
             </View>
-            <Text style={styles.brandText}>NetworkPay</Text>
+            <Text style={styles.brandText}>{app_name}</Text>
           </View>
 
           <Text style={styles.overline}>WELCOME BACK</Text>
-          <Text style={styles.h1}>Sign in to{"\n"}your network</Text>
+          <Text style={styles.h1}>{login_subtitle}</Text>
           <Text style={styles.subtitle}>
-            Track your referrals, earnings and grow your team.
+            {tagline}
           </Text>
 
           <View style={styles.formGroup}>

@@ -1,9 +1,17 @@
 import { Tabs } from "expo-router";
 import { Feather } from "@expo/vector-icons";
-import { colors } from "../../src/theme";
 import { Platform } from "react-native";
+import { colors } from "../../src/theme";
+import { useBranding } from "../../src/branding";
 
 export default function TabsLayout() {
+  const { tabs } = useBranding();
+  // Use the configured ordering / labels but render every screen file (Tabs requires every
+  // child to map to an actual file in /app/(tabs)). We use `href: null` to hide invisible
+  // tabs from the bar without unmounting the route.
+  const order = tabs.map((t) => t.key);
+  const byKey = Object.fromEntries(tabs.map((t) => [t.key, t]));
+
   return (
     <Tabs
       screenOptions={{
@@ -21,41 +29,21 @@ export default function TabsLayout() {
         tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
       }}
     >
-      <Tabs.Screen
-        name="dashboard"
-        options={{
-          title: "Home",
-          tabBarIcon: ({ color, size }) => <Feather name="home" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="network"
-        options={{
-          title: "Network",
-          tabBarIcon: ({ color, size }) => <Feather name="users" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="wallet"
-        options={{
-          title: "Wallet",
-          tabBarIcon: ({ color, size }) => <Feather name="credit-card" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="shop"
-        options={{
-          title: "Shop",
-          tabBarIcon: ({ color, size }) => <Feather name="shopping-bag" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="profile"
-        options={{
-          title: "Profile",
-          tabBarIcon: ({ color, size }) => <Feather name="user" size={size} color={color} />,
-        }}
-      />
+      {order.map((key) => {
+        const t = byKey[key];
+        const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : "user");
+        return (
+          <Tabs.Screen
+            key={key}
+            name={key}
+            options={{
+              title: t?.label || key,
+              href: t?.visible === false ? null : undefined,
+              tabBarIcon: ({ color, size }) => <Feather name={iconName} size={size} color={color} />,
+            }}
+          />
+        );
+      })}
     </Tabs>
   );
 }
