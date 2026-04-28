@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -31,6 +32,7 @@ export default function CartScreen() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -45,8 +47,11 @@ export default function CartScreen() {
       }, 0);
       setTotal(Number(data.total) > 0 ? Number(data.total) : localTotal);
     } catch {}
-    finally { setLoading(false); }
+    finally { setLoading(false); setRefreshing(false); }
   }, []);
+
+  useFocusEffect(useCallback(() => { load(); }, [load]));
+  const onRefresh = useCallback(() => { setRefreshing(true); load(); }, [load]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -100,7 +105,10 @@ export default function CartScreen() {
         </View>
       ) : (
         <>
-          <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingTop: 8, paddingBottom: 20 }}>
+          <ScrollView
+            contentContainerStyle={{ padding: spacing.screen, paddingTop: 8, paddingBottom: 20 }}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
+          >
             {items.map((it) => (
               <View key={it.id} style={styles.line} testID={`cart-line-${it.product_id}`}>
                 <Image source={{ uri: it.product.image_url }} style={styles.image} />

@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, RefreshControl } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -27,6 +27,7 @@ export default function NotificationsScreen() {
   const router = useRouter();
   const [items, setItems] = useState<Notif[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -35,10 +36,11 @@ export default function NotificationsScreen() {
       // Mark all as read
       await api.post("/notifications/me/read-all").catch(() => {});
     } catch {}
-    finally { setLoading(false); }
+    finally { setLoading(false); setRefreshing(false); }
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+  const onRefresh = useCallback(() => { setRefreshing(true); load(); }, [load]);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -61,6 +63,7 @@ export default function NotificationsScreen() {
       ) : (
         <FlatList
           contentContainerStyle={{ padding: spacing.screen, paddingTop: 8 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
           data={items}
           keyExtractor={(i) => i.id}
           renderItem={({ item }) => (
