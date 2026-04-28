@@ -35,8 +35,15 @@ export default function CartScreen() {
   const load = useCallback(async () => {
     try {
       const { data } = await api.get<{ items: CartLine[]; total: number }>("/cart");
-      setItems(data.items);
-      setTotal(data.total);
+      const safeItems = Array.isArray(data.items) ? data.items : [];
+      setItems(safeItems);
+      // Defensive: if backend total comes back as 0/undefined for any reason, compute it
+      // locally from the line_totals so the user never sees an incorrect ₹0 with items present.
+      const localTotal = safeItems.reduce((sum, it) => {
+        const lt = typeof it.line_total === "number" ? it.line_total : (it.product?.price || 0) * (it.qty || 0);
+        return sum + (lt || 0);
+      }, 0);
+      setTotal(Number(data.total) > 0 ? Number(data.total) : localTotal);
     } catch {}
     finally { setLoading(false); }
   }, []);
