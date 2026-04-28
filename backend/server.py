@@ -153,6 +153,32 @@ async def verify_super_password(provided: str) -> bool:
         return False
 
 
+# ------------------ Danger PIN (Wipe + Restore unified gate) ------------------
+DANGER_PIN_FORMAT_DESC = "PIN must be exactly 6 digits (0–9)."
+
+
+def validate_danger_pin_format(pin: str) -> None:
+    if not isinstance(pin, str) or len(pin) != 6 or not pin.isdigit():
+        raise HTTPException(status_code=400, detail=f"Invalid PIN format. {DANGER_PIN_FORMAT_DESC}")
+
+
+async def get_danger_pin_hash() -> Optional[str]:
+    doc = await db.settings.find_one({"id": "global"}, {"_id": 0, "danger_pin_hash": 1})
+    return (doc or {}).get("danger_pin_hash")
+
+
+async def verify_danger_pin(provided: str) -> bool:
+    if not provided:
+        return False
+    h = await get_danger_pin_hash()
+    if not h:
+        return False
+    try:
+        return verify_password(provided, h)
+    except Exception:
+        return False
+
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -1200,10 +1226,43 @@ async def admin_verify_super_password(
     return {"ok": True}
 
 
+# ------------------ Danger PIN endpoints ------------------
+class DangerPinSet(BaseModel):
+    new_pin: str
+    current_pin: Optional[str] = None  # required if one is already set
+
+
+@api_router.get("/admin/danger-pin")
+async def admin_danger_pin_status(_: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    h = await get_danger_pin_hash()
+    return {"is_set": bool(h), "format": DANGER_PIN_FORMAT_DESC}
+
+
+@api_router.post("/admin/danger-pin")
+async def admin_set_danger_pin(
+    payload: DangerPinSet,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Set or rotate the Danger PIN. super_admin only.
+    If one is already set, current_pin must be provided and match."""
+    existing = await get_danger_pin_hash()
+    if existing:
+        if not payload.current_pin or not verify_password(payload.current_pin, existing):
+            raise HTTPException(status_code=401, detail="Current Danger PIN is incorrect")
+    validate_danger_pin_format(payload.new_pin)
+    new_hash = hash_password(payload.new_pin)
+    await db.settings.update_one(
+        {"id": "global"},
+        {"$set": {"danger_pin_hash": new_hash, "danger_pin_set_at": now_utc().isoformat()}},
+        upsert=True,
+    )
+    await _audit_log(admin, "danger_pin.set", "system", "global")
+    return {"ok": True}
+
+
 class WipeUsersRequest(BaseModel):
-    confirm: str  # must equal "WIPE_ALL_USERS"
     keep_admins: bool = True
-    super_password: str  # required — danger-zone gate
+    danger_pin: str  # required — unified danger-zone PIN
 
 
 @api_router.post("/admin/system/wipe-users")
@@ -1212,14 +1271,11 @@ async def admin_wipe_users(
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
     """DESTRUCTIVE: Deletes all (non-admin) users + their related data.
-    Caller must send confirm="WIPE_ALL_USERS" and a valid super_password. super_admin only."""
-    if payload.confirm != "WIPE_ALL_USERS":
-        raise HTTPException(status_code=400, detail="Send confirm='WIPE_ALL_USERS' to proceed")
-    # Danger-zone gate
-    if not await get_super_password_hash():
-        raise HTTPException(status_code=400, detail="Super password not set. Please set it in Admin → Admin access.")
-    if not await verify_super_password(payload.super_password):
-        raise HTTPException(status_code=401, detail="Invalid super password")
+    Caller must provide the 6-digit Danger PIN. super_admin only."""
+    if not await get_danger_pin_hash():
+        raise HTTPException(status_code=400, detail="Danger PIN not set. Please set it in Admin → Admin access.")
+    if not await verify_danger_pin(payload.danger_pin):
+        raise HTTPException(status_code=401, detail="Invalid Danger PIN")
 
     user_query: Dict[str, Any] = {"role": {"$ne": "admin"}} if payload.keep_admins else {"id": {"$ne": admin["id"]}}
     if not payload.keep_admins:
@@ -2314,17 +2370,17 @@ async def admin_take_backup(payload: TakeBackupRequest,
 
 
 class RestoreBackupRequest(BaseModel):
-    super_password: str
+    danger_pin: str
 
 
 @api_router.post("/admin/backups/{snap_id}/restore")
 async def admin_restore_backup(snap_id: str, payload: RestoreBackupRequest,
                                admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
-    """Restore the DB to a snapshot. super_admin only + super-password gate."""
-    if not await get_super_password_hash():
-        raise HTTPException(status_code=400, detail="Super password not set. Set it in Admin → Admin access.")
-    if not await verify_super_password(payload.super_password):
-        raise HTTPException(status_code=401, detail="Invalid super password")
+    """Restore the DB to a snapshot. super_admin only + Danger PIN gate."""
+    if not await get_danger_pin_hash():
+        raise HTTPException(status_code=400, detail="Danger PIN not set. Set it in Admin → Admin access.")
+    if not await verify_danger_pin(payload.danger_pin):
+        raise HTTPException(status_code=401, detail="Invalid Danger PIN")
     res = await _restore_snapshot(snap_id)
     await _audit_log(admin, "backup.restore", "snapshot", snap_id, res["restored"])
     return res
