@@ -16,6 +16,8 @@ export default function Index() {
       router.replace("/admin/home");
     } else if (!user.registration_paid) {
       router.replace("/payment");
+    } else if (((user as any).approval_status || "approved") !== "approved") {
+      router.replace("/pending-approval" as any);
     } else {
       router.replace("/(tabs)/dashboard");
     }

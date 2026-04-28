@@ -332,6 +332,8 @@ async def register(payload: RegisterRequest):
         "wallet_balance": 0.0,
         "total_earned": 0.0,
         "registration_paid": False,
+        "payment_attempts": 0,
+        "last_payment_failure_at": None,
         "direct_referrals_count": 0,
         "payouts_received": 0,
         "upi_id": None,
@@ -379,6 +381,15 @@ async def login(payload: LoginRequest):
     if user.get("is_blocked"):
         reason = user.get("block_reason") or "Contact support."
         raise HTTPException(status_code=403, detail=f"Account blocked: {reason}")
+    # Non-admin users whose registration was rejected cannot sign in.
+    if user.get("role") == "user" and user.get("approval_status") == "rejected":
+        cat = user.get("approval_reject_category") or "other"
+        msg_map = {
+            "payment_unsuccessful": "Your registration payment was unsuccessful. Please contact support.",
+            "referral_code_mistake": "Your referral code was invalid. Please contact support to re-register.",
+            "other": user.get("approval_reject_reason") or "Your registration was rejected. Please contact support.",
+        }
+        raise HTTPException(status_code=403, detail=msg_map.get(cat, msg_map["other"]))
     token = create_access_token(user["id"], email, user.get("role", "user"))
     return {"token": token, "user": serialize_user(user)}
 
@@ -440,6 +451,8 @@ async def google_exchange(payload: GoogleExchange):
             "wallet_balance": 0.0,
             "total_earned": 0.0,
             "registration_paid": False,
+            "payment_attempts": 0,
+            "last_payment_failure_at": None,
             "direct_referrals_count": 0,
             "payouts_received": 0,
             "upi_id": None,
@@ -603,7 +616,8 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
 
 @api_router.post("/payment/register-fee")
 async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user)):
-    """Mock registration fee payment. Marks account active.
+    """BACKWARD-COMPAT: Instant mock registration fee payment. Marks account paid.
+    New flows should prefer /payment/create-order + /payment/verify (Razorpay-compatible).
     Note: referral commissions are NOT triggered here anymore — they trigger only after
     admin approves the user via /admin/approvals/{id}/approve."""
     if user.get("registration_paid"):
@@ -620,7 +634,7 @@ async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user))
         "type": "registration_fee",
         "amount": fee,
         "status": "paid",
-        "description": "Registration fee (mocked)",
+        "description": "Registration fee (legacy mock)",
         "created_at": now_utc().isoformat(),
     })
     await _create_notification(
@@ -630,6 +644,231 @@ async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user))
         "Thanks! Your registration is paid. An admin will review your profile shortly.",
     )
     return {"ok": True, "transaction_id": txn_id, "amount": fee, "approval_status": "pending"}
+
+
+# ------------------ Razorpay-compatible payment flow (mock fallback) ------------------
+# The backend ships with a "mock" mode when RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not
+# configured. In mock mode, fake order IDs are generated and the /verify endpoint accepts
+# any non-empty signature. When real keys are provided, we'll hit api.razorpay.com.
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
+RAZORPAY_IS_MOCK = not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+MAX_PAYMENT_ATTEMPTS = 3
+
+
+@api_router.get("/payment/config")
+async def payment_config(user: Dict[str, Any] = Depends(get_current_user)):
+    """Return public Razorpay config + user-specific payment state.
+    Used by the frontend to render the checkout sheet."""
+    settings = await get_settings()
+    fee = settings["registration_fee"]
+    attempts = int(user.get("payment_attempts") or 0)
+    return {
+        "key_id": RAZORPAY_KEY_ID or "rzp_test_MOCK",
+        "is_mock": RAZORPAY_IS_MOCK,
+        "amount": fee,  # rupees
+        "amount_paise": int(round(fee * 100)),
+        "currency": "INR",
+        "registration_paid": bool(user.get("registration_paid")),
+        "approval_status": user.get("approval_status") or "pending",
+        "attempts_used": attempts,
+        "attempts_remaining": max(0, MAX_PAYMENT_ATTEMPTS - attempts),
+        "max_attempts": MAX_PAYMENT_ATTEMPTS,
+        "prefill": {
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "contact": user.get("phone") or "",
+        },
+        "description": "NetworkPay registration fee",
+    }
+
+
+class CreateOrderResponse(BaseModel):
+    order_id: str
+    amount_paise: int
+    currency: str
+    key_id: str
+    is_mock: bool
+
+
+@api_router.post("/payment/create-order")
+async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user)):
+    """Create a Razorpay order (or mock order in dev). Returns order_id for checkout."""
+    if user.get("registration_paid"):
+        raise HTTPException(status_code=400, detail="Registration fee already paid")
+
+    attempts = int(user.get("payment_attempts") or 0)
+    if attempts >= MAX_PAYMENT_ATTEMPTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_PAYMENT_ATTEMPTS} payment attempts reached. Contact support.",
+        )
+
+    settings = await get_settings()
+    amount_paise = int(round(settings["registration_fee"] * 100))
+
+    if RAZORPAY_IS_MOCK:
+        order_id = f"order_MOCK_{secrets.token_hex(8)}"
+    else:
+        # LIVE MODE (requires httpx Basic Auth to Razorpay). Not exercised here.
+        async with httpx.AsyncClient(timeout=15.0, auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) as client:
+            r = await client.post(
+                "https://api.razorpay.com/v1/orders",
+                json={
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "receipt": f"reg_{user['id'][:12]}",
+                    "notes": {"user_id": user["id"], "email": user["email"]},
+                },
+            )
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Razorpay order failed: {r.text}")
+        order_id = r.json().get("id")
+
+    # Record a pending transaction for traceability
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "type": "registration_fee",
+        "amount": amount_paise / 100.0,
+        "status": "created",
+        "description": "Razorpay order created" + (" (mock)" if RAZORPAY_IS_MOCK else ""),
+        "razorpay_order_id": order_id,
+        "created_at": now_utc().isoformat(),
+    })
+
+    return CreateOrderResponse(
+        order_id=order_id,
+        amount_paise=amount_paise,
+        currency="INR",
+        key_id=RAZORPAY_KEY_ID or "rzp_test_MOCK",
+        is_mock=RAZORPAY_IS_MOCK,
+    )
+
+
+class VerifyPaymentRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+@api_router.post("/payment/verify")
+async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    """Verify Razorpay payment signature and activate the user's registration_paid flag.
+    In mock mode, any non-empty signature is accepted. In live mode we HMAC-SHA256
+    verify using the Razorpay secret."""
+    if user.get("registration_paid"):
+        raise HTTPException(status_code=400, detail="Registration fee already paid")
+
+    if not payload.razorpay_signature or not payload.razorpay_payment_id or not payload.razorpay_order_id:
+        raise HTTPException(status_code=400, detail="Missing Razorpay fields")
+
+    if not RAZORPAY_IS_MOCK:
+        import hmac
+        import hashlib
+        expected = hmac.new(
+            RAZORPAY_KEY_SECRET.encode(),
+            f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, payload.razorpay_signature):
+            raise HTTPException(status_code=401, detail="Invalid payment signature")
+
+    settings = await get_settings()
+    fee = settings["registration_fee"]
+    txn_id = str(uuid.uuid4())
+
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "registration_paid": True,
+            "payment_method": "razorpay" + ("_mock" if RAZORPAY_IS_MOCK else ""),
+            "razorpay_payment_id": payload.razorpay_payment_id,
+            "razorpay_order_id": payload.razorpay_order_id,
+            "paid_at": now_utc().isoformat(),
+        }},
+    )
+    await db.transactions.insert_one({
+        "id": txn_id,
+        "user_id": user["id"],
+        "type": "registration_fee",
+        "amount": fee,
+        "status": "paid",
+        "description": "Registration fee via Razorpay" + (" (mock)" if RAZORPAY_IS_MOCK else ""),
+        "razorpay_order_id": payload.razorpay_order_id,
+        "razorpay_payment_id": payload.razorpay_payment_id,
+        "created_at": now_utc().isoformat(),
+    })
+    await _create_notification(
+        user["id"],
+        "welcome",
+        "Payment received — awaiting approval",
+        "Your registration payment was successful. The finance team will review your profile shortly.",
+    )
+    return {
+        "ok": True,
+        "transaction_id": txn_id,
+        "amount": fee,
+        "approval_status": "pending",
+        "is_mock": RAZORPAY_IS_MOCK,
+    }
+
+
+class PaymentFailureRequest(BaseModel):
+    razorpay_order_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@api_router.post("/payment/failure")
+async def payment_failure(payload: PaymentFailureRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    """Record a failed payment attempt. After MAX_PAYMENT_ATTEMPTS, the user is
+    auto-moved to `rejected_registrations` with category=payment_unsuccessful.
+    Phase A note: archive to rejected_registrations happens in Phase B; for now
+    we simply increment the counter and, on cap, mark approval_status='rejected'
+    with category/reason so the UI can route to a polite rejection screen."""
+    if user.get("registration_paid"):
+        raise HTTPException(status_code=400, detail="Registration fee already paid")
+
+    attempts = int(user.get("payment_attempts") or 0) + 1
+    archived = False
+
+    update_doc: Dict[str, Any] = {
+        "payment_attempts": attempts,
+        "last_payment_failure_at": now_utc().isoformat(),
+        "last_payment_failure_reason": (payload.reason or "Payment failed")[:500],
+    }
+    if attempts >= MAX_PAYMENT_ATTEMPTS:
+        archived = True
+        update_doc.update({
+            "approval_status": "rejected",
+            "approval_reviewed_at": now_utc().isoformat(),
+            "approval_reviewed_by": "system",
+            "approval_reject_category": "payment_unsuccessful",
+            "approval_reject_reason": f"Auto-rejected after {MAX_PAYMENT_ATTEMPTS} failed payment attempts. Last reason: {payload.reason or 'unknown'}",
+        })
+
+    await db.users.update_one({"id": user["id"]}, {"$set": update_doc})
+
+    # Log a pending-failed transaction for traceability
+    settings = await get_settings()
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "type": "registration_fee",
+        "amount": settings["registration_fee"],
+        "status": "failed",
+        "description": f"Payment failed (attempt {attempts}/{MAX_PAYMENT_ATTEMPTS})" + (f" — {payload.reason}" if payload.reason else ""),
+        "razorpay_order_id": payload.razorpay_order_id,
+        "created_at": now_utc().isoformat(),
+    })
+
+    return {
+        "ok": True,
+        "attempts_used": attempts,
+        "attempts_remaining": max(0, MAX_PAYMENT_ATTEMPTS - attempts),
+        "archived": archived,
+        "category": "payment_unsuccessful" if archived else None,
+    }
 
 
 # ------------------ User Endpoints ------------------

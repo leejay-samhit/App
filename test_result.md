@@ -107,6 +107,180 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Payment Gateway (Razorpay mock) + 3-attempt cap + login gate"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Razorpay-compatible MOCK payment flow — backend testing COMPLETE.
+            63/65 functional checks PASSED via /app/payment_razorpay_test.py against
+            https://network-pay-1.preview.emergentagent.com. The 2 "failures" are NOT
+            implementation bugs — they are env-config mismatches (see note at bottom).
+
+            Detailed scenario results (matches review-request A–G):
+
+            A. SUCCESS PATH ✅
+               • A1. Register fresh U1 + login → 200, token captured.
+               • A2. GET /payment/config → 200 with is_mock=true, max_attempts=3,
+                 attempts_remaining=3, registration_paid=false, key_id="rzp_test_MOCK".
+                 amount_paise = registration_fee*100 (correct math). ✅
+               • A3. POST /payment/create-order → 200 with order_id="order_MOCK_<hex>",
+                 amount_paise present, key_id present, currency=INR. ✅
+               • A4. Repeat create-order on same user → still 200 (idempotent retry
+                 allowed; backend simply mints a new mock order). ✅
+               • A5. POST /payment/verify with razorpay_signature="" → 400
+                 "Missing Razorpay fields". ✅
+               • A6. POST /payment/verify with valid mock fields
+                 (razorpay_order_id from step A3, razorpay_payment_id="pay_MOCK_xyz",
+                 razorpay_signature="sig_MOCK_abc") → 200 {ok:true, transaction_id,
+                 amount, approval_status:"pending", is_mock:true}. ✅
+               • A7. GET /auth/me → registration_paid=true, approval_status="pending".
+                 paid_at, payment_method="razorpay_mock", razorpay_payment_id and
+                 razorpay_order_id all persisted on user doc. ✅
+               • A8. Second /payment/verify call → 400 "Registration fee already paid". ✅
+               • A9. Legacy POST /payment/register-fee on the SAME (already-paid) user
+                 → 400 "Registration fee already paid" (backward-compat). ✅
+
+            B. FAILURE / AUTO-ARCHIVE ✅
+               • Register fresh U2.
+               • B1. /payment/failure {reason:"Card declined"} → 200
+                 {ok:true, attempts_used:1, archived:false, attempts_remaining:2,
+                 category:null}. ✅
+               • B2. /payment/failure 2nd → attempts_used:2, attempts_remaining:1,
+                 archived:false. ✅
+               • B3. /payment/failure 3rd → attempts_used:3, archived:true,
+                 category:"payment_unsuccessful". ✅
+               • B4. GET /auth/me as U2 → approval_status="rejected",
+                 approval_reject_category="payment_unsuccessful",
+                 approval_reject_reason mentions "Auto-rejected after 3 failed
+                 payment attempts." ✅
+               • B5. POST /auth/login as U2 → 403 with detail
+                 "Your registration payment was unsuccessful. Please contact
+                 support." (login gate active for role=user with rejected status). ✅
+               • B6. POST /payment/create-order as U2 (with old token) → 400
+                 "Maximum 3 payment attempts reached. Contact support." ✅
+
+            C. MIXED PATH (failures then success) ✅
+               • Register fresh U3.
+               • C1. /payment/failure x2 → archived=false, attempts_remaining=1,
+                 user still in "pending" state. ✅
+               • C2. /payment/create-order on U3 → 200 (3rd attempt allowed since
+                 cap is 3 and only 2 failures so far). /payment/verify with mock
+                 sig → 200. ✅
+               • C3. GET /auth/me → registration_paid=true. Confirms success path
+                 after some failures still works correctly. ✅
+
+            D. LEGACY COMPAT ✅
+               • Register fresh U4.
+               • D1. POST /payment/register-fee (no body) → 200
+                 {ok:true, transaction_id, amount, approval_status:"pending"};
+                 GET /auth/me confirms registration_paid=true. ✅
+               • D2. Second call → 400 "Registration fee already paid". ✅
+
+            E. UNAUTHENTICATED ✅
+               • E1. GET /payment/config without token → 401 "Not authenticated". ✅
+               • E2. POST /payment/verify without token → 401 "Not authenticated". ✅
+
+            F. CLEANUP ✅
+               • DELETE /admin/users/{U1.id|U2.id|U3.id|U4.id} as super_admin → 200
+                 each. All four throwaway users removed. ✅
+
+            G. REGRESSION ✅
+               • GET /auth/me as admin@app.com → 200. ✅
+               • GET /admin/users as super_admin → 200. ✅
+               • Did NOT re-test Danger PIN (per review request). ✅
+
+            Implementation observations:
+            • RAZORPAY_IS_MOCK=true (RAZORPAY_KEY_ID/SECRET not configured in env).
+              In mock mode order_id format is "order_MOCK_<16-hex>", and
+              /payment/verify accepts any non-empty signature.
+            • MAX_PAYMENT_ATTEMPTS=3 enforced at /payment/failure (auto-archive on
+              3rd) and /payment/create-order (rejects further attempts when cap
+              reached).
+            • /payment/failure logs a status="failed" transaction with description
+              "Payment failed (attempt N/3) — <reason>".
+            • Login gate (server.py /auth/login) blocks any role=="user" whose
+              approval_status=="rejected" with category-specific message:
+                payment_unsuccessful → "Your registration payment was
+                unsuccessful. Please contact support."
+                referral_code_mistake → ".. invalid referral code .."
+                other → uses approval_reject_reason text.
+            • /payment/verify persists payment_method, razorpay_payment_id,
+              razorpay_order_id, paid_at and inserts a status="paid" transaction
+              with description "Registration fee via Razorpay (mock)".
+
+            ENV-CONFIG NOTE (NOT A BUG):
+            The 2 "failures" in the test run are A2f and A3c which expected
+            amount_paise=10000 per the review request. Current
+            settings.registration_fee=118.0 (configured by a prior test session,
+            persisted in DB), so amount_paise correctly returns 11800. The math
+            (amount_paise = registration_fee * 100) is correct; the only
+            mismatch is the hardcoded test expectation vs current DB state.
+            Backend implementation is correct. If the main agent wants the fee
+            reset to ₹100, PUT /admin/settings {registration_fee: 100} as
+            super_admin.
+
+            Backend logs clean, no 500s. Task working: true, needs_retesting: false.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            NEW Phase-A payment flow that is Razorpay-compatible but ships in
+            MOCK mode when RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are absent.
+
+            New endpoints (all require authenticated user token):
+            • GET  /api/payment/config     → {key_id, is_mock, amount, amount_paise,
+                                              currency, registration_paid, approval_status,
+                                              attempts_used, attempts_remaining,
+                                              max_attempts=3, prefill, description}
+            • POST /api/payment/create-order → creates mock Razorpay order; returns
+                                               {order_id: "order_MOCK_...", amount_paise,
+                                               currency, key_id, is_mock}. Errors 400 if
+                                               registration_paid=true or attempts_used>=3.
+            • POST /api/payment/verify     → body {razorpay_order_id, razorpay_payment_id,
+                                             razorpay_signature}. In mock mode, any non-empty
+                                             signature → success → sets registration_paid=true,
+                                             paid_at, payment_method, transaction row (status=paid).
+            • POST /api/payment/failure    → body {razorpay_order_id?, reason?}. Increments
+                                             payment_attempts, logs failed transaction. On 3rd
+                                             strike: sets approval_status="rejected" with
+                                             reject_category="payment_unsuccessful" (auto-archive).
+
+            Login gate update:
+            • POST /api/auth/login — if user.role=="user" AND approval_status=="rejected":
+              returns 403 with category-specific message (payment_unsuccessful / referral_code_mistake / other).
+
+            User doc now also includes payment_attempts:int, last_payment_failure_at.
+            Backward-compat: POST /api/payment/register-fee preserved (legacy tests still pass).
+
+            REQUEST: Please run tests against the same preview URL. Use admin@app.com / Admin@123
+            ONLY for cleanup; create a fresh throwaway user for the payment flow.
+
+            Scenarios to verify:
+            A. Register fresh user → GET /payment/config returns is_mock=true,
+               attempts_remaining=3, registration_paid=false.
+            B. POST /payment/create-order → 200 with order_id starting "order_MOCK_".
+               Second create-order on same user → still 200 (orders can be retried).
+            C. POST /payment/verify with empty signature "" → 400.
+            D. POST /payment/verify with valid mock ids/signature → 200, registration_paid=true,
+               approval_status stays "pending". Second /verify call → 400 "already paid".
+            E. Fresh user2: POST /payment/failure x3 with reasons. After 3rd → archived:true,
+               user.approval_status=="rejected", reject_category="payment_unsuccessful".
+               Subsequent /login for user2 → 403 with payment-related message.
+               Subsequent /payment/create-order by user2 → 400 (max attempts reached).
+            F. Fresh user3: POST /payment/failure x2 → archived=false, attempts_remaining=1,
+               then successful /verify → 200 (success path after some failures still works).
+            G. Regression: POST /api/payment/register-fee legacy endpoint on a fresh user4
+               still marks registration_paid=true.
+            H. Cleanup all throwaway users via super_admin DELETE.
+
+            NOTE: Do NOT require Danger PIN tests here — already PASSED earlier.
+
   - task: "Danger PIN (6-digit unified gate for Wipe + Restore)"
     implemented: true
     working: true
@@ -824,6 +998,47 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        RAZORPAY-MOCK PAYMENT FLOW (Phase A) — backend testing COMPLETE.
+        63/65 functional checks PASSED via /app/payment_razorpay_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Scenarios A–G all verified end-to-end:
+        • A. SUCCESS: register → /payment/config (is_mock=true, max_attempts=3,
+          attempts_remaining=3, registration_paid=false, key_id="rzp_test_MOCK") →
+          /payment/create-order (returns order_MOCK_<hex>, idempotent on retry) →
+          /payment/verify empty sig 400 → /payment/verify valid mock sig 200 →
+          /auth/me shows registration_paid=true, approval_status="pending" →
+          second /payment/verify 400 "already paid" → legacy /payment/register-fee
+          on same user 400 "already paid". ✅
+        • B. FAILURE/AUTO-ARCHIVE: 3x /payment/failure → archived=true,
+          category="payment_unsuccessful". /auth/me shows
+          approval_status="rejected" + approval_reject_category="payment_unsuccessful".
+          /auth/login as that user → 403 with detail "Your registration payment
+          was unsuccessful. Please contact support." /payment/create-order →
+          400 "Maximum 3 payment attempts reached." ✅
+        • C. MIXED: 2 failures then successful create-order + verify → 200,
+          registration_paid=true. Confirms cap=3 (not <3) and success-after-fail. ✅
+        • D. LEGACY COMPAT: POST /payment/register-fee on fresh user → 200,
+          registration_paid=true. Second call → 400 "already paid". ✅
+        • E. UNAUTH: /payment/config and /payment/verify without bearer → 401. ✅
+        • F. CLEANUP: super_admin deleted U1..U4 (200 each). ✅
+        • G. REGRESSION: admin /auth/me 200, admin /admin/users 200. (Did NOT
+          re-test Danger PIN per request.) ✅
+
+        ENV-CONFIG NOTE (NOT A BACKEND BUG):
+        The 2 "failures" (A2f, A3c) were that amount_paise returned 11800 instead
+        of the expected 10000. Reason: settings.registration_fee=118.0 in the
+        DB (set by a prior test session). Computation amount_paise =
+        registration_fee * 100 is correct. If you want the displayed amount to
+        be ₹100/10000 paise, run as super_admin:
+          PUT /api/admin/settings {"registration_fee": 100}
+        and re-run. Implementation is correct.
+
+        Backend logs clean, no 500s. Task "Payment Gateway (Razorpay mock) +
+        3-attempt cap + login gate" marked working: true, needs_retesting: false.
+        Main agent can summarise and finish.
     - agent: "testing"
       message: |
         10-LEVEL PAYOUT STRUCTURE — backend testing COMPLETE. ALL 135/135 PASSED via
