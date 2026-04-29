@@ -1,25 +1,21 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { Platform, StyleSheet } from "react-native";
+// Trimmed to 3 weights per font (400/600/800) — drops ~40% of the bundled font assets
+// while still covering Body / Heading / ExtraBold use cases throughout the app.
 import {
   useFonts as useInter,
   Inter_400Regular,
-  Inter_500Medium,
   Inter_600SemiBold,
-  Inter_700Bold,
   Inter_800ExtraBold,
 } from "@expo-google-fonts/inter";
 import {
   Poppins_400Regular,
-  Poppins_500Medium,
   Poppins_600SemiBold,
-  Poppins_700Bold,
   Poppins_800ExtraBold,
 } from "@expo-google-fonts/poppins";
 import {
   PlusJakartaSans_400Regular,
-  PlusJakartaSans_500Medium,
   PlusJakartaSans_600SemiBold,
-  PlusJakartaSans_700Bold,
   PlusJakartaSans_800ExtraBold,
 } from "@expo-google-fonts/plus-jakarta-sans";
 import { api } from "./api";
@@ -57,9 +53,9 @@ const DEFAULT_BRANDING: Branding = {
 
 const FONT_FAMILY_MAP: Record<Branding["font"], string | undefined> = {
   system: undefined,
-  inter: "Inter_500Medium",
-  poppins: "Poppins_500Medium",
-  jakarta: "PlusJakartaSans_500Medium",
+  inter: "Inter_600SemiBold",
+  poppins: "Poppins_600SemiBold",
+  jakarta: "PlusJakartaSans_600SemiBold",
   manrope: undefined, // can be added later
   dmsans: undefined, // can be added later
 };
@@ -77,22 +73,16 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
   const [branding, setBrandingState] = useState<Branding>(DEFAULT_BRANDING);
   const [loading, setLoading] = useState(true);
 
-  // Load all the fonts so they're ready when the user picks one.
+  // Load the trimmed weights so they're ready when the user picks a font.
   const [fontsLoaded] = useInter({
     Inter_400Regular,
-    Inter_500Medium,
     Inter_600SemiBold,
-    Inter_700Bold,
     Inter_800ExtraBold,
     Poppins_400Regular,
-    Poppins_500Medium,
     Poppins_600SemiBold,
-    Poppins_700Bold,
     Poppins_800ExtraBold,
     PlusJakartaSans_400Regular,
-    PlusJakartaSans_500Medium,
     PlusJakartaSans_600SemiBold,
-    PlusJakartaSans_700Bold,
     PlusJakartaSans_800ExtraBold,
   });
 

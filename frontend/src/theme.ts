@@ -35,3 +35,32 @@ export const formatINR = (n: number) => {
   if (typeof n !== "number") n = Number(n) || 0;
   return "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
 };
+
+// ---------- Responsive helpers ----------
+// Tablet breakpoint: anything >= 600 px viewport (covers iPad mini portrait & up).
+export const TABLET_MIN_WIDTH = 600;
+// Above this width, content is centered in a single readable column (~600 px) so it
+// doesn't stretch edge-to-edge on iPads, foldables, and large tablets.
+export const READABLE_MAX_WIDTH = 600;
+
+import { useWindowDimensions, ViewStyle } from "react-native";
+
+/** Returns true when the viewport is tablet-sized (>= 600 px). */
+export function useIsTablet(): boolean {
+  const { width } = useWindowDimensions();
+  return width >= TABLET_MIN_WIDTH;
+}
+
+/** Style spread that constrains content to a centered, readable column on tablets.
+ *  Drop this onto a screen's outermost <View>/<ScrollView>'s contentContainerStyle. */
+export function useResponsiveContainer(): ViewStyle {
+  const { width } = useWindowDimensions();
+  if (width >= TABLET_MIN_WIDTH) {
+    return {
+      maxWidth: READABLE_MAX_WIDTH,
+      alignSelf: "center",
+      width: "100%",
+    };
+  }
+  return { width: "100%" };
+}
