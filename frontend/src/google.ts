@@ -19,7 +19,10 @@ export type GoogleResult = {
 
 export async function signInWithGoogle(referralCode?: string): Promise<GoogleResult> {
   // Redirect must be reachable; we use our backend's callback page which Emergent appends #session_id=... to.
-  const redirectUrl = `${BACKEND}/api/auth/google/callback`;
+  // On web, we use window.location.origin so it works across preview/prod/custom domains.
+  // On native, we fall back to the BACKEND env var.
+  const origin = Platform.OS === "web" && typeof window !== "undefined" ? window.location.origin : BACKEND;
+  const redirectUrl = `${origin}/api/auth/google/callback`;
   const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
 
   let resultUrl: string | undefined;
