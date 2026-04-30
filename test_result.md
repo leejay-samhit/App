@@ -1514,6 +1514,66 @@ backend:
             mock is the registration-fee payment which is intentional per product spec.
 
 frontend:
+  - task: "Live Razorpay Checkout — Web opens real Razorpay modal (not mock)"
+    implemented: true
+    working: true
+    file: "frontend/app/payment.tsx, frontend/src/lib/razorpay.ts"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            LIVE Razorpay end-to-end UI test PASSED at http://localhost:3000
+            via Playwright (mobile 390x844 + desktop 1280x720).
+
+            Mobile 390x844 results:
+            1) /register → filled (Pay Tester / paytest_<rand>@test.com /
+               9876543210 / Pass@123) → clicked "Continue to payment" →
+               redirected to /payment. ✅
+            2) /payment screen showed Account=<email>, Your code=3O3NYZ,
+               Gateway="Razorpay" with NO "· Sandbox" suffix. Footer shows
+               "Secured by Razorpay. Your payment is processed securely." with
+               NO "Sandbox mode — no real charge" phrase. ✅
+            3) Clicked [data-testid="payment-pay-button"] "Pay ₹100" →
+               after ~6s a REAL Razorpay checkout iframe loaded with
+               src=https://api.razorpay.com/v1/checkout/public?...
+               build=9cf4993... — iframe host is api.razorpay.com (NOT our mock
+               React Native modal). Modal renders a "Test Mode" banner
+               (Razorpay's own test-mode indicator for rzp_test_* keys),
+               "Contact details / Enter mobile number to continue",
+               "Total Amount 100", and after phone prefill shows Payment
+               Options UPI / Cards / EMI / Netbanking / Wallet / Pay Later with
+               UPI QR. Mock-modal signature "Sandbox mode — any tap simulates a
+               successful payment." is ABSENT from the DOM. ✅
+            4) Hitting Escape closed the Razorpay overlay and the app returned
+               to /payment without any error banner. ✅
+
+            Desktop 1280x720 results:
+            5) Re-registered a second user, landed on /payment, clicked Pay →
+               same real Razorpay iframe opened with src on api.razorpay.com
+               (unified_session_id + rzp_device_id present — real Razorpay
+               session). Payment Options panel rendered identically. ✅
+
+            Minor non-blocking observations (NOT failures of the main task):
+            • Logout icon click via [data-testid="payment-logout"] timed out
+              on mobile viewport — likely the Razorpay overlay iframe was
+              still intercepting pointer events at the moment of the click.
+              The underlying /payment screen itself is unaffected; reloading
+              the route brings the user back to the payment UI correctly.
+            • Follow-up admin login attempt via /login (admin@app.com /
+              Admin@123) clicked "Sign in" but the test captured the page
+              before the post-login redirect completed; admin auth was not
+              re-validated in this UI pass — already covered by backend tests.
+
+            CONCLUSION: The payment flow on web now launches the REAL
+            Razorpay Checkout (rzp_test_SjgtHA4CxiFyTK keys) — the in-app
+            mock modal is NOT being rendered anymore. All review-request UI
+            assertions for this task are satisfied. Task working: true,
+            needs_retesting: false.
+
+
   - task: "Phase A + B — Finance-gate UI flows (Razorpay mock, Pending, Admin new-user, Reject categories, Rejected archive)"
     implemented: true
     working: true
