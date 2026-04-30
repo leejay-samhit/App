@@ -107,6 +107,267 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Support / Ticket System — user + admin CRUD, messaging with attachments, status/priority/assignment, CSV export, notifications"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Support/Ticket backend — end-to-end testing COMPLETE. ALL 74/74 checks
+            PASSED via /app/ticket_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Detailed scenario results (matches review-request 1–15):
+
+            SETUP ✅
+              • admin@app.com / Admin@123 login → super_admin token.
+              • Created helper support admin via POST /admin/admins
+                {admin_role:"support"} → 200; login works.
+              • Registered throwaway user, promoted via
+                POST /admin/users/{id}/promote {admin_role:"finance"} → 200,
+                admin_role="finance"; login works.
+              • Created helper manager admin via POST /admin/admins
+                {admin_role:"manager"} → 200 (for RBAC negative test).
+              • Registered fresh users U1 (u1.<rand>@example.com) and U2.
+
+            1. CREATE TICKET ✅
+              • U1 POST /tickets {subject:"Can't withdraw", category:"withdrawal",
+                message:"I tried to withdraw 500 and it failed"} → 200
+                {ok:true, ticket:{...}}.
+              • Returned ticket: status="open", priority="normal",
+                message_count=1, has_unread_admin=true, category="withdrawal",
+                user_id/user_email/user_name populated, assigned_to=null.
+              • db.ticket_messages has the first message (sender_type="user").
+              • Notification kind="ticket" created for super_admin, support admin,
+                finance admin (verified via GET /notifications/me count diff).
+              • Manager admin did NOT receive a ticket notification (confirms
+                TICKET_ADMIN_ROLES = super_admin/support/finance only).
+
+            2. INVALID CATEGORY ✅
+              • POST {category:"not-a-real-category"} → 200 with returned
+                ticket.category == "other" (normalized).
+
+            3. SHORT SUBJECT/MESSAGE ✅
+              • subject="hi" → 400 "Subject is required (min 3 chars)".
+              • message="a" → 400 "Message is required (min 3 chars)".
+
+            4. GET /tickets/me as U1 ✅
+              • 200 with items[] containing the new ticket.
+
+            5. GET /tickets/{id} as U1 (owner) ✅
+              • 200 with {ticket, messages[]}, messages len=1, has_unread_user=false
+                after read.
+
+            6. GET /tickets/{id} as U2 (non-owner, non-admin) ✅
+              • 403 "Not allowed".
+
+            7. U1 REPLY ✅
+              • POST /tickets/{id}/reply {message:"update on my withdrawal issue"}
+                → 200. Ticket now message_count=2, has_unread_admin=true,
+                last_message_by="user", last_message_preview set.
+
+            8. ADMIN REPLY (super_admin) ✅
+              • POST /tickets/{id}/reply {message:"we'll check this out"} → 200.
+              • Ticket status flipped from "open"→"in_progress" (the U1 reply in
+                step 7 kept it "open"; admin reply flipped to "in_progress").
+              • has_unread_user=true, has_unread_admin=false (cleared upon prior
+                admin GET), last_message_by="admin".
+              • Messages array from GET /tickets/{id} now contains
+                sender_type="admin" entry.
+              • U1 received a new notification kind="ticket"
+                "Support replied: Can't withdraw".
+
+            9. ADMIN LIST + FILTERS ✅
+              • GET /admin/tickets as super_admin → 200 with items + counts
+                {open, in_progress, unread_admin}.
+              • ?status=in_progress → all items have status=in_progress; U1's
+                ticket present.
+              • ?category=withdrawal → U1's ticket present.
+              • ?q="WiTHdraw" → case-insensitive regex match on subject — U1's
+                ticket present.
+              • ?assigned_to=me (before PATCH) → does NOT include U1's ticket
+                (unassigned).
+              • ?assigned_to=unassigned → includes U1's ticket.
+              • manager admin → 403 (Requires admin role: super_admin/support/
+                finance). ✅
+              • support admin → 200. ✅
+              • finance admin → 200. ✅
+              • No auth → 401. ✅
+
+            10. ADMIN PATCH ✅
+              • PATCH {status:"resolved"} → 200; status=resolved, resolved_at
+                timestamp set.
+              • PATCH {priority:"high"} → 200; priority=high.
+              • PATCH {assigned_to:<support_id>} → 200; assigned_to +
+                assigned_to_email persisted.
+              • Post-assignment: support admin GET /admin/tickets?assigned_to=me
+                → includes U1's ticket. ✅
+              • PATCH {assigned_to:"not-a-real-id"} → 400 "Assignee is not a
+                valid admin".
+              • PATCH {assigned_to:""} → 200; assigned_to=null (unassigned).
+              • PATCH {status:"bogus"} → 400 "Invalid status".
+              • PATCH {priority:"bogus"} → 400 "Invalid priority".
+              • U1 notification count increased by 4+ across these PATCH changes
+                (one notification per change via _create_notification
+                "Ticket updated: <subject>" with change notes).
+
+            11. USER CLOSE by owner ✅
+              • Re-PATCH status→"resolved" → 200.
+              • U1 POST /tickets/{id}/close → 200 {ok:true}; ticket now closed.
+              • Second close → 400 "Ticket is already closed".
+
+            12. REPLY TO CLOSED TICKET ✅
+              • U1 POST /tickets/{id}/reply → 400 "Ticket is closed — cannot
+                reply".
+
+            13. ADMIN STATS ✅
+              • GET /admin/tickets/stats → 200 with all keys
+                {total, open, in_progress, resolved, closed, unread_admin}; all
+                non-negative integers.
+
+            14. ADMIN EXPORT CSV ✅
+              • GET /admin/tickets/export → 200;
+                content-type="text/csv; charset=utf-8";
+                Content-Disposition="attachment; filename=tickets.csv";
+                CSV header row contains all 13 required cols: id, subject,
+                category, priority, status, user_email, user_name,
+                assigned_to_email, message_count, created_at, updated_at,
+                last_message_at, last_message_by.
+
+            15. REGRESSION ✅
+              • /api/admin/approvals?status=pending as admin → 200.
+              • /api/cart as U1 → 200.
+              • /api/branding (public, no auth) → 200.
+
+            CLEANUP ✅
+              • DELETE /admin/users/{id} for support admin, finance admin,
+                manager admin, U1, U2 — all 200.
+              • Orphan tickets (2) + ticket_messages (3) + orphan ticket
+                notifications (6) purged directly from DB (no cascade on user
+                delete for these collections).
+              • admin@app.com login still works post-cleanup.
+
+            Implementation observations:
+            • TICKET_CATEGORIES = (payment, withdrawal, account, kyc, product,
+              other). Unknown category → normalized to "other".
+            • TICKET_STATUSES = (open, in_progress, resolved, closed).
+            • TICKET_PRIORITIES = (low, normal, high, urgent).
+            • TICKET_ADMIN_ROLES = (super_admin, support, finance). Manager
+              explicitly excluded (matches spec).
+            • Route ordering verified: GET /tickets/me defined before
+              /tickets/{id}; GET /admin/tickets/stats and /admin/tickets/export
+              are distinct static paths vs PATCH /admin/tickets/{id} — no
+              conflicts observed.
+            • POST /tickets seeds has_unread_admin=true, has_unread_user=false,
+              notifies all admins with role∈TICKET_ADMIN_ROLES via
+              _notify_support_admins.
+            • POST /tickets/{id}/reply by admin flips status open→in_progress
+              and has_unread_user=true; by user flips status resolved→in_progress
+              and has_unread_admin=true. Closed tickets cannot be replied to.
+            • POST /tickets/{id}/close by owner: sets status=closed,
+              closed_at, closed_by="user". Already-closed → 400.
+            • PATCH /admin/tickets/{id}: status/priority/assigned_to partial
+              update. Invalid status/priority → 400. Invalid assignee (user not
+              admin) → 400. Empty string for assigned_to → unassign (null).
+              Notification "Ticket updated: <subject>" with comma-joined change
+              notes delivered to ticket.user_id.
+            • CSV export uses manual builder with proper quoting; Response
+              media_type="text/csv" and Content-Disposition header.
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Added Support/Ticket backend. New collections: tickets, ticket_messages.
+            Endpoints:
+              USER:
+                POST   /api/tickets                        { subject, category, message, attachment_b64? }
+                GET    /api/tickets/me
+                GET    /api/tickets/{id}                    (owner or admin w/ support role)
+                POST   /api/tickets/{id}/reply              { message, attachment_b64? }
+                POST   /api/tickets/{id}/close              (owner closes)
+              ADMIN (require super_admin / support / finance):
+                GET    /api/admin/tickets?status=&category=&priority=&assigned_to=&q=
+                GET    /api/admin/tickets/stats
+                PATCH  /api/admin/tickets/{id}              { status?, priority?, assigned_to? }
+                GET    /api/admin/tickets/export            (CSV)
+
+            Behaviors to verify:
+            1. USER CREATE:
+               • POST /tickets w/ valid subject+message+category → 200 {ok, ticket}
+                 - ticket.status=="open", priority=="normal", message_count==1, has_unread_admin=true
+                 - First message persisted in ticket_messages w/ sender_type="user"
+                 - All admins with admin_role in (super_admin, support, finance) receive a
+                   "New support ticket" notification (check db.notifications).
+               • Invalid category → normalized to "other"
+               • subject < 3 chars or message < 3 chars → 400
+
+            2. USER READ:
+               • GET /tickets/me → lists only the user's own tickets, sorted by updated_at desc.
+               • GET /tickets/{id} as owner → 200 {ticket, messages[]}; has_unread_user cleared on read (if was true).
+               • GET /tickets/{id} as a DIFFERENT non-admin user → 403.
+               • GET /tickets/nonexistent → 404.
+
+            3. USER REPLY:
+               • POST /tickets/{id}/reply w/ owner → 200; message inserted; message_count incremented;
+                 ticket.updated_at/last_message_at updated; has_unread_admin=true;
+                 last_message_by="user"; last_message_preview set to truncated text.
+               • If ticket was "resolved", user replying should flip it back to "in_progress".
+               • If ticket is "closed" → 400 "Ticket is closed — cannot reply".
+               • Empty message → 400.
+
+            4. USER CLOSE:
+               • POST /tickets/{id}/close by owner when status is open/in_progress/resolved → 200; status="closed".
+               • By non-owner → 403.
+               • On already-closed ticket → 400.
+
+            5. ADMIN LIST + FILTERS:
+               • As admin (admin@app.com super_admin): GET /admin/tickets returns items + counts{open,in_progress,unread_admin}.
+               • ?status=open/in_progress/resolved/closed filters correctly.
+               • ?category=payment/withdrawal/account/kyc/product/other filters correctly.
+               • ?q=foo does case-insensitive regex on subject/user_email/user_name/last_message_preview.
+               • assigned_to=me → filters to the admin's own id; assigned_to=unassigned → null assignments.
+               • As non-support/non-finance/non-super admin role (e.g. manager) → 403.
+               • As non-admin user → 403.
+               • No auth → 401.
+
+            6. ADMIN REPLY:
+               • POST /tickets/{id}/reply as admin → sender_type="admin"; message added;
+                 last_message_by="admin"; has_unread_user=true; has_unread_admin=false;
+                 if ticket was "open" → status flips to "in_progress";
+                 a notification is created for the ticket.user_id with kind="ticket".
+
+            7. ADMIN UPDATE:
+               • PATCH /admin/tickets/{id} {status: "resolved"} → status updated, resolved_at stamped.
+               • PATCH {status: "closed"} → status+closed_at+closed_by="admin".
+               • PATCH {priority: "high"} → priority updated.
+               • PATCH {assigned_to: <admin_id>} → assigned_to + assigned_to_email stored.
+               • PATCH {assigned_to: ""} → unassign (null).
+               • Invalid status/priority → 400.
+               • Non-admin assignee → 400 "Assignee is not a valid admin".
+               • Notification created for ticket.user_id describing changes.
+
+            8. ADMIN STATS:
+               • GET /admin/tickets/stats → total, open, in_progress, resolved, closed, unread_admin counts.
+
+            9. ADMIN EXPORT:
+               • GET /admin/tickets/export → 200 text/csv with Content-Disposition header;
+                 CSV header includes id,subject,category,priority,status,user_email,user_name,assigned_to_email,message_count,created_at,updated_at,last_message_at,last_message_by.
+
+           10. REGRESSION: existing flows unaffected (admin/approvals, payments, cart, branding).
+
+            Credentials: admin@app.com / Admin@123 (super_admin).
+            To test a finance-role admin, promote a throwaway user to admin_role="finance" via
+            POST /admin/users/{id}/promote {admin_role:"finance"} and verify it can list+reply tickets.
+            To test support-role, POST /admin/admins {email, password, admin_role:"support"}.
+            Clean up throwaway users after tests.
+
   - task: "Live Razorpay payment flow (test keys) — /payment/config + /payment/create-order + /payment/verify + /payment/failure with HMAC signature verification"
     implemented: true
     working: true
@@ -1955,18 +2216,67 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "1.4"
-  test_sequence: 9
+  version: "1.5"
+  test_sequence: 10
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Live Razorpay (test mode) payment flow — /payment/config, /payment/create-order, /payment/verify with real Razorpay order_id + HMAC signature"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        SUPPORT / TICKET SYSTEM — backend testing COMPLETE. ALL 74/74 PASSED via
+        /app/ticket_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Scenarios 1–15 all green:
+        1. USER CREATE ticket → 200 with status=open, priority=normal,
+           message_count=1, has_unread_admin=true; ticket_messages row created;
+           notifications kind="ticket" delivered to super_admin + support +
+           finance (manager excluded — TICKET_ADMIN_ROLES integrity confirmed).
+        2. Unknown category → normalized to "other".
+        3. Subject/message <3 chars → 400.
+        4. GET /tickets/me returns the new ticket.
+        5. GET /tickets/{id} as owner → 200 {ticket, messages[]},
+           has_unread_user cleared.
+        6. GET /tickets/{id} as another fresh user → 403.
+        7. Owner reply → 200; message_count=2; has_unread_admin=true;
+           last_message_by="user".
+        8. Admin reply (super_admin) → 200; sender_type="admin"; status flipped
+           open→in_progress; has_unread_user=true; user notified via
+           notifications collection.
+        9. ADMIN LIST + FILTERS: counts{open, in_progress, unread_admin}
+           present; filters status/category/q/assigned_to=me/assigned_to=
+           unassigned all correct; manager→403; support→200; finance→200;
+           no-auth→401.
+        10. ADMIN PATCH: status=resolved (with resolved_at), priority=high,
+            assigned_to=<support_id> + assigned_to_email, assigned_to="" →
+            unassigned, invalid status/priority → 400, invalid assignee → 400;
+            each change produces a notification for U1.
+        11. User CLOSE by owner while resolved → 200; second close → 400.
+        12. Reply to closed ticket → 400 "Ticket is closed — cannot reply".
+        13. GET /admin/tickets/stats → keys total/open/in_progress/resolved/
+            closed/unread_admin; all non-negative ints.
+        14. GET /admin/tickets/export → 200 text/csv;
+            Content-Disposition=attachment; CSV header contains all 13
+            required columns.
+        15. REGRESSION: /admin/approvals?status=pending, /cart, /branding all
+            200.
+
+        CLEANUP: 5 throwaway accounts (U1, U2, support helper, finance helper,
+        manager helper) deleted via super_admin DELETE /admin/users/{id} →
+        all 200. Orphan tickets/messages/notifications purged from DB
+        (these collections don't cascade on user delete). admin@app.com
+        login still works.
+
+        Backend logs clean, no 500s observed. Task "Support / Ticket System"
+        marked working: true, needs_retesting: false. Main agent can
+        summarise and finish.
+
     - agent: "testing"
       message: |
         Approved Registrations bucket + finance-can-approve — backend testing

@@ -95,6 +95,15 @@ export default function ProfileScreen() {
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
 
+          <TouchableOpacity onPress={() => router.push("/tickets" as any)} style={styles.kycCard} testID="profile-tickets-link">
+            <View style={[styles.kycDot, { backgroundColor: colors.primary }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.kycTitle}>Support &amp; Help</Text>
+              <Text style={styles.kycSub}>RAISE A TICKET · MY CONVERSATIONS</Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+
           <Text style={styles.sectionLabel}>PAYOUT DETAILS</Text>
           <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
 
