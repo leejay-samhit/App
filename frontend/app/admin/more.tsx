@@ -41,6 +41,7 @@ export default function More() {
   const [wipeOpen, setWipeOpen] = useState(false);
   const [wipePin, setWipePin] = useState("");
   const [wipeBusy, setWipeBusy] = useState(false);
+  const [wipeError, setWipeError] = useState<string | null>(null);
 
   const isPin = (p: string) => /^[0-9]{6}$/.test(p);
 
@@ -65,8 +66,9 @@ export default function More() {
   };
 
   const onWipe = async () => {
+    setWipeError(null);
     if (!isPin(wipePin)) {
-      Alert.alert("Invalid PIN", "PIN must be exactly 6 digits.");
+      setWipeError("PIN must be exactly 6 digits.");
       return;
     }
     setWipeBusy(true);
@@ -82,7 +84,7 @@ export default function More() {
         `Deleted:\n• ${data.users_deleted} users\n• ${data.transactions_deleted} transactions\n• ${data.withdrawals_deleted} withdrawals\n• ${data.orders_deleted} orders\n• ${data.cart_items_deleted} cart items\n• ${data.notifications_deleted} notifications`,
       );
     } catch (e) {
-      Alert.alert("Wipe failed", formatApiError(e));
+      setWipeError(formatApiError(e));
     } finally {
       setWipeBusy(false);
     }
@@ -123,7 +125,7 @@ export default function More() {
         {isSuperAdmin && (
           <>
             <Text style={[styles.sectionLabel, { color: "#B3261E" }]}>DANGER ZONE</Text>
-            <TouchableOpacity onPress={() => setWipeOpen(true)} style={styles.dangerRow} testID="more-wipe-users">
+            <TouchableOpacity onPress={() => { setWipeError(null); setWipePin(""); setWipeOpen(true); }} style={styles.dangerRow} testID="more-wipe-users">
               <View style={styles.dangerIcon}><Feather name="trash-2" size={16} color="#B3261E" /></View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.dangerText}>Wipe all users</Text>
@@ -140,8 +142,19 @@ export default function More() {
         </TouchableOpacity>
       </ScrollView>
 
-      <Modal visible={wipeOpen} transparent animationType="slide" onRequestClose={() => setWipeOpen(false)}>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <Modal
+        visible={wipeOpen}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        presentationStyle="overFullScreen"
+        onRequestClose={() => setWipeOpen(false)}
+      >
+        <KeyboardAvoidingView
+          style={[styles.modalOverlay, Platform.OS === "web" ? ({ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999 } as any) : null]}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <TouchableOpacity activeOpacity={1} style={{ flex: 1 }} onPress={() => setWipeOpen(false)} />
           <View style={styles.modalSheet}>
             <View style={styles.modalIconWrap}>
               <Feather name="alert-triangle" size={28} color="#B3261E" />
@@ -156,14 +169,21 @@ export default function More() {
             <TextInput
               testID="wipe-pin-input"
               value={wipePin}
-              onChangeText={(v) => setWipePin(v.replace(/[^0-9]/g, "").slice(0, 6))}
+              onChangeText={(v) => { setWipeError(null); setWipePin(v.replace(/[^0-9]/g, "").slice(0, 6)); }}
               secureTextEntry
               keyboardType="number-pad"
               maxLength={6}
               placeholder="••••••"
               placeholderTextColor={colors.textMuted}
-              style={styles.modalInput}
+              style={[styles.modalInput, !!wipeError && { borderWidth: 2, borderColor: "#B3261E" }]}
+              autoFocus
             />
+            {!!wipeError && (
+              <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
+                <Feather name="x-circle" size={16} color="#B3261E" />
+                <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{wipeError}</Text>
+              </View>
+            )}
             <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
               <TouchableOpacity onPress={() => { setWipeOpen(false); setWipePin(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} testID="wipe-cancel">
                 <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
