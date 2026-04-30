@@ -107,6 +107,153 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Live Razorpay payment flow (test keys) — /payment/config + /payment/create-order + /payment/verify + /payment/failure with HMAC signature verification"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/.env"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            ALL 42/42 checks PASSED via /app/backend_test.py against
+            https://network-pay-1.preview.emergentagent.com. Live Razorpay
+            test-mode integration is fully functional end-to-end.
+
+            Detailed scenario results (matches review-request A–F):
+
+            Setup ✅
+              • Admin login admin@app.com / Admin@123 → 200, token captured.
+              • Registered U1 "Test Pay One" testpay1.<rand>@example.com → 200,
+                user.id captured. Login U1 → 200.
+
+            A. /payment/config reflects LIVE mode ✅
+              • A.1 GET /payment/config as U1 → 200.
+              • A.2 is_mock == false. ✅
+              • A.3 key_id == "rzp_test_SjgtHA4CxiFyTK" (starts with "rzp_test_"). ✅
+              • A.4 amount=100.0, amount_paise=10000 — math correct
+                (amount_paise == int(round(amount * 100))). ✅
+              • A.5 registration_paid == false. attempts_remaining == 3. ✅
+
+            B. /payment/create-order hits real Razorpay API ✅
+              • B.1 POST /payment/create-order → 200.
+              • B.2 order_id="order_Sjh5AIqDwGebbA" — starts with "order_" and
+                does NOT start with "order_MOCK_" (real Razorpay order). ✅
+              • B.3 is_mock == false; key_id starts with "rzp_test_";
+                amount_paise=10000 matches /payment/config; currency="INR". ✅
+
+            C. /payment/verify rejects invalid signature ✅
+              • POST /payment/verify {razorpay_order_id: order_Sjh5AIqDwGebbA,
+                razorpay_payment_id: "pay_MOCK_xxx",
+                razorpay_signature: "sig_MOCK_xxx"} → 401 with detail exactly
+                "Invalid payment signature" (live HMAC verification active). ✅
+              • /auth/me confirms registration_paid still false. ✅
+
+            D. /payment/verify accepts correct HMAC signature ✅
+              • Computed valid_sig = hmac.SHA256(KEY_SECRET, f"{order_id}|{pay_id}")
+                where pay_id = "pay_test_<rand>".
+              • POST /payment/verify with valid_sig → 200
+                {ok:true, transaction_id, amount:100.0, approval_status:"pending",
+                is_mock:false}. ✅
+              • GET /auth/me → registration_paid=true,
+                payment_method="razorpay" (NOT "razorpay_mock" — confirms live
+                mode), razorpay_order_id and razorpay_payment_id persisted on
+                user doc. ✅
+              • Transaction inserted with type=registration_fee, status="paid",
+                razorpay_order_id and razorpay_payment_id matching the order
+                and fabricated payment id. ✅
+              • Re-POST /payment/create-order → 400 "Registration fee already
+                paid". ✅
+
+            E. 3-attempts failure cap still works in live mode ✅
+              • Registered U2 "Test Pay Two" testpay2.<rand>@example.com.
+              • E.1 /payment/failure {reason:"card_declined"} 1st → 200
+                {archived:false, attempts_used:1}. ✅
+              • E.2 2nd call → 200 {archived:false, attempts_used:2}. ✅
+              • E.3 3rd call → 200 {archived:true,
+                category:"payment_unsuccessful", archive_id:"<uuid>"}. ✅
+              • U2 found in /admin/rejected-registrations?category=
+                payment_unsuccessful (items_count=1). ✅
+              • U2 removed from /admin/users (active users collection). ✅
+
+            F. Regression ✅
+              • /admin/approvals?status=pending → 200 as admin. ✅
+              • /admin/approvals/today → 200 as admin. ✅
+              • /cart as paid user U1 → 200 with shape {items, total, count}. ✅
+              • /branding (public, no auth) → 200. ✅
+              • admin /auth/me → 200. ✅
+
+            Cleanup ✅
+              • super_admin DELETE /admin/users/{u1_id} → 200.
+              • super_admin DELETE /admin/rejected-registrations/{u2_archive_id}
+                → 200.
+              • Sweep of any leftover users/archives matching the test
+                random suffix completed (defensive idempotent cleanup).
+              • admin@app.com still works.
+
+            Implementation observations:
+            • RAZORPAY_KEY_ID=rzp_test_SjgtHA4CxiFyTK and
+              RAZORPAY_KEY_SECRET=QrEEeWzxU5xJdRh1HrXeDUIy correctly loaded
+              from /app/backend/.env at boot; RAZORPAY_IS_MOCK is now False.
+            • POST /payment/create-order uses httpx.AsyncClient with
+              auth=(KEY_ID, KEY_SECRET) against
+              https://api.razorpay.com/v1/orders and persists the returned
+              order id (verified by inspecting body — id="order_Sjh5AIqDwGebbA"
+              is a real Razorpay test-mode order, not a mock).
+            • POST /payment/verify performs hmac.compare_digest of
+              hmac.SHA256(KEY_SECRET, f"{order_id}|{payment_id}").hexdigest()
+              against razorpay_signature. Bad sig → 401 "Invalid payment
+              signature"; valid sig → user.registration_paid=true,
+              payment_method="razorpay" (not "razorpay_mock" — confirms
+              live branch), razorpay_order_id & razorpay_payment_id stored,
+              transaction (status="paid") inserted, notification "Payment
+              received — awaiting approval" created.
+            • POST /payment/failure 3rd-strike behaviour preserved: archives
+              user via _archive_and_delete_user, removes from active users,
+              inserts failed transaction; first-2 strikes only increment
+              counter and return attempts_remaining.
+            • Login gate, /cart, /branding, and admin approvals endpoints
+              unaffected by live-mode switch.
+
+            Backend logs clean, no 500s. Real Razorpay test-mode orders
+            successfully created and verified end-to-end via HMAC.
+            Task working: true, needs_retesting: false. Main agent can
+            summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Wired real Razorpay test keys into /app/backend/.env:
+              RAZORPAY_KEY_ID=rzp_test_SjgtHA4CxiFyTK
+              RAZORPAY_KEY_SECRET=QrEEeWzxU5xJdRh1HrXeDUIy
+            Backend already handles: RAZORPAY_IS_MOCK is now False; /payment/create-order
+            hits https://api.razorpay.com/v1/orders via httpx basic-auth; /payment/verify
+            HMAC-SHA256-verifies razorpay_signature against (order_id|payment_id) using
+            the secret; on success marks user.registration_paid=True and inserts a
+            'registration_fee' transaction with the real razorpay ids.
+            
+            Manual smoke test: direct POST to Razorpay API with these creds returned
+            order_Sjh0k1w8vNYr87 (200 OK) — keys confirmed live.
+
+            Please verify end-to-end:
+            1. Login as a FRESH user (register one and login).
+            2. GET /api/payment/config → must return is_mock=false, key_id starts with "rzp_test_".
+            3. POST /api/payment/create-order → must return an order_id that starts with "order_"
+               (NOT "order_MOCK_"). Amount should equal settings.registration_fee * 100.
+            4. POST /api/payment/verify with a fabricated signature → must 401 with
+               "Invalid payment signature" (since HMAC check is now active).
+            5. POST /api/payment/verify with a valid HMAC-computed signature (compute it using
+               KEY_SECRET over "order_id|payment_id") → must 200, user.registration_paid=true,
+               transaction inserted with razorpay_order_id + razorpay_payment_id, notification
+               "Payment received" created.
+            6. 3-attempts cap: POST /api/payment/failure 3 times → user archived, approval_status="rejected".
+            7. Regression: GET /api/payment/config while registration_paid=true → still 200 with
+               registration_paid=true; create-order rejected with "already paid".
+            8. Admin login (admin@app.com / Admin@123) + settings + approvals endpoints still 200.
+
+            Keep test users & any inserted orders — Razorpay test orders are free and do not
+            affect production.
   - task: "Approved Registrations bucket + finance can approve users + cart-total defensive (UI fallback)"
     implemented: true
     working: true
@@ -1748,12 +1895,13 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "1.3"
-  test_sequence: 8
+  version: "1.4"
+  test_sequence: 9
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Live Razorpay (test mode) payment flow — /payment/config, /payment/create-order, /payment/verify with real Razorpay order_id + HMAC signature"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"

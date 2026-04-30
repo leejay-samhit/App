@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Image, ScrollView, Alert, Modal } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Image, ScrollView, Alert, Modal, Platform } from "react-native";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { WebView } from "react-native-webview";
 import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
 import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
 
 type PayMethod = "upi" | "card" | "netbanking";
 
@@ -38,6 +40,11 @@ export default function Payment() {
   const [stage, setStage] = useState<"idle" | "creating-order" | "processing-payment" | "verifying" | "success" | "failure">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Native WebView Razorpay checkout state
+  const [rzpVisible, setRzpVisible] = useState(false);
+  const [rzpHtml, setRzpHtml] = useState<string>("");
+  const rzpResolver = useRef<((r: RazorpayResult) => void) | null>(null);
+
   const loadConfig = useCallback(async () => {
     try {
       const { data } = await api.get<PayConfig>("/payment/config");
@@ -62,7 +69,134 @@ export default function Payment() {
     }
     setErrorMsg(null);
     setStage("idle");
+    // If live Razorpay keys are configured → open real Razorpay Checkout directly (no mock UI)
+    if (!config.is_mock) {
+      runLiveCheckout();
+      return;
+    }
+    // Else show Razorpay-styled mock modal
     setCheckoutOpen(true);
+  };
+
+  // Native WebView resolves via onMessage → we stash a resolver in a ref
+  const openNativeRazorpay = (html: string): Promise<RazorpayResult> => {
+    return new Promise((resolve) => {
+      rzpResolver.current = resolve;
+      setRzpHtml(html);
+      setRzpVisible(true);
+    });
+  };
+
+  const closeNativeRazorpay = () => {
+    setRzpVisible(false);
+    setTimeout(() => setRzpHtml(""), 250);
+  };
+
+  const handleRzpMessage = (raw: string) => {
+    let data: any = {};
+    try { data = JSON.parse(raw); } catch { data = {}; }
+    const resolver = rzpResolver.current;
+    rzpResolver.current = null;
+    closeNativeRazorpay();
+    if (!resolver) return;
+    if (data.type === "success") {
+      resolver({ ok: true, paymentId: data.payment_id, orderId: data.order_id, signature: data.signature });
+    } else if (data.type === "cancel") {
+      resolver({ ok: false, cancelled: true });
+    } else if (data.type === "failed" || data.type === "error") {
+      resolver({ ok: false, error: data.error || "Payment failed", code: data.code });
+    } else {
+      resolver({ ok: false, error: "Unknown response" });
+    }
+  };
+
+  // Real Razorpay Checkout flow (Web uses script; Native uses WebView)
+  const runLiveCheckout = async () => {
+    if (!config) return;
+    setProcessing(true);
+    setErrorMsg(null);
+    setStage("creating-order");
+    try {
+      // 1) Create order
+      const orderRes = await api.post<{ order_id: string; amount_paise: number; currency: string; key_id: string; is_mock: boolean }>(
+        "/payment/create-order",
+      );
+      const orderId = orderRes.data.order_id;
+
+      const rzpOpts = {
+        orderId,
+        amountPaise: orderRes.data.amount_paise,
+        keyId: orderRes.data.key_id,
+        name: app_name,
+        description: config.description || "Registration fee",
+        prefill: {
+          name: config.prefill?.name || (user as any)?.name,
+          email: config.prefill?.email || (user as any)?.email,
+          contact: config.prefill?.contact || (user as any)?.phone,
+        },
+        themeColor: colors.primary,
+      };
+
+      // 2) Open checkout
+      setStage("processing-payment");
+      let result: RazorpayResult;
+      if (Platform.OS === "web") {
+        result = await openRazorpayCheckout(rzpOpts);
+      } else {
+        const html = buildRazorpayHtml(rzpOpts);
+        result = await openNativeRazorpay(html);
+      }
+
+      if (!result.ok) {
+        if (result.cancelled) {
+          // User dismissed — treat as abandonment, do NOT count as failure attempt
+          setProcessing(false);
+          setStage("idle");
+          return;
+        }
+        throw new Error(result.error || "Payment failed");
+      }
+
+      // 3) Verify
+      setStage("verifying");
+      await api.post("/payment/verify", {
+        razorpay_order_id: result.orderId || orderId,
+        razorpay_payment_id: result.paymentId,
+        razorpay_signature: result.signature,
+      });
+
+      setStage("success");
+      setCheckoutOpen(true); // show branded success UI for a moment
+      await refresh();
+      setTimeout(() => {
+        setCheckoutOpen(false);
+        router.replace("/pending-approval" as any);
+      }, 1200);
+    } catch (e) {
+      const reason = formatApiError(e);
+      setErrorMsg(reason);
+      setStage("failure");
+      setCheckoutOpen(true);
+      try {
+        const failRes = await api.post<{ attempts_used: number; attempts_remaining: number; archived: boolean }>(
+          "/payment/failure",
+          { reason },
+        );
+        if (failRes.data.archived) {
+          await refresh();
+          setTimeout(async () => {
+            setCheckoutOpen(false);
+            router.replace("/pending-approval" as any);
+          }, 1500);
+        } else {
+          await loadConfig();
+        }
+      } catch {
+        // silent
+      }
+    } finally {
+      setProcessing(false);
+    }
   };
 
   const runMockCheckout = async () => {
@@ -255,7 +389,7 @@ export default function Payment() {
                   {errorMsg || "Something went wrong. Please try again."}
                 </Text>
                 {config.attempts_remaining > 0 ? (
-                  <TouchableOpacity onPress={runMockCheckout} style={styles.rzpPrimaryBtn} testID="rzp-retry">
+                  <TouchableOpacity onPress={config.is_mock ? runMockCheckout : runLiveCheckout} style={styles.rzpPrimaryBtn} testID="rzp-retry">
                     <Text style={styles.rzpPrimaryBtnText}>Try again ({config.attempts_remaining} left)</Text>
                   </TouchableOpacity>
                 ) : (
@@ -318,6 +452,46 @@ export default function Payment() {
           </View>
         </View>
       </Modal>
+
+      {/* Native WebView Razorpay Checkout (iOS / Android) */}
+      <Modal visible={rzpVisible} animationType="slide" onRequestClose={() => {
+        const resolver = rzpResolver.current;
+        rzpResolver.current = null;
+        closeNativeRazorpay();
+        if (resolver) resolver({ ok: false, cancelled: true });
+      }}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: "#f5f7fb" }}>
+          <View style={styles.rzpNativeHeader}>
+            <TouchableOpacity
+              onPress={() => {
+                const resolver = rzpResolver.current;
+                rzpResolver.current = null;
+                closeNativeRazorpay();
+                if (resolver) resolver({ ok: false, cancelled: true });
+              }}
+              style={styles.iconBtn}
+              testID="rzp-webview-close"
+            >
+              <Feather name="x" size={20} color={colors.textMain} />
+            </TouchableOpacity>
+            <Text style={styles.rzpNativeTitle}>Secure Payment</Text>
+            <View style={{ width: 40 }} />
+          </View>
+          {Platform.OS !== "web" && rzpHtml ? (
+            <WebView
+              originWhitelist={["*"]}
+              source={{ html: rzpHtml, baseUrl: "https://checkout.razorpay.com" }}
+              javaScriptEnabled
+              domStorageEnabled
+              onMessage={(e) => handleRzpMessage(e.nativeEvent.data)}
+              startInLoadingState
+              style={{ flex: 1, backgroundColor: "#f5f7fb" }}
+            />
+          ) : (
+            <View style={styles.center}><ActivityIndicator size="large" color={colors.primary} /></View>
+          )}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -371,4 +545,8 @@ const styles = StyleSheet.create({
   rzpStatusIcon: { width: 56, height: 56, borderRadius: 28, alignItems: "center", justifyContent: "center", marginBottom: 12 },
   rzpStageTitle: { fontSize: 18, fontWeight: "800", color: colors.textMain, textAlign: "center" },
   rzpStageBody: { fontSize: 13, color: colors.textMuted, marginTop: 6, textAlign: "center" },
+
+  // Native WebView header
+  rzpNativeHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 10, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: colors.border },
+  rzpNativeTitle: { fontSize: 15, fontWeight: "800", color: colors.textMain },
 });

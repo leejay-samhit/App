@@ -1,429 +1,290 @@
 """
-Backend test for: Approved Registrations bucket + finance can approve users.
-
-Scenarios A–M from /app/test_result.md.
+Live Razorpay payment flow test suite (test keys).
+Targets: https://network-pay-1.preview.emergentagent.com
 """
 import sys
-import time
-import uuid
-from typing import Optional, Dict, Any, List, Tuple
-
+import hmac
+import hashlib
+import secrets
 import requests
+from typing import Any, Dict, Optional, Tuple, List
 
 BASE = "https://network-pay-1.preview.emergentagent.com"
 API = f"{BASE}/api"
-
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
-DANGER_PIN = "654321"
+RAZORPAY_KEY_ID = "rzp_test_SjgtHA4CxiFyTK"
+RAZORPAY_KEY_SECRET = "QrEEeWzxU5xJdRh1HrXeDUIy"
 
 results: List[Tuple[str, bool, str]] = []
-created_user_ids: List[str] = []
-created_archive_ids: List[str] = []
-promoted_admin_ids: List[Dict[str, Any]] = []  # entries {id, email, is_promoted_user}
 
 
-def log(name: str, ok: bool, detail: str = ""):
-    results.append((name, ok, detail))
-    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
+def record(name: str, passed: bool, detail: str = "") -> None:
+    results.append((name, passed, detail))
+    flag = "PASS" if passed else "FAIL"
+    print(f"  [{flag}] {name}{(' — ' + detail) if detail else ''}")
 
 
-def post(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
-    headers = kwargs.pop("headers", {}) or {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return requests.post(f"{API}{path}", headers=headers, timeout=60, **kwargs)
+def hdr(t: Optional[str]) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {t}"} if t else {}
 
 
-def get(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
-    headers = kwargs.pop("headers", {}) or {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return requests.get(f"{API}{path}", headers=headers, timeout=60, **kwargs)
+def jpost(path: str, body: Dict[str, Any], token: Optional[str] = None):
+    return requests.post(f"{API}{path}", json=body, headers=hdr(token), timeout=30)
 
 
-def delete(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
-    headers = kwargs.pop("headers", {}) or {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return requests.delete(f"{API}{path}", headers=headers, timeout=60, **kwargs)
+def jget(path: str, token: Optional[str] = None, params: Optional[Dict[str, Any]] = None):
+    return requests.get(f"{API}{path}", headers=hdr(token), params=params, timeout=30)
 
 
-def patch(path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
-    headers = kwargs.pop("headers", {}) or {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return requests.patch(f"{API}{path}", headers=headers, timeout=60, **kwargs)
+def jdel(path: str, token: Optional[str] = None):
+    return requests.delete(f"{API}{path}", headers=hdr(token), timeout=30)
+
+
+def register_user(name: str, email: str, password: str = "Pass@123") -> Tuple[Optional[str], Optional[Dict]]:
+    r = jpost("/auth/register", {"name": name, "email": email, "password": password})
+    if r.status_code != 200:
+        print(f"  Register failed: {r.status_code} {r.text[:200]}")
+        return None, None
+    j = r.json()
+    return j.get("token"), j.get("user")
 
 
 def login(email: str, password: str) -> Optional[str]:
-    r = post("/auth/login", json={"email": email, "password": password})
-    if r.status_code == 200:
-        return r.json().get("token")
-    return None
-
-
-def register_user(name: str, email: str, password: str = "Test@123",
-                  referral_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    body = {"name": name, "email": email, "password": password,
-            "phone": f"99{int(time.time()*1000) % 100000000:08d}"}
-    if referral_code:
-        body["referral_code"] = referral_code
-    r = post("/auth/register", json=body)
-    if r.status_code == 200:
-        return r.json()
-    print(f"   register failed: {r.status_code} {r.text[:120]}")
-    return None
+    r = jpost("/auth/login", {"email": email, "password": password})
+    if r.status_code != 200:
+        return None
+    return r.json().get("token")
 
 
 def main():
-    rand = uuid.uuid4().hex[:8]
+    print("\n=== Live Razorpay Test Suite ===\n")
+    rand = secrets.token_hex(4)
 
-    # ADMIN LOGIN
-    admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    if not admin_token:
-        log("Admin login", False, "Could not login as admin@app.com")
-        return False
-    me = get("/auth/me", admin_token).json()
-    super_admin_id = me["id"]
-    log("Admin login (super_admin)", True, f"id={super_admin_id}")
+    admin_t = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    record("Admin login admin@app.com", admin_t is not None)
+    if not admin_t:
+        return finalize()
 
-    # A. super_admin approves U1
-    u1_email = f"u1.appr.{rand}@netpay.example.com"
-    u1_reg = register_user("Aarav Sharma", u1_email)
-    if not u1_reg:
-        log("A.1 Register U1", False)
-        return False
-    u1_id = u1_reg["user"]["id"]
-    created_user_ids.append(u1_id)
-    log("A.1 Register U1", True, f"id={u1_id}")
+    # Setup: register fresh U1
+    u1_email = f"testpay1.{rand}@example.com"
+    u1_token, u1 = register_user("Test Pay One", u1_email)
+    record("Register U1", u1_token is not None and u1 is not None, f"email={u1_email}")
+    if not u1_token:
+        return finalize()
+    u1_id = u1["id"]
+    u1_token = login(u1_email, "Pass@123") or u1_token
+    record("Login U1", u1_token is not None)
 
-    r = post(f"/admin/approvals/{u1_id}/approve", admin_token)
-    log("A.2 super_admin approve U1",
-        r.status_code == 200 and r.json().get("ok"),
-        f"{r.status_code} {r.text[:120]}")
+    # ---------- Scenario A ----------
+    print("\n--- Scenario A: /payment/config (live mode) ---")
+    rcfg = jget("/payment/config", u1_token)
+    record("A. GET /payment/config → 200", rcfg.status_code == 200, f"status={rcfg.status_code}")
+    cfg = rcfg.json() if rcfg.status_code == 200 else {}
+    record("A. is_mock == false", cfg.get("is_mock") is False, f"is_mock={cfg.get('is_mock')}")
+    record("A. key_id starts with 'rzp_test_'",
+           isinstance(cfg.get("key_id"), str) and cfg["key_id"].startswith("rzp_test_"),
+           f"key_id={cfg.get('key_id')}")
+    amt = cfg.get("amount")
+    amt_paise = cfg.get("amount_paise")
+    record("A. amount_paise == amount * 100",
+           isinstance(amt, (int, float)) and isinstance(amt_paise, int) and amt_paise == int(round(amt * 100)),
+           f"amount={amt}, amount_paise={amt_paise}")
+    record("A. registration_paid == false", cfg.get("registration_paid") is False)
+    record("A. attempts_remaining == 3", cfg.get("attempts_remaining") == 3)
 
-    r = get("/admin/approved-registrations", admin_token)
-    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-    u1_rec = next((it for it in items if it.get("original_user_id") == u1_id), None)
-    cond = u1_rec is not None and u1_rec.get("approver_role") == "super_admin" and u1_rec.get("auto_approved") is False
-    log("A.3 U1 in archive (approver_role=super_admin, auto_approved=false)",
-        cond, f"rec_keys={list(u1_rec.keys()) if u1_rec else None}")
-    if u1_rec:
-        created_archive_ids.append(u1_rec["id"])
+    # ---------- Scenario B ----------
+    print("\n--- Scenario B: /payment/create-order (real Razorpay API) ---")
+    rco = jpost("/payment/create-order", {}, u1_token)
+    co_ok = rco.status_code == 200
+    record("B. POST /payment/create-order → 200", co_ok,
+           f"status={rco.status_code} body={rco.text[:300]}")
+    if not co_ok:
+        return finalize()
+    co = rco.json()
+    order_id = co.get("order_id")
+    record("B. order_id starts with 'order_'",
+           isinstance(order_id, str) and order_id.startswith("order_"), f"order_id={order_id}")
+    record("B. order_id NOT mock prefix",
+           isinstance(order_id, str) and not order_id.startswith("order_MOCK_"), f"order_id={order_id}")
+    record("B. is_mock == false", co.get("is_mock") is False)
+    record("B. key_id starts with 'rzp_test_'",
+           isinstance(co.get("key_id"), str) and co["key_id"].startswith("rzp_test_"))
+    record("B. amount_paise matches config", co.get("amount_paise") == amt_paise)
+    record("B. currency == INR", co.get("currency") == "INR")
 
-    # B. Promote a fresh user to finance, approve U2
-    fin_email = f"finance.{rand}@netpay.example.com"
-    fin_reg = register_user("Priya Iyer", fin_email)
-    if not fin_reg:
-        log("B.1 Register finance candidate", False)
-        return False
-    fin_id = fin_reg["user"]["id"]
-    log("B.1 Register finance candidate", True, f"id={fin_id}")
+    # ---------- Scenario C ----------
+    print("\n--- Scenario C: /payment/verify rejects invalid signature ---")
+    rv_bad = jpost("/payment/verify", {
+        "razorpay_order_id": order_id,
+        "razorpay_payment_id": "pay_MOCK_xxx",
+        "razorpay_signature": "sig_MOCK_xxx",
+    }, u1_token)
+    record("C. Bad signature → 401", rv_bad.status_code == 401,
+           f"status={rv_bad.status_code} body={rv_bad.text[:200]}")
+    detail = ""
+    try:
+        detail = (rv_bad.json() or {}).get("detail", "")
+    except Exception:
+        detail = rv_bad.text
+    record("C. detail mentions 'Invalid payment signature'",
+           "Invalid payment signature" in str(detail), f"detail={detail}")
 
-    r = post(f"/admin/users/{fin_id}/promote", admin_token, json={"admin_role": "finance"})
-    log("B.2 Promote candidate to finance",
-        r.status_code == 200 and r.json().get("admin_role") == "finance",
-        f"{r.status_code} {r.text[:120]}")
-    promoted_admin_ids.append({"id": fin_id, "email": fin_email, "is_promoted_user": True})
+    me_after_c = jget("/auth/me", u1_token)
+    record("C. registration_paid still false",
+           me_after_c.status_code == 200 and me_after_c.json().get("registration_paid") is False)
 
-    fin_token = login(fin_email, "Test@123")
-    log("B.3 Finance login", fin_token is not None)
+    # ---------- Scenario D ----------
+    print("\n--- Scenario D: /payment/verify with VALID HMAC signature ---")
+    fake_payment_id = f"pay_test_{secrets.token_hex(8)}"
+    valid_sig = hmac.new(
+        RAZORPAY_KEY_SECRET.encode(),
+        f"{order_id}|{fake_payment_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
-    u2_email = f"u2.appr.{rand}@netpay.example.com"
-    u2_reg = register_user("Rohit Verma", u2_email)
-    if not u2_reg:
-        log("B.4 Register U2", False)
-        return False
-    u2_id = u2_reg["user"]["id"]
-    created_user_ids.append(u2_id)
-    log("B.4 Register U2", True, f"id={u2_id}")
+    rv_good = jpost("/payment/verify", {
+        "razorpay_order_id": order_id,
+        "razorpay_payment_id": fake_payment_id,
+        "razorpay_signature": valid_sig,
+    }, u1_token)
+    record("D. Valid signature → 200", rv_good.status_code == 200,
+           f"status={rv_good.status_code} body={rv_good.text[:200]}")
+    if rv_good.status_code == 200:
+        rj = rv_good.json()
+        record("D. response ok=true", rj.get("ok") is True)
+        record("D. response is_mock=false", rj.get("is_mock") is False)
+        record("D. response approval_status='pending'", rj.get("approval_status") == "pending")
 
-    r = post(f"/admin/approvals/{u2_id}/approve", fin_token)
-    log("B.5 Finance approve U2 (RBAC widened) → 200",
-        r.status_code == 200 and r.json().get("ok"),
-        f"{r.status_code} {r.text[:160]}")
+    me2 = jget("/auth/me", u1_token)
+    me2j = me2.json() if me2.status_code == 200 else {}
+    record("D. /auth/me registration_paid=true",
+           me2j.get("registration_paid") is True,
+           f"registration_paid={me2j.get('registration_paid')}")
+    record("D. /auth/me razorpay_order_id matches",
+           me2j.get("razorpay_order_id") == order_id)
+    record("D. /auth/me razorpay_payment_id matches",
+           me2j.get("razorpay_payment_id") == fake_payment_id)
+    record("D. /auth/me payment_method == 'razorpay'",
+           me2j.get("payment_method") == "razorpay",
+           f"payment_method={me2j.get('payment_method')}")
 
-    r = get("/admin/approved-registrations?role_filter=auto", admin_token)
-    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-    u2_rec = next((it for it in items if it.get("original_user_id") == u2_id), None)
-    cond = (
-        u2_rec is not None
-        and u2_rec.get("auto_approved") is True
-        and u2_rec.get("approver_role") == "finance"
-    )
-    log("B.6 role_filter=auto returns U2 (auto_approved=true, approver_role=finance)",
-        cond, f"rec_present={u2_rec is not None}")
-    if u2_rec:
-        created_archive_ids.append(u2_rec["id"])
+    txn = jget("/transactions/me", u1_token)
+    txns = txn.json() if txn.status_code == 200 else []
+    paid_txn = [t for t in txns if t.get("type") == "registration_fee"
+                and t.get("status") == "paid"
+                and t.get("razorpay_order_id") == order_id
+                and t.get("razorpay_payment_id") == fake_payment_id]
+    record("D. registration_fee 'paid' transaction inserted with razorpay ids",
+           len(paid_txn) >= 1, f"matching_txns={len(paid_txn)}, total_txns={len(txns)}")
 
-    # C. role_filter=finance returns U2
-    r = get("/admin/approved-registrations?role_filter=finance", admin_token)
-    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-    cond = any(it.get("original_user_id") == u2_id for it in items)
-    log("C. role_filter=finance contains U2", cond, f"items_count={len(items)}")
+    re_co = jpost("/payment/create-order", {}, u1_token)
+    record("D. Re-POST /payment/create-order → 400 'already paid'",
+           re_co.status_code == 400 and "already paid" in re_co.text.lower(),
+           f"status={re_co.status_code} body={re_co.text[:200]}")
 
-    # D. role_filter=super_admin returns U1 (and not U2)
-    r = get("/admin/approved-registrations?role_filter=super_admin", admin_token)
-    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-    has_u1 = any(it.get("original_user_id") == u1_id for it in items)
-    has_u2 = any(it.get("original_user_id") == u2_id for it in items)
-    log("D. role_filter=super_admin contains U1 and not U2",
-        has_u1 and not has_u2, f"has_u1={has_u1} has_u2={has_u2}")
+    # ---------- Scenario E ----------
+    print("\n--- Scenario E: 3-attempt failure cap ---")
+    u2_email = f"testpay2.{rand}@example.com"
+    u2_token, u2 = register_user("Test Pay Two", u2_email)
+    record("E. Register U2", u2_token is not None and u2 is not None, f"email={u2_email}")
+    archive_id = None
+    if u2_token:
+        f1 = jpost("/payment/failure", {"reason": "card_declined"}, u2_token)
+        f1j = f1.json() if f1.status_code == 200 else {}
+        record("E. 1st failure → 200, archived=false",
+               f1.status_code == 200 and f1j.get("archived") is False,
+               f"status={f1.status_code} archived={f1j.get('archived')} attempts={f1j.get('attempts_used')}")
 
-    # E. role_filter=manager → []; counts.manager == 0
-    r = get("/admin/approved-registrations?role_filter=manager", admin_token)
-    body = r.json() if r.status_code == 200 else {}
-    items = body.get("items", [])
-    counts = body.get("counts", {}) or {}
-    cond_e = (len(items) == 0) and (counts.get("manager", 0) == 0)
-    log("E. role_filter=manager returns [] and counts.manager==0",
-        cond_e, f"items={len(items)} counts.manager={counts.get('manager', 0)}")
+        f2 = jpost("/payment/failure", {"reason": "card_declined"}, u2_token)
+        f2j = f2.json() if f2.status_code == 200 else {}
+        record("E. 2nd failure → 200, archived=false",
+               f2.status_code == 200 and f2j.get("archived") is False,
+               f"status={f2.status_code} archived={f2j.get('archived')} attempts={f2j.get('attempts_used')}")
 
-    # F. counts.all == sum(super_admin+finance+manager+support); counts.auto == counts.finance
-    r = get("/admin/approved-registrations", admin_token)
-    body = r.json() if r.status_code == 200 else {}
-    counts = body.get("counts", {}) or {}
-    sa = counts.get("super_admin", 0)
-    fn = counts.get("finance", 0)
-    mg = counts.get("manager", 0)
-    sp = counts.get("support", 0)
-    all_c = counts.get("all", 0)
-    auto_c = counts.get("auto", 0)
-    cond_f1 = all_c == sa + fn + mg + sp
-    cond_f2 = auto_c == fn
-    log("F.1 counts.all == sum of role counts", cond_f1,
-        f"all={all_c} sum={sa+fn+mg+sp} ({sa},{fn},{mg},{sp})")
-    log("F.2 counts.auto == counts.finance (in our test)", cond_f2,
-        f"auto={auto_c} finance={fn}")
+        f3 = jpost("/payment/failure", {"reason": "card_declined"}, u2_token)
+        f3j = f3.json() if f3.status_code == 200 else {}
+        record("E. 3rd failure → 200, archived=true",
+               f3.status_code == 200 and f3j.get("archived") is True,
+               f"status={f3.status_code} archived={f3j.get('archived')} category={f3j.get('category')}")
+        record("E. 3rd failure category='payment_unsuccessful'",
+               f3j.get("category") == "payment_unsuccessful")
+        archive_id = f3j.get("archive_id")
 
-    # G. export as super_admin → 200 text/csv with header
-    r = get("/admin/approved-registrations/export", admin_token)
-    ct = r.headers.get("content-type", "")
-    first_line = r.text.splitlines()[0] if r.text else ""
-    cond_g = (r.status_code == 200 and ct.startswith("text/csv")
-              and first_line.startswith("id,original_user_id"))
-    log("G.1 export as super_admin → 200 text/csv with header",
-        cond_g, f"{r.status_code} ct={ct} first_line={first_line[:80]}")
+        rej = jget("/admin/rejected-registrations", admin_t,
+                   params={"category": "payment_unsuccessful"})
+        rej_items = (rej.json() or {}).get("items", []) if rej.status_code == 200 else []
+        u2_in_rej = any(i.get("email") == u2_email for i in rej_items)
+        record("E. U2 found in rejected_registrations", u2_in_rej,
+               f"items_count={len(rej_items)}")
 
-    r2 = get("/admin/approved-registrations/export?role_filter=auto", admin_token)
-    log("G.2 export role_filter=auto super_admin → 200",
-        r2.status_code == 200 and r2.headers.get("content-type", "").startswith("text/csv"),
-        f"{r2.status_code}")
+        users_list = jget("/admin/users", admin_t)
+        u2_still_active = False
+        if users_list.status_code == 200:
+            u2_still_active = any(u.get("email") == u2_email for u in users_list.json())
+        record("E. U2 removed from active users", not u2_still_active)
 
-    # H. export as manager → 403
-    mgr_email = f"manager.{rand}@netpay.example.com"
-    r = post("/admin/admins", admin_token, json={
-        "name": "Manager Mehta", "email": mgr_email,
-        "password": "Test@123", "admin_role": "manager"
-    })
-    mgr_token = None
-    if r.status_code != 200:
-        log("Helper: create manager", False, f"{r.status_code} {r.text[:120]}")
-    else:
-        mgr_id = r.json()["id"]
-        promoted_admin_ids.append({"id": mgr_id, "email": mgr_email, "is_promoted_user": False})
-        log("Helper: create manager", True, f"id={mgr_id}")
-        mgr_token = login(mgr_email, "Test@123")
-        log("Helper: login manager", mgr_token is not None)
-        r = get("/admin/approved-registrations/export", mgr_token)
-        log("H. export as manager → 403", r.status_code == 403, f"{r.status_code}")
-        r = get("/admin/approved-registrations", mgr_token)
-        log("H.2 list as manager → 200", r.status_code == 200, f"{r.status_code}")
+    # ---------- Scenario F ----------
+    print("\n--- Scenario F: Regression ---")
+    rapp_pending = jget("/admin/approvals", admin_t, params={"status": "pending"})
+    record("F. /admin/approvals?status=pending → 200", rapp_pending.status_code == 200,
+           f"status={rapp_pending.status_code}")
 
-    # finance export → 200
-    r = get("/admin/approved-registrations/export", fin_token)
-    log("H.3 export as finance → 200 text/csv",
-        r.status_code == 200 and r.headers.get("content-type", "").startswith("text/csv"),
-        f"{r.status_code}")
+    rapp_today = jget("/admin/approvals/today", admin_t)
+    record("F. /admin/approvals/today → 200", rapp_today.status_code == 200)
 
-    # support helper
-    sup_email = f"support.{rand}@netpay.example.com"
-    r = post("/admin/admins", admin_token, json={
-        "name": "Support Singh", "email": sup_email,
-        "password": "Test@123", "admin_role": "support"
-    })
-    sup_token = None
-    if r.status_code == 200:
-        sup_id = r.json()["id"]
-        promoted_admin_ids.append({"id": sup_id, "email": sup_email, "is_promoted_user": False})
-        sup_token = login(sup_email, "Test@123")
-        r = get("/admin/approved-registrations", sup_token)
-        log("H.4 list as support → 200", r.status_code == 200, f"{r.status_code}")
-        r = get("/admin/approved-registrations/export", sup_token)
-        log("H.5 export as support → 403", r.status_code == 403, f"{r.status_code}")
-        if u2_rec:
-            r = delete(f"/admin/approved-registrations/{u2_rec['id']}", sup_token)
-            log("H.6 DELETE as support → 403", r.status_code == 403, f"{r.status_code}")
-    else:
-        log("Helper: create support", False, f"{r.status_code} {r.text[:120]}")
+    rcart = jget("/cart", u1_token)
+    record("F. /cart → 200 for paid user U1", rcart.status_code == 200,
+           f"status={rcart.status_code}")
+    if rcart.status_code == 200:
+        cj = rcart.json()
+        record("F. /cart shape ok", isinstance(cj, dict) and {"items", "total", "count"}.issubset(cj.keys()),
+               f"keys={list(cj.keys())}")
 
-    # I. Approving same user twice does NOT duplicate archive
-    # First approach: create U3, approve, flip to pending, approve again → expect 1 archive row
-    u3_email = f"u3.dup.{rand}@netpay.example.com"
-    u3_reg = register_user("Sneha Patel", u3_email)
-    u3_archive_id = None
-    if u3_reg:
-        u3_id = u3_reg["user"]["id"]
-        created_user_ids.append(u3_id)
-        r = post(f"/admin/approvals/{u3_id}/approve", admin_token)
-        log("I.0 Approve U3 first time", r.status_code == 200, f"{r.status_code}")
-        # Flip back via PATCH /admin/users
-        rp = patch(f"/admin/users/{u3_id}", admin_token, json={"approval_status": "pending"})
-        if rp.status_code == 200:
-            r = post(f"/admin/approvals/{u3_id}/approve", admin_token)
-            log("I.1 Re-approve U3 after revert",
-                r.status_code == 200 and r.json().get("ok") is True,
-                f"{r.status_code} {r.text[:120]}")
-            r = get("/admin/approved-registrations", admin_token)
-            items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-            u3_rows = [it for it in items if it.get("original_user_id") == u3_id]
-            log("I.2 Approving same user twice → only 1 archive entry (helper deletes prior rows)",
-                len(u3_rows) == 1, f"rows={len(u3_rows)}")
-            for it in u3_rows:
-                if it.get("id") not in created_archive_ids:
-                    created_archive_ids.append(it["id"])
-                    u3_archive_id = it["id"]
-        else:
-            log("I.1 PATCH approval_status=pending (admin)",
-                False, f"{rp.status_code} {rp.text[:140]}")
+    rbrand = requests.get(f"{API}/branding", timeout=15)
+    record("F. /branding (public, no auth) → 200", rbrand.status_code == 200)
 
-    # J. Re-approve attempt on already-approved user returns {already_approved:true}, no extra archive
-    r = get("/admin/approved-registrations?role_filter=finance", admin_token)
-    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-    u2_count_before = sum(1 for it in items if it.get("original_user_id") == u2_id)
+    radmin_me = jget("/auth/me", admin_t)
+    record("F. admin /auth/me → 200", radmin_me.status_code == 200)
 
-    r = post(f"/admin/approvals/{u2_id}/approve", admin_token)
-    body = r.json() if r.status_code == 200 else {}
-    cond_j = r.status_code == 200 and body.get("already_approved") is True
-    log("J.1 Re-approve already-approved user returns {already_approved:true}",
-        cond_j, f"{r.status_code} {body}")
+    # ---------- Cleanup ----------
+    print("\n--- Cleanup ---")
+    if u1_id:
+        d1 = jdel(f"/admin/users/{u1_id}", admin_t)
+        if d1.status_code != 200:
+            print(f"  WARN: failed to delete U1: {d1.status_code} {d1.text[:120]}")
+    if archive_id:
+        da = jdel(f"/admin/rejected-registrations/{archive_id}", admin_t)
+        if da.status_code != 200:
+            print(f"  WARN: failed to delete U2 archive: {da.status_code} {da.text[:120]}")
 
-    r = get("/admin/approved-registrations?role_filter=finance", admin_token)
-    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-    u2_count_after = sum(1 for it in items if it.get("original_user_id") == u2_id)
-    log("J.2 No 2nd archive row added on already_approved",
-        u2_count_after == u2_count_before,
-        f"before={u2_count_before} after={u2_count_after}")
+    ulist = jget("/admin/users", admin_t)
+    if ulist.status_code == 200:
+        for u in ulist.json():
+            if rand in (u.get("email") or ""):
+                jdel(f"/admin/users/{u['id']}", admin_t)
+    rlist = jget("/admin/rejected-registrations", admin_t)
+    if rlist.status_code == 200:
+        for r in (rlist.json() or {}).get("items", []):
+            if rand in (r.get("email") or ""):
+                jdel(f"/admin/rejected-registrations/{r['id']}", admin_t)
 
-    # K. super_admin DELETE archive removes archive only; finance DELETE → 403
-    if u2_rec:
-        r = delete(f"/admin/approved-registrations/{u2_rec['id']}", fin_token)
-        log("K.1 finance DELETE archive → 403",
-            r.status_code == 403, f"{r.status_code} {r.text[:120]}")
+    finalize()
 
-    if u1_rec:
-        u1_archive_id = u1_rec["id"]
-        r = delete(f"/admin/approved-registrations/{u1_archive_id}", admin_token)
-        log("K.2 super_admin DELETE archive → 200",
-            r.status_code == 200 and r.json().get("ok"),
-            f"{r.status_code} {r.text[:120]}")
-        if u1_archive_id in created_archive_ids:
-            created_archive_ids.remove(u1_archive_id)
 
-        r = get("/admin/users", admin_token)
-        users = r.json() if r.status_code == 200 else []
-        still_present = any(u.get("id") == u1_id for u in users)
-        log("K.3 Underlying U1 user still present after archive delete",
-            still_present, f"present={still_present}")
-
-        r = delete(f"/admin/approved-registrations/{u1_archive_id}", admin_token)
-        log("K.4 Second DELETE same archive id → 404",
-            r.status_code == 404, f"{r.status_code}")
-
-    # L. Regression
-    r = get("/admin/approvals/today", admin_token)
-    log("L.1 GET /admin/approvals/today → 200", r.status_code == 200, f"{r.status_code}")
-
-    r = get("/admin/approvals?status=pending", admin_token)
-    log("L.2 GET /admin/approvals?status=pending → 200",
-        r.status_code == 200, f"{r.status_code}")
-
-    cart_email = f"cart.{rand}@netpay.example.com"
-    cart_reg = register_user("Cart User", cart_email)
-    cart_token = None
-    if cart_reg:
-        cart_token = cart_reg["token"]
-        cart_id = cart_reg["user"]["id"]
-        created_user_ids.append(cart_id)
-        r = get("/cart", cart_token)
-        body = r.json() or {}
-        log("L.3 GET /cart → 200 with total/items/count",
-            r.status_code == 200 and "total" in body and "items" in body and "count" in body,
-            f"{r.status_code} keys={list(body.keys())}")
-
-        r = get("/payment/config", cart_token)
-        log("L.4 GET /payment/config → 200",
-            r.status_code == 200 and "is_mock" in (r.json() or {}),
-            f"{r.status_code}")
-
-    # Non-admin user accessing approved-registrations endpoints → 401/403
-    if cart_token:
-        r = get("/admin/approved-registrations", cart_token)
-        log("Auth: regular user GET list → 401/403",
-            r.status_code in (401, 403), f"{r.status_code}")
-        r = get("/admin/approved-registrations/export", cart_token)
-        log("Auth: regular user GET export → 401/403",
-            r.status_code in (401, 403), f"{r.status_code}")
-        r = delete("/admin/approved-registrations/some-fake-id", cart_token)
-        log("Auth: regular user DELETE → 401/403",
-            r.status_code in (401, 403), f"{r.status_code}")
-        r = post(f"/admin/approvals/{u1_id}/approve", cart_token)
-        log("Auth: regular user POST approve → 401/403",
-            r.status_code in (401, 403), f"{r.status_code}")
-
-    # No-auth checks
-    r = requests.get(f"{API}/admin/approved-registrations", timeout=30)
-    log("Auth: no-auth GET list → 401/403", r.status_code in (401, 403), f"{r.status_code}")
-    r = requests.get(f"{API}/admin/approved-registrations/export", timeout=30)
-    log("Auth: no-auth GET export → 401/403", r.status_code in (401, 403), f"{r.status_code}")
-
-    # M. Cleanup
-    print("\n--- Cleanup phase ---")
-    cleanup_errors = 0
-    r = get("/admin/approved-registrations", admin_token)
-    items = (r.json() or {}).get("items", []) if r.status_code == 200 else []
-    test_ids = {u1_id, u2_id} | set(created_user_ids)
-    for it in items:
-        if it.get("original_user_id") in test_ids:
-            rr = delete(f"/admin/approved-registrations/{it['id']}", admin_token)
-            print(f"   archive del {it['id']}: {rr.status_code}")
-            if rr.status_code != 200:
-                cleanup_errors += 1
-
-    for adm in promoted_admin_ids:
-        if adm.get("is_promoted_user"):
-            rr = post(f"/admin/users/{adm['id']}/demote", admin_token)
-            print(f"   demote {adm['email']}: {rr.status_code}")
-        rr = delete(f"/admin/users/{adm['id']}", admin_token)
-        print(f"   delete admin {adm['email']}: {rr.status_code}")
-        if rr.status_code != 200:
-            cleanup_errors += 1
-
-    for uid in created_user_ids:
-        rr = delete(f"/admin/users/{uid}", admin_token)
-        if rr.status_code not in (200, 404):
-            cleanup_errors += 1
-            print(f"   delete user {uid}: {rr.status_code}")
-
-    t = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    log("M. admin@app.com still works after cleanup", t is not None,
-        f"cleanup_errors={cleanup_errors}")
-
-    # Summary
-    print("\n" + "=" * 70)
-    print("SUMMARY")
-    print("=" * 70)
+def finalize():
     passed = sum(1 for _, ok, _ in results if ok)
     failed = sum(1 for _, ok, _ in results if not ok)
-    print(f"Total: {len(results)}  Passed: {passed}  Failed: {failed}")
+    print("\n========================================")
+    print(f"Total: {len(results)}  PASS: {passed}  FAIL: {failed}")
+    print("========================================\n")
     if failed:
-        print("\nFailed checks:")
-        for name, ok, detail in results:
+        print("FAILED items:")
+        for n, ok, d in results:
             if not ok:
-                print(f"  - {name}: {detail}")
-    return failed == 0
+                print(f"  [FAIL] {n} — {d}")
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":
-    sys.exit(0 if main() else 1)
+    main()
