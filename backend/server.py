@@ -727,10 +727,27 @@ async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user))
 # The backend ships with a "mock" mode when RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not
 # configured. In mock mode, fake order IDs are generated and the /verify endpoint accepts
 # any non-empty signature. When real keys are provided, we'll hit api.razorpay.com.
-RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "").strip()
-RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
-RAZORPAY_IS_MOCK = not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+#
+# Keys can be supplied via:
+#   1) Admin Panel → Payment Gateway form (stored in settings.razorpay) [PREFERRED]
+#   2) /app/backend/.env  (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET) — fallback
+# DB override always wins over env so super_admin can rotate keys without redeploy.
+RAZORPAY_ENV_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_ENV_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
 MAX_PAYMENT_ATTEMPTS = 3
+
+
+async def get_razorpay_creds() -> Dict[str, Any]:
+    """Return active Razorpay credentials. Order of precedence: DB > env."""
+    s = await get_settings()
+    rzp = (s.get("razorpay") or {}) if isinstance(s.get("razorpay"), dict) else {}
+    db_id = (rzp.get("key_id") or "").strip()
+    db_secret = (rzp.get("key_secret") or "").strip()
+    if db_id and db_secret:
+        return {"key_id": db_id, "key_secret": db_secret, "source": "db", "is_mock": False}
+    if RAZORPAY_ENV_KEY_ID and RAZORPAY_ENV_KEY_SECRET:
+        return {"key_id": RAZORPAY_ENV_KEY_ID, "key_secret": RAZORPAY_ENV_KEY_SECRET, "source": "env", "is_mock": False}
+    return {"key_id": "", "key_secret": "", "source": "none", "is_mock": True}
 
 
 @api_router.get("/payment/config")
@@ -740,9 +757,10 @@ async def payment_config(user: Dict[str, Any] = Depends(get_current_user)):
     settings = await get_settings()
     fee = settings["registration_fee"]
     attempts = int(user.get("payment_attempts") or 0)
+    creds = await get_razorpay_creds()
     return {
-        "key_id": RAZORPAY_KEY_ID or "rzp_test_MOCK",
-        "is_mock": RAZORPAY_IS_MOCK,
+        "key_id": creds["key_id"] or "rzp_test_MOCK",
+        "is_mock": creds["is_mock"],
         "amount": fee,  # rupees
         "amount_paise": int(round(fee * 100)),
         "currency": "INR",
@@ -783,12 +801,12 @@ async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user))
 
     settings = await get_settings()
     amount_paise = int(round(settings["registration_fee"] * 100))
+    creds = await get_razorpay_creds()
 
-    if RAZORPAY_IS_MOCK:
+    if creds["is_mock"]:
         order_id = f"order_MOCK_{secrets.token_hex(8)}"
     else:
-        # LIVE MODE (requires httpx Basic Auth to Razorpay). Not exercised here.
-        async with httpx.AsyncClient(timeout=15.0, auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) as client:
+        async with httpx.AsyncClient(timeout=15.0, auth=(creds["key_id"], creds["key_secret"])) as client:
             r = await client.post(
                 "https://api.razorpay.com/v1/orders",
                 json={
@@ -809,7 +827,7 @@ async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user))
         "type": "registration_fee",
         "amount": amount_paise / 100.0,
         "status": "created",
-        "description": "Razorpay order created" + (" (mock)" if RAZORPAY_IS_MOCK else ""),
+        "description": "Razorpay order created" + (" (mock)" if creds["is_mock"] else ""),
         "razorpay_order_id": order_id,
         "created_at": now_utc().isoformat(),
     })
@@ -818,8 +836,8 @@ async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user))
         order_id=order_id,
         amount_paise=amount_paise,
         currency="INR",
-        key_id=RAZORPAY_KEY_ID or "rzp_test_MOCK",
-        is_mock=RAZORPAY_IS_MOCK,
+        key_id=creds["key_id"] or "rzp_test_MOCK",
+        is_mock=creds["is_mock"],
     )
 
 
@@ -840,11 +858,12 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
     if not payload.razorpay_signature or not payload.razorpay_payment_id or not payload.razorpay_order_id:
         raise HTTPException(status_code=400, detail="Missing Razorpay fields")
 
-    if not RAZORPAY_IS_MOCK:
+    creds = await get_razorpay_creds()
+    if not creds["is_mock"]:
         import hmac
         import hashlib
         expected = hmac.new(
-            RAZORPAY_KEY_SECRET.encode(),
+            creds["key_secret"].encode(),
             f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}".encode(),
             hashlib.sha256,
         ).hexdigest()
@@ -859,7 +878,7 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
         {"id": user["id"]},
         {"$set": {
             "registration_paid": True,
-            "payment_method": "razorpay" + ("_mock" if RAZORPAY_IS_MOCK else ""),
+            "payment_method": "razorpay" + ("_mock" if creds["is_mock"] else ""),
             "razorpay_payment_id": payload.razorpay_payment_id,
             "razorpay_order_id": payload.razorpay_order_id,
             "paid_at": now_utc().isoformat(),
@@ -871,7 +890,7 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
         "type": "registration_fee",
         "amount": fee,
         "status": "paid",
-        "description": "Registration fee via Razorpay" + (" (mock)" if RAZORPAY_IS_MOCK else ""),
+        "description": "Registration fee via Razorpay" + (" (mock)" if creds["is_mock"] else ""),
         "razorpay_order_id": payload.razorpay_order_id,
         "razorpay_payment_id": payload.razorpay_payment_id,
         "created_at": now_utc().isoformat(),
@@ -887,7 +906,7 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
         "transaction_id": txn_id,
         "amount": fee,
         "approval_status": "pending",
-        "is_mock": RAZORPAY_IS_MOCK,
+        "is_mock": creds["is_mock"],
     }
 
 
@@ -3676,6 +3695,141 @@ async def admin_export_tickets(admin: Dict[str, Any] = Depends(require_admin_rol
     csv = "".join(lines)
     from fastapi.responses import Response
     return Response(content=csv, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=tickets.csv"})
+
+
+
+# ----------------------------------------------------------------------------
+# PAYMENT GATEWAY (Razorpay) — Admin-managed credentials
+# ----------------------------------------------------------------------------
+# Allows super_admin to update Razorpay key_id / key_secret directly from the
+# Admin Panel without redeploying. Stored in settings.razorpay subdoc.
+# DB override always wins over .env credentials.
+# ----------------------------------------------------------------------------
+
+class PaymentGatewayPayload(BaseModel):
+    key_id: str
+    key_secret: str
+
+
+def _mask_secret(s: str) -> str:
+    if not s: return ""
+    if len(s) <= 6: return "*" * len(s)
+    return s[:3] + ("*" * max(4, len(s) - 7)) + s[-4:]
+
+
+@api_router.get("/admin/payment-gateway")
+async def admin_payment_gateway_get(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Return current Razorpay configuration (secret masked)."""
+    s = await get_settings()
+    rzp = (s.get("razorpay") or {}) if isinstance(s.get("razorpay"), dict) else {}
+    db_id = (rzp.get("key_id") or "").strip()
+    db_secret = (rzp.get("key_secret") or "").strip()
+    creds = await get_razorpay_creds()
+    return {
+        "key_id": creds["key_id"],          # full (publicly safe)
+        "key_secret_masked": _mask_secret(creds["key_secret"]),
+        "is_test_mode": creds["key_id"].startswith("rzp_test_"),
+        "is_mock": creds["is_mock"],
+        "source": creds["source"],          # "db" | "env" | "none"
+        "has_db_override": bool(db_id and db_secret),
+        "has_env_fallback": bool(RAZORPAY_ENV_KEY_ID and RAZORPAY_ENV_KEY_SECRET),
+        "updated_at": rzp.get("updated_at"),
+        "updated_by": rzp.get("updated_by_email"),
+    }
+
+
+@api_router.put("/admin/payment-gateway")
+async def admin_payment_gateway_put(payload: PaymentGatewayPayload, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Update Razorpay credentials. Validates by hitting Razorpay's orders endpoint with a tiny test order, then persists if it passes."""
+    key_id = (payload.key_id or "").strip()
+    key_secret = (payload.key_secret or "").strip()
+    if not key_id or not key_secret:
+        raise HTTPException(status_code=400, detail="Both key_id and key_secret are required")
+    if not (key_id.startswith("rzp_test_") or key_id.startswith("rzp_live_")):
+        raise HTTPException(status_code=400, detail="key_id must start with rzp_test_ or rzp_live_")
+
+    # Validate by creating a tiny test order against Razorpay
+    try:
+        async with httpx.AsyncClient(timeout=15.0, auth=(key_id, key_secret)) as client:
+            r = await client.post(
+                "https://api.razorpay.com/v1/orders",
+                json={"amount": 100, "currency": "INR", "receipt": f"test_{secrets.token_hex(4)}"},
+            )
+        if r.status_code not in (200, 201):
+            detail = "Razorpay rejected these credentials"
+            try:
+                err = r.json().get("error", {})
+                detail = err.get("description") or err.get("code") or detail
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=detail)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Couldn't reach Razorpay: {e}")
+
+    ts = now_utc().isoformat()
+    await db.settings.update_one(
+        {"id": "global"},
+        {"$set": {"razorpay": {
+            "key_id": key_id,
+            "key_secret": key_secret,
+            "updated_at": ts,
+            "updated_by": admin["id"],
+            "updated_by_email": admin.get("email"),
+        }}},
+        upsert=True,
+    )
+    try:
+        await db.audit_logs.insert_one({
+            "id": str(uuid.uuid4()),
+            "actor_id": admin["id"],
+            "actor_email": admin.get("email"),
+            "action": "payment_gateway.update",
+            "details": {"key_id_prefix": key_id[:12]},
+            "created_at": ts,
+        })
+    except Exception:
+        pass
+    return {"ok": True, "key_id": key_id, "key_secret_masked": _mask_secret(key_secret), "is_test_mode": key_id.startswith("rzp_test_")}
+
+
+@api_router.delete("/admin/payment-gateway")
+async def admin_payment_gateway_delete(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Clear DB-stored Razorpay credentials and fall back to .env or mock mode."""
+    await db.settings.update_one({"id": "global"}, {"$unset": {"razorpay": ""}})
+    try:
+        await db.audit_logs.insert_one({
+            "id": str(uuid.uuid4()),
+            "actor_id": admin["id"],
+            "actor_email": admin.get("email"),
+            "action": "payment_gateway.clear",
+            "created_at": now_utc().isoformat(),
+        })
+    except Exception:
+        pass
+    creds = await get_razorpay_creds()
+    return {"ok": True, "source": creds["source"], "is_mock": creds["is_mock"]}
+
+
+@api_router.post("/admin/payment-gateway/test")
+async def admin_payment_gateway_test(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Sanity-check the currently active credentials by minting a tiny test order."""
+    creds = await get_razorpay_creds()
+    if creds["is_mock"]:
+        return {"ok": False, "error": "No Razorpay credentials configured (running in mock mode)."}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, auth=(creds["key_id"], creds["key_secret"])) as client:
+            r = await client.post(
+                "https://api.razorpay.com/v1/orders",
+                json={"amount": 100, "currency": "INR", "receipt": f"ping_{secrets.token_hex(4)}"},
+            )
+        if r.status_code in (200, 201):
+            data = r.json()
+            return {"ok": True, "order_id": data.get("id"), "status": data.get("status")}
+        return {"ok": False, "error": r.text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 

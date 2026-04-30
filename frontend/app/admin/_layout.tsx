@@ -42,6 +42,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="approved" options={{ href: null }} />
       <Tabs.Screen name="tickets" options={{ href: null }} />
       <Tabs.Screen name="ticket" options={{ href: null }} />
+      <Tabs.Screen name="payment-gateway" options={{ href: null }} />
     </Tabs>
   );
 }

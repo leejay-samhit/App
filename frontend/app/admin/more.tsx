@@ -14,6 +14,7 @@ const ITEMS = [
   { icon: "check-circle", label: "Approved registrations", route: "/admin/approved" },
   { icon: "user-x", label: "Rejected registrations", route: "/admin/rejected" },
   { icon: "message-square", label: "Support tickets", route: "/admin/tickets" },
+  { icon: "credit-card", label: "Payment gateway (Razorpay)", route: "/admin/payment-gateway" },
   { icon: "package", label: "Products", route: "/admin/products" },
   { icon: "edit-3", label: "Branding & theme", route: "/admin/branding" },
   { icon: "hard-drive", label: "Data backups", route: "/admin/backups" },
