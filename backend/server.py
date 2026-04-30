@@ -58,6 +58,7 @@ DEFAULT_SETTINGS = {
     "registration_fee": REGISTRATION_FEE,
     **DEFAULT_LEVEL_PAYOUTS,
     "directs_required": DIRECTS_REQUIRED,
+    "vendor_commission_pct": 70,  # vendor's % share of each line-item sale
 }
 
 
@@ -293,6 +294,7 @@ class ProductCreate(BaseModel):
     stock: int = 100
     category: Optional[str] = None
     is_published: bool = True
+    vendor_id: Optional[str] = None  # admin can assign to a vendor
 
 
 class ProductUpdate(BaseModel):
@@ -303,6 +305,7 @@ class ProductUpdate(BaseModel):
     stock: Optional[int] = None
     category: Optional[str] = None
     is_published: Optional[bool] = None
+    vendor_id: Optional[str] = None
 
 
 # ------------------ Branding (public-readable, super_admin writable) ------------------
@@ -1957,12 +1960,22 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Cart is empty")
     enriched = []
     total = 0.0
+    settings = await get_settings()
+    vendor_pct = float(settings.get("vendor_commission_pct") or 70)
+    vendor_payouts: Dict[str, float] = {}  # vendor_id -> total credit
     for it in items:
         product = await db.products.find_one({"id": it["product_id"]}, {"_id": 0})
         if not product:
             continue
         line_total = product["price"] * it["qty"]
         total += line_total
+        vendor_id = product.get("vendor_id")
+        vendor_share = 0.0
+        platform_share = line_total
+        if vendor_id:
+            vendor_share = round(line_total * (vendor_pct / 100.0), 2)
+            platform_share = round(line_total - vendor_share, 2)
+            vendor_payouts[vendor_id] = vendor_payouts.get(vendor_id, 0.0) + vendor_share
         enriched.append({
             "product_id": product["id"],
             "name": product["name"],
@@ -1970,6 +1983,9 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
             "image_url": product["image_url"],
             "qty": it["qty"],
             "line_total": line_total,
+            "vendor_id": vendor_id,
+            "vendor_share": vendor_share,
+            "platform_share": platform_share,
         })
     if total <= 0:
         raise HTTPException(status_code=400, detail="Cart total invalid")
@@ -1999,6 +2015,43 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         "description": f"Order #{order_id[:8]} ({len(enriched)} items)",
         "created_at": now_utc().isoformat(),
     })
+
+    # Credit vendor wallets and write vendor sales ledger entries
+    for it in enriched:
+        if not it.get("vendor_id"):
+            continue
+        await db.vendor_sales.insert_one({
+            "id": str(uuid.uuid4()),
+            "vendor_id": it["vendor_id"],
+            "order_id": order_id,
+            "buyer_id": user["id"],
+            "buyer_email": user.get("email"),
+            "product_id": it["product_id"],
+            "product_name": it["name"],
+            "qty": it["qty"],
+            "line_total": it["line_total"],
+            "vendor_share": it["vendor_share"],
+            "platform_share": it["platform_share"],
+            "commission_pct": vendor_pct,
+            "created_at": now_utc().isoformat(),
+        })
+    for vid, amount in vendor_payouts.items():
+        await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": amount}})
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": vid,
+            "type": "vendor_sale",
+            "amount": amount,
+            "status": "credited",
+            "description": f"Vendor share credited from order #{order_id[:8]}",
+            "order_id": order_id,
+            "created_at": now_utc().isoformat(),
+        })
+        try:
+            await _create_notification(vid, "vendor", "New sale!", f"₹{amount:.0f} credited from order #{order_id[:8]}.")
+        except Exception:
+            pass
+
     await _create_notification(user["id"], "order", "Order placed!", f"Your order of ₹{int(total)} has been placed.")
     order.pop("_id", None)
     return order
@@ -3830,6 +3883,307 @@ async def admin_payment_gateway_test(admin: Dict[str, Any] = Depends(require_adm
         return {"ok": False, "error": r.text}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+
+# ----------------------------------------------------------------------------
+# VENDOR PANEL — Sellers manage their own products, earnings, applications
+# ----------------------------------------------------------------------------
+# Roles / states on user doc:
+#   is_vendor (bool)
+#   vendor_status: pending | approved | rejected | suspended
+#   shop_name, gst_number, pan_number (vendor profile)
+# Collections used:
+#   vendor_applications, vendor_sales (per-line-item ledger)
+# Commission split happens during /orders/checkout (above) using
+# settings.vendor_commission_pct (default 70).
+# ----------------------------------------------------------------------------
+
+VENDOR_STATUSES = ("pending", "approved", "rejected", "suspended")
+
+
+class VendorApplyRequest(BaseModel):
+    shop_name: str
+    gst_number: Optional[str] = ""
+    pan_number: Optional[str] = ""
+    bank_name: Optional[str] = ""
+    bank_account: Optional[str] = ""
+    bank_ifsc: Optional[str] = ""
+    description: Optional[str] = ""
+
+
+class VendorRejectRequest(BaseModel):
+    reason: Optional[str] = ""
+
+
+def _is_vendor_active(u: Dict[str, Any]) -> bool:
+    return bool(u.get("is_vendor")) and (u.get("vendor_status") == "approved")
+
+
+async def require_vendor(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if not _is_vendor_active(user):
+        raise HTTPException(status_code=403, detail="Vendor access only — your account is not an approved vendor")
+    return user
+
+
+# ---------------- USER endpoints ----------------
+
+@api_router.post("/vendor/apply")
+async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    if not user.get("registration_paid"):
+        raise HTTPException(status_code=403, detail="Complete registration before applying as a vendor")
+    if user.get("approval_status") != "approved":
+        raise HTTPException(status_code=403, detail="Your account must be approved by admin first")
+    shop = (payload.shop_name or "").strip()
+    if len(shop) < 3:
+        raise HTTPException(status_code=400, detail="Shop name is required (min 3 chars)")
+    existing = await db.vendor_applications.find_one({"user_id": user["id"], "status": {"$in": ["pending", "approved"]}})
+    if existing:
+        raise HTTPException(status_code=400, detail="You already have an active application")
+    app_id = str(uuid.uuid4())
+    ts = now_utc().isoformat()
+    doc = {
+        "id": app_id,
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "user_name": user.get("name"),
+        "shop_name": shop,
+        "gst_number": (payload.gst_number or "").strip(),
+        "pan_number": (payload.pan_number or "").strip(),
+        "bank_name": (payload.bank_name or "").strip(),
+        "bank_account": (payload.bank_account or "").strip(),
+        "bank_ifsc": (payload.bank_ifsc or "").strip(),
+        "description": (payload.description or "").strip(),
+        "status": "pending",
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    await db.vendor_applications.insert_one(doc)
+    # Mark user with vendor_status pending
+    await db.users.update_one({"id": user["id"]}, {"$set": {
+        "vendor_status": "pending",
+        "shop_name": shop,
+    }})
+    # Notify admins
+    async for a in db.users.find({"role": "admin", "admin_role": {"$in": ["super_admin", "support", "finance"]}}, {"id": 1, "_id": 0}):
+        try:
+            await _create_notification(a["id"], "vendor", "New vendor application", f"{user.get('name') or user.get('email')} applied with shop '{shop}'")
+        except Exception:
+            pass
+    doc.pop("_id", None)
+    return {"ok": True, "application": doc}
+
+
+@api_router.get("/vendor/me/status")
+async def vendor_my_status(user: Dict[str, Any] = Depends(get_current_user)):
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    app = await db.vendor_applications.find_one(
+        {"user_id": user["id"]},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    return {
+        "is_vendor": bool(fresh.get("is_vendor")),
+        "vendor_status": fresh.get("vendor_status") or "none",
+        "shop_name": fresh.get("shop_name"),
+        "application": app,
+    }
+
+
+@api_router.get("/vendor/me/stats")
+async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
+    today_iso = now_utc().date().isoformat()
+    sales = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).to_list(5000)
+    total_sales = sum(s.get("line_total", 0) for s in sales)
+    total_earnings = sum(s.get("vendor_share", 0) for s in sales)
+    today_earnings = sum(s.get("vendor_share", 0) for s in sales if (s.get("created_at") or "").startswith(today_iso))
+    today_orders = len({s.get("order_id") for s in sales if (s.get("created_at") or "").startswith(today_iso)})
+    products_count = await db.products.count_documents({"vendor_id": vendor["id"]})
+    published_count = await db.products.count_documents({"vendor_id": vendor["id"], "is_published": True})
+    return {
+        "total_sales": round(total_sales, 2),
+        "total_earnings": round(total_earnings, 2),
+        "today_earnings": round(today_earnings, 2),
+        "today_orders": today_orders,
+        "all_orders": len({s.get("order_id") for s in sales}),
+        "products_count": products_count,
+        "published_count": published_count,
+        "wallet_balance": round(float(vendor.get("wallet_balance") or 0), 2),
+    }
+
+
+@api_router.get("/vendor/me/products")
+async def vendor_my_products(vendor: Dict[str, Any] = Depends(require_vendor)):
+    items = await db.products.find({"vendor_id": vendor["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return items
+
+
+@api_router.post("/vendor/me/products")
+async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depends(require_vendor)):
+    if (p.price or 0) <= 0:
+        raise HTTPException(status_code=400, detail="Price must be > 0")
+    if not (p.name or "").strip():
+        raise HTTPException(status_code=400, detail="Name is required")
+    doc = {
+        "id": str(uuid.uuid4()),
+        **{k: v for k, v in p.dict().items() if k != "vendor_id"},
+        "vendor_id": vendor["id"],          # force-stamp
+        "vendor_email": vendor.get("email"),
+        "created_at": now_utc().isoformat(),
+    }
+    await db.products.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.patch("/vendor/me/products/{product_id}")
+async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor: Dict[str, Any] = Depends(require_vendor)):
+    target = await db.products.find_one({"id": product_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if target.get("vendor_id") != vendor["id"]:
+        raise HTTPException(status_code=403, detail="Not your product")
+    update = {k: v for k, v in payload.dict().items() if v is not None and k != "vendor_id"}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields provided")
+    await db.products.update_one({"id": product_id}, {"$set": update})
+    fresh = await db.products.find_one({"id": product_id}, {"_id": 0})
+    return fresh
+
+
+@api_router.delete("/vendor/me/products/{product_id}")
+async def vendor_delete_product(product_id: str, vendor: Dict[str, Any] = Depends(require_vendor)):
+    target = await db.products.find_one({"id": product_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if target.get("vendor_id") != vendor["id"]:
+        raise HTTPException(status_code=403, detail="Not your product")
+    await db.products.delete_one({"id": product_id})
+    await db.cart_items.delete_many({"product_id": product_id})
+    return {"ok": True}
+
+
+@api_router.get("/vendor/me/sales")
+async def vendor_my_sales(vendor: Dict[str, Any] = Depends(require_vendor)):
+    items = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return {"items": items, "total": len(items)}
+
+
+# ---------------- ADMIN endpoints ----------------
+
+@api_router.get("/admin/vendor-applications")
+async def admin_list_vendor_apps(
+    status: Optional[str] = "pending",
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    q: Dict[str, Any] = {}
+    if status and status in VENDOR_STATUSES:
+        q["status"] = status
+    items = await db.vendor_applications.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    counts = {
+        "pending": await db.vendor_applications.count_documents({"status": "pending"}),
+        "approved": await db.vendor_applications.count_documents({"status": "approved"}),
+        "rejected": await db.vendor_applications.count_documents({"status": "rejected"}),
+        "suspended": await db.vendor_applications.count_documents({"status": "suspended"}),
+    }
+    return {"items": items, "total": len(items), "counts": counts}
+
+
+@api_router.post("/admin/vendor-applications/{app_id}/approve")
+async def admin_approve_vendor(app_id: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance"))):
+    a = await db.vendor_applications.find_one({"id": app_id})
+    if not a:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if a.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="Already processed")
+    ts = now_utc().isoformat()
+    await db.vendor_applications.update_one({"id": app_id}, {"$set": {
+        "status": "approved",
+        "approved_at": ts,
+        "approved_by": admin["id"],
+        "approved_by_email": admin.get("email"),
+        "updated_at": ts,
+    }})
+    await db.users.update_one({"id": a["user_id"]}, {"$set": {
+        "is_vendor": True,
+        "vendor_status": "approved",
+        "shop_name": a.get("shop_name"),
+        "vendor_approved_at": ts,
+    }})
+    try:
+        await _create_notification(a["user_id"], "vendor", "Vendor account approved!", "You can now list and sell products.")
+    except Exception:
+        pass
+    fresh = await db.vendor_applications.find_one({"id": app_id}, {"_id": 0})
+    return {"ok": True, "application": fresh}
+
+
+@api_router.post("/admin/vendor-applications/{app_id}/reject")
+async def admin_reject_vendor(app_id: str, payload: VendorRejectRequest, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance"))):
+    a = await db.vendor_applications.find_one({"id": app_id})
+    if not a:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if a.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="Already processed")
+    ts = now_utc().isoformat()
+    await db.vendor_applications.update_one({"id": app_id}, {"$set": {
+        "status": "rejected",
+        "rejection_reason": (payload.reason or "").strip(),
+        "rejected_at": ts,
+        "rejected_by": admin["id"],
+        "rejected_by_email": admin.get("email"),
+        "updated_at": ts,
+    }})
+    await db.users.update_one({"id": a["user_id"]}, {"$set": {"vendor_status": "rejected"}})
+    try:
+        await _create_notification(a["user_id"], "vendor", "Vendor application rejected", payload.reason or "Please contact support for details.")
+    except Exception:
+        pass
+    fresh = await db.vendor_applications.find_one({"id": app_id}, {"_id": 0})
+    return {"ok": True, "application": fresh}
+
+
+@api_router.get("/admin/vendors")
+async def admin_list_vendors(admin: Dict[str, Any] = Depends(require_admin)):
+    vendors = await db.users.find({"is_vendor": True}, {"_id": 0, "hashed_password": 0}).sort("vendor_approved_at", -1).to_list(2000)
+    out: List[Dict[str, Any]] = []
+    for v in vendors:
+        sales = await db.vendor_sales.find({"vendor_id": v["id"]}, {"_id": 0}).to_list(5000)
+        out.append({
+            **v,
+            "total_sales": round(sum(s.get("line_total", 0) for s in sales), 2),
+            "total_earnings": round(sum(s.get("vendor_share", 0) for s in sales), 2),
+            "products_count": await db.products.count_documents({"vendor_id": v["id"]}),
+        })
+    return {"items": out, "total": len(out)}
+
+
+@api_router.post("/admin/vendors/{user_id}/suspend")
+async def admin_suspend_vendor(user_id: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance"))):
+    u = await db.users.find_one({"id": user_id})
+    if not u or not u.get("is_vendor"):
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    await db.users.update_one({"id": user_id}, {"$set": {"vendor_status": "suspended"}})
+    # Unpublish all of their products
+    await db.products.update_many({"vendor_id": user_id}, {"$set": {"is_published": False}})
+    try:
+        await _create_notification(user_id, "vendor", "Vendor account suspended", "Contact support for clarification.")
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@api_router.post("/admin/vendors/{user_id}/reactivate")
+async def admin_reactivate_vendor(user_id: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance"))):
+    u = await db.users.find_one({"id": user_id})
+    if not u or not u.get("is_vendor"):
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    await db.users.update_one({"id": user_id}, {"$set": {"vendor_status": "approved"}})
+    try:
+        await _create_notification(user_id, "vendor", "Vendor account reactivated", "Welcome back! Your products can be published again.")
+    except Exception:
+        pass
+    return {"ok": True}
 
 
 

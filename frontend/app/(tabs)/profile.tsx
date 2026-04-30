@@ -104,6 +104,19 @@ export default function ProfileScreen() {
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
 
+          <TouchableOpacity
+            onPress={() => router.push((((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "/vendor/dashboard" : "/vendor/apply") as any)}
+            style={styles.kycCard}
+            testID="profile-vendor-link"
+          >
+            <View style={[styles.kycDot, { backgroundColor: ((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? colors.success : (user as any)?.vendor_status === "pending" ? colors.warning : (user as any)?.vendor_status === "suspended" ? "#B3261E" : "#94A3B8" }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.kycTitle}>{((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "Vendor Panel" : "Become a Vendor"}</Text>
+              <Text style={styles.kycSub}>{(user as any)?.vendor_status ? ((user as any).vendor_status as string).toUpperCase() : "SELL ON OUR PLATFORM"}</Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+
           <Text style={styles.sectionLabel}>PAYOUT DETAILS</Text>
           <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
 

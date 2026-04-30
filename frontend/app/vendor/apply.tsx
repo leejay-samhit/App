@@ -1,0 +1,166 @@
+import { useCallback, useEffect, useState } from "react";
+import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, RefreshControl } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
+import { useFocusEffect, useRouter } from "expo-router";
+import { api, formatApiError } from "../../src/api";
+import { useAuth } from "../../src/auth";
+import { colors, radii, spacing } from "../../src/theme";
+
+type VendorStatus = {
+  is_vendor: boolean;
+  vendor_status: "none" | "pending" | "approved" | "rejected" | "suspended";
+  shop_name?: string | null;
+  application?: any;
+};
+
+export default function VendorApplyScreen() {
+  const router = useRouter();
+  const { user } = useAuth();
+  const [info, setInfo] = useState<VendorStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [shopName, setShopName] = useState("");
+  const [gst, setGst] = useState("");
+  const [pan, setPan] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [bankAccount, setBankAccount] = useState("");
+  const [bankIfsc, setBankIfsc] = useState("");
+  const [description, setDescription] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await api.get<VendorStatus>("/vendor/me/status");
+      setInfo(data);
+      if (data.vendor_status === "approved") {
+        // Auto-redirect to dashboard
+        setTimeout(() => router.replace("/vendor/dashboard" as any), 100);
+      }
+    } catch (e) { Alert.alert("Error", formatApiError(e)); }
+    finally { setLoading(false); setRefreshing(false); }
+  }, [router]);
+
+  useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
+
+  const onSubmit = async () => {
+    if (shopName.trim().length < 3) { Alert.alert("Shop name is too short"); return; }
+    setSubmitting(true);
+    try {
+      await api.post("/vendor/apply", {
+        shop_name: shopName.trim(), gst_number: gst.trim(), pan_number: pan.trim(),
+        bank_name: bankName.trim(), bank_account: bankAccount.trim(), bank_ifsc: bankIfsc.trim(),
+        description: description.trim(),
+      });
+      Alert.alert("Application submitted", "We'll notify you once an admin reviews it.");
+      await load();
+    } catch (e) { Alert.alert("Couldn't apply", formatApiError(e)); }
+    finally { setSubmitting(false); }
+  };
+
+  if (loading) {
+    return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator size="large" color={colors.primary} /></View></SafeAreaView>;
+  }
+
+  const status = info?.vendor_status || "none";
+  const showForm = status === "none" || status === "rejected";
+  const showPending = status === "pending";
+  const showSuspended = status === "suspended";
+  const lastApp = info?.application;
+
+  return (
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} testID="vapply-back"><Feather name="arrow-left" size={20} color={colors.textMain} /></TouchableOpacity>
+          <Text style={styles.title}>Become a Vendor</Text>
+          <View style={{ width: 40 }} />
+        </View>
+        <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }} keyboardShouldPersistTaps="handled" refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
+          {showPending && lastApp && (
+            <View style={[styles.statusCard, { backgroundColor: "#FFF4E5" }]}>
+              <MaterialCommunityIcons name="clock-outline" size={28} color="#7A4A0E" />
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={[styles.statusTitle, { color: "#7A4A0E" }]}>Application under review</Text>
+                <Text style={styles.statusBody}>Submitted on {new Date(lastApp.created_at).toLocaleDateString()} for shop “{lastApp.shop_name}”. We'll notify you once approved.</Text>
+              </View>
+            </View>
+          )}
+          {showSuspended && (
+            <View style={[styles.statusCard, { backgroundColor: "#FCE9E5" }]}>
+              <Feather name="alert-triangle" size={28} color="#B3261E" />
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={[styles.statusTitle, { color: "#B3261E" }]}>Vendor account suspended</Text>
+                <Text style={styles.statusBody}>Please contact support to resolve this.</Text>
+              </View>
+            </View>
+          )}
+          {status === "rejected" && lastApp && (
+            <View style={[styles.statusCard, { backgroundColor: "#FCE9E5" }]}>
+              <Feather name="x-circle" size={28} color="#B3261E" />
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={[styles.statusTitle, { color: "#B3261E" }]}>Previous application rejected</Text>
+                <Text style={styles.statusBody}>{lastApp.rejection_reason || "Please update your details and re-submit."}</Text>
+              </View>
+            </View>
+          )}
+
+          {showForm && (
+            <>
+              <View style={[styles.statusCard, { backgroundColor: "#E6F1FB" }]}>
+                <Feather name="shopping-bag" size={28} color="#1F5E9E" />
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={[styles.statusTitle, { color: "#1F5E9E" }]}>Sell on our platform</Text>
+                  <Text style={styles.statusBody}>List your products, manage orders, earn 70% commission per sale.</Text>
+                </View>
+              </View>
+
+              <Text style={styles.section}>SHOP DETAILS</Text>
+              <Text style={styles.label}>Shop name *</Text>
+              <TextInput style={styles.input} value={shopName} onChangeText={setShopName} placeholder="e.g. Anika's Boutique" placeholderTextColor={colors.textMuted} testID="vapply-shop" />
+              <Text style={styles.label}>Description (optional)</Text>
+              <TextInput style={[styles.input, styles.area]} value={description} onChangeText={setDescription} placeholder="What do you sell? Specialities, regions covered, etc." placeholderTextColor={colors.textMuted} multiline textAlignVertical="top" testID="vapply-desc" />
+
+              <Text style={styles.section}>BUSINESS DOCUMENTS</Text>
+              <Text style={styles.label}>GST number (optional)</Text>
+              <TextInput style={styles.input} value={gst} onChangeText={setGst} placeholder="22AAAAA0000A1Z5" placeholderTextColor={colors.textMuted} autoCapitalize="characters" testID="vapply-gst" />
+              <Text style={styles.label}>PAN number (optional)</Text>
+              <TextInput style={styles.input} value={pan} onChangeText={setPan} placeholder="ABCDE1234F" placeholderTextColor={colors.textMuted} autoCapitalize="characters" testID="vapply-pan" />
+
+              <Text style={styles.section}>PAYOUT BANK ACCOUNT</Text>
+              <Text style={styles.label}>Bank name (optional)</Text>
+              <TextInput style={styles.input} value={bankName} onChangeText={setBankName} placeholder="HDFC Bank" placeholderTextColor={colors.textMuted} testID="vapply-bank" />
+              <Text style={styles.label}>Account number (optional)</Text>
+              <TextInput style={styles.input} value={bankAccount} onChangeText={setBankAccount} placeholder="XXXX-XXXX-1234" placeholderTextColor={colors.textMuted} keyboardType="number-pad" testID="vapply-acct" />
+              <Text style={styles.label}>IFSC code (optional)</Text>
+              <TextInput style={styles.input} value={bankIfsc} onChangeText={setBankIfsc} placeholder="HDFC0001234" placeholderTextColor={colors.textMuted} autoCapitalize="characters" testID="vapply-ifsc" />
+
+              <TouchableOpacity onPress={onSubmit} disabled={submitting} style={[styles.primaryBtn, submitting && { opacity: 0.7 }]} testID="vapply-submit">
+                {submitting ? <ActivityIndicator color={colors.primaryFg} /> : <><Feather name="send" size={16} color={colors.primaryFg} /><Text style={styles.primaryBtnText}>  Submit application</Text></>}
+              </TouchableOpacity>
+              <Text style={styles.note}>You can sell after admin approval. Bank details can be updated later from settings.</Text>
+            </>
+          )}
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.background },
+  center: { flex: 1, alignItems: "center", justifyContent: "center" },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.screen, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border },
+  title: { fontSize: 18, fontWeight: "800", color: colors.textMain },
+  iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  statusCard: { flexDirection: "row", alignItems: "center", borderRadius: radii.card, padding: 16, marginBottom: 20 },
+  statusTitle: { fontSize: 15, fontWeight: "800" },
+  statusBody: { fontSize: 12, color: colors.textMuted, marginTop: 4 },
+  section: { fontSize: 11, letterSpacing: 1.5, color: colors.textMuted, fontWeight: "800", marginTop: 16, marginBottom: 8 },
+  label: { fontSize: 12, color: colors.textMuted, marginTop: 12, marginBottom: 6, fontWeight: "600" },
+  input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 16, paddingVertical: 14, fontSize: 14, color: colors.textMain },
+  area: { minHeight: 90, paddingTop: 14 },
+  primaryBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 15, marginTop: 24 },
+  primaryBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
+  note: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 12 },
+});

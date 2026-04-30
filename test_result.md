@@ -107,6 +107,248 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Vendor Panel — apply, admin approve/reject, vendor products CRUD, sales ledger, commission split on checkout"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Vendor Panel backend — end-to-end testing COMPLETE. ALL 72/72 checks
+            PASSED via /app/vendor_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Detailed results (matches review-request scenarios 1–8):
+
+            1. APPLY GUARDS ✅
+              • Registered U1 (no payment) → POST /vendor/apply → 403
+                "Complete registration before applying as a vendor". ✅
+              • U1 paid /payment/register-fee → 200 (approval_status still pending).
+              • POST /vendor/apply → 403 "Your account must be approved by admin
+                first". ✅
+              • super_admin POST /admin/approvals/{U1.id}/approve → 200.
+              • POST /vendor/apply with shop_name="Tester Store" + GST/PAN/bank →
+                200 {ok:true, application:{...status:"pending"}}; user.vendor_status
+                flipped to "pending". ✅
+              • Re-POST /vendor/apply → 400 "You already have an active
+                application". ✅
+              • POST /vendor/apply {shop_name:"Hi"} → 400 "Shop name is required
+                (min 3 chars)". (Length check is performed BEFORE the existing-app
+                check in the implementation, so this fires correctly even when
+                U1 already has a pending application.) ✅
+
+            2. ADMIN APPROVE ✅
+              • GET /admin/vendor-applications?status=pending as admin → 200; U1's
+                app present in items[]; counts={pending:1, approved:0, rejected:0,
+                suspended:0}. ✅
+              • POST /admin/vendor-applications/{u1_app_id}/approve as super_admin →
+                200 {ok:true, application:{...status:"approved", approved_at,
+                approved_by, approved_by_email}}. ✅
+              • U1 user doc: is_vendor=true, vendor_status="approved". ✅
+              • Notification kind="vendor" with title "Vendor account approved!"
+                delivered to U1 (verified via GET /notifications/me). ✅
+              • GET /vendor/me/status as U1 → 200 {is_vendor:true,
+                vendor_status:"approved", shop_name:"Tester Store",
+                application:{...}}. ✅
+
+            3. VENDOR PRODUCTS CRUD ✅
+              • GET /vendor/me/products as fresh approved vendor U1 → []. ✅
+              • POST /vendor/me/products {name:"Test Lamp", price:500, stock:10,
+                image_url:"https://placehold.it/300", description:"test",
+                is_published:true, vendor_id:"FAKE_VENDOR_ID"} → 200; persisted
+                product had vendor_id force-stamped to U1.id (NOT the caller-supplied
+                "FAKE_VENDOR_ID") and vendor_email==U1.email. ✅
+              • PATCH /vendor/me/products/{p1_id} {price:600} → 200, persisted. ✅
+              • Registered U2, paid + approved + applied as vendor + admin approved.
+              • U2 PATCH /vendor/me/products/{p1_id} → 403 "Not your product". ✅
+              • U2 DELETE /vendor/me/products/{p1_id} → 403 "Not your product". ✅
+              • U1 DELETE /vendor/me/products/{p1_id} → 200 {ok:true}. ✅
+
+            4. CHECKOUT COMMISSION SPLIT ✅
+              • U1 created fresh product priced ₹500, is_published=true. Snapshot
+                U1 wallet = 0.
+              • Registered U3 buyer, paid, super_admin approved, admin credited
+                wallet ₹1000 (admin/users/{id}/wallet credit). U3 wallet=1000. ✅
+              • U3 cart/add product, then POST /orders/checkout → 200; order
+                returned items[0].vendor_id==U1.id, vendor_share==350. ✅
+              • U3 wallet decreased by exactly 500 (1000 → 500). ✅
+              • U1 wallet increased by exactly 350 (0 → 350) — round(500*0.7,2). ✅
+              • db.vendor_sales row present for vendor_id=U1.id, order_id matching:
+                line_total=500, vendor_share=350, platform_share=150,
+                commission_pct=70. ✅
+              • U1 transactions/me has type="vendor_sale" amount=350. ✅
+              • U1 has notification kind="vendor", title "New sale!". ✅
+
+            5. STATS ✅
+              • GET /vendor/me/stats as U1 → 200 {total_sales:500,
+                total_earnings:350, today_earnings:350, today_orders:1,
+                products_count:1, published_count:1, wallet_balance:350}. All
+                ≥ thresholds satisfied. ✅
+
+            6. ADMIN VENDORS LIST + SUSPEND/REACTIVATE ✅
+              • GET /admin/vendors as admin → 200 with U1 row carrying
+                total_earnings=350, total_sales=500, products_count=1. ✅
+              • POST /admin/vendors/{U1.id}/suspend → 200 {ok:true};
+                U1.vendor_status="suspended"; ALL of U1's products
+                is_published=false (verified via /admin/products). ✅
+              • GET /vendor/me/stats as U1 → 403 (require_vendor blocks suspended
+                vendor). ✅
+              • POST /admin/vendors/{U1.id}/reactivate → 200 {ok:true};
+                U1.vendor_status="approved". ✅
+              • GET /vendor/me/stats as U1 → 200 again. ✅
+
+            7. REJECTION FLOW ✅
+              • Registered U4, paid, super_admin approved, applied → 200 pending.
+              • POST /admin/vendor-applications/{u4_app_id}/reject
+                {reason:"Insufficient docs"} → 200 {ok:true,
+                application:{status:"rejected", rejection_reason:"Insufficient
+                docs", rejected_at, rejected_by, rejected_by_email}}. ✅
+              • U4.vendor_status="rejected"; rejection notification kind="vendor"
+                title "Vendor application rejected" delivered. ✅
+              • U4 POST /vendor/apply (re-apply) → 200 (allowed because previous
+                app is "rejected", not pending/approved). ✅
+
+            8. REGRESSION ✅
+              • Public GET /api/products → 200 (list). ✅
+              • GET /admin/approvals?status=pending → 200. ✅
+              • GET /branding (no auth) → 200. ✅
+              • Platform-owned product (no vendor_id) checkout: admin POST
+                /admin/products → 200; U3 cart/add+/orders/checkout → 200; order
+                items[0].vendor_id is empty (None); db.vendor_sales count
+                unchanged before/after this checkout (1 → 1). Platform retains
+                full revenue when no vendor_id is set. ✅
+
+            CLEANUP ✅
+              • DELETE all 4 throwaway users (U1, U2, U3, U4) via super_admin
+                DELETE /admin/users/{id} → 200 each.
+              • DELETE remaining vendor product + platform product via
+                /admin/products/{id} → 200.
+              • Orphan vendor_applications (4), orphan vendor_sales (1) and
+                orphan orders (2) purged directly from DB (these collections
+                don't cascade on user delete).
+              • admin@app.com login still works post-cleanup. ✅
+
+            Implementation observations:
+            • require_vendor dependency: returns 403 unless user.is_vendor=true
+              AND user.vendor_status=="approved" — hence suspended vendors
+              correctly blocked from /vendor/me/* read endpoints.
+            • POST /vendor/apply guard order: registration_paid → approval_status
+              → shop_name length (min 3) → existing pending/approved application.
+              Length check fires before existing-app check.
+            • POST /vendor/me/products force-stamps vendor_id=user.id and
+              vendor_email=user.email, ignoring caller-supplied vendor_id.
+              ProductCreate's vendor_id field is filtered out via dict
+              comprehension.
+            • PATCH/DELETE /vendor/me/products/{id} verify ownership; non-owners
+              get 403 "Not your product"; same for non-existent → 404.
+            • /orders/checkout commission split: for each line item with
+              product.vendor_id, vendor_share = round(line_total *
+              vendor_pct/100, 2), platform_share = line_total - vendor_share;
+              vendor_sales row inserted; vendor wallet incremented; vendor_sale
+              transaction recorded; "New sale!" notification sent. Items
+              without vendor_id behave as platform-owned (no vendor_sales row,
+              full revenue retained).
+            • POST /admin/vendors/{id}/suspend additionally calls
+              db.products.update_many({"vendor_id":id}, {"$set":
+              {"is_published":False}}) — un-publishing all of vendor's
+              products in one shot.
+            • POST /admin/vendor-applications/{id}/approve|reject restricted to
+              super_admin or finance via require_admin_role.
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Added Vendor Panel backend. New collections: vendor_applications, vendor_sales.
+            New user flags: is_vendor (bool), vendor_status (none/pending/approved/rejected/suspended), shop_name.
+            New product field: vendor_id, vendor_email (when product belongs to a vendor).
+            Settings: vendor_commission_pct (default 70).
+
+            Endpoints:
+              VENDOR (self):
+                POST   /api/vendor/apply               { shop_name, gst_number?, pan_number?, bank_name?, bank_account?, bank_ifsc?, description? }
+                GET    /api/vendor/me/status           returns { is_vendor, vendor_status, shop_name, application }
+                GET    /api/vendor/me/stats            (only if approved) returns sales/earnings/products counters
+                GET    /api/vendor/me/products         (only if approved) own products
+                POST   /api/vendor/me/products         create product (vendor_id force-stamped)
+                PATCH  /api/vendor/me/products/{id}    update own product
+                DELETE /api/vendor/me/products/{id}    delete own product
+                GET    /api/vendor/me/sales            line-item ledger
+
+              ADMIN (require admin role):
+                GET    /api/admin/vendor-applications?status=pending|approved|rejected|suspended
+                POST   /api/admin/vendor-applications/{id}/approve  (super_admin or finance)
+                POST   /api/admin/vendor-applications/{id}/reject   { reason? } (super_admin or finance)
+                GET    /api/admin/vendors            list of approved vendors w/ totals
+                POST   /api/admin/vendors/{id}/suspend
+                POST   /api/admin/vendors/{id}/reactivate
+
+            Flow on /orders/checkout (modified):
+              For each line item, if product.vendor_id is set:
+                - vendor_share = round(line_total * vendor_pct/100, 2)
+                - platform_share = line_total - vendor_share
+                - vendor_sales row inserted
+                - vendor's wallet_balance incremented by vendor_share
+                - vendor receives "vendor_sale" transaction + "New sale!" notification
+
+            Test scenarios to verify:
+            1. APPLY flow:
+               • Register fresh user U1, but DO NOT pay registration → POST /vendor/apply → 403 "Complete registration".
+               • Pay registration but approval_status=pending → 403 "Your account must be approved".
+               • Approve U1 via admin → POST /vendor/apply with valid shop_name → 200, application created (pending), user.vendor_status=pending.
+               • Re-POST while pending → 400 "already have an active application".
+               • shop_name shorter than 3 → 400.
+
+            2. ADMIN APPROVE:
+               • As admin@app.com (super_admin) GET /admin/vendor-applications → returns U1's app with counts.
+               • POST /admin/vendor-applications/{id}/approve → user.is_vendor=true, vendor_status=approved.
+               • Notification "Vendor account approved!" sent to U1.
+
+            3. VENDOR PRODUCTS CRUD:
+               • As U1, GET /vendor/me/products → []
+               • POST /vendor/me/products with valid {name, price, image_url} → 200, product persisted with vendor_id=U1.id, vendor_email=U1.email, even if caller passed a different vendor_id (force-stamped).
+               • PATCH /vendor/me/products/{id} {price: 200} → 200.
+               • PATCH on a product not owned by U1 → 403.
+               • DELETE on own → 200; on other's → 403.
+
+            4. CHECKOUT COMMISSION SPLIT:
+               • Admin promotes U1 to is_vendor approved. Admin creates a regular user U2 (registered+approved+wallet topped up).
+               • U1 publishes a product priced ₹500.
+               • U2 adds to cart, checkout. Order succeeds. Verify:
+                 - U2.wallet_balance debited 500
+                 - U1.wallet_balance credited round(500*0.7,2)=350
+                 - vendor_sales has a row for U1 with vendor_share=350, platform_share=150, commission_pct=70.
+                 - U1 has a "vendor_sale" transaction +350.
+                 - U1 receives a notification kind="vendor".
+                 - Order.items[0].vendor_id=U1.id, vendor_share=350.
+
+            5. STATS:
+               • GET /vendor/me/stats as U1 → { total_earnings: 350, total_sales: 500, today_earnings: 350, today_orders: 1, products_count: 1, published_count: 1 }.
+
+            6. ADMIN VENDORS LIST:
+               • GET /admin/vendors → includes U1 with totals.
+               • POST /admin/vendors/{U1.id}/suspend → user.vendor_status=suspended; all U1's products is_published=false.
+               • require_vendor (GET /vendor/me/stats) now returns 403 (because suspended).
+               • POST /admin/vendors/{U1.id}/reactivate → vendor_status=approved, /vendor/me/stats works again.
+
+            7. REJECTION:
+               • Register U3, get approved, POST /vendor/apply.
+               • Admin POST .../reject {reason:"Insufficient docs"} → user.vendor_status=rejected, application.rejection_reason saved, notification sent.
+               • U3 re-POST /vendor/apply → 200 (allowed since the previous one is rejected, not pending/approved).
+
+            8. REGRESSION:
+               • Existing /api/products endpoints still work and return platform-owned products too.
+               • Existing /api/cart, /api/admin/approvals/*, /api/branding all 200.
+               • A regular non-vendor checkout (no vendor_id on products) does NOT create vendor_sales rows and platform keeps full revenue.
+
+            Cleanup test users (U1, U2, U3) and their applications/sales.
+            Credentials: admin@app.com / Admin@123 (super_admin).
+
   - task: "Support / Ticket System — user + admin CRUD, messaging with attachments, status/priority/assignment, CSV export, notifications"
     implemented: true
     working: true
@@ -2216,8 +2458,8 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "1.5"
-  test_sequence: 10
+  version: "1.6"
+  test_sequence: 11
   run_ui: false
 
 test_plan:
@@ -2227,6 +2469,61 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        VENDOR PANEL — backend testing COMPLETE. ALL 72/72 PASSED via
+        /app/vendor_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Scenarios 1–8 all green:
+        1. APPLY GUARDS — unpaid → 403 "Complete registration"; paid+pending →
+           403 "must be approved by admin"; super_admin approves U1 →
+           /vendor/apply 200 (status=pending, user.vendor_status=pending);
+           re-apply → 400 "already have an active application";
+           shop_name="Hi" → 400 (min 3 chars).
+        2. ADMIN APPROVE — GET /admin/vendor-applications?status=pending lists
+           U1's app with counts.pending>=1; POST .../approve → 200; user becomes
+           is_vendor=true / vendor_status=approved; "Vendor account approved!"
+           notification delivered; /vendor/me/status returns expected payload.
+        3. VENDOR PRODUCTS CRUD — empty list initially; POST forces vendor_id
+           to U1.id (ignores caller-supplied "FAKE_VENDOR_ID") and stamps
+           vendor_email; PATCH price=600 OK; second vendor U2 PATCH/DELETE
+           U1's product → 403 "Not your product"; U1 DELETE own → 200.
+        4. CHECKOUT COMMISSION SPLIT — U1 makes ₹500 product; U3 buyer paid+
+           approved+wallet=1000; U3 cart/add+checkout → 200; U3 wallet -500;
+           U1 wallet +350 (round(500*0.7,2)); vendor_sales row inserted with
+           {line_total:500, vendor_share:350, platform_share:150,
+           commission_pct:70, order_id matches}; U1 has type=vendor_sale tx
+           +350; U1 has kind=vendor "New sale!" notification; order
+           items[0].vendor_id==U1.id and vendor_share==350.
+        5. STATS — /vendor/me/stats returns total_earnings=350, total_sales=
+           500, today_earnings=350, today_orders=1, products_count=1,
+           published_count=1, wallet_balance=350.
+        6. ADMIN VENDORS — /admin/vendors lists U1 with totals; suspend →
+           U1.vendor_status="suspended" + ALL U1 products is_published=false;
+           /vendor/me/stats now 403; reactivate → vendor_status="approved" +
+           /vendor/me/stats 200 again.
+        7. REJECTION — U4 paid+approved+applied → admin rejects with
+           reason="Insufficient docs"; application.status="rejected" with
+           rejection_reason saved; user.vendor_status="rejected"; rejection
+           notification sent; U4 re-apply → 200 (allowed since previous
+           is rejected, not pending/approved).
+        8. REGRESSION — public /api/products 200, /admin/approvals?status=
+           pending 200, /branding 200; platform-owned product checkout (no
+           vendor_id) does NOT create vendor_sales rows and platform retains
+           full revenue (verified via vendor_sales count unchanged before/
+           after).
+
+        CLEANUP: U1, U2, U3, U4 all deleted via super_admin DELETE. Remaining
+        vendor product + platform product deleted via /admin/products.
+        Orphan vendor_applications (4), orphan vendor_sales (1), and orphan
+        orders (2) purged directly from DB (these collections don't cascade
+        on user delete). admin@app.com login still works.
+
+        Backend logs clean, no 500s observed. Task "Vendor Panel" marked
+        working: true, needs_retesting: false. Main agent can summarise and
+        finish.
+
     - agent: "testing"
       message: |
         SUPPORT / TICKET SYSTEM — backend testing COMPLETE. ALL 74/74 PASSED via
