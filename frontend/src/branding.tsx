@@ -1,5 +1,13 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { Platform, StyleSheet } from "react-native";
+// Preload @expo/vector-icons fonts at boot — Expo SDK 54 + new-arch can race
+// the runtime font loader and surface "Font file for feather is empty"
+// when an icon renders before the font registers. Importing each icon set
+// here exposes its `.font` map (e.g. `{ feather: require(...) }`) which we
+// pass to `useFonts` alongside the Google fonts.
+import Feather from "@expo/vector-icons/Feather";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 // Trimmed to 3 weights per font (400/600/800) — drops ~40% of the bundled font assets
 // while still covering Body / Heading / ExtraBold use cases throughout the app.
 import {
@@ -84,6 +92,11 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
     PlusJakartaSans_400Regular,
     PlusJakartaSans_600SemiBold,
     PlusJakartaSans_800ExtraBold,
+    // Icon fonts — preload to avoid the Expo SDK 54 race condition where the
+    // first <Feather/> render happens before the font asset registers.
+    ...((Feather as any).font || {}),
+    ...((MaterialCommunityIcons as any).font || {}),
+    ...((Ionicons as any).font || {}),
   });
 
   const applyToColors = (next: Branding["colors"]) => {
