@@ -1,9 +1,14 @@
 import { Tabs } from "expo-router";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 
 export default function AdminLayout() {
+  const insets = useSafeAreaInsets();
+  // Respect the device's bottom inset (gesture pill on Android edge-to-edge,
+  // home indicator on iOS) so labels never get clipped.
+  const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 24 : 10);
   return (
     <Tabs
       screenOptions={{
@@ -14,9 +19,9 @@ export default function AdminLayout() {
           backgroundColor: colors.surface,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: Platform.OS === "ios" ? 88 : 64,
+          height: 56 + bottomPad,
           paddingTop: 8,
-          paddingBottom: Platform.OS === "ios" ? 28 : 10,
+          paddingBottom: bottomPad,
         },
         tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
       }}

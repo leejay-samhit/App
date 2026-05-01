@@ -1,11 +1,14 @@
 import { Tabs } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 import { useBranding } from "../../src/branding";
 
 export default function TabsLayout() {
   const { tabs } = useBranding();
+  const insets = useSafeAreaInsets();
+  const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 24 : 10);
   // Use the configured ordering / labels but render every screen file (Tabs requires every
   // child to map to an actual file in /app/(tabs)). We use `href: null` to hide invisible
   // tabs from the bar without unmounting the route.
@@ -22,9 +25,9 @@ export default function TabsLayout() {
           backgroundColor: colors.surface,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: Platform.OS === "ios" ? 88 : 64,
+          height: 56 + bottomPad,
           paddingTop: 8,
-          paddingBottom: Platform.OS === "ios" ? 28 : 10,
+          paddingBottom: bottomPad,
         },
         tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
       }}

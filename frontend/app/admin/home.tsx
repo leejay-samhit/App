@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator, RefreshControl, TouchableOpacity, Dimensions } from "react-native";
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, RefreshControl, TouchableOpacity, useWindowDimensions } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import Svg, { Rect, Line, Text as SvgText, Path } from "react-native-svg";
@@ -294,7 +294,8 @@ function QuickAction({ icon, label, onPress, testID }: { icon: any; label: strin
 }
 
 function BarChart({ title, data, color, valueFormatter }: { title: string; data: { date: string; value: number }[]; color: string; valueFormatter?: (v: number) => string }) {
-  const w = Dimensions.get("window").width - spacing.screen * 2 - 32;
+  const { width: winW } = useWindowDimensions();
+  const w = Math.max(160, winW - spacing.screen * 2 - 32);
   const h = 140;
   const padTop = 18;
   const padBottom = 22;
