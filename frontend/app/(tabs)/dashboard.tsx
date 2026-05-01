@@ -20,6 +20,7 @@ import { useAuth } from "../../src/auth";
 import { colors, formatINR, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
+import { Sparkline, DonutProgress, BarChart } from "../../src/charts";
 
 type Tier = { name: string; min: number; color: string; icon: string };
 
@@ -37,6 +38,9 @@ type Dashboard = {
   unread_notifications: number;
   tier: Tier;
   level_payouts: { l1: number; l2: number; l3: number };
+  earnings_per_day?: number[];
+  day_labels?: string[];
+  level_breakdown?: Record<string, number>;
 };
 
 type Notif = {
@@ -188,15 +192,23 @@ export default function DashboardScreen() {
         </Animated.View>
 
         <Animated.View entering={FadeInDown.duration(450).delay(180)} style={styles.progressCard}>
-          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-            <Text style={styles.cardTitle}>Next L1 payout</Text>
-            <Text style={styles.cardSub}>{formatINR(data.level_payouts.l1)}</Text>
-          </View>
-          <Text style={styles.progressInfo}>
-            Refer <Text style={styles.bold}>{data.next_payout_in}</Text> more direct{data.next_payout_in === 1 ? "" : "s"} to unlock your next payout.
-          </Text>
-          <View style={styles.progressBar}>
-            <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
+            <DonutProgress
+              value={data.directs_required - data.next_payout_in}
+              max={data.directs_required}
+              size={104}
+              strokeWidth={12}
+              color={colors.primary}
+              label={`${data.direct_referrals % data.directs_required}/${data.directs_required}`}
+              sublabel="DIRECTS"
+            />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>Next L1 payout</Text>
+              <Text style={styles.bigPrice}>{formatINR(data.level_payouts.l1)}</Text>
+              <Text style={styles.progressInfo}>
+                Refer <Text style={styles.bold}>{data.next_payout_in}</Text> more direct{data.next_payout_in === 1 ? "" : "s"} to unlock.
+              </Text>
+            </View>
           </View>
           <View style={styles.levelsRow}>
             <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L1</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l1)}</Text></View>
@@ -204,6 +216,47 @@ export default function DashboardScreen() {
             <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L3</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l3)}</Text></View>
           </View>
         </Animated.View>
+
+        {/* Sparkline - earnings last 7 days */}
+        {Array.isArray(data.earnings_per_day) && data.earnings_per_day.length > 0 && (
+          <Animated.View entering={FadeInDown.duration(450).delay(220)} style={styles.chartCard}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+              <View>
+                <Text style={styles.chartLabel}>LAST 7 DAYS</Text>
+                <Text style={styles.chartTitle}>Earnings trend</Text>
+              </View>
+              <View style={{ alignItems: "flex-end" }}>
+                <Text style={styles.chartTotal}>{formatINR(data.earnings_per_day.reduce((a, b) => a + b, 0))}</Text>
+                <Text style={styles.chartTotalLabel}>total this week</Text>
+              </View>
+            </View>
+            <View style={{ marginTop: 14 }}>
+              <Sparkline data={data.earnings_per_day} width={300} height={88} strokeColor={colors.primary} fillFrom="rgba(20,61,46,0.28)" fillTo="rgba(20,61,46,0.0)" />
+              <View style={styles.dayLabelsRow}>
+                {(data.day_labels || []).map((d, i) => (
+                  <Text key={i} style={styles.dayLabel}>{d}</Text>
+                ))}
+              </View>
+            </View>
+          </Animated.View>
+        )}
+
+        {/* Bar chart - level breakdown */}
+        {data.level_breakdown && Object.values(data.level_breakdown).some((v) => (v as number) > 0) && (
+          <Animated.View entering={FadeInDown.duration(450).delay(260)} style={styles.chartCard}>
+            <Text style={styles.chartLabel}>EARNINGS BY LEVEL</Text>
+            <Text style={styles.chartTitle}>Where it's coming from</Text>
+            <View style={{ marginTop: 14, alignItems: "center" }}>
+              <BarChart
+                data={Object.values(data.level_breakdown) as number[]}
+                labels={["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10"]}
+                width={320}
+                height={170}
+                color={colors.primary}
+              />
+            </View>
+          </Animated.View>
+        )}
 
         <Animated.View entering={FadeInDown.duration(450).delay(240)}>
           <Text style={styles.sectionLabel}>YOUR NETWORK</Text>
@@ -312,6 +365,14 @@ const styles = StyleSheet.create({
   heroSubValue: { color: colors.primaryFg, fontSize: 18, fontWeight: "700", marginTop: 2 },
   withdrawBtn: { flexDirection: "row", alignItems: "center", backgroundColor: colors.accent, paddingHorizontal: 16, paddingVertical: 10, borderRadius: radii.button, gap: 4 },
   withdrawBtnText: { color: colors.accentFg, fontWeight: "700", fontSize: 13 },
+  bigPrice: { fontSize: 24, fontWeight: "800", color: colors.primary, marginTop: 4, letterSpacing: -0.5 },
+  chartCard: { backgroundColor: colors.surface, borderRadius: radii.card, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: colors.border },
+  chartLabel: { fontSize: 10, letterSpacing: 1.5, color: colors.textMuted, fontWeight: "800" },
+  chartTitle: { fontSize: 16, fontWeight: "800", color: colors.textMain, marginTop: 4 },
+  chartTotal: { fontSize: 18, fontWeight: "800", color: colors.primary, letterSpacing: -0.5 },
+  chartTotalLabel: { fontSize: 10, color: colors.textMuted, marginTop: 2, fontWeight: "600" },
+  dayLabelsRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 6, paddingHorizontal: 4 },
+  dayLabel: { fontSize: 10, color: colors.textMuted, fontWeight: "700" },
   progressCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 20, marginBottom: 24 },
   cardTitle: { fontSize: 15, fontWeight: "700", color: colors.textMain },
   cardSub: { fontSize: 14, fontWeight: "700", color: colors.accent },

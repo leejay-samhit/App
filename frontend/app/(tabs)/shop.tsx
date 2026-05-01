@@ -15,6 +15,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { GradientCard } from "../../src/gradient-card";
 
 type Product = {
   id: string;
@@ -67,21 +68,23 @@ export default function ShopScreen() {
         contentContainerStyle={styles.container}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
-        <View style={styles.headerRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.overline}>SHOP</Text>
-            <Text style={styles.h1}>Member store</Text>
+        <GradientCard variant="sunset" style={{ marginBottom: 16, padding: 22 }}>
+          <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>SHOP</Text>
+              <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>Member store</Text>
+              <Text style={{ fontSize: 13, color: "rgba(255,255,255,0.9)", marginTop: 6 }}>Pay using your wallet earnings.</Text>
+            </View>
+            <TouchableOpacity onPress={() => router.push("/cart")} style={[styles.cartBtn, { backgroundColor: "rgba(255,255,255,0.2)", borderWidth: 0 }]} testID="shop-cart-btn">
+              <Feather name="shopping-cart" size={18} color="#fff" />
+              {cartCount > 0 && (
+                <View style={[styles.cartBadge, { backgroundColor: "#fff" }]}>
+                  <Text style={[styles.cartBadgeText, { color: "#E57A44" }]}>{cartCount > 9 ? "9+" : cartCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
-          <TouchableOpacity onPress={() => router.push("/cart")} style={styles.cartBtn} testID="shop-cart-btn">
-            <Feather name="shopping-cart" size={18} color={colors.textMain} />
-            {cartCount > 0 && (
-              <View style={styles.cartBadge}>
-                <Text style={styles.cartBadgeText}>{cartCount > 9 ? "9+" : cartCount}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-        </View>
-        <Text style={styles.subtitle}>Pay using your wallet earnings.</Text>
+        </GradientCard>
 
         <View style={styles.grid}>
           {items.map((p) => (

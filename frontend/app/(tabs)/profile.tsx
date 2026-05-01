@@ -18,6 +18,7 @@ import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
+import { GradientCard } from "../../src/gradient-card";
 
 export default function ProfileScreen() {
   const { user, logout, refresh } = useAuth();
@@ -74,17 +75,29 @@ export default function ProfileScreen() {
           keyboardShouldPersistTaps="handled"
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
         >
-          <Text style={styles.overline}>PROFILE</Text>
-          <Text style={styles.h1}>{user?.name}</Text>
-          <Text style={styles.subtitle}>{user?.email}</Text>
-
-          <View style={styles.codeCard}>
-            <View>
-              <Text style={styles.codeLabel}>YOUR REFERRAL CODE</Text>
-              <Text style={styles.code}>{user?.referral_code}</Text>
+          <GradientCard variant="royal" style={{ marginBottom: 18, padding: 24 }}>
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center", marginRight: 16, borderWidth: 2, borderColor: "rgba(255,255,255,0.4)" }}>
+                <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff" }}>{(user?.name || "U").charAt(0).toUpperCase()}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>PROFILE</Text>
+                <Text style={{ fontSize: 22, fontWeight: "800", color: "#fff", letterSpacing: -0.5, marginTop: 4 }} numberOfLines={1}>{user?.name}</Text>
+                <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 2 }} numberOfLines={1}>{user?.email}</Text>
+              </View>
             </View>
-            <Feather name="copy" size={20} color={colors.primaryFg} />
-          </View>
+            <View style={{ flexDirection: "row", marginTop: 16, gap: 8 }}>
+              <View style={{ backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }}>
+                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700", letterSpacing: 1 }}>REF CODE</Text>
+                <Text style={{ fontSize: 14, fontWeight: "800", color: "#fff", letterSpacing: 1 }}>{user?.referral_code}</Text>
+              </View>
+              {(user as any)?.is_vendor && (
+                <View style={{ backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, justifyContent: "center" }}>
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: "#fff", letterSpacing: 0.5 }}>🛍️ VENDOR</Text>
+                </View>
+              )}
+            </View>
+          </GradientCard>
 
           <TouchableOpacity onPress={() => router.push("/kyc")} style={styles.kycCard} testID="profile-kyc-link">
             <View style={[styles.kycDot, { backgroundColor: (user as any)?.kyc_status === "approved" ? colors.success : (user as any)?.kyc_status === "pending" ? colors.warning : (user as any)?.kyc_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />

@@ -14,6 +14,7 @@ import { useFocusEffect } from "expo-router";
 import { api } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
+import { GradientCard } from "../../src/gradient-card";
 
 type Node = {
   id: string;
@@ -61,9 +62,21 @@ export default function NetworkScreen() {
         contentContainerStyle={styles.container}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
-        <Text style={styles.overline}>YOUR DOWNLINE</Text>
-        <Text style={styles.h1}>Referral tree</Text>
-        <Text style={styles.subtitle}>The 1+4 network you've built so far.</Text>
+        <GradientCard variant="emerald" style={{ marginBottom: 20, padding: 22 }}>
+          <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>YOUR DOWNLINE</Text>
+          <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>Referral tree</Text>
+          <Text style={{ fontSize: 13, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>The 1+4 network you've built so far.</Text>
+          <View style={{ flexDirection: "row", marginTop: 16, gap: 12 }}>
+            <View style={{ backgroundColor: "rgba(255,255,255,0.15)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 }}>
+              <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>DIRECTS</Text>
+              <Text style={{ fontSize: 18, fontWeight: "800", color: "#fff", marginTop: 2 }}>{tree.length}</Text>
+            </View>
+            <View style={{ backgroundColor: "rgba(255,255,255,0.15)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 }}>
+              <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>SLOTS LEFT</Text>
+              <Text style={{ fontSize: 18, fontWeight: "800", color: "#fff", marginTop: 2 }}>{Math.max(0, 4 - tree.length)}</Text>
+            </View>
+          </View>
+        </GradientCard>
 
         <View style={styles.rootCard}>
           <View style={styles.rootAvatar}><Text style={styles.rootAvatarText}>{(user?.name || "U").charAt(0).toUpperCase()}</Text></View>

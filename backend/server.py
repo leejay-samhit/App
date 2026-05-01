@@ -1010,6 +1010,36 @@ async def my_dashboard(user: Dict[str, Any] = Depends(get_current_user)):
     if direct_count > 0 and direct_count % directs_required == 0:
         needed = directs_required  # next cycle
     tier = get_tier(team_size)
+
+    # Earnings per day (last 7 days) — for sparkline
+    today = now_utc().date()
+    earnings_per_day: List[float] = []
+    day_labels: List[str] = []
+    for i in range(6, -1, -1):
+        d = (today - timedelta(days=i))
+        d_iso = d.isoformat()
+        agg = await db.transactions.aggregate([
+            {"$match": {
+                "user_id": user["id"],
+                "type": {"$in": ["payout", "level_payout", "vendor_sale"]},
+                "amount": {"$gt": 0},
+                "created_at": {"$regex": f"^{d_iso}"},
+            }},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        total = float(agg[0]["total"]) if agg else 0.0
+        earnings_per_day.append(round(total, 2))
+        day_labels.append(d.strftime("%a"))
+
+    # Level breakdown (level 1..10) — sum of payouts for each level
+    level_breakdown: Dict[str, float] = {}
+    for lv in range(1, 11):
+        agg = await db.transactions.aggregate([
+            {"$match": {"user_id": user["id"], "type": "level_payout", "level": lv}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        level_breakdown[f"l{lv}"] = round(float(agg[0]["total"]), 2) if agg else 0.0
+
     return {
         "user": serialize_user(user),
         "wallet_balance": user.get("wallet_balance", 0),
@@ -1025,6 +1055,9 @@ async def my_dashboard(user: Dict[str, Any] = Depends(get_current_user)):
         "unread_notifications": unread_notifs,
         "tier": tier,
         "level_payouts": {f"l{i}": settings.get(f"payout_l{i}", 0) or 0 for i in range(1, 11)},
+        "earnings_per_day": earnings_per_day,
+        "day_labels": day_labels,
+        "level_breakdown": level_breakdown,
     }
 
 
