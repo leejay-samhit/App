@@ -48,11 +48,10 @@ export default function RootLayout() {
         <BrandingProvider>
           <AuthProvider>
             <GlobalFont>
-              {/* Translucent status bar so app content draws under it — each
-                  screen's SafeAreaView adds top padding equal to the status-bar
-                  height, so nothing is clipped. Dark icons over the cream
-                  background. */}
-              <StatusBar style="dark" translucent backgroundColor="transparent" />
+              {/* Standard status bar — Android reserves space for it automatically
+                  now that edge-to-edge is off, matching how Chrome browser
+                  renders pages on the user's phone. */}
+              <StatusBar style="dark" />
               <TabletContainer>
                 <Stack
                   screenOptions={{
