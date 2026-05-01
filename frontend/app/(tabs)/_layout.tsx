@@ -8,7 +8,9 @@ import { useBranding } from "../../src/branding";
 export default function TabsLayout() {
   const { tabs } = useBranding();
   const insets = useSafeAreaInsets();
-  const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 24 : 10);
+  // Lift the tab bar comfortably above the device's navigation buttons
+  // (Android 3-button nav / gesture pill, iOS home indicator).
+  const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 28 : 18);
   // Use the configured ordering / labels but render every screen file (Tabs requires every
   // child to map to an actual file in /app/(tabs)). We use `href: null` to hide invisible
   // tabs from the bar without unmounting the route.

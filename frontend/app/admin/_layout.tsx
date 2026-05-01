@@ -6,9 +6,9 @@ import { colors } from "../../src/theme";
 
 export default function AdminLayout() {
   const insets = useSafeAreaInsets();
-  // Respect the device's bottom inset (gesture pill on Android edge-to-edge,
-  // home indicator on iOS) so labels never get clipped.
-  const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 24 : 10);
+  // Lift the tab bar above the device's navigation buttons (Android 3-button
+  // nav bar / gesture pill / iOS home indicator) with a comfortable gap.
+  const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 28 : 18);
   return (
     <Tabs
       screenOptions={{
