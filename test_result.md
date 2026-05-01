@@ -109,12 +109,50 @@ user_problem_statement: |
 backend:
   - task: "Auto-approve user on Razorpay payment success — UTR cross-check + commission cascade + approved_registrations archive"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            RE-TEST after SettingsUpdate fix — ALL 48/48 checks PASSED via
+            /app/auto_approve_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Fix verified at backend/server.py line 2218:
+              auto_approve_on_payment: Optional[bool] = None
+            is now declared in the SettingsUpdate Pydantic model, so PUT
+            /admin/settings correctly accepts the toggle.
+
+            Confirmed Scenario E (toggle flow) end-to-end:
+              • E.1 PUT /admin/settings {auto_approve_on_payment:false} → 200. ✅
+              • E.2 Response settings.auto_approve_on_payment == False. ✅
+              • E.3 U3 /payment/verify with valid HMAC → 200. ✅
+              • E.4 approval_status == "pending" (toggle honored). ✅
+              • E.5 auto_approved == False. ✅
+              • E.6 /auth/me approval_status == "pending". ✅
+              • E.7 razorpay_utr persisted on U3. ✅
+              • E.8 registration_paid == True on U3. ✅
+              • E.9 Manual POST /admin/approvals/{u3}/approve → 200. ✅
+              • E.10 U3 approval_status → "approved" post-manual. ✅
+              • E.11 PUT /admin/settings {auto_approve_on_payment:true} → 200. ✅
+              • E.12 Response settings.auto_approve_on_payment == True. ✅
+
+            Other scenarios all green:
+              SETUP ✅  A (17/17) ✅  B (2/2) ✅  C (2/2) ✅  D (4/4) ✅
+              E (12/12) ✅  F (4/4 — incl F.4 U3 archived under super_admin)  ✅
+              G (1/1) ✅  H (3/3) ✅  I (1/1) ✅
+
+            F.4 (previously cascaded failure) now passes: after toggle-off +
+            manual approve, U3 is archived under approver_role="super_admin"
+            and appears in GET /admin/approved-registrations?role_filter=
+            super_admin&search=<u3_email>.
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
         - working: false
           agent: "testing"
           comment: |
@@ -3117,17 +3155,41 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Auto-approve user on Razorpay payment success — UTR cross-check + commission cascade + approved_registrations archive"
-  stuck_tasks:
-    - "Auto-approve user on Razorpay payment success — UTR cross-check + commission cascade + approved_registrations archive"
+  current_focus: []
+  stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
     - agent: "testing"
       message: |
-        AUTO-APPROVAL PIPELINE — testing COMPLETE via
+        AUTO-APPROVAL PIPELINE — RE-TEST COMPLETE, ALL 48/48 PASSED via
+        /app/auto_approve_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Fix verified: SettingsUpdate at backend/server.py line 2218 now
+        declares `auto_approve_on_payment: Optional[bool] = None`. PUT
+        /admin/settings correctly accepts the toggle (200) in both
+        directions (false and true).
+
+        Scenario E (toggle-off → manual approve → toggle back on) fully
+        green end-to-end:
+          • E.1 PUT toggle=false → 200 ✅
+          • E.3–E.8 U3 /payment/verify returns pending + auto_approved=false
+            (toggle honored); registration_paid/razorpay_utr still set ✅
+          • E.9–E.10 manual /admin/approvals/{u3}/approve → 200; U3 → approved ✅
+          • E.11–E.12 PUT toggle=true → 200 ✅
+          • F.4 U3 archived under approver_role="super_admin" and found via
+            /admin/approved-registrations?role_filter=super_admin&search=u3 ✅
+
+        All other scenarios (A happy path, B cascade, C duplicate, D bad
+        sig, F list, G edge, H regression, I cleanup) pass green. Backend
+        logs clean, no 500s. Task is working:true, no further retest.
+        Main agent: please summarise and finish.
+
+    - agent: "testing"
+      message: |
+        [PREVIOUS RUN] AUTO-APPROVAL PIPELINE — testing COMPLETE via
         /app/auto_approve_test.py against
         https://network-pay-1.preview.emergentagent.com.
         40/48 PASSED, 8 FAILED — all 8 cascade from ONE bug.

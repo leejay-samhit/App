@@ -2215,6 +2215,7 @@ class SettingsUpdate(BaseModel):
     payout_l9: Optional[float] = Field(default=None, ge=0)
     payout_l10: Optional[float] = Field(default=None, ge=0)
     directs_required: Optional[int] = Field(default=None, ge=1, le=20)
+    auto_approve_on_payment: Optional[bool] = None
 
 
 @api_router.get("/admin/settings")
