@@ -5,6 +5,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
+import { useBranding } from "../src/branding";
 import { colors, radii, spacing } from "../src/theme";
 
 /**
