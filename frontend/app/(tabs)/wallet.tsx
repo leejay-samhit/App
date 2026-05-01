@@ -15,7 +15,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
@@ -41,6 +41,7 @@ type Txn = {
 };
 
 export default function WalletScreen() {
+  const router = useRouter();
   const { user, refresh } = useAuth();
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
   const [txns, setTxns] = useState<Txn[]>([]);
@@ -52,6 +53,17 @@ export default function WalletScreen() {
   const [error, setError] = useState("");
   // Wallet-to-wallet transfer state
   const [showTransfer, setShowTransfer] = useState(false);
+  const [txFilter, setTxFilter] = useState<"all" | "credits" | "debits">("all");
+  // Type-aware classification (some legacy txns store positive amount for debits like registration_fee/order).
+  const isDebit = (t: Txn) => {
+    if ((t.amount || 0) < 0) return true;
+    return ["withdrawal", "transfer_out", "order", "registration_fee"].includes(t.type);
+  };
+  const filteredTxns = txns.filter((t) => {
+    if (txFilter === "all") return true;
+    if (txFilter === "credits") return !isDebit(t);
+    return isDebit(t);
+  });
   const [recipient, setRecipient] = useState("");
   const [transferAmt, setTransferAmt] = useState("");
   const [transferNote, setTransferNote] = useState("");
@@ -147,10 +159,17 @@ export default function WalletScreen() {
           </View>
           <View style={styles.actionsRow}>
             <TouchableOpacity
-              style={[styles.withdrawBtn, { flex: 1 }, !hasPayoutMethod && { opacity: 0.5 }]}
+              style={[styles.withdrawBtn, { flex: 1 }]}
               onPress={() => {
                 if (!hasPayoutMethod) {
-                  Alert.alert("Add UPI / Bank", "Please add UPI or bank details from your profile first.");
+                  Alert.alert(
+                    "Add UPI / Bank details",
+                    "To withdraw, please add a UPI ID or bank account first.",
+                    [
+                      { text: "Cancel", style: "cancel" },
+                      { text: "Add now", onPress: () => router.push("/payout-details" as any) },
+                    ],
+                  );
                   return;
                 }
                 setShowModal(true);
@@ -158,7 +177,7 @@ export default function WalletScreen() {
               testID="wallet-request-withdraw"
             >
               <Feather name="arrow-up-right" size={18} color={colors.accentFg} />
-              <Text style={styles.withdrawBtnText}>Schedule withdrawal</Text>
+              <Text style={styles.withdrawBtnText}>{hasPayoutMethod ? "Schedule withdrawal" : "Add details to withdraw"}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.transferBtn, { flex: 1 }]}
@@ -203,15 +222,34 @@ export default function WalletScreen() {
           })
         )}
 
-        <Text style={styles.sectionLabel}>TRANSACTIONS</Text>
-        {txns.length === 0 ? (
-          <Text style={styles.empty}>No transactions yet.</Text>
+        <View style={styles.txHeader}>
+          <Text style={styles.sectionLabel}>TRANSACTIONS</Text>
+          <View style={styles.txFilters}>
+            {(["all", "credits", "debits"] as const).map((f) => (
+              <TouchableOpacity
+                key={f}
+                onPress={() => setTxFilter(f)}
+                style={[styles.txFilterChip, txFilter === f && styles.txFilterChipActive]}
+                testID={`wallet-filter-${f}`}
+              >
+                <Text style={[styles.txFilterText, txFilter === f && { color: colors.primaryFg }]}>{f === "all" ? "All" : f === "credits" ? "Credits" : "Debits"}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+        {filteredTxns.length === 0 ? (
+          <Text style={styles.empty}>{txFilter === "all" ? "No transactions yet." : `No ${txFilter} yet.`}</Text>
         ) : (
-          txns.map((t) => {
-            const icon = t.type === "referral_payout" ? "trending-up"
+          filteredTxns.map((t) => {
+            const icon = t.type === "referral_payout" || t.type === "level_payout" ? "trending-up"
               : t.type === "withdrawal" ? "arrow-up-right"
               : t.type === "transfer_out" ? "send"
               : t.type === "transfer_in" ? "download"
+              : t.type === "admin_adjust" && t.amount > 0 ? "gift"
+              : t.type === "admin_adjust" ? "edit-3"
+              : t.type === "vendor_sale" ? "shopping-bag"
+              : t.type === "registration_fee" ? "user-plus"
+              : t.type === "order" ? "shopping-cart"
               : "credit-card";
             const statusColor = t.status === "processing" ? colors.brand500
               : t.status === "success" ? colors.success
@@ -332,6 +370,11 @@ const styles = StyleSheet.create({
   transferBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#fff", paddingVertical: 14, borderRadius: radii.button, gap: 8 },
   transferBtnText: { color: colors.primary, fontWeight: "700", fontSize: 14 },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12, marginTop: 8 },
+  txHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 8, marginBottom: 12 },
+  txFilters: { flexDirection: "row", gap: 6 },
+  txFilterChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  txFilterChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  txFilterText: { fontSize: 11, fontWeight: "700", color: colors.textMain },
   empty: { color: colors.textMuted, fontSize: 13, padding: 16, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, marginBottom: 16 },
   row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 8 },
   rowLeft: { flexDirection: "row", alignItems: "center", flex: 1 },
