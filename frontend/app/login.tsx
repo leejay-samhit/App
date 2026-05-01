@@ -19,6 +19,8 @@ import { useBranding } from "../src/branding";
 import { colors, radii, spacing } from "../src/theme";
 import { formatApiError } from "../src/api";
 import { signInWithGoogle } from "../src/google";
+import { GradientCard } from "../src/gradient-card";
+import Animated, { FadeInDown } from "react-native-reanimated";
 
 export default function Login() {
   const { login, setSession } = useAuth();
@@ -77,19 +79,21 @@ export default function Login() {
         behavior={Platform.OS === "ios" ? "padding" : "height"}
       >
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-          <View style={styles.brandRow}>
-            <View style={styles.logoBox}>
-              <Feather name="git-merge" size={22} color={colors.primaryFg} />
-            </View>
-            <Text style={styles.brandText}>{app_name}</Text>
-          </View>
+          <Animated.View entering={FadeInDown.duration(400)}>
+            <GradientCard variant="emerald" style={styles.heroBrand}>
+              <View style={styles.brandRow}>
+                <View style={styles.logoBox}>
+                  <Feather name="git-merge" size={22} color={colors.primary} />
+                </View>
+                <Text style={[styles.brandText, { color: "#fff" }]}>{app_name}</Text>
+              </View>
+              <Text style={styles.heroOverline}>WELCOME BACK</Text>
+              <Text style={styles.heroH1}>{login_subtitle}</Text>
+              <Text style={styles.heroTagline}>{tagline}</Text>
+            </GradientCard>
+          </Animated.View>
 
-          <Text style={styles.overline}>WELCOME BACK</Text>
-          <Text style={styles.h1}>{login_subtitle}</Text>
-          <Text style={styles.subtitle}>
-            {tagline}
-          </Text>
-
+          <Animated.View entering={FadeInDown.duration(400).delay(120)}>
           <View style={styles.formGroup}>
             <Text style={styles.label}>Email</Text>
             <TextInput
@@ -170,6 +174,7 @@ export default function Login() {
               Admin demo: admin@app.com / Admin@123
             </Text>
           </View>
+          </Animated.View>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -179,17 +184,21 @@ export default function Login() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   container: { padding: spacing.screen, paddingTop: spacing.lg, paddingBottom: 60 },
-  brandRow: { flexDirection: "row", alignItems: "center", marginBottom: 40 },
+  heroBrand: { padding: 28, marginBottom: 28 },
+  heroOverline: { fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700", marginTop: 28 },
+  heroH1: { fontSize: 32, fontWeight: "800", color: "#fff", lineHeight: 38, letterSpacing: -1, marginTop: 8 },
+  heroTagline: { fontSize: 13, color: "rgba(255,255,255,0.85)", marginTop: 10, lineHeight: 18 },
+  brandRow: { flexDirection: "row", alignItems: "center" },
   logoBox: {
-    width: 36,
-    height: 36,
+    width: 38,
+    height: 38,
     borderRadius: 12,
-    backgroundColor: colors.primary,
+    backgroundColor: "#fff",
     alignItems: "center",
     justifyContent: "center",
     marginRight: 10,
   },
-  brandText: { fontSize: 18, fontWeight: "700", color: colors.textMain, letterSpacing: -0.3 },
+  brandText: { fontSize: 18, fontWeight: "800", color: colors.textMain, letterSpacing: -0.3 },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12 },
   h1: { fontSize: 36, fontWeight: "800", color: colors.textMain, lineHeight: 42, letterSpacing: -1 },
   subtitle: { fontSize: 15, color: colors.textMuted, marginTop: 12, marginBottom: 32, lineHeight: 22 },

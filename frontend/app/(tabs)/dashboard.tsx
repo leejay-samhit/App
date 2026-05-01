@@ -18,6 +18,8 @@ import Animated, { FadeInDown } from "react-native-reanimated";
 import { api } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, formatINR, radii, spacing } from "../../src/theme";
+import { GradientCard } from "../../src/gradient-card";
+import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
 
 type Tier = { name: string; min: number; color: string; icon: string };
 
@@ -91,7 +93,19 @@ export default function DashboardScreen() {
   if (loading || !data) {
     return (
       <SafeAreaView style={styles.safe}>
-        <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+        <View style={{ padding: spacing.screen, gap: 14 }}>
+          <Skeleton width="50%" height={14} />
+          <View style={{ height: 4 }} />
+          <Skeleton width="70%" height={26} />
+          <View style={{ height: 16 }} />
+          <SkeletonCard height={170} />
+          <SkeletonCard height={110} />
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <SkeletonCard height={92} style={{ flex: 1 }} />
+            <SkeletonCard height={92} style={{ flex: 1 }} />
+          </View>
+          <SkeletonRow />
+        </View>
       </SafeAreaView>
     );
   }
@@ -156,20 +170,21 @@ export default function DashboardScreen() {
           </TouchableOpacity>
         )}
 
-        <Animated.View entering={FadeInDown.duration(450).delay(120)} style={styles.heroCard}>
-          <View style={styles.heroDecor} />
-          <Text style={styles.heroLabel}>TOTAL EARNINGS</Text>
-          <Text style={styles.heroAmount} testID="dashboard-total-earned">{formatINR(data.total_earned)}</Text>
-          <View style={styles.heroBottom}>
-            <View>
-              <Text style={styles.heroSubLabel}>Wallet balance</Text>
-              <Text style={styles.heroSubValue} testID="dashboard-wallet-balance">{formatINR(data.wallet_balance)}</Text>
+        <Animated.View entering={FadeInDown.duration(450).delay(120)}>
+          <GradientCard variant="emerald" style={styles.heroCard}>
+            <Text style={styles.heroLabel}>TOTAL EARNINGS</Text>
+            <Text style={styles.heroAmount} testID="dashboard-total-earned">{formatINR(data.total_earned)}</Text>
+            <View style={styles.heroBottom}>
+              <View>
+                <Text style={styles.heroSubLabel}>Wallet balance</Text>
+                <Text style={styles.heroSubValue} testID="dashboard-wallet-balance">{formatINR(data.wallet_balance)}</Text>
+              </View>
+              <TouchableOpacity onPress={() => router.push("/(tabs)/wallet")} style={styles.withdrawBtn} testID="dashboard-withdraw-btn">
+                <Text style={styles.withdrawBtnText}>Withdraw</Text>
+                <Feather name="arrow-up-right" size={16} color={colors.accentFg} />
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity onPress={() => router.push("/(tabs)/wallet")} style={styles.withdrawBtn} testID="dashboard-withdraw-btn">
-              <Text style={styles.withdrawBtnText}>Withdraw</Text>
-              <Feather name="arrow-up-right" size={16} color={colors.accentFg} />
-            </TouchableOpacity>
-          </View>
+          </GradientCard>
         </Animated.View>
 
         <Animated.View entering={FadeInDown.duration(450).delay(180)} style={styles.progressCard}>
@@ -288,7 +303,7 @@ const styles = StyleSheet.create({
   approvalBanner: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, borderWidth: 1, marginBottom: 16 },
   approvalBannerTitle: { fontSize: 13, fontWeight: "800" },
   approvalBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, lineHeight: 16 },
-  heroCard: { backgroundColor: colors.primary, borderRadius: radii.card, padding: 24, marginBottom: 16, overflow: "hidden" },
+  heroCard: { marginBottom: 16, padding: 24 },
   heroDecor: { position: "absolute", right: -40, top: -40, width: 160, height: 160, borderRadius: 80, backgroundColor: "rgba(229,122,68,0.18)" },
   heroLabel: { color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: 2, fontWeight: "700" },
   heroAmount: { color: colors.primaryFg, fontSize: 44, fontWeight: "800", marginTop: 6, letterSpacing: -1.5 },

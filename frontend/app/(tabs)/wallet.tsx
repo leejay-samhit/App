@@ -19,6 +19,7 @@ import { useFocusEffect } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { GradientCard } from "../../src/gradient-card";
 
 type Withdrawal = {
   id: string;
@@ -131,7 +132,7 @@ export default function WalletScreen() {
         <Text style={styles.overline}>WALLET</Text>
         <Text style={styles.h1}>Your earnings</Text>
 
-        <View style={styles.balanceCard}>
+        <GradientCard variant="emerald" style={styles.balanceCard}>
           <Text style={styles.balanceLabel}>AVAILABLE BALANCE</Text>
           <Text style={styles.balanceAmount} testID="wallet-balance">{formatINR(user?.wallet_balance || 0)}</Text>
           <View style={styles.statsRow}>
@@ -168,7 +169,7 @@ export default function WalletScreen() {
               <Text style={styles.transferBtnText}>Send to user</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </GradientCard>
 
         <Text style={styles.sectionLabel}>WITHDRAWAL HISTORY</Text>
         {withdrawals.length === 0 ? (
@@ -319,7 +320,7 @@ const styles = StyleSheet.create({
   container: { padding: spacing.screen, paddingBottom: 40 },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 8 },
   h1: { fontSize: 30, fontWeight: "800", color: colors.textMain, letterSpacing: -1, marginBottom: 20 },
-  balanceCard: { backgroundColor: colors.primary, borderRadius: radii.card, padding: 24, marginBottom: 24 },
+  balanceCard: { padding: 24, marginBottom: 24 },
   balanceLabel: { color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: 2, fontWeight: "700" },
   balanceAmount: { color: colors.primaryFg, fontSize: 44, fontWeight: "800", marginTop: 6, letterSpacing: -1.5 },
   statsRow: { flexDirection: "row", gap: 32, marginTop: 16 },
