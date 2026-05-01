@@ -107,6 +107,300 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Auto-approve user on Razorpay payment success — UTR cross-check + commission cascade + approved_registrations archive"
+    implemented: true
+    working: false
+    file: "backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: false
+          agent: "testing"
+          comment: |
+            Auto-approval pipeline end-to-end testing via
+            /app/auto_approve_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+            40/48 checks PASS, 8 FAIL — ALL 8 failures trace back to ONE root-
+            cause bug in the SettingsUpdate Pydantic model that blocks the
+            "toggle auto-approval off" requirement (Scenario E).
+
+            ============================================================
+            CRITICAL BUG — SettingsUpdate model missing auto_approve_on_payment
+            ============================================================
+            backend/server.py lines 2205-2217 define SettingsUpdate with
+            registration_fee, payout_l1..payout_l10, and directs_required.
+            The field `auto_approve_on_payment: Optional[bool]` is NOT
+            declared, so Pydantic silently drops it from the payload.
+            Then admin_update_settings() does:
+              update = {k: v for k, v in payload.dict().items() if v is not None}
+              if not update: raise 400 "No fields provided"
+            → PUT /admin/settings {"auto_approve_on_payment": false} → 400
+              {"detail": "No fields provided"}.
+
+            Reproduction (super_admin token):
+              PUT /api/admin/settings  body={"auto_approve_on_payment": false}
+              → 400 "No fields provided"  (expected: 200 with the updated
+                                            settings echoed back)
+              PUT /api/admin/settings  body={"auto_approve_on_payment": true}
+              → 400 "No fields provided"
+
+            Fix: add `auto_approve_on_payment: Optional[bool] = None` to the
+            SettingsUpdate class. No other change needed — get_settings()
+            already defaults the flag to True at line 62, /payment/verify
+            already honors settings.get("auto_approve_on_payment", True)
+            at line 933.
+
+            Direct failures (all 8 cascade from this single bug):
+              E.1  PUT /admin/settings auto_approve_on_payment=false → 400
+                   "No fields provided"  (expected 200)
+              E.2  Settings did not flip to False (response was the default
+                   True, because the update silently no-ops)
+              E.4  U3 /payment/verify response carried approval_status=
+                   "approved" — because the toggle never flipped, auto-
+                   approval still fired.
+              E.5  U3 response auto_approved=True (expected False)
+              E.6  /auth/me for U3 approval_status="approved" (expected
+                   "pending")
+              E.11 PUT /admin/settings auto_approve_on_payment=true → 400
+                   "No fields provided"
+              E.12 Settings did not flip back (remains True via default, but
+                   the PUT itself returned 400)
+              F.4  /admin/approved-registrations?role_filter=super_admin &
+                   search=U3 returned 0 items — because U3 was auto-approved
+                   (not manually approved); the manual POST /admin/approvals/
+                   {U3.id}/approve returned {"ok":true,"already_approved":
+                   true} without re-archiving, so the archive row carries
+                   approver_role="auto" instead of "super_admin".
+
+            ============================================================
+            WHAT WORKS — 40/48 passing; core auto-approval pipeline is
+            correct and ready to ship once the SettingsUpdate model is
+            fixed
+            ============================================================
+            SETUP ✅
+              • admin@app.com / Admin@123 login → super_admin token.
+              • Admin referral_code fetched via GET /admin/users → "I1YDTL"
+                (NOT "ADMIN001" — that is the sponsor-code myth; admin's
+                actual code is generated at seed time).
+
+            A. AUTO-APPROVE HAPPY PATH (17/17) ✅
+              • U1 registered referred_by I1YDTL.
+              • POST /payment/create-order → live order_id
+                "order_SjxdsEe22zYkml" (is_mock=False, starts "order_",
+                not "order_MOCK_").
+              • Computed valid_sig = hmac.SHA256(KEY_SECRET,
+                "<order_id>|pay_test_<rand>"); POST /payment/verify → 200
+                with approval_status="approved", auto_approved=true,
+                utr="pay_test_<rand>" (Razorpay 404s on fake pay_test_ so
+                _fetch_razorpay_payment returns None → fallback to
+                payment_id), rzp_status="signature_only",
+                is_mock=false, amount=118.0.
+                Note: settings.registration_fee is currently 118 (not 100)
+                — the /payment/verify handler correctly used the live value
+                from the settings collection.
+              • GET /auth/me as U1: registration_paid=true,
+                approval_status="approved", razorpay_utr matches
+                payment_id, approval_reviewed_by="auto".
+              • Notification "Account approved automatically" delivered to
+                U1 via GET /notifications/me.
+              • db.approved_registrations contains U1 with
+                auto_approved=true, approver_role="auto",
+                approver_email="system@auto-approval".
+              • db.audit_logs has action="user.auto_approve" target_id=U1
+                details={utr: pay_test_<rand>, rzp_status:
+                "signature_only", amount: 118.0}.
+
+            B. COMMISSION CASCADE (2/2) ✅
+              • Admin's direct_referrals_count: 0 → 1 (+1).
+              • Admin received notification "New referral: Priya Auto"
+                via /notifications/me.
+              • directs_required=5, payout_l1=300 → L1 payout not due at
+                direct #1 (1 % 5 ≠ 0) — skipped per spec.
+
+            C. SECOND VERIFY ATTEMPT (2/2) ✅
+              • POST /payment/verify same order again → 400 "Registration
+                fee already paid".
+
+            D. INVALID SIGNATURE (4/4) ✅
+              • U2 registered; create-order OK; POST /payment/verify with
+                sig="bad_sig" → 401 "Invalid payment signature".
+              • U2.registration_paid=false, U2.approval_status="pending"
+                remain unchanged.
+
+            E. AUTO-APPROVE TOGGLE OFF (5/12 — 7 FAIL due to model bug)
+              • E.1 PUT /admin/settings {auto_approve_on_payment:false}
+                    → 400 "No fields provided". ❌
+              • E.2 Response value None. ❌
+              • E.3 U3 registered; create-order OK; /payment/verify → 200. ✅
+              • E.4 approval_status="approved" (expected "pending"). ❌
+              • E.5 auto_approved=true (expected false). ❌
+              • E.6 /auth/me approval_status="approved" (expected pending). ❌
+              • E.7 razorpay_utr still set on U3 user. ✅
+              • E.8 registration_paid=true on U3. ✅
+              • E.9 Manual POST /admin/approvals/{U3.id}/approve → 200
+                    (response {"ok":true,"already_approved":true} since U3
+                    was already auto-approved). ✅
+              • E.10 U3 approval_status="approved" post-manual. ✅
+              • E.11 PUT /admin/settings {auto_approve_on_payment:true}
+                    → 400. ❌ (bug again — fortunately default is True so
+                     subsequent tests aren't impacted)
+              • E.12 Value None. ❌
+
+            F. APPROVED_REGISTRATIONS LIST (3/4)
+              • F.1 GET /admin/approved-registrations?role_filter=auto
+                    → 200. ✅
+              • F.2 counts.auto=2 (≥1). ✅
+              • F.3 items contain U1 with original_user_id matching. ✅
+              • F.4 role_filter=super_admin & search=U3 → 0 items. ❌
+                    (Expected U3 via manual path; cascaded from E — U3
+                    was auto-approved, not super_admin-approved)
+
+            G. EDGE CASE (1/1) ✅
+              • POST /payment/verify body={"razorpay_order_id":"",
+                "razorpay_payment_id":"","razorpay_signature":""} → 400
+                "Missing Razorpay fields".
+
+            H. REGRESSION (3/3) ✅
+              • GET /admin/withdrawals/digest → 200.
+              • GET /branding (no auth) → 200.
+              • admin@app.com login → 200.
+
+            I. CLEANUP (1/1) ✅
+              • DELETE /admin/users/{id} for U1, U2, U3, U4 → 200 each.
+              • DELETE /admin/approved-registrations/{id} for 2 archive
+                rows → 200 each.
+              • Final GET /admin/settings → auto_approve_on_payment=true
+                (default).
+
+            ============================================================
+            ACTION REQUIRED FOR MAIN AGENT
+            ============================================================
+            MUST FIX before this task can be marked working:
+              backend/server.py line 2217 (end of SettingsUpdate class):
+                ADD:  auto_approve_on_payment: Optional[bool] = None
+
+              Then re-run /app/auto_approve_test.py. All 8 currently-failing
+              checks are expected to flip green with no other code change.
+              The verify handler itself is correct — it already reads
+              settings.get("auto_approve_on_payment", True) at line 933 and
+              branches on it. The archive/commission/audit/notification
+              flow all work as designed (verified by 40 passing checks).
+
+            Backend logs clean, no 500s observed. Core auto-approval
+            pipeline is production-ready after the 1-line model fix.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Replaced the manual finance review with an auto-approval pipeline that fires
+            on /payment/verify when Razorpay confirms the payment. Implementation:
+
+            1. New helper _fetch_razorpay_payment(payment_id, creds) — calls
+               https://api.razorpay.com/v1/payments/{id} via Basic Auth and returns
+               the payment object. Returns None on mock or unreachable.
+            2. New helper _extract_utr(rzp_payment) — pulls UTR from
+               acquirer_data.rrn (UPI), .upi_transaction_id, .bank_transaction_id
+               (netbanking), or .auth_code (card). Falls back to payment_id.
+            3. /payment/verify upgraded:
+                 a. HMAC SHA256 signature verification (existing) — strict in live mode.
+                 b. NEW: cross-check Razorpay server: status must be
+                    "captured" or "authorized"; order_id must match; amount (paise)
+                    must equal settings.registration_fee*100. Mismatch → 400.
+                 c. UTR persisted on user (razorpay_utr) AND on the registration_fee
+                    transaction (reference_number).
+                 d. If settings.auto_approve_on_payment is True (default),
+                    set approval_status="approved", approval_reviewed_by="auto",
+                    trigger _trigger_referral_commissions(fresh) (10-level cascade),
+                    and _archive_approved_user with synthetic admin
+                    {id:"system", email:"system@auto-approval", admin_role:"auto"}.
+                 e. _archive_approved_user.auto_approved now also true when
+                    approver_role=="auto" (was finance only).
+                 f. Audit log "user.auto_approve" with details
+                    {utr, rzp_status, amount}.
+                 g. Notification "Account approved automatically" sent to user
+                    (vs the old "awaiting approval").
+                 h. Response now includes: approval_status, auto_approved, utr,
+                    rzp_status (one of "captured"/"authorized"/"signature_only"/
+                    "mock"/"unverified").
+            4. New default setting: auto_approve_on_payment=True. Admins can
+               disable via PUT /admin/settings if they prefer manual review.
+            5. Mock mode: HMAC/UTR cross-check is skipped (no Razorpay server),
+               but auto-approval still fires (since dev mode).
+            6. Razorpay API unreachable: HMAC signature was already verified, so
+               we proceed with auto-approval and tag rzp_status="signature_only".
+
+            Test scenarios to verify (admin@app.com / Admin@123):
+
+            A. AUTO-APPROVE (live mode w/ valid HMAC):
+               • Register fresh U1 (referred_by ADMIN001).
+               • POST /payment/create-order → real order_id (rzp creds in env).
+               • Compute valid_sig = HMAC-SHA256(KEY_SECRET, "<order_id>|<payment_id>").
+                 Use payment_id like "pay_test_<rand>" (Razorpay won't recognise it,
+                 so _fetch_razorpay_payment returns None → cross_check_ok via
+                 signature_only branch).
+               • POST /payment/verify {order_id, payment_id, valid_sig} → 200 with:
+                 - approval_status:"approved"
+                 - auto_approved:true
+                 - utr:<payment_id> (since acquirer fetch failed)
+                 - rzp_status:"signature_only"
+               • GET /auth/me → registration_paid:true, approval_status:"approved",
+                 razorpay_utr matches, approval_reviewed_by="auto".
+               • Notification "Account approved automatically" delivered.
+               • Audit log "user.auto_approve" with details.
+               • db.approved_registrations contains U1 with auto_approved:true,
+                 approver_role:"auto", approver_email:"system@auto-approval".
+
+            B. COMMISSION CASCADE FIRED:
+               • Sponsor's direct_referrals_count incremented.
+               • Sponsor receives "New referral" notification.
+               • If sponsor.direct_referrals_count % directs_required == 0 and
+                 payout_l1 > 0 → +₹payout_l1 credited to sponsor wallet (verified
+                 by /transactions/me on sponsor showing referral_payout txn).
+
+            C. SECOND VERIFY ATTEMPT:
+               • POST /payment/verify same order again → 400 "Registration fee
+                 already paid".
+
+            D. INVALID SIGNATURE:
+               • Brand new U2; create-order; POST /payment/verify with
+                 sig="bad_sig" → 401 "Invalid payment signature".
+               • U2.registration_paid still false; not auto-approved.
+
+            E. AUTO-APPROVE TOGGLE OFF:
+               • super_admin PUT /admin/settings {auto_approve_on_payment:false}.
+               • Brand new U3; create-order; verify with valid HMAC → 200 with
+                 approval_status:"pending", auto_approved:false. /auth/me shows
+                 approval_status:"pending". Notification body now reads
+                 "awaiting approval" instead of "approved automatically".
+               • super_admin POST /admin/approvals/{U3.id}/approve → 200 (manual
+                 path still works).
+               • Reset PUT /admin/settings {auto_approve_on_payment:true}.
+
+            F. MOCK MODE PATH (only if user clears DB+env Razorpay creds — skip
+               if not feasible; described for completeness):
+               • In mock mode, /payment/verify skips Razorpay API call but still
+                 auto-approves. is_mock:true in response.
+
+            G. APPROVED_REGISTRATIONS LIST:
+               • GET /admin/approved-registrations?role_filter=auto → contains U1
+                 with auto_approved:true.
+               • counts.auto >= 1.
+
+            H. EDGE CASES:
+               • Missing fields in /payment/verify body → 400 "Missing Razorpay
+                 fields".
+
+            I. REGRESSION:
+               • Manual /admin/approvals/{id}/approve still works.
+               • /admin/withdrawals/digest still works.
+               • /branding still works.
+               • admin@app.com login still works.
+
+            J. CLEANUP — DELETE U1, U2, U3 + their approved_registrations rows.
+
+            Credentials: admin@app.com / Admin@123. Razorpay test keys in
+            /app/backend/.env (RAZORPAY_KEY_ID/SECRET).
+
   - task: "Withdrawal Settlement Enhancements — reject reason, complete UTR, instant approve+complete, batch settle, daily digest"
     implemented: true
     working: true
@@ -2823,12 +3117,67 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
-  stuck_tasks: []
+  current_focus:
+    - "Auto-approve user on Razorpay payment success — UTR cross-check + commission cascade + approved_registrations archive"
+  stuck_tasks:
+    - "Auto-approve user on Razorpay payment success — UTR cross-check + commission cascade + approved_registrations archive"
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        AUTO-APPROVAL PIPELINE — testing COMPLETE via
+        /app/auto_approve_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+        40/48 PASSED, 8 FAILED — all 8 cascade from ONE bug.
+
+        ROOT CAUSE (critical, 1-line fix):
+        backend/server.py class SettingsUpdate (lines 2205-2217) does NOT
+        declare `auto_approve_on_payment`. Pydantic strips it, so
+        PUT /admin/settings {"auto_approve_on_payment": false} returns
+        400 "No fields provided". This blocks Scenario E (toggle off).
+
+        FIX (main agent): add to SettingsUpdate class:
+            auto_approve_on_payment: Optional[bool] = None
+
+        Everything else in the pipeline works correctly:
+        • A. Happy path (17/17) ✅ — valid HMAC on live order, response
+          carries approval_status=approved, auto_approved=true, utr=
+          payment_id (pay_test_ → Razorpay returns 400, falls back to
+          payment_id as expected), rzp_status=signature_only;
+          /auth/me reflects approved + razorpay_utr + approval_reviewed_by
+          ="auto"; "Account approved automatically" notification sent;
+          approved_registrations row auto_approved=true approver_role=
+          "auto" approver_email="system@auto-approval"; audit-log
+          user.auto_approve with {utr, rzp_status, amount}.
+        • B. Commission cascade (2/2) ✅ — admin direct_referrals_count
+          +1, "New referral: Priya Auto" delivered. L1 payout not due at
+          direct #1 (directs_required=5). Spec-conformant.
+        • C. Second verify → 400 "Registration fee already paid" ✅
+        • D. Invalid sig → 401 "Invalid payment signature"; U2 state
+          unchanged ✅
+        • F. role_filter=auto returns counts.auto≥1 and items incl. U1 ✅
+        • G. Missing fields → 400 "Missing Razorpay fields" ✅
+        • H. /admin/withdrawals/digest, /branding, admin login all 200 ✅
+        • I. Cleanup successful ✅
+
+        Cascaded failures from the toggle bug (no code fix needed for
+        these beyond the 1-line model change):
+          E.1/E.2/E.11/E.12  PUT /admin/settings → 400 "No fields provided"
+          E.4/E.5/E.6        U3 still auto-approved (toggle never flipped)
+          F.4                U3 archive row carries approver_role="auto"
+                             not "super_admin" (cascaded from E)
+
+        Task set to working:false, stuck_count:1, needs_retesting:true.
+        Main agent: make the 1-line Pydantic fix, restart backend, and
+        re-invoke testing. All 8 failing checks are expected to flip
+        green with no other changes. Backend logs clean, no 500s.
+
+        NOTE: sponsor referral code is admin's actual code (fetched via
+        GET /admin/users), NOT the literal "ADMIN001" mentioned in the
+        spec. settings.registration_fee is currently 118 — verify
+        endpoint correctly uses the live settings value.
     - agent: "testing"
       message: |
         WITHDRAWAL SETTLEMENT ENHANCEMENTS — RE-TEST COMPLETE, 85/85 PASSED.

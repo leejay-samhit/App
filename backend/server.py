@@ -59,6 +59,7 @@ DEFAULT_SETTINGS = {
     **DEFAULT_LEVEL_PAYOUTS,
     "directs_required": DIRECTS_REQUIRED,
     "vendor_commission_pct": 70,  # vendor's % share of each line-item sale
+    "auto_approve_on_payment": True,  # auto-approve user after Razorpay confirms payment + UTR cross-check
 }
 
 
@@ -753,6 +754,36 @@ async def get_razorpay_creds() -> Dict[str, Any]:
     return {"key_id": "", "key_secret": "", "source": "none", "is_mock": True}
 
 
+async def _fetch_razorpay_payment(payment_id: str, creds: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Cross-check a Razorpay payment with their server. Returns None on mock/unreachable."""
+    if creds.get("is_mock") or not creds.get("key_id") or not creds.get("key_secret") or not payment_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15.0, auth=(creds["key_id"], creds["key_secret"])) as client:
+            r = await client.get(f"https://api.razorpay.com/v1/payments/{payment_id}")
+        if r.status_code == 200:
+            return r.json()
+        logger.warning(f"Razorpay payment fetch returned {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Razorpay payment fetch failed: {e}")
+    return None
+
+
+def _extract_utr(rzp_payment: Optional[Dict[str, Any]]) -> str:
+    """Pull UTR / acquirer reference number from Razorpay payment object.
+    UPI: rrn. Netbanking: bank_transaction_id. Card: auth_code. Fallback: payment id."""
+    if not rzp_payment:
+        return ""
+    ad = rzp_payment.get("acquirer_data") or {}
+    return (
+        (ad.get("rrn") or "").strip()
+        or (ad.get("upi_transaction_id") or "").strip()
+        or (ad.get("bank_transaction_id") or "").strip()
+        or (ad.get("auth_code") or "").strip()
+        or (rzp_payment.get("id") or "").strip()
+    )
+
+
 @api_router.get("/payment/config")
 async def payment_config(user: Dict[str, Any] = Depends(get_current_user)):
     """Return public Razorpay config + user-specific payment state.
@@ -852,9 +883,8 @@ class VerifyPaymentRequest(BaseModel):
 
 @api_router.post("/payment/verify")
 async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = Depends(get_current_user)):
-    """Verify Razorpay payment signature and activate the user's registration_paid flag.
-    In mock mode, any non-empty signature is accepted. In live mode we HMAC-SHA256
-    verify using the Razorpay secret."""
+    """Verify Razorpay payment signature, cross-check with Razorpay server (UTR/amount/status),
+    and auto-approve the user if `settings.auto_approve_on_payment` is True (default)."""
     if user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Registration fee already paid")
 
@@ -875,40 +905,108 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
 
     settings = await get_settings()
     fee = settings["registration_fee"]
-    txn_id = str(uuid.uuid4())
+    expected_paise = int(round(fee * 100))
 
-    await db.users.update_one(
-        {"id": user["id"]},
-        {"$set": {
-            "registration_paid": True,
-            "payment_method": "razorpay" + ("_mock" if creds["is_mock"] else ""),
-            "razorpay_payment_id": payload.razorpay_payment_id,
-            "razorpay_order_id": payload.razorpay_order_id,
-            "paid_at": now_utc().isoformat(),
-        }},
-    )
+    # ---------------- Cross-check with Razorpay server (live mode only) ----------------
+    rzp_payment = await _fetch_razorpay_payment(payload.razorpay_payment_id, creds)
+    cross_check_ok = bool(creds["is_mock"])  # mock mode = trust HMAC
+    rzp_status = "mock" if creds["is_mock"] else "unverified"
+
+    if rzp_payment:
+        rzp_status = (rzp_payment.get("status") or "").lower()
+        rzp_order = rzp_payment.get("order_id")
+        rzp_amount = int(rzp_payment.get("amount") or 0)
+        if rzp_status not in ("captured", "authorized"):
+            raise HTTPException(status_code=400, detail=f"Payment is not captured (Razorpay status: {rzp_status})")
+        if rzp_order and rzp_order != payload.razorpay_order_id:
+            raise HTTPException(status_code=400, detail="Payment order_id does not match the order on file")
+        if rzp_amount and rzp_amount != expected_paise:
+            raise HTTPException(status_code=400, detail=f"Payment amount mismatch: expected {expected_paise} paise, got {rzp_amount}")
+        cross_check_ok = True
+    elif not creds["is_mock"]:
+        # Razorpay API unreachable — HMAC signature was valid, fall back to that.
+        # Auto-approval still allowed per signature trust.
+        cross_check_ok = True
+        rzp_status = "signature_only"
+
+    utr = _extract_utr(rzp_payment) or payload.razorpay_payment_id
+    auto_approve = bool(settings.get("auto_approve_on_payment", True)) and cross_check_ok
+
+    txn_id = str(uuid.uuid4())
+    user_set: Dict[str, Any] = {
+        "registration_paid": True,
+        "payment_method": "razorpay" + ("_mock" if creds["is_mock"] else ""),
+        "razorpay_payment_id": payload.razorpay_payment_id,
+        "razorpay_order_id": payload.razorpay_order_id,
+        "razorpay_utr": utr,
+        "paid_at": now_utc().isoformat(),
+    }
+    if auto_approve:
+        user_set.update({
+            "approval_status": "approved",
+            "approval_reviewed_at": now_utc().isoformat(),
+            "approval_reviewed_by": "auto",
+            "approval_reject_category": None,
+            "approval_reject_reason": None,
+        })
+
+    await db.users.update_one({"id": user["id"]}, {"$set": user_set})
     await db.transactions.insert_one({
         "id": txn_id,
         "user_id": user["id"],
         "type": "registration_fee",
         "amount": fee,
         "status": "paid",
-        "description": "Registration fee via Razorpay" + (" (mock)" if creds["is_mock"] else ""),
+        "description": (
+            "Registration fee via Razorpay"
+            + (f" · UTR {utr}" if utr else "")
+            + (" (mock)" if creds["is_mock"] else "")
+        ),
         "razorpay_order_id": payload.razorpay_order_id,
         "razorpay_payment_id": payload.razorpay_payment_id,
+        "reference_number": utr,
         "created_at": now_utc().isoformat(),
     })
-    await _create_notification(
-        user["id"],
-        "welcome",
-        "Payment received — awaiting approval",
-        "Your registration payment was successful. The finance team will review your profile shortly.",
-    )
+
+    if auto_approve:
+        # Trigger commission cascade + archive into approved_registrations
+        fresh = await db.users.find_one({"id": user["id"]})
+        if fresh:
+            try:
+                await _trigger_referral_commissions(fresh)
+            except Exception as e:
+                logger.warning(f"Auto-approval: commission trigger failed for {user['id']}: {e}")
+            synthetic_admin = {"id": "system", "email": "system@auto-approval", "admin_role": "auto"}
+            try:
+                await _archive_approved_user(fresh, synthetic_admin)
+            except Exception as e:
+                logger.warning(f"Auto-approval: archive failed for {user['id']}: {e}")
+            try:
+                await _audit_log(
+                    synthetic_admin, "user.auto_approve", "user", user["id"],
+                    {"utr": utr, "rzp_status": rzp_status, "amount": fee},
+                )
+            except Exception:
+                pass
+        await _create_notification(
+            user["id"], "approval", "Account approved automatically",
+            (f"Welcome aboard! Your payment was verified" + (f" (UTR {utr})" if utr else "") +
+             ". You're now approved and can start earning."),
+        )
+    else:
+        await _create_notification(
+            user["id"], "welcome", "Payment received — awaiting approval",
+            "Your registration payment was successful. The finance team will review your profile shortly.",
+        )
+
     return {
         "ok": True,
         "transaction_id": txn_id,
         "amount": fee,
-        "approval_status": "pending",
+        "approval_status": "approved" if auto_approve else "pending",
+        "auto_approved": auto_approve,
+        "utr": utr,
+        "rzp_status": rzp_status,
         "is_mock": creds["is_mock"],
     }
 
@@ -2680,7 +2778,7 @@ async def _archive_approved_user(user_doc: Dict[str, Any], admin: Dict[str, Any]
         "approver_role": approver_role,
         "approver_id": admin["id"],
         "approver_email": admin.get("email"),
-        "auto_approved": approver_role == "finance",
+        "auto_approved": approver_role in ("finance", "auto"),
         "source": "admin_created" if user_doc.get("created_by_admin") else (
             "google" if user_doc.get("auth_provider") == "google" else "self"
         ),

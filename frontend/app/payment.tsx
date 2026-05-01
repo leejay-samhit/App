@@ -159,18 +159,26 @@ export default function Payment() {
 
       // 3) Verify
       setStage("verifying");
-      await api.post("/payment/verify", {
-        razorpay_order_id: result.orderId || orderId,
-        razorpay_payment_id: result.paymentId,
-        razorpay_signature: result.signature,
-      });
+      const verifyRes = await api.post<{ approval_status?: string; auto_approved?: boolean; utr?: string }>(
+        "/payment/verify",
+        {
+          razorpay_order_id: result.orderId || orderId,
+          razorpay_payment_id: result.paymentId,
+          razorpay_signature: result.signature,
+        },
+      );
 
       setStage("success");
       setCheckoutOpen(true); // show branded success UI for a moment
       await refresh();
+      const approved = verifyRes.data?.approval_status === "approved" || verifyRes.data?.auto_approved;
       setTimeout(() => {
         setCheckoutOpen(false);
-        router.replace("/pending-approval" as any);
+        if (approved) {
+          router.replace("/(tabs)/dashboard" as any);
+        } else {
+          router.replace("/pending-approval" as any);
+        }
       }, 1200);
     } catch (e) {
       const reason = formatApiError(e);
@@ -219,18 +227,26 @@ export default function Payment() {
       setStage("verifying");
       const mockPaymentId = `pay_MOCK_${Math.random().toString(36).slice(2, 14)}`;
       const mockSignature = `sig_MOCK_${Math.random().toString(36).slice(2, 20)}`;
-      await api.post("/payment/verify", {
-        razorpay_order_id: orderId,
-        razorpay_payment_id: mockPaymentId,
-        razorpay_signature: mockSignature,
-      });
+      const verifyRes = await api.post<{ approval_status?: string; auto_approved?: boolean }>(
+        "/payment/verify",
+        {
+          razorpay_order_id: orderId,
+          razorpay_payment_id: mockPaymentId,
+          razorpay_signature: mockSignature,
+        },
+      );
 
       setStage("success");
       await refresh();
-      // Brief success UI then route to pending approval
+      const approved = verifyRes.data?.approval_status === "approved" || verifyRes.data?.auto_approved;
+      // Brief success UI then route based on approval status
       setTimeout(() => {
         setCheckoutOpen(false);
-        router.replace("/pending-approval" as any);
+        if (approved) {
+          router.replace("/(tabs)/dashboard" as any);
+        } else {
+          router.replace("/pending-approval" as any);
+        }
       }, 1200);
     } catch (e) {
       // Record failure for the attempt counter + message
