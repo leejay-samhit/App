@@ -109,12 +109,64 @@ user_problem_statement: |
 backend:
   - task: "Withdrawal Settlement Enhancements — reject reason, complete UTR, instant approve+complete, batch settle, daily digest"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            RE-TEST after route-ordering fix — ALL 85/85 checks PASSED via
+            /app/withdrawal_settlement_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Route ordering verified in backend/server.py:
+              • line 1426  POST /admin/withdrawals/batch/complete   ← static, FIRST ✅
+              • line 1505  POST /admin/withdrawals/{wid}/complete   ← param, AFTER
+              • line 1542  POST /admin/withdrawals/{wid}/approve-and-complete
+              • line 1590  POST /admin/withdrawals/{wid}/reject
+              • line 1621  GET  /admin/withdrawals/digest
+
+            Previous route-ordering bug (batch handler shadowed by /{wid}/complete)
+            is fully resolved. No duplicate /batch/complete handler remains.
+
+            Confirmed scenarios:
+              • F3  POST /admin/withdrawals/batch/complete with
+                    {ids:[wb1, wb2, "fake-id-xxx"], reference_prefix:"BATCH-2025-04"}
+                    → 200 {ok, settled_count:2, skipped_count:1,
+                             settled:[wb1, wb2],
+                             skipped:[{id:"fake-id-xxx", reason:"not_found"}]}.
+              • F4/F5/F6/F7 settled_count/skipped_count/skipped reason/settled list
+                    all correct.
+              • F8/F9 Each settled withdrawal has reference_number
+                    == "BATCH-2025-04-<wid[:8]>", status=success,
+                    batch_settled=true, instant_settle=true.
+              • F10 Both users (U1, U4) have new success withdrawal txs with
+                    reference_number starting "BATCH-2025-04-".
+              • F11 digest.settled_today incremented by ≥4 (w2, w3, wb1, wb2)
+                    post-batch.
+              • H1  Empty ids {ids:[]} → 400 "No withdrawal ids provided". ✅
+              • H2  complete on pending → 400 "not in processing". ✅
+              • H3–H6 nonexistent wid → 404 on /approve, /complete, /reject,
+                    /approve-and-complete. ✅
+
+            All 5 endpoints fully working:
+              A. SETUP (14/14) ✅
+              B. DIGEST (6/6) ✅
+              C. REJECT WITH REASON (7/7) ✅
+              D. COMPLETE WITH UTR (7/7) ✅
+              E. INSTANT APPROVE+COMPLETE (5/5) ✅
+              F. BATCH SETTLE (13/13) ✅  (previously 0/7 — now green)
+              G. RBAC (18/18) ✅
+              H. EDGE CASES (6/6) ✅     (H1 previously failed — now green)
+              I. REGRESSION (5/5) ✅
+              J. CLEANUP (2/2) ✅
+
+            Super admin auth: admin@app.com / Admin@123 works throughout.
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
         - working: false
           agent: "testing"
           comment: |
@@ -2771,13 +2823,33 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Withdrawal Settlement Enhancements — reject reason, complete UTR, instant approve+complete, batch settle, daily digest"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        WITHDRAWAL SETTLEMENT ENHANCEMENTS — RE-TEST COMPLETE, 85/85 PASSED.
+        Route ordering fix verified: /admin/withdrawals/batch/complete is now
+        registered at line 1426 BEFORE /{wid}/complete at line 1505. All
+        previously failing checks (F3-F11, H1) now green.
+
+        Batch settle happy path (F3-F9): ids=[wb1, wb2, "fake-id-xxx"] +
+        reference_prefix="BATCH-2025-04" → 200 with settled_count=2,
+        skipped_count=1, skipped[0]={id:"fake-id-xxx", reason:"not_found"},
+        settled=[wb1, wb2]. Both withdrawals got reference_number=
+        "BATCH-2025-04-<wid[:8]>", status=success, batch_settled=true,
+        instant_settle=true. Both users received success withdrawal txs with
+        the BATCH-2025-04- prefix and digest.settled_today incremented by ≥4.
+
+        Edge cases (H1-H6): empty ids → 400 "No withdrawal ids provided";
+        complete on pending → 400; all 4 endpoints return 404 on nonexistent
+        wid.
+
+        Task marked working: true, needs_retesting: false, stuck_count: 0.
+        Main agent can summarise and finish.
     - agent: "testing"
       message: |
         VENDOR PANEL — backend testing COMPLETE. ALL 72/72 PASSED via
