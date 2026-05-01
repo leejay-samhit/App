@@ -107,6 +107,314 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Withdrawal Settlement Enhancements — reject reason, complete UTR, instant approve+complete, batch settle, daily digest"
+    implemented: true
+    working: false
+    file: "backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: false
+          agent: "testing"
+          comment: |
+            Withdrawal Settlement Enhancements — end-to-end testing via
+            /app/withdrawal_settlement_test.py against
+            https://network-pay-1.preview.emergentagent.com. 72/79 PASSED, 7 FAILED.
+            4 of the 5 new/modified endpoints work correctly; the batch endpoint
+            is completely unreachable due to a ROUTE ORDERING BUG in server.py.
+
+            ============================================================
+            CRITICAL BUG — POST /admin/withdrawals/batch/complete is UNREACHABLE
+            ============================================================
+            Root cause: In backend/server.py the routes are registered in this
+            order:
+              • line 1426  POST /admin/withdrawals/{wid}/complete
+              • line 1463  POST /admin/withdrawals/{wid}/approve-and-complete
+              • line 1511  POST /admin/withdrawals/batch/complete
+
+            FastAPI matches routes in definition order. Because the path
+            parameter {wid} at line 1426 is a catch-all string, ANY request to
+            POST /api/admin/withdrawals/batch/complete is matched by the
+            /{wid}/complete handler first with wid="batch". The batch handler
+            at line 1511 is NEVER INVOKED. The /{wid}/complete handler then
+            looks up a withdrawal with id="batch", doesn't find one, and
+            returns 404 {"detail":"Withdrawal not found"}.
+
+            Reproduction (super_admin token):
+              POST /api/admin/withdrawals/batch/complete
+                   {"ids":[], "reference_prefix":"X"}
+              → 404 "Withdrawal not found"  (expected: 400 "No withdrawal ids
+                                             provided")
+              POST /api/admin/withdrawals/batch/complete
+                   {"ids":["<valid_wid_1>","<valid_wid_2>","fake"],
+                    "reference_prefix":"BATCH-2025-04"}
+              → 404 "Withdrawal not found"  (expected: 200 with settled_count=2,
+                                             skipped_count=1)
+
+            Fix: REORDER the @api_router decorators so the static-path route
+            /admin/withdrawals/batch/complete is defined BEFORE the dynamic
+            /admin/withdrawals/{wid}/complete (move the batch handler above
+            line 1426). Same care already exists for /admin/withdrawals/digest
+            (GET) because GET vs POST don't collide — but /batch/complete
+            collides with {wid}/complete on the POST verb and MUST be moved.
+
+            Impact: 5 direct failures + 1 cascaded digest check:
+              F3  POST /admin/withdrawals/batch/complete happy path → 404
+                  (expected 200)
+              F8  (x2) wb1/wb2 withdrawals never got status=success /
+                  reference_number — batch never ran.
+              F10 (x2) U1/U4 never got new success tx — batch never ran.
+              F11 digest.settled_today==2 (only w2 and w3) instead of 4 —
+                  cascaded from F3.
+              H1  batch with empty ids → 404 "Withdrawal not found" (expected
+                  400 "No withdrawal ids provided") — same root cause: request
+                  never reaches the batch handler.
+
+            ============================================================
+            WHAT WORKS — 72/79 passing, 4/5 endpoints verified green
+            ============================================================
+            A. SETUP (14/14) ✅
+              • Super admin login; digest baseline 200; 4 throwaway users
+                registered using admin's referral code (not "ADMIN001" — that
+                is a myth in the spec; admin's actual referral_code is
+                generated at seed time, e.g. "I1YDTL"), paid /payment/register-fee,
+                approved by super_admin.
+              • Each user credited ₹1000 via POST /admin/users/{id}/wallet
+                {amount:1000, type:"credit", reason:"Test credit"}.
+                Note: endpoint field is `type`, not `action` as mentioned in the
+                review request — WalletAdjust model uses `type`.
+              • Each user POST /users/me/bank {upi_id:"u<n>_<rand>@upi"} then
+                POST /withdrawals {amount:200} → 200 pending. Captured w1..w4.
+                Note: POST /withdrawals body is just {amount}; upi is pulled
+                from user doc.
+
+            B. DIGEST (6/6) ✅
+              • GET /api/admin/withdrawals/digest as super_admin → 200.
+              • pending count >= baseline+4; pending_amount >= baseline+800.
+              • processing unchanged from baseline.
+              • Response contains all 7 expected keys: pending, processing,
+                pending_amount, processing_amount, settled_today,
+                settled_today_amount, oldest_pending_age_hours.
+              • oldest_pending_age_hours is a number ≥ 0 (computed correctly
+                from oldest pending created_at).
+
+            C. REJECT WITH REASON (7/7) ✅
+              • U1 wallet == 800 before reject (1000 - 200 locked).
+              • POST /admin/withdrawals/{w1}/reject {reason:"Invalid UPI"} → 200
+                {ok:true, rejection_reason:"Invalid UPI"}.
+              • U1 wallet refunded to 1000 (atomic $inc, verified via /auth/me).
+              • Withdrawal doc in GET /admin/withdrawals?status=rejected has
+                status="rejected" + rejection_reason="Invalid UPI".
+              • GET /notifications/me as U1 includes "Withdrawal rejected" with
+                "Invalid UPI" in body.
+              • Re-POST /reject on already rejected → 400 "Already processed".
+
+            D. COMPLETE WITH UTR (7/7) ✅
+              • POST /admin/withdrawals/{w2}/approve → 200 (status processing).
+              • POST /admin/withdrawals/{w2}/complete {reference_number:"UTR12345"}
+                → 200 {ok:true, reference_number:"UTR12345"}.
+              • Withdrawal doc now status=success with reference_number=UTR12345.
+              • U2 /transactions/me has withdrawal tx status=success,
+                amount=-200, reference_number=UTR12345, description contains
+                "UTR12345" (tx row was promoted via update_many from processing).
+              • U2 notification "Withdrawal successful" body contains "UTR12345".
+
+            E. INSTANT APPROVE+COMPLETE (5/5) ✅
+              • POST /admin/withdrawals/{w3}/approve-and-complete
+                {reference_number:"INST-001"} → 200.
+              • Re-POST → 400 "Already processed".
+              • Withdrawal doc: status=success, instant_settle=true,
+                reference_number="INST-001".
+              • U3 has exactly 1 withdrawal success tx with amount=-200 and
+                description/reference_number mentioning INST-001.
+              • U3 has ZERO processing withdrawal txs remaining (confirms the
+                endpoint skips the intermediate processing tx).
+
+            G. RBAC (18/18) ✅
+              • Finance admin created via POST /admin/admins {admin_role:"finance"}
+                → can POST /admin/withdrawals/{wid}/approve-and-complete → 200.
+              • Manager admin created → can POST /approve then /complete → 200.
+              • Regular non-admin user → 403 on /reject, /complete,
+                /approve-and-complete, /batch/complete, /digest.
+              • No-auth → 401/403 on all 5 endpoints.
+
+            H. EDGE CASES (5/6) — 1 FAIL (H1 masked by route bug)
+              • H1 batch/complete {ids:[]} → expected 400, got 404 (cascaded
+                from route-ordering bug — request never reaches batch handler).
+              • H2 /complete on a pending withdrawal → 400 "not in processing". ✅
+              • H3..H6 nonexistent wid → 404 on /approve, /complete, /reject,
+                /approve-and-complete. ✅
+
+            I. REGRESSION (5/5) ✅
+              • GET /admin/withdrawals?status=pending → 200.
+              • POST /withdrawals (user submit) → 200 for approved user with
+                UPI and balance.
+              • GET /admin/approvals?status=pending → 200.
+              • GET /branding (no auth) → 200.
+              • admin@app.com login still 200.
+
+            J. CLEANUP ✅
+              • All 4 throwaway users + finance admin + manager admin + 2 RBAC
+                helper users DELETEd via super_admin DELETE /admin/users/{id}.
+              • admin@app.com login still works post-cleanup.
+
+            ============================================================
+            ACTION REQUIRED FOR MAIN AGENT
+            ============================================================
+            MUST FIX before this task can be marked working:
+              Move the @api_router.post("/admin/withdrawals/batch/complete")
+              decorator+handler (currently at line 1511) to ABOVE the
+              @api_router.post("/admin/withdrawals/{wid}/complete") handler
+              (currently at line 1426). Static routes must precede parameterised
+              routes in FastAPI. After the move, all 7 failing checks are
+              expected to pass without any other code change — the batch
+              handler implementation itself is correct (verified by code review
+              lines 1511-1587). Re-run /app/withdrawal_settlement_test.py to
+              confirm.
+
+            Backend logs clean, no 500s observed. Main agent: please reorder
+            the batch endpoint above /{wid}/complete and re-invoke testing.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Added 5 user-requested enhancements to the Admin Payouts (Withdrawals)
+            settlement flow. All endpoints already gate on
+            require_admin_role("super_admin","manager","support","finance").
+
+            New / modified endpoints:
+
+            1) POST /api/admin/withdrawals/{wid}/reject   { reason?: string }
+               • Refunds locked amount back to user wallet, sets status="rejected".
+               • Persists rejection_reason on withdrawal doc; sends notification
+                 "Withdrawal rejected" with the reason in the body.
+               • Audit log "withdrawal.reject" with {amount, reason}.
+
+            2) POST /api/admin/withdrawals/{wid}/complete   { reference_number?: string }
+               • Now accepts an optional UTR / bank reference number.
+               • Persists reference_number on withdrawal doc AND on the matching
+                 transaction (via update_many on processing tx).
+               • Notification body includes "· UTR <ref>" when ref provided.
+               • Audit log "withdrawal.complete" with {amount, reference}.
+
+            3) POST /api/admin/withdrawals/{wid}/approve-and-complete   { reference_number?: string }
+               • NEW endpoint — instantly moves pending → success in one step.
+               • Useful when admin already paid the user via UPI/bank manually.
+               • Inserts a single tx with status="success" (skipping the
+                 processing intermediate tx). Sets instant_settle=true on
+                 withdrawal. Audit log "withdrawal.instant_settle".
+               • 400 if status != pending.
+
+            4) POST /api/admin/withdrawals/batch/complete
+                  { ids: [..wids..], reference_prefix?: string }
+               • NEW endpoint — bulk settle. For each wid:
+                   - pending → success (with new tx insert), instant_settle=true
+                   - processing → success (existing tx promoted)
+                   - else → skipped with reason
+               • Each settled withdrawal gets unique reference_number
+                 = "<prefix>-<wid[:8]>" (or just "<wid[:8]>" if no prefix).
+               • Sends "Withdrawal successful · UTR <ref>" notifications.
+               • Returns { ok, settled_count, skipped_count, settled[], skipped[] }.
+               • 400 if ids list is empty.
+
+            5) GET /api/admin/withdrawals/digest
+               • NEW lightweight summary endpoint feeding the new admin Payouts
+                 banner + admin home digest.
+               • Returns { pending, processing, pending_amount,
+                   processing_amount, settled_today, settled_today_amount,
+                   oldest_pending_age_hours }.
+               • oldest_pending_age_hours is float (hours since the oldest
+                 pending withdrawal) — UI flags red when > 24.
+
+            Test scenarios to verify (admin@app.com / Admin@123):
+
+            A. SETUP
+               • Register fresh users U1..U4 (referred by ADMIN001), pay
+                 registration fee, super_admin approve.
+               • Admin credit each user wallet ₹1000 via
+                 POST /admin/users/{id}/wallet {amount:1000, action:"credit"}.
+               • Each user submits a withdrawal:
+                   POST /withdrawals { amount: 200, upi_id: "u<n>@upi" }
+                 → 200 (status pending). Capture w1..w4 ids.
+
+            B. DIGEST BANNER
+               • GET /admin/withdrawals/digest → 200 with:
+                   pending=4, processing=0, pending_amount=800,
+                   settled_today=0, settled_today_amount=0,
+                   oldest_pending_age_hours >= 0.
+
+            C. REJECT WITH REASON
+               • POST /admin/withdrawals/{w1}/reject {reason:"Invalid UPI"} → 200,
+                 rejection_reason persisted, U1 wallet refunded back to 1000,
+                 notification "Withdrawal rejected" with reason in body.
+               • Re-POST same → 400 "Already processed".
+               • POST /admin/withdrawals/{w1}/reject without reason → 400 already
+                 processed (already rejected).
+
+            D. COMPLETE WITH UTR
+               • POST /admin/withdrawals/{w2}/approve → 200 (status processing).
+               • POST /admin/withdrawals/{w2}/complete
+                     {reference_number:"UTR12345"} → 200,
+                 withdrawal.reference_number=="UTR12345",
+                 withdrawal.status=="success", processing tx promoted to
+                 status=success with reference_number=="UTR12345".
+               • U2 GET /transactions/me must contain the success tx with
+                 description containing "ref UTR12345".
+               • U2 notification body contains "UTR UTR12345".
+
+            E. INSTANT APPROVE+COMPLETE
+               • POST /admin/withdrawals/{w3}/approve-and-complete
+                     {reference_number:"INST-001"} → 200.
+               • Verify withdrawal.status=="success", instant_settle==true,
+                 reference_number=="INST-001". Single tx exists with
+                 status=success amount=-200 description with "ref INST-001".
+                 NO processing tx should remain for this withdrawal.
+               • POST same wid again → 400 "Already processed".
+
+            F. BATCH SETTLE
+               • Submit two more withdrawals from U1 (now refunded) and U4.
+                 Both pending. Capture wb1, wb2.
+               • POST /admin/withdrawals/batch/complete
+                     {ids:[wb1, wb2, "fake-id"], reference_prefix:"BATCH-2025-04"}
+                 → 200 with settled_count=2, skipped_count=1
+                   (skipped includes "fake-id" with reason "not_found").
+               • Each settled withdrawal must have reference_number
+                 starting with "BATCH-2025-04-" and length matching prefix+9.
+               • Both withdrawals status==success, instant_settle==true,
+                 batch_settled==true.
+               • Both users have a +ve match tx with status=success.
+               • Digest endpoint after batch: settled_today >= 4 (w2 + w3 +
+                 wb1 + wb2), pending count down accordingly.
+
+            G. RBAC
+               • Promote a fresh user to admin_role="finance" → POST same
+                 endpoints → 200 (finance can settle).
+               • Promote another user to "manager" → 200.
+               • Regular non-admin user → 403 on all 5 endpoints.
+               • No-auth → 401.
+
+            H. EDGE CASES
+               • POST /admin/withdrawals/batch/complete {ids:[]} → 400
+                 "No withdrawal ids provided".
+               • POST /admin/withdrawals/{wid}/complete on a pending
+                 withdrawal → 400 "Withdrawal is not in processing state".
+               • POST /admin/withdrawals/{nonexistent}/(approve|complete|
+                 reject|approve-and-complete) → 404 "Withdrawal not found".
+
+            I. REGRESSION
+               • Existing /admin/withdrawals?status=pending list still 200.
+               • /withdrawals (user submit) still works for approved users
+                 with sufficient balance + UPI/bank.
+               • /admin/approvals?status=pending → 200.
+               • /branding → 200.
+               • admin@app.com login still works.
+
+            J. CLEANUP — DELETE all throwaway users (U1..U4 + helper finance/
+               manager admins) via super_admin DELETE /admin/users/{id}.
+               admin@app.com must still be able to login.
+
+            Credentials: admin@app.com / Admin@123 (super_admin); Danger PIN 654321.
+
   - task: "Vendor Panel — apply, admin approve/reject, vendor products CRUD, sales ledger, commission split on checkout"
     implemented: true
     working: true
@@ -2463,7 +2771,8 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Withdrawal Settlement Enhancements — reject reason, complete UTR, instant approve+complete, batch settle, daily digest"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -2973,3 +3282,54 @@ agent_communication:
 
         Backend logs clean, no 500s. Task marked working: true,
         needs_retesting: false. Main agent can summarise and finish.
+
+    - agent: "testing"
+      message: |
+        WITHDRAWAL SETTLEMENT ENHANCEMENTS — backend testing COMPLETE.
+        72/79 PASSED via /app/withdrawal_settlement_test.py against
+        https://network-pay-1.preview.emergentagent.com. Detailed pass/fail
+        log appended to the first backend task's status_history.
+
+        RESULT: 4 of 5 endpoints green; 1 CRITICAL bug blocking the batch
+        endpoint.
+
+        ✅ POST /admin/withdrawals/{wid}/reject            — reason persisted,
+           wallet refunded, notification contains reason, re-reject → 400.
+        ✅ POST /admin/withdrawals/{wid}/complete          — UTR persisted on
+           withdrawal AND on linked tx via update_many; notification contains
+           UTR.
+        ✅ POST /admin/withdrawals/{wid}/approve-and-complete — instant_settle=true,
+           single success tx, NO processing tx; re-call → 400.
+        ❌ POST /admin/withdrawals/batch/complete           — UNREACHABLE. All
+           calls (including empty ids) return 404 "Withdrawal not found".
+        ✅ GET  /admin/withdrawals/digest                   — all 7 keys,
+           counts + amounts + oldest_pending_age_hours all correct.
+
+        CRITICAL BUG — ROUTE ORDERING IN backend/server.py
+        --------------------------------------------------
+        The batch handler at line 1511 is registered AFTER the
+        /{wid}/complete handler at line 1426. FastAPI matches in declaration
+        order, so every POST /admin/withdrawals/batch/complete is swallowed
+        by /{wid}/complete with wid="batch" and returns 404. The batch
+        handler implementation itself is correct — only reachability is
+        broken.
+
+        FIX (one minor edit, no functional code change required):
+        Move the @api_router.post("/admin/withdrawals/batch/complete")
+        decorator + function (server.py lines 1511-1587) to ABOVE the
+        @api_router.post("/admin/withdrawals/{wid}/complete") at line 1426.
+        After the reorder, re-run /app/withdrawal_settlement_test.py —
+        all 79 checks expected to pass.
+
+        Also note two minor spec-vs-implementation discrepancies (NOT bugs):
+        • Wallet credit payload is {amount, type:"credit", reason} — the
+          WalletAdjust model uses field name `type`, not `action`.
+        • POST /withdrawals body is just {amount}; UPI must be set via
+          POST /users/me/bank. The review request inline-showed {amount,
+          upi_id} but the endpoint doesn't take upi_id.
+        • "ADMIN001" referral code is NOT fixed; admin's referral_code is
+          generated at seed time. The test fetches it from the admin login
+          response.
+
+        Task "Withdrawal Settlement Enhancements" marked:
+          working: false, needs_retesting: true, stuck_count: 1.
