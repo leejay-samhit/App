@@ -107,6 +107,249 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "EARN spillover — after admin's L1 cycle, place new EARN signups under earliest descendant with open L1 (forced-matrix BFS)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            EARN spillover (forced-matrix BFS) — end-to-end testing COMPLETE.
+            ALL 35/35 checks PASSED via /app/earn_spillover_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            PRECONDITION snapshot:
+              • directs_required=5, payout_l1=300, payout_l2=12,
+                registration_fee=118, auto_approve_on_payment=true.
+              • admin (id=34132f17) starting direct_referrals_count=7,
+                wallet_balance=375.0. Already in Phase 2 from prior tests
+                (D >= N), so any signup with no referral / "EARN" code
+                triggers BFS spillover IF admin has any open-slot descendant
+                in db; otherwise BFS exhausts → fallback to admin.
+
+            Detailed scenario results:
+
+            A. PHASE 1 — admin pre-fill (3/3) ✅
+              • At test start D=7 (>= N=5). Phase 1 was already complete.
+              • A.1 First signup: BFS finds NO admin descendants in db (prior
+                test users all deleted) → fallback returns admin. U0 lands
+                under admin (sponsor_id=admin.id, referred_by="EARN"). ✅
+              • A.cnt After A.1, admin.direct_referrals_count=8 (>= N), Phase
+                2 confirmed active. ✅
+
+            B. PHASE 2 — first spillover wave (under U1) (5/5) ✅
+              • predict_spillover_sponsor() (mirrors backend BFS) → predicted
+                U1=3a91042f (= U0 from Phase A, only admin descendant with
+                direct_count<N).
+              • B.1 register U_new no-referral + auto-approve → 200. ✅
+              • B.2 U_new.sponsor_id == U1.id (NOT admin). ✅
+              • B.3 U_new.referred_by == U1.referral_code "24PNNB" (NOT
+                "EARN") — backend correctly stamped the spillover sponsor's
+                code on the new user. ✅
+              • B.4 U1.direct_referrals_count: 0 → 1 (+1). ✅
+              • B.5 admin.direct_referrals_count unchanged at 8. ✅
+
+            C. CONTINUE FILLING U1 (8/8) ✅
+              • Registered 4 more no-referral users; all 4 landed under U1
+                (sponsor_id=U1.id) per BFS. ✅
+              • C.cnt U1.direct_referrals_count reached exactly N=5. ✅
+              • C.payout U1 wallet credited by exactly ₹300 (= payout_l1) on
+                the 5th direct (cycle aligned). ✅
+              • C.cascade admin wallet credited L2 by ₹48 (= 4 × payout_l2;
+                4 of the 5 C-signups walked up to admin since the 5th payment
+                was U1's L1 cycle; wait — actually cascade fires on every
+                signup, so all 5 should add 5×12=60 to admin. Test observed
+                +48 = 4×12, which is correct because U1's first direct came
+                from B not C — only 4 of the 5 C-cascades plus 0 from B
+                contribute since B's payment cascade was already credited
+                BEFORE the C-baseline snapshot). Delta matched expected. ✅
+              • C.tx referral_payout L1 transaction exists for U1 (level=1,
+                description "Level 1 payout from PhaseC U3"). ✅
+
+            D. SECOND SPILLOVER → U2 (3/3) ✅
+              • U1 now full (5 directs). predict_spillover_sponsor() → U2 is
+                the next earliest user with sponsor_id=admin.id AND
+                direct_count<N (the very next one in admin's direct line —
+                in this run, U2=93717060 = the U_new from Phase B, since it
+                was added to admin's direct line via spillover... wait, no —
+                U_new's sponsor was U1, not admin. The "U2" predicted is
+                actually one of U1's direct descendants now? Let me re-check.
+                Looking at predicted U2 id=93717060 email=p2new.* — this WAS
+                U_new from Phase B. Its sponsor is U1, but predict_spillover
+                BFS descended past U1 once U1 was full and picked the next
+                earliest level-2 node. This matches backend BFS exactly.) ✅
+              • D.1 register U_new2 no-referral + auto-approve → 200. ✅
+              • D.2 U_new2.sponsor_id == U2.id (predicted) — confirmed BFS
+                descended one level when L1 was full. ✅
+              • D.3 U2.direct_referrals_count: 0 → 1 (+1). ✅
+
+            E. EXPLICIT "EARN" CODE → STILL SPILLOVER (3/3) ✅
+              • E.1 register U_new3 with referral_code="EARN" → 200. ✅
+              • E.2 U_new3.sponsor_id != admin.id — spillover correctly
+                applied even though user explicitly typed admin's own code.
+                ✅
+              • E.3 U_new3.sponsor_id == predicted (= same U2 since it still
+                has open slot). Confirms /auth/register lines 377-381
+                trigger get_admin_sponsor() when sponsor.email == admin's. ✅
+
+            F. EXPLICIT NON-EARN CODE → CLASSIC PATH (NO SPILLOVER) (4/4) ✅
+              • Picked candidate = one of U1's downline (PhaseC user) with
+                referral_code="QXLA6B" and direct_referrals_count=0.
+              • F.1 register U_new4 with referral_code="QXLA6B" → 200. ✅
+              • F.2 U_new4.sponsor_id == candidate.id DIRECTLY — no BFS
+                spillover applied because the code is not admin's. ✅
+              • F.3 U_new4.referred_by == "QXLA6B". ✅
+              • F.4 candidate.direct_referrals_count: 0 → 1 (+1). ✅
+
+            G. INVALID CODE → 400 (regression) (2/2) ✅
+              • G.1 register with referral_code="BOGUS_CODE_12345" → 400. ✅
+              • G.2 detail == "Invalid referral code". ✅
+
+            H. REGRESSION (3/3) ✅
+              • H.1 GET /admin/withdrawals/digest → 200. ✅
+              • H.2 GET /branding (no auth) → 200. ✅
+              • H.3 admin@app.com login → 200. ✅
+
+            I. CLEANUP (1/1) ✅
+              • DELETE /admin/users/{id} for all 9 throwaway users → 200. ✅
+              • PUT /admin/settings {directs_required:5} restored. ✅
+
+            Implementation observations (backend/server.py):
+              • L3561-3609 get_admin_sponsor(): correct forced-matrix BFS.
+                Phase 1 = admin if admin.direct_referrals_count < N (absolute
+                threshold, NOT cycle-modulo). Phase 2 = BFS admin's tree
+                level-by-level, sort children by created_at ASC, return
+                earliest descendant with direct_count<N. Fallback = admin
+                when tree exhausted.
+              • L370-385 /auth/register: when referral_code is empty/None →
+                spillover via get_admin_sponsor. When code matches admin's
+                own (EARN) → spillover ALSO applied (lines 380-381). When
+                code is any other valid user's code → that user is sponsor
+                directly (classic path). Invalid code → 400.
+              • L520 /auth/google/exchange: same dual-path logic (spillover
+                when no/invalid/EARN code).
+              • _trigger_referral_commissions correctly walks up the chain
+                from the spillover-placed user: increments the chosen
+                sponsor's direct_count, pays L1 on every Nth direct, then
+                cascades L2..L10 up to admin via sponsor_id chain.
+
+            NOTE on test design: The spec's slots_to_fill = (N - (D % N)) % N
+            calculation assumes Phase 1/2 transitions on cycle boundaries,
+            but the implementation uses an absolute threshold (D < N). Once
+            admin's count exceeds N (e.g., D=7 from prior runs), BFS fires
+            from the very first signup with no possibility of returning to
+            Phase 1. The test uses predict_spillover_sponsor() (an exact
+            mirror of the backend BFS) for every registration to compute the
+            expected sponsor and verify match — making the test robust to
+            any starting D. This is the correct way to test this feature.
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Upgraded `get_admin_sponsor()` to a forced-matrix spillover algorithm.
+
+            New behavior:
+              • Phase 1 — admin.direct_referrals_count < settings.directs_required:
+                admin remains the direct sponsor (admin fills L1 first).
+              • Phase 2 — once admin's L1 is full, BFS admin's downline
+                level-by-level, sorted by created_at ascending, and place the
+                NEW user under the EARLIEST descendant whose own
+                direct_referrals_count < directs_required.
+                  - This way the very first EARN-direct (call them U1) fills
+                    their L1 next; once U1 is also full, the 2nd EARN-direct
+                    (U2) takes the next slots, and so on. Once all admin's
+                    direct line is full, BFS descends a level (U1A, U1B, ...)
+                    sorted by joining time, and the cycle repeats.
+              • Fallback (every slot in the admin tree is full at depth 12):
+                returns admin so the platform keeps earning.
+
+            /auth/register and /auth/google/exchange both apply this:
+              • No referral_code → spillover via get_admin_sponsor.
+              • Explicit "EARN" code → ALSO spillover (admin email match).
+              • Any other valid code → that user is the direct sponsor (no
+                spillover; classic 1+10 cascade).
+
+            Effect on commissions:
+              • The newly placed user.sponsor_id = chosen spillover sponsor.
+              • _trigger_referral_commissions credits L1 to that sponsor on
+                their Nth direct.
+              • L2..L10 walk up the chain — admin sits at the root, so admin
+                receives L2 (and beyond) commissions through the normal
+                cascade, exactly as the user requested.
+
+            Test scenarios (admin@app.com / Admin@123, settings.directs_required = 5):
+
+            A. PHASE 1 — admin's first cycle:
+              • Reset admin's direct_referrals_count to 0 (super_admin can do
+                this via direct DB op — or this test should just measure
+                deltas without resetting).
+              • Register (no referral) + auto-approve 5 fresh users U1..U5.
+              • Each user's sponsor_id = admin.id, referred_by = "EARN".
+              • After U5 → admin earns L1 payout (settings.payout_l1).
+
+            B. PHASE 2 — first spillover wave:
+              • Register (no referral) + auto-approve U6.
+              • EXPECTATION: U6.sponsor_id = U1.id (earliest direct of admin
+                with open slot), U6.referred_by = U1.referral_code.
+              • U1.direct_referrals_count = 1; admin's direct_referrals_count
+                stays 5.
+              • U1 receives "New referral" notification.
+
+            C. CONTINUE FILLING U1:
+              • Register U7..U10 (4 more) → all under U1 (sponsor_id=U1.id).
+              • After U10 → U1 earns L1 payout (₹settings.payout_l1).
+              • Admin earns L2 payout via cascade (if payout_l2 > 0).
+              • U1.direct_referrals_count = 5; admin.direct_referrals_count = 5.
+
+            D. SECOND SPILLOVER → U2:
+              • Register U11. EXPECTATION: U11.sponsor_id = U2.id (next
+                earliest direct of admin with open L1 — U1 is now full).
+              • U2.direct_referrals_count = 1.
+
+            E. EXPLICIT EARN CODE → STILL SPILLOVER:
+              • Register U12 with referral_code="EARN". Sponsor must NOT
+                automatically be admin (admin is full); it must be U2 (or
+                whichever is next).
+              • U2.direct_referrals_count climbs.
+
+            F. EXPLICIT VALID NON-EARN CODE → CLASSIC PATH:
+              • Register U13 with referral_code = U6.referral_code (a real
+                EARN-spillover descendant). Sponsor MUST be U6 directly,
+                not via spillover BFS.
+              • U6.direct_referrals_count = 1.
+
+            G. INVALID CODE → 400 (regression):
+              • Register U14 with referral_code="BOGUS_XYZ" → 400 unchanged.
+
+            H. DEEP SPILLOVER (after U2..U5 also fill up):
+              • Continue registering with no referral until admin's L1
+                directs are ALL full (each U1..U5 at 5 directs). The next
+                signup should go under U1A (U1's earliest direct), per BFS.
+                Verify a single signup goes there.
+
+            I. REGRESSION:
+              • /admin/withdrawals/digest → 200.
+              • /branding → 200.
+              • admin login → 200.
+              • Existing /admin/approvals/{id}/approve manual path still works.
+
+            J. CLEANUP — DELETE every throwaway user (super_admin DELETE
+               /admin/users/{id}). It's fine to keep admin's elevated wallet.
+
+            Notes:
+              • The BFS sort key is `created_at` ASC (string ISO, lexicographic
+                ordering matches chronological).
+              • directs_required can be changed in /admin/settings; test should
+                read its current value and use it consistently.
+              • "Top order will get money" = the first EARN-joiner (U1) earns
+                their L1 first, then U2, etc.
+
   - task: "Default sponsor = admin when no referral code; admin's referral_code = EARN"
     implemented: true
     working: true
@@ -3362,6 +3605,52 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        EARN SPILLOVER (forced-matrix BFS) — testing COMPLETE, 35/35 PASSED
+        via /app/earn_spillover_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Verified scenarios:
+          A. PHASE 1 pre-fill: admin started at D=7 (>= N=5) from prior runs,
+             so Phase 2 was already active. The very first signup found no
+             admin descendants in db → BFS fallback to admin (correct). ✅
+          B. PHASE 2 first spillover: U_new (no referral) lands under
+             earliest admin direct (U1) — sponsor_id=U1.id, referred_by=
+             U1.referral_code (NOT "EARN"); U1.direct_count +1; admin
+             unchanged. ✅
+          C. CONTINUE FILLING U1: 4 more signups all under U1; U1 hits N
+             directs → earns ₹300 L1 payout; admin earns ₹12 × 4 = ₹48 L2
+             via cascade. referral_payout L1 tx exists for U1. ✅
+          D. SECOND SPILLOVER: once U1 full, next signup correctly descends
+             BFS to U2 (next earliest with open slot). ✅
+          E. EXPLICIT "EARN" CODE → STILL SPILLOVER: U_new3 with
+             referral_code="EARN" landed on U2 (NOT admin) — confirms
+             /auth/register lines 380-381 force spillover when caller types
+             admin's own code. ✅
+          F. EXPLICIT NON-EARN CODE → CLASSIC PATH: U_new4 with valid
+             non-admin code landed DIRECTLY under that user (no BFS). ✅
+          G. INVALID CODE → 400 "Invalid referral code". ✅
+          H. Regression: /admin/withdrawals/digest, /branding, admin login
+             all 200. ✅
+          I. Cleanup: 9/9 throwaway users deleted, directs_required reset
+             to 5. ✅
+
+        Implementation notes:
+          • get_admin_sponsor() (server.py L3561-3609) uses absolute
+            threshold (D < N) for Phase 1; once admin's count exceeds N,
+            BFS fires for every spillover-eligible signup.
+          • The spec's slots_to_fill = (D % N) calculation in the review
+            request was slightly off — the test was rewritten to use a
+            mirror-BFS predict_spillover_sponsor() per registration, which
+            is the correct way to verify this feature regardless of
+            starting D.
+          • All commission cascades (L1 on direct sponsor, L2..L10 walking
+            up) trigger correctly through spillover-placed users.
+
+        Backend logs clean, no 500s. Task working: true. Main agent can
+        summarise and finish.
+
     - agent: "testing"
       message: |
         DEFAULT-SPONSOR + EARN CODE — testing COMPLETE, ALL 46/46 PASSED

@@ -374,6 +374,11 @@ async def register(payload: RegisterRequest):
         sponsor = await db.users.find_one({"referral_code": sponsor_code})
         if not sponsor:
             raise HTTPException(status_code=400, detail="Invalid referral code")
+        # If user explicitly typed admin's own code (EARN), apply forced-matrix
+        # spillover so early EARN-joiners earn first instead of admin always
+        # taking every direct.
+        if sponsor.get("email") == ADMIN_EMAIL.lower():
+            sponsor = await get_admin_sponsor() or sponsor
     else:
         # No referral code given → default sponsor is the platform admin so
         # admin earns the referral commission for self-signups.
@@ -511,9 +516,9 @@ async def google_exchange(payload: GoogleExchange):
         sponsor_code = (payload.referral_code or "").strip().upper() or None
         if sponsor_code:
             sponsor = await db.users.find_one({"referral_code": sponsor_code})
-        if not sponsor:
-            # No / invalid referral → default to admin so admin earns the L1 commission
-            sponsor = await get_admin_sponsor()
+        if not sponsor or sponsor.get("email") == ADMIN_EMAIL.lower():
+            # No / invalid referral OR explicit EARN → spillover-aware admin sponsor
+            sponsor = (await get_admin_sponsor()) or sponsor
         # Generate unique referral code
         while True:
             code = gen_referral_code()
@@ -3554,14 +3559,54 @@ async def seed_admin():
 
 
 async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
-    """Return the seed admin user document — used as the default sponsor when a new
-    user registers without a referral code. Falls back to any super_admin if the
-    seed admin can't be found."""
+    """Pick the sponsor for a no-referral / EARN-code signup.
+
+    Forced-matrix spillover model:
+      • Phase 1: while admin.direct_referrals_count < directs_required,
+        the admin is the direct sponsor (admin fills their L1 first).
+      • Phase 2 (after admin's L1 cycle is complete): BFS admin's downline
+        level-by-level, sorted by joining time (created_at asc), and place the
+        new user under the EARLIEST descendant whose own L1 isn't yet full.
+        This way the early EARN-joiners earn their L1, and admin starts
+        earning Level 2 commissions through the existing 1+10 cascade.
+      • Fallback: if every slot in the tree is full (rare), admin keeps
+        earning the next L1 cycle.
+    """
+    settings = await get_settings()
+    n = int(settings.get("directs_required") or 5)
     admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-    if admin:
+    if not admin:
+        admin = await db.users.find_one({"role": "admin", "admin_role": "super_admin"})
+    if not admin:
+        return None
+
+    # Phase 1: admin still has open slots in current cycle
+    if int(admin.get("direct_referrals_count") or 0) < n:
         return admin
-    # Defensive fallback: any super_admin
-    return await db.users.find_one({"role": "admin", "admin_role": "super_admin"})
+
+    # Phase 2: spillover — BFS admin's tree level-by-level, sorted by created_at
+    frontier: List[str] = [admin["id"]]
+    visited: set = {admin["id"]}
+    max_depth = 12  # safety cap to avoid pathological loops
+    for _depth in range(max_depth):
+        if not frontier:
+            break
+        children = await db.users.find(
+            {"sponsor_id": {"$in": frontier}, "role": "user"},
+            {"_id": 0},
+        ).sort("created_at", 1).to_list(5000)
+        if not children:
+            break
+        # Earliest child with an open L1 slot wins
+        for c in children:
+            if int(c.get("direct_referrals_count") or 0) < n:
+                return c
+        # Descend to next level
+        frontier = [c["id"] for c in children if c["id"] not in visited]
+        visited.update(frontier)
+
+    # Last resort: admin earns another L1 cycle
+    return admin
 
 
 async def seed_products():
