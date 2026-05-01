@@ -1373,6 +1373,19 @@ async def admin_list_withdrawals(_: Dict[str, Any] = Depends(require_admin), sta
     return items
 
 
+class WithdrawalCompleteRequest(BaseModel):
+    reference_number: Optional[str] = ""
+
+
+class WithdrawalRejectRequest(BaseModel):
+    reason: Optional[str] = ""
+
+
+class WithdrawalBatchRequest(BaseModel):
+    ids: List[str]
+    reference_prefix: Optional[str] = ""
+
+
 @api_router.post("/admin/withdrawals/{wid}/approve")
 async def admin_approve_withdrawal(wid: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
     """Finance/admin approves a withdrawal. Moves status pending → processing with an ETA.
@@ -1389,6 +1402,7 @@ async def admin_approve_withdrawal(wid: str, admin: Dict[str, Any] = Depends(req
             "status": "processing",
             "processed_at": now_utc().isoformat(),
             "approved_by": admin["id"],
+            "approved_by_email": admin.get("email"),
             "estimated_completion_at": eta,
         }},
     )
@@ -1410,8 +1424,14 @@ async def admin_approve_withdrawal(wid: str, admin: Dict[str, Any] = Depends(req
 
 
 @api_router.post("/admin/withdrawals/{wid}/complete")
-async def admin_complete_withdrawal(wid: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
-    """Mark a processing withdrawal as successfully paid out."""
+async def admin_complete_withdrawal(
+    wid: str,
+    payload: Optional[WithdrawalCompleteRequest] = None,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
+    """Mark a processing withdrawal as successfully paid out. Captures optional UTR / reference."""
+    ref = (payload.reference_number if payload else "") or ""
+    ref = ref.strip()
     w = await db.withdrawals.find_one({"id": wid})
     if not w:
         raise HTTPException(status_code=404, detail="Withdrawal not found")
@@ -1419,23 +1439,162 @@ async def admin_complete_withdrawal(wid: str, admin: Dict[str, Any] = Depends(re
         raise HTTPException(status_code=400, detail="Withdrawal is not in processing state")
     await db.withdrawals.update_one(
         {"id": wid},
-        {"$set": {"status": "success", "completed_at": now_utc().isoformat(), "completed_by": admin["id"]}},
+        {"$set": {
+            "status": "success",
+            "completed_at": now_utc().isoformat(),
+            "completed_by": admin["id"],
+            "completed_by_email": admin.get("email"),
+            "reference_number": ref,
+        }},
     )
-    # Update the matching processing transaction → success
+    desc = f"Withdrawal paid (₹{int(w['amount'])})" + (f" · ref {ref}" if ref else "")
     await db.transactions.update_many(
         {"user_id": w["user_id"], "type": "withdrawal", "status": "processing", "amount": -w["amount"]},
-        {"$set": {"status": "success", "description": f"Withdrawal paid (₹{int(w['amount'])})"}},
+        {"$set": {"status": "success", "description": desc, "reference_number": ref}},
     )
     await _create_notification(
         w["user_id"], "withdrawal", "Withdrawal successful",
-        f"₹{int(w['amount'])} has been paid to your bank account.",
+        f"₹{int(w['amount'])} has been paid" + (f" · UTR {ref}" if ref else "."),
     )
-    await _audit_log(admin, "withdrawal.complete", "withdrawal", wid, {"amount": w["amount"]})
-    return {"ok": True}
+    await _audit_log(admin, "withdrawal.complete", "withdrawal", wid, {"amount": w["amount"], "reference": ref})
+    return {"ok": True, "reference_number": ref}
+
+
+@api_router.post("/admin/withdrawals/{wid}/approve-and-complete")
+async def admin_approve_and_complete_withdrawal(
+    wid: str,
+    payload: Optional[WithdrawalCompleteRequest] = None,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
+    """One-step: pending → success directly. Useful for instant payouts (e.g., admin already paid via UPI)."""
+    ref = (payload.reference_number if payload else "") or ""
+    ref = ref.strip()
+    w = await db.withdrawals.find_one({"id": wid})
+    if not w:
+        raise HTTPException(status_code=404, detail="Withdrawal not found")
+    if w["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Already processed")
+    ts = now_utc().isoformat()
+    await db.withdrawals.update_one(
+        {"id": wid},
+        {"$set": {
+            "status": "success",
+            "processed_at": ts,
+            "approved_by": admin["id"],
+            "approved_by_email": admin.get("email"),
+            "completed_at": ts,
+            "completed_by": admin["id"],
+            "completed_by_email": admin.get("email"),
+            "reference_number": ref,
+            "instant_settle": True,
+        }},
+    )
+    desc = f"Withdrawal paid (₹{int(w['amount'])})" + (f" · ref {ref}" if ref else "")
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": w["user_id"],
+        "type": "withdrawal",
+        "amount": -w["amount"],
+        "status": "success",
+        "description": desc,
+        "reference_number": ref,
+        "created_at": ts,
+    })
+    await _create_notification(
+        w["user_id"], "withdrawal", "Withdrawal successful",
+        f"₹{int(w['amount'])} has been paid" + (f" · UTR {ref}" if ref else "."),
+    )
+    await _audit_log(admin, "withdrawal.instant_settle", "withdrawal", wid, {"amount": w["amount"], "reference": ref})
+    return {"ok": True, "reference_number": ref}
+
+
+@api_router.post("/admin/withdrawals/batch/complete")
+async def admin_batch_complete_withdrawals(
+    payload: WithdrawalBatchRequest,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
+    """Batch settle many withdrawals at once.
+    For each withdrawal:
+      • If status==pending → flip directly to success (instant)
+      • If status==processing → flip to success
+      • Else → skip with reason
+    Each gets a unique reference_number = `<prefix>-<id8>` (or just <id8> if no prefix).
+    Returns a summary { settled, skipped, failures }.
+    """
+    ids = list({i for i in (payload.ids or []) if i})
+    if not ids:
+        raise HTTPException(status_code=400, detail="No withdrawal ids provided")
+    prefix = (payload.reference_prefix or "").strip()
+    settled: List[str] = []
+    skipped: List[Dict[str, Any]] = []
+    ts = now_utc().isoformat()
+
+    for wid in ids:
+        w = await db.withdrawals.find_one({"id": wid})
+        if not w:
+            skipped.append({"id": wid, "reason": "not_found"}); continue
+        if w["status"] not in ("pending", "processing"):
+            skipped.append({"id": wid, "reason": f"status_{w['status']}"}); continue
+
+        ref = (f"{prefix}-{wid[:8]}" if prefix else wid[:8])
+        was_pending = w["status"] == "pending"
+
+        await db.withdrawals.update_one(
+            {"id": wid},
+            {"$set": {
+                "status": "success",
+                "processed_at": w.get("processed_at") or ts,
+                "completed_at": ts,
+                "completed_by": admin["id"],
+                "completed_by_email": admin.get("email"),
+                "approved_by": w.get("approved_by") or admin["id"],
+                "approved_by_email": w.get("approved_by_email") or admin.get("email"),
+                "reference_number": ref,
+                "instant_settle": was_pending,
+                "batch_settled": True,
+            }},
+        )
+
+        desc = f"Withdrawal paid (₹{int(w['amount'])}) · ref {ref}"
+        if was_pending:
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": w["user_id"],
+                "type": "withdrawal",
+                "amount": -w["amount"],
+                "status": "success",
+                "description": desc,
+                "reference_number": ref,
+                "created_at": ts,
+            })
+        else:
+            await db.transactions.update_many(
+                {"user_id": w["user_id"], "type": "withdrawal", "status": "processing", "amount": -w["amount"]},
+                {"$set": {"status": "success", "description": desc, "reference_number": ref}},
+            )
+
+        try:
+            await _create_notification(
+                w["user_id"], "withdrawal", "Withdrawal successful",
+                f"₹{int(w['amount'])} paid · UTR {ref}",
+            )
+        except Exception:
+            pass
+
+        settled.append(wid)
+        await _audit_log(admin, "withdrawal.batch_settle", "withdrawal", wid, {"amount": w["amount"], "reference": ref})
+
+    return {"ok": True, "settled_count": len(settled), "skipped_count": len(skipped), "settled": settled, "skipped": skipped}
 
 
 @api_router.post("/admin/withdrawals/{wid}/reject")
-async def admin_reject_withdrawal(wid: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
+async def admin_reject_withdrawal(
+    wid: str,
+    payload: Optional[WithdrawalRejectRequest] = None,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
+    reason = (payload.reason if payload else "") or ""
+    reason = reason.strip()
     w = await db.withdrawals.find_one({"id": wid})
     if not w:
         raise HTTPException(status_code=404, detail="Withdrawal not found")
@@ -1445,11 +1604,66 @@ async def admin_reject_withdrawal(wid: str, admin: Dict[str, Any] = Depends(requ
     await db.users.update_one({"id": w["user_id"]}, {"$inc": {"wallet_balance": w["amount"]}})
     await db.withdrawals.update_one(
         {"id": wid},
-        {"$set": {"status": "rejected", "processed_at": now_utc().isoformat(), "rejected_by": admin["id"]}},
+        {"$set": {
+            "status": "rejected",
+            "processed_at": now_utc().isoformat(),
+            "rejected_by": admin["id"],
+            "rejected_by_email": admin.get("email"),
+            "rejection_reason": reason,
+        }},
     )
-    await _create_notification(w["user_id"], "withdrawal", "Withdrawal rejected", f"₹{int(w['amount'])} has been refunded to your wallet.")
-    await _audit_log(admin, "withdrawal.reject", "withdrawal", wid, {"amount": w["amount"]})
-    return {"ok": True}
+    body = f"₹{int(w['amount'])} has been refunded to your wallet." + (f" Reason: {reason}" if reason else "")
+    await _create_notification(w["user_id"], "withdrawal", "Withdrawal rejected", body)
+    await _audit_log(admin, "withdrawal.reject", "withdrawal", wid, {"amount": w["amount"], "reason": reason})
+    return {"ok": True, "rejection_reason": reason}
+
+
+@api_router.get("/admin/withdrawals/digest")
+async def admin_withdrawals_digest(_: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
+    """Admin home banner — counts of pending / processing withdrawals + totals."""
+    pending = await db.withdrawals.count_documents({"status": "pending"})
+    processing = await db.withdrawals.count_documents({"status": "processing"})
+    pending_total_agg = await db.withdrawals.aggregate([
+        {"$match": {"status": "pending"}},
+        {"$group": {"_id": None, "amt": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    processing_total_agg = await db.withdrawals.aggregate([
+        {"$match": {"status": "processing"}},
+        {"$group": {"_id": None, "amt": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    pending_amount = float(pending_total_agg[0]["amt"]) if pending_total_agg else 0.0
+    processing_amount = float(processing_total_agg[0]["amt"]) if processing_total_agg else 0.0
+
+    today = now_utc().date().isoformat()
+    settled_today = await db.withdrawals.count_documents({
+        "status": "success",
+        "completed_at": {"$regex": f"^{today}"},
+    })
+    settled_today_amt_agg = await db.withdrawals.aggregate([
+        {"$match": {"status": "success", "completed_at": {"$regex": f"^{today}"}}},
+        {"$group": {"_id": None, "amt": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    settled_today_amount = float(settled_today_amt_agg[0]["amt"]) if settled_today_amt_agg else 0.0
+
+    # Oldest pending (alert flag if older than 24h)
+    oldest = await db.withdrawals.find({"status": "pending"}, {"_id": 0, "created_at": 1}).sort("created_at", 1).limit(1).to_list(1)
+    oldest_age_hours: Optional[float] = None
+    if oldest:
+        try:
+            o = datetime.fromisoformat(oldest[0]["created_at"].replace("Z", "+00:00"))
+            oldest_age_hours = round((now_utc() - o).total_seconds() / 3600, 1)
+        except Exception:
+            pass
+
+    return {
+        "pending": pending,
+        "processing": processing,
+        "pending_amount": round(pending_amount, 2),
+        "processing_amount": round(processing_amount, 2),
+        "settled_today": settled_today,
+        "settled_today_amount": round(settled_today_amount, 2),
+        "oldest_pending_age_hours": oldest_age_hours,
+    }
 
 
 @api_router.get("/admin/transactions")
