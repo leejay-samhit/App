@@ -23,15 +23,17 @@ export default function TabsLayout() {
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.textMuted,
+        tabBarHideOnKeyboard: true,
         tabBarStyle: {
           backgroundColor: colors.surface,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: 56 + bottomPad,
-          paddingTop: 8,
+          height: 62 + bottomPad,
+          paddingTop: 10,
           paddingBottom: bottomPad,
         },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
+        tabBarLabelStyle: { fontSize: 11, fontWeight: "600", marginTop: 2 },
+        tabBarItemStyle: { paddingVertical: 4 },
       }}
     >
       {order.map((key) => {

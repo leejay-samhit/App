@@ -15,15 +15,17 @@ export default function AdminLayout() {
         headerShown: false,
         tabBarActiveTintColor: colors.accent,
         tabBarInactiveTintColor: colors.textMuted,
+        tabBarHideOnKeyboard: true,
         tabBarStyle: {
           backgroundColor: colors.surface,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: 56 + bottomPad,
-          paddingTop: 8,
+          height: 62 + bottomPad,
+          paddingTop: 10,
           paddingBottom: bottomPad,
         },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
+        tabBarLabelStyle: { fontSize: 11, fontWeight: "600", marginTop: 2 },
+        tabBarItemStyle: { paddingVertical: 4 },
       }}
     >
       <Tabs.Screen name="home" options={{ title: "Home", tabBarIcon: ({ color, size }) => <Feather name="grid" size={size} color={color} /> }} />

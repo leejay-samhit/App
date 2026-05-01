@@ -37,11 +37,14 @@ export const formatINR = (n: number) => {
 };
 
 // ---------- Responsive helpers ----------
-// Tablet breakpoint: anything >= 600 px viewport (covers iPad mini portrait & up).
-export const TABLET_MIN_WIDTH = 600;
-// Above this width, content is centered in a single readable column (~600 px) so it
-// doesn't stretch edge-to-edge on iPads, foldables, and large tablets.
-export const READABLE_MAX_WIDTH = 600;
+// Tablet breakpoint: 900 px viewport and above. This keeps the app in its
+// native "mobile" layout even when viewed in landscape on a phone (which can
+// be ~800-900 px wide) or in Chrome on a narrow desktop window — prevents the
+// tab bar / content from being squeezed into a tiny centered column.
+export const TABLET_MIN_WIDTH = 900;
+// Above this width, content is centered in a single readable column (~480 px)
+// so it doesn't stretch edge-to-edge on iPads, foldables, and large tablets.
+export const READABLE_MAX_WIDTH = 480;
 
 import { useWindowDimensions, ViewStyle } from "react-native";
 
