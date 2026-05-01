@@ -167,13 +167,6 @@ export default function Login() {
               </TouchableOpacity>
             </Link>
           </View>
-
-          <View style={styles.helperBox}>
-            <Feather name="info" size={14} color={colors.textMuted} />
-            <Text style={styles.helperText}>
-              Admin demo: admin@app.com / Admin@123
-            </Text>
-          </View>
           </Animated.View>
         </ScrollView>
       </KeyboardAvoidingView>
