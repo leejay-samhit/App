@@ -374,6 +374,10 @@ async def register(payload: RegisterRequest):
         sponsor = await db.users.find_one({"referral_code": sponsor_code})
         if not sponsor:
             raise HTTPException(status_code=400, detail="Invalid referral code")
+    else:
+        # No referral code given → default sponsor is the platform admin so
+        # admin earns the referral commission for self-signups.
+        sponsor = await get_admin_sponsor()
 
     user_id = str(uuid.uuid4())
     # Ensure unique referral code
@@ -507,6 +511,9 @@ async def google_exchange(payload: GoogleExchange):
         sponsor_code = (payload.referral_code or "").strip().upper() or None
         if sponsor_code:
             sponsor = await db.users.find_one({"referral_code": sponsor_code})
+        if not sponsor:
+            # No / invalid referral → default to admin so admin earns the L1 commission
+            sponsor = await get_admin_sponsor()
         # Generate unique referral code
         while True:
             code = gen_referral_code()
@@ -3469,11 +3476,15 @@ async def root():
 async def seed_admin():
     existing = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not existing:
-        # Pick a referral code that isn't already taken (defensive — if a previous
-        # user inherited "ADMIN001" via promotion, fall back to a random code).
-        admin_code = "ADMIN001"
-        clash = await db.users.find_one({"referral_code": admin_code})
-        if clash:
+        # Try to claim "EARN" as the admin's referral code; fall back to
+        # legacy "ADMIN001" then a random one if both are taken.
+        admin_code = "EARN"
+        for candidate in ("EARN", "ADMIN001"):
+            clash = await db.users.find_one({"referral_code": candidate})
+            if not clash:
+                admin_code = candidate
+                break
+        else:
             while True:
                 admin_code = gen_referral_code()
                 if not await db.users.find_one({"referral_code": admin_code}):
@@ -3510,7 +3521,7 @@ async def seed_admin():
             "kyc_reject_reason": None,
             "created_at": now_utc().isoformat(),
         })
-        logger.info("Admin user seeded")
+        logger.info(f"Admin user seeded with referral_code={admin_code}")
     else:
         # Refresh password if env changed
         if not verify_password(ADMIN_PASSWORD, existing["password_hash"]):
@@ -3524,6 +3535,33 @@ async def seed_admin():
                 {"email": ADMIN_EMAIL.lower()},
                 {"$set": {"admin_role": "super_admin"}},
             )
+        # Migrate admin's referral_code to "EARN" if it isn't already, and "EARN" is free.
+        if existing.get("referral_code") != "EARN":
+            clash = await db.users.find_one({"referral_code": "EARN", "email": {"$ne": ADMIN_EMAIL.lower()}})
+            if not clash:
+                await db.users.update_one(
+                    {"email": ADMIN_EMAIL.lower()},
+                    {"$set": {"referral_code": "EARN"}},
+                )
+                # Cascade-update existing users who were referred via the old code
+                old_code = existing.get("referral_code")
+                if old_code:
+                    await db.users.update_many(
+                        {"referred_by": old_code},
+                        {"$set": {"referred_by": "EARN"}},
+                    )
+                logger.info(f"Admin referral_code migrated from {old_code} → EARN")
+
+
+async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
+    """Return the seed admin user document — used as the default sponsor when a new
+    user registers without a referral code. Falls back to any super_admin if the
+    seed admin can't be found."""
+    admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if admin:
+        return admin
+    # Defensive fallback: any super_admin
+    return await db.users.find_one({"role": "admin", "admin_role": "super_admin"})
 
 
 async def seed_products():

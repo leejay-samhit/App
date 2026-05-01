@@ -107,6 +107,207 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Default sponsor = admin when no referral code; admin's referral_code = EARN"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Default-sponsor + EARN code feature — end-to-end testing COMPLETE.
+            ALL 46/46 checks PASSED via /app/admin_default_sponsor_test.py
+            against https://network-pay-1.preview.emergentagent.com.
+
+            Boot logs confirm migration: "Admin referral_code migrated from
+            I1YDTL → EARN" (logged once on backend start). Live settings:
+            directs_required=5, payout_l1=300, registration_fee=118,
+            auto_approve_on_payment=true.
+
+            Detailed scenario results:
+
+            A. ADMIN CODE MIGRATION ✅
+              • A.1 GET /admin/users contains admin row (id=34132f17…). ✅
+              • A.2 admin.referral_code == "EARN". ✅
+              Baseline at test start: direct_referrals_count=0, wallet=0.
+
+            B. NO-REFERRAL REGISTRATION (key omitted) ✅
+              • B.1 POST /auth/register {name,email,password} (no
+                referral_code key) → 200. ✅
+              • B.2 returned user.referred_by == "EARN". ✅
+              • B.3 returned user.sponsor_id == admin.id. ✅
+              • B.4 /admin/users shows sponsor_id == admin.id. ✅
+              • B.5 /admin/users shows referred_by == "EARN". ✅
+
+            C. EMPTY-STRING REFERRAL ✅
+              • C.1 POST /auth/register {referral_code:""} → 200. ✅
+              • C.2 user.referred_by == "EARN". ✅
+              • C.3 user.sponsor_id == admin.id. ✅
+              (Behaves identically to B; the strip().upper() check in
+              register() correctly normalises "" → None → admin fallback.)
+
+            D. INVALID REFERRAL → 400 ✅
+              • D.1 POST /auth/register {referral_code:"BOGUS_CODE_XYZ"}
+                → 400. ✅
+              • D.2 detail == "Invalid referral code". ✅
+
+            E. EXPLICIT VALID REFERRAL → SPONSOR=THAT USER ✅
+              • E.1 Register U_a (no referral) → 200. ✅
+              • E.2 U_a has referral_code="IQXJ9N". ✅
+              • E.3 U_a.sponsor_id == admin.id (confirms default fallback
+                kicked in for U_a). ✅
+              • E.4 Register U_b with referral_code=U_a.referral_code → 200. ✅
+              • E.5 U_b.referred_by == U_a.referral_code (NOT "EARN"). ✅
+              • E.6 U_b.sponsor_id == U_a.id (NOT admin). ✅
+
+            F. ADMIN EARNS COMMISSION (N=5 chain via Razorpay live HMAC) ✅
+              • Snapshot admin.direct_referrals_count = 0 (after B/C/E this
+                stayed 0 because B/C/E users were not paid+approved, so the
+                commission cascade never fired for them — auto-approval
+                triggers only on /payment/verify success, per spec).
+              • F.reg1..F.reg5: registered 5 fresh users without referral. ✅
+              • F.pay1..F.pay5: For each user — POST /payment/create-order
+                (live order_id "order_..."), computed valid HMAC =
+                hmac.SHA256(KEY_SECRET, "<order_id>|pay_test_<rand>"),
+                POST /payment/verify → 200 with approval_status="approved",
+                auto_approved=true. Razorpay 404s on the fake pay_test_ id
+                so _fetch_razorpay_payment returns None and the verify
+                handler hits the "signature_only" branch. ✅
+              • F.cnt admin.direct_referrals_count: 0 → 5 (+5). ✅
+              • F.payout (cycle aligned: 0→5 crosses 1 full cycle of
+                directs_required=5): admin wallet credited by exactly
+                ₹300 (= 1*payout_l1). ✅
+              • F.tx /admin/transactions contains 1 referral_payout
+                transaction for admin user_id with level=1
+                (description "Level 1 payout from FChain4"). ✅
+
+            G. REGRESSION ✅
+              • G.1 GET /admin/withdrawals/digest as super_admin → 200. ✅
+              • G.2 GET /branding (no auth) → 200. ✅
+              • G.3 admin@app.com login still → 200. ✅
+              • G.4 Manual approval path: toggled
+                auto_approve_on_payment=false, registered fresh user, paid
+                via valid HMAC (now stays "pending"), POST /admin/approvals
+                /{id}/approve → 200 {"ok":true}. Toggled back to true. ✅
+
+            H. CLEANUP ✅
+              • DELETE /admin/users/{id} for all 10 throwaway users
+                (1×B + 1×C + 2×E[U_a,U_b] + 5×F + 1×G manual) → 200 each. ✅
+
+            Implementation observations:
+            • backend/server.py L380 (register) and L516 (google_exchange):
+              when no/empty referral_code is supplied, await
+              get_admin_sponsor() fetches the seed admin doc and the new
+              user is stamped with referred_by=admin.referral_code ("EARN")
+              and sponsor_id=admin.id.
+            • Invalid (non-empty) referral codes still raise 400 "Invalid
+              referral code" — the fallback ONLY triggers when sponsor_code
+              is empty/None after strip().upper().
+            • seed_admin migration (L3538-3553): runs idempotently on every
+              boot. If admin.referral_code != "EARN" and "EARN" is free,
+              atomically swap to "EARN" AND cascade-update
+              db.users.update_many({referred_by: <old_code>}, {$set:
+              {referred_by: "EARN"}}). Logs migration once. Subsequent
+              boots are no-ops (already "EARN").
+            • get_admin_sponsor() (L3556) returns the seed admin (or any
+              super_admin as defensive fallback).
+            • _trigger_referral_commissions correctly walks up from the new
+              admin-sponsored user: increments admin.direct_referrals_count,
+              and on every Nth direct (N=directs_required=5) credits
+              payout_l1 (₹300) to admin's wallet via _credit_payout (which
+              also inserts a referral_payout transaction with level=1 and
+              sends a "₹300 credited!" notification). Levels 2..10 don't
+              fire for admin-sponsored users because admin.sponsor_id is
+              None — correct behavior since admin sits at the root.
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Two changes applied:
+
+            1) ADMIN REFERRAL CODE migration: admin's referral_code is now "EARN".
+               • seed_admin (fresh install): tries "EARN" first, falls back to
+                 "ADMIN001", then a random code if both are taken.
+               • seed_admin (existing install): if admin's current code != "EARN"
+                 and "EARN" is not held by another user, atomically swap to
+                 "EARN" AND cascade-update db.users.referred_by={old_code} →
+                 "EARN". Logs migration: "Admin referral_code migrated from
+                 <old> → EARN". Verified via boot logs:
+                 "Admin referral_code migrated from I1YDTL → EARN".
+
+            2) FALLBACK SPONSOR = ADMIN: when a user registers without a referral
+               code (or in google-exchange flow, with an invalid one), the new
+               helper get_admin_sponsor() returns the seed admin doc and that
+               becomes the user's sponsor. Effect:
+               • new user.referred_by == "EARN"
+               • new user.sponsor_id == admin.id
+               • Admin's direct_referrals_count increments and admin earns the
+                 L1 commission on every Nth direct (per directs_required), via
+                 the existing _trigger_referral_commissions logic.
+               • Levels 2..10 still walk up admin's own sponsor chain (admin
+                 has sponsor_id=None so the cascade stops at L1) — this is the
+                 correct behavior since admin sits at the root.
+
+            Test scenarios to verify (admin@app.com / Admin@123):
+
+            A. ADMIN CODE MIGRATION:
+               • GET /admin/users → admin row carries referral_code="EARN".
+               • Existing users that were referred by the old code (e.g.
+                 "I1YDTL" or "ADMIN001") now have referred_by="EARN".
+
+            B. NO-REFERRAL REGISTRATION:
+               • POST /auth/register {name, email, password} (no referral_code)
+                 → 200 with returned user.referred_by="EARN".
+               • GET /admin/users → newly-registered user has sponsor_id ==
+                 admin.id, referred_by="EARN".
+
+            C. EMPTY-STRING REFERRAL TREATED AS NO-REFERRAL:
+               • POST /auth/register {..., referral_code: ""} → 200; same as B.
+
+            D. INVALID REFERRAL → STILL 400:
+               • POST /auth/register {..., referral_code: "BOGUS"} → 400
+                 "Invalid referral code". Behavior unchanged.
+
+            E. EXPLICIT VALID REFERRAL → SPONSOR=THAT USER:
+               • Existing user U_existing (e.g. registered via fallback in B);
+                 fetch their referral_code via /admin/users.
+               • Register U_new with referral_code=U_existing.referral_code →
+                 user.referred_by == U_existing.referral_code,
+                 sponsor_id == U_existing.id (NOT admin).
+
+            F. ADMIN EARNS COMMISSION (via auto-approve cascade):
+               • Take 4-5 fresh users (matching default directs_required) and
+                 push them through register (no referral) + create-order +
+                 verify (auto-approve) one by one.
+               • Admin's direct_referrals_count climbs each step.
+               • On the Nth signup (N == settings.directs_required), admin's
+                 wallet should be credited by settings.payout_l1 (default 200).
+                 Verify via GET /admin/users (admin.wallet_balance increased)
+                 and a referral_payout transaction on admin.
+
+            G. GOOGLE-EXCHANGE FALLBACK:
+               • POST /auth/google/exchange with invalid session_id → still
+                 401 (existing behavior). The new fallback only triggers on
+                 the success branch which can't be hit without a real Google
+                 session. Code review only — no test required.
+
+            H. REGRESSION:
+               • /payment/verify auto-approval still works (uses sponsor_id
+                 set during register).
+               • /admin/withdrawals/digest still 200.
+               • /branding still 200.
+               • admin@app.com login still 200.
+
+            I. CLEANUP — DELETE all throwaway users + reset admin wallet if
+               needed (only if test credited it).
+
+            Credentials: admin@app.com / Admin@123. Admin referral_code: EARN.
+
   - task: "Auto-approve user on Razorpay payment success — UTR cross-check + commission cascade + approved_registrations archive"
     implemented: true
     working: true
@@ -3161,6 +3362,53 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        DEFAULT-SPONSOR + EARN CODE — testing COMPLETE, ALL 46/46 PASSED
+        via /app/admin_default_sponsor_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Boot logs confirm one-time migration: "Admin referral_code
+        migrated from I1YDTL → EARN".
+
+        Verified scenarios:
+          A. admin row in /admin/users carries referral_code="EARN". ✅
+          B. POST /auth/register with no referral_code key → 200; new
+             user.referred_by="EARN", sponsor_id=admin.id (verified via
+             /admin/users). ✅
+          C. POST /auth/register with referral_code="" → 200; same as B
+             (strip().upper() normalises empty → admin fallback). ✅
+          D. POST /auth/register with referral_code="BOGUS_CODE_XYZ" →
+             400 "Invalid referral code". ✅
+          E. Register U_a no-referral; register U_b with U_a's referral
+             code → U_b.referred_by=U_a.referral_code, sponsor_id=U_a.id
+             (NOT admin). ✅
+          F. Chain of N=settings.directs_required=5 fresh users without
+             referral, each paid via /payment/verify with valid HMAC →
+             auto-approved → admin.direct_referrals_count: 0 → 5;
+             admin wallet credited by exactly ₹300 (= 1 cycle × payout_l1);
+             1 referral_payout L1 transaction recorded for admin. ✅
+          G. /admin/withdrawals/digest → 200; /branding → 200; admin login
+             → 200; manual /admin/approvals/{id}/approve still works
+             (toggled auto_approve off, paid, manual-approved, toggled
+             back on). ✅
+          H. All 10 throwaway users cleaned up via super_admin DELETE
+             /admin/users/{id}. ✅
+
+        Implementation observations:
+        • register() and google_exchange() correctly fall back to
+          get_admin_sponsor() when referral_code is empty/None after
+          strip().upper(); 400 still returned for non-empty invalid code.
+        • seed_admin migration is idempotent: subsequent boots are no-ops
+          once admin.referral_code == "EARN".
+        • Commission cascade triggered correctly for admin-sponsored users
+          via _trigger_referral_commissions on auto-approval; L2..L10 do
+          not fire because admin.sponsor_id is None (correct — admin sits
+          at root).
+
+        Backend logs clean, no 500s. Task is working:true, no further
+        retest needed. Main agent: please summarise and finish.
+
     - agent: "testing"
       message: |
         AUTO-APPROVAL PIPELINE — RE-TEST COMPLETE, ALL 48/48 PASSED via
