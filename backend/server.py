@@ -4616,6 +4616,328 @@ async def admin_reactivate_vendor(user_id: str, admin: Dict[str, Any] = Depends(
 
 
 
+# ============================================================
+# SERVICES MARKETPLACE — admin-approved peer-to-peer service directory
+# ============================================================
+# Users apply to be listed as a service provider with their pincode + service
+# + charge. Admin approves. Approved providers show up in /services for any
+# logged-in user to browse. Other users can book a service which deducts the
+# charge from the customer's wallet and credits the provider's wallet (minus
+# the platform's `vendor_commission_pct` cut going to the admin).
+
+class ServiceApplyRequest(BaseModel):
+    service_name: str = Field(min_length=2, max_length=80)
+    service_category: str = Field(min_length=2, max_length=40)  # e.g. "Plumber", "Tutor"
+    pincode: str = Field(pattern=r"^\d{6}$")
+    charge: float = Field(ge=0, le=1_000_000)
+    description: Optional[str] = Field(default=None, max_length=500)
+
+
+class ServiceRejectRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class ServiceBookRequest(BaseModel):
+    notes: Optional[str] = Field(default=None, max_length=300)
+    scheduled_date: Optional[str] = None  # ISO date the customer wants service
+
+
+@api_router.post("/service/apply")
+async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    if user.get("role") == "admin":
+        raise HTTPException(status_code=400, detail="Admins cannot apply as service providers")
+    if not user.get("registration_paid"):
+        raise HTTPException(status_code=400, detail="Pay registration first")
+    # Reject if there's already a pending or approved application
+    existing = await db.service_applications.find_one(
+        {"user_id": user["id"], "status": {"$in": ["pending", "approved"]}}
+    )
+    if existing:
+        raise HTTPException(status_code=400, detail=f"You already have a {existing['status']} service application")
+    app_id = str(uuid.uuid4())
+    ts = now_utc().isoformat()
+    doc = {
+        "id": app_id,
+        "user_id": user["id"],
+        "name": user.get("name"),
+        "email": user.get("email"),
+        "phone": user.get("phone"),
+        "referral_code": user.get("referral_code"),
+        "service_name": payload.service_name.strip(),
+        "service_category": payload.service_category.strip(),
+        "pincode": payload.pincode,
+        "charge": float(payload.charge),
+        "description": (payload.description or "").strip() or None,
+        "status": "pending",
+        "created_at": ts,
+        "reviewed_at": None,
+        "reviewed_by": None,
+        "reject_reason": None,
+    }
+    await db.service_applications.insert_one(doc)
+    # Mark user with pending state
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"service_status": "pending"}},
+    )
+    doc.pop("_id", None)
+    return {"ok": True, "application": doc}
+
+
+@api_router.get("/service/me")
+async def service_me(user: Dict[str, Any] = Depends(get_current_user)):
+    """Return the user's current service-provider state — any application + their listing if approved."""
+    app = await db.service_applications.find_one(
+        {"user_id": user["id"]},
+        sort=[("created_at", -1)],
+    )
+    if app:
+        app.pop("_id", None)
+    fresh = await db.users.find_one({"id": user["id"]})
+    return {
+        "application": app,
+        "is_service_provider": bool(fresh and fresh.get("is_service_provider")),
+        "service_status": (fresh or {}).get("service_status"),
+        "listing": (
+            {
+                "service_name": fresh.get("service_name"),
+                "service_category": fresh.get("service_category"),
+                "service_pincode": fresh.get("service_pincode"),
+                "service_charge": fresh.get("service_charge"),
+                "service_description": fresh.get("service_description"),
+            }
+            if fresh and fresh.get("is_service_provider")
+            else None
+        ),
+    }
+
+
+@api_router.get("/admin/service-applications")
+async def admin_list_service_applications(
+    status: Optional[str] = "pending",
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
+    q: Dict[str, Any] = {}
+    if status and status != "all":
+        q["status"] = status
+    items = await db.service_applications.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    pending_n = await db.service_applications.count_documents({"status": "pending"})
+    approved_n = await db.service_applications.count_documents({"status": "approved"})
+    rejected_n = await db.service_applications.count_documents({"status": "rejected"})
+    return {
+        "items": items,
+        "counts": {"pending": pending_n, "approved": approved_n, "rejected": rejected_n, "total": pending_n + approved_n + rejected_n},
+    }
+
+
+@api_router.post("/admin/service-applications/{aid}/approve")
+async def admin_approve_service(aid: str, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager"))):
+    app = await db.service_applications.find_one({"id": aid})
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if app["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Already processed")
+    ts = now_utc().isoformat()
+    await db.service_applications.update_one(
+        {"id": aid},
+        {"$set": {"status": "approved", "reviewed_at": ts, "reviewed_by": admin["id"]}},
+    )
+    await db.users.update_one(
+        {"id": app["user_id"]},
+        {"$set": {
+            "is_service_provider": True,
+            "service_status": "approved",
+            "service_name": app["service_name"],
+            "service_category": app["service_category"],
+            "service_pincode": app["pincode"],
+            "service_charge": app["charge"],
+            "service_description": app.get("description"),
+            "service_approved_at": ts,
+        }},
+    )
+    await _create_notification(
+        app["user_id"], "service", "Service listing approved",
+        f"You're now listed as a {app['service_category']} in pincode {app['pincode']}.",
+    )
+    await _audit_log(admin, "service.approve", "user", app["user_id"], {"service": app["service_name"]})
+    return {"ok": True}
+
+
+@api_router.post("/admin/service-applications/{aid}/reject")
+async def admin_reject_service(aid: str, payload: ServiceRejectRequest, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager"))):
+    app = await db.service_applications.find_one({"id": aid})
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if app["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Already processed")
+    ts = now_utc().isoformat()
+    reason = (payload.reason or "").strip() or None
+    await db.service_applications.update_one(
+        {"id": aid},
+        {"$set": {"status": "rejected", "reviewed_at": ts, "reviewed_by": admin["id"], "reject_reason": reason}},
+    )
+    await db.users.update_one(
+        {"id": app["user_id"]},
+        {"$set": {"service_status": "rejected"}},
+    )
+    await _create_notification(
+        app["user_id"], "service", "Service listing rejected",
+        reason or "Your service application was rejected.",
+    )
+    await _audit_log(admin, "service.reject", "user", app["user_id"], {"reason": reason})
+    return {"ok": True}
+
+
+@api_router.get("/services")
+async def list_services(
+    q: Optional[str] = None,
+    pincode: Optional[str] = None,
+    category: Optional[str] = None,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Public listing of approved service providers. Customer-facing."""
+    filt: Dict[str, Any] = {"is_service_provider": True}
+    if pincode:
+        filt["service_pincode"] = pincode
+    if category and category != "all":
+        filt["service_category"] = category
+    if q:
+        rgx = {"$regex": re.escape(q), "$options": "i"}
+        filt["$or"] = [{"name": rgx}, {"service_name": rgx}, {"service_category": rgx}]
+    rows = await db.users.find(
+        filt,
+        {
+            "_id": 0,
+            "id": 1, "name": 1, "phone": 1, "email": 1, "referral_code": 1,
+            "service_name": 1, "service_category": 1, "service_pincode": 1,
+            "service_charge": 1, "service_description": 1, "service_approved_at": 1,
+        },
+    ).sort("service_approved_at", -1).to_list(300)
+    return {"items": rows, "total": len(rows)}
+
+
+@api_router.get("/services/categories")
+async def list_service_categories(user: Dict[str, Any] = Depends(get_current_user)):
+    cats = await db.users.distinct("service_category", {"is_service_provider": True})
+    return {"categories": sorted([c for c in cats if c])}
+
+
+@api_router.post("/services/{provider_id}/book")
+async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    if provider_id == user["id"]:
+        raise HTTPException(status_code=400, detail="You can't book your own service")
+    provider = await db.users.find_one({"id": provider_id, "is_service_provider": True})
+    if not provider:
+        raise HTTPException(status_code=404, detail="Service provider not found")
+    if user.get("wallet_frozen"):
+        raise HTTPException(status_code=400, detail="Your wallet is frozen")
+    charge = float(provider.get("service_charge") or 0)
+    if charge <= 0:
+        raise HTTPException(status_code=400, detail="Service has no fixed charge — contact provider directly")
+    bal = float(user.get("wallet_balance") or 0)
+    if bal < charge:
+        raise HTTPException(status_code=400, detail=f"Insufficient wallet balance — need ₹{int(charge)}")
+    settings = await get_settings()
+    provider_pct = float(settings.get("vendor_commission_pct", 70)) / 100.0
+    provider_share = round(charge * provider_pct, 2)
+    admin_share = round(charge - provider_share, 2)
+    book_id = str(uuid.uuid4())
+    ts = now_utc().isoformat()
+    # Deduct from customer
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$inc": {"wallet_balance": -charge}},
+    )
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "type": "service_booking",
+        "amount": -charge,
+        "status": "success",
+        "description": f"Booked service: {provider.get('service_name')} from {provider.get('name')}",
+        "booking_id": book_id,
+        "created_at": ts,
+    })
+    # Credit provider
+    await db.users.update_one(
+        {"id": provider_id},
+        {"$inc": {"wallet_balance": provider_share, "total_earned": provider_share}},
+    )
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": provider_id,
+        "type": "service_earning",
+        "amount": provider_share,
+        "status": "success",
+        "description": f"Service booking from {user.get('name')} (₹{int(charge)} - ₹{int(admin_share)} platform fee)",
+        "booking_id": book_id,
+        "created_at": ts,
+    })
+    # Credit admin platform fee
+    if admin_share > 0:
+        admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+        if admin:
+            await db.users.update_one(
+                {"id": admin["id"]},
+                {"$inc": {"wallet_balance": admin_share, "total_earned": admin_share}},
+            )
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": admin["id"],
+                "type": "service_commission",
+                "amount": admin_share,
+                "status": "success",
+                "description": f"Service platform fee from {provider.get('name')} (booking by {user.get('name')})",
+                "booking_id": book_id,
+                "created_at": ts,
+            })
+    booking = {
+        "id": book_id,
+        "customer_id": user["id"],
+        "customer_name": user.get("name"),
+        "customer_phone": user.get("phone"),
+        "provider_id": provider_id,
+        "provider_name": provider.get("name"),
+        "provider_phone": provider.get("phone"),
+        "service_name": provider.get("service_name"),
+        "service_category": provider.get("service_category"),
+        "charge": charge,
+        "provider_share": provider_share,
+        "admin_share": admin_share,
+        "status": "confirmed",
+        "scheduled_date": payload.scheduled_date,
+        "notes": (payload.notes or "").strip() or None,
+        "created_at": ts,
+        "completed_at": None,
+    }
+    await db.service_bookings.insert_one(booking)
+    booking.pop("_id", None)
+    # Notifications
+    await _create_notification(
+        provider_id, "service", "New service booking",
+        f"{user.get('name')} booked your {provider.get('service_name')} (+₹{int(provider_share)} credited)",
+    )
+    await _create_notification(
+        user["id"], "service", "Service booking confirmed",
+        f"You've booked {provider.get('service_name')} from {provider.get('name')} for ₹{int(charge)}.",
+    )
+    return {"ok": True, "booking": booking}
+
+
+@api_router.get("/services/bookings/me")
+async def my_service_bookings(role: Optional[str] = "all", user: Dict[str, Any] = Depends(get_current_user)):
+    """Return both bookings I made (customer) and bookings on my services (provider)."""
+    q: Dict[str, Any]
+    if role == "customer":
+        q = {"customer_id": user["id"]}
+    elif role == "provider":
+        q = {"provider_id": user["id"]}
+    else:
+        q = {"$or": [{"customer_id": user["id"]}, {"provider_id": user["id"]}]}
+    rows = await db.service_bookings.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return {"items": rows, "total": len(rows)}
+
+
 # Include router
 app.include_router(api_router)
 

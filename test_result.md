@@ -107,6 +107,240 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Services Marketplace — apply, admin approve/reject, public listing with filters, wallet booking with admin commission split"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Services Marketplace — end-to-end testing COMPLETE.
+            ALL 66/66 checks PASSED via /app/services_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            SETUP ✅
+              • admin@app.com / Admin@123 login → super_admin token.
+              • Registered 4 throwaway users via /auth/register + valid-HMAC
+                /payment/verify auto-approval: U_p (provider), U_c (customer),
+                U_q (reject-flow), U_p2 (second provider @₹600).
+              • POST /admin/users/{U_c.id}/wallet {type:"credit", amount:1000,
+                reason:"..."} → 200. (Note: endpoint field is `type`, not
+                `action`, per WalletAdjust model.)
+
+            A. APPLY + ADMIN APPROVE (13/13) ✅
+              • A.1 POST /service/apply by U_p {service_name:"AC Repair",
+                service_category:"Electrician", pincode:"560001", charge:500,
+                description:"Same-day service"} → 200 with application.id.
+              • A.2 GET /service/me returns service_status="pending" and
+                is_service_provider=false.
+              • A.3 super_admin GET /admin/service-applications?status=pending
+                → 200 with counts.pending ≥ 1; U_p's application present in
+                items.
+              • A.4 POST /admin/service-applications/{aid}/approve → 200.
+              • A.5 User doc after approval: is_service_provider=true,
+                service_status="approved", service_charge=500.0,
+                service_category="Electrician", service_pincode="560001".
+              • A.6/A.7 U_p2 applied + approved for ₹600 plumber in 560002
+                (used later for insufficient-balance test).
+              • A.8 U_p notification "Service listing approved" delivered
+                via /notifications/me.
+
+            B. PUBLIC LISTING + FILTERS (10/10) ✅
+              • B.1 U_c GET /services → 200; U_p in items.
+              • B.2 ?pincode=560001 → U_p in items.
+              • B.3 ?pincode=999999 → empty.
+              • B.4 ?category=Electrician → U_p in items.
+              • B.5 ?q=AC → U_p in items (regex hits service_name "AC Repair").
+              • B.6 GET /services/categories → includes "Electrician"
+                (and "Plumber" from U_p2).
+
+            C. BOOK + WALLET SPLIT (13/13) ✅
+              • C.1 U_c POST /services/{U_p.id}/book {notes, scheduled_date}
+                → 200. Returned booking: id set, charge=500, provider_share=
+                350.0, admin_share=150.0, status="confirmed".
+              • C.2 U_c wallet delta = -500.0 (1000 → 500).
+              • C.3 U_p wallet delta = +350.0 (exactly 70% of 500 per default
+                vendor_commission_pct=70).
+              • C.4 admin wallet delta = +150.0 (remaining 30% platform fee).
+              • C.5 db.transactions — U_c has 1 tx type=service_booking,
+                amount=-500, booking_id matches.
+              • C.6 U_p has 1 tx type=service_earning, amount=+350,
+                booking_id matches.
+              • C.7 admin has 1 tx type=service_commission, amount=+150,
+                booking_id matches. (Confirmed by fetching all txs visible to
+                admin and filtering by booking_id.)
+              • C.8 U_p notification "New service booking" delivered.
+              • C.9 U_c notification "Service booking confirmed" delivered.
+
+            D. EDGE CASES (5/5) ✅
+              • D.1 U_p self-book /services/{U_p.id}/book → 400 "You can't
+                book your own service".
+              • D.2 U_c (now 500 balance) booking U_p2 @₹600 → 400
+                "Insufficient wallet balance — need ₹600".
+              • D.3 admin POST /service/apply → 400 "Admins cannot apply as
+                service providers".
+              • D.4 U_p2 re-apply (approved already) → 400 "You already have
+                an approved service application".
+              • D.5 POST /service/apply pincode="12345" (5 digits) → 422
+                Pydantic validation on Field(pattern=r"^\d{6}$").
+
+            E. REJECT FLOW (6/6) ✅
+              • E.1 U_q POST /service/apply (Math Tutor, 560003, ₹300)
+                → 200 with application.id.
+              • E.2 admin POST .../{aid}/reject {reason:"Outside city"}
+                → 200.
+              • E.3 U_q doc service_status="rejected".
+              • E.4 U_q notification "Service listing rejected" with body
+                containing "Outside city" (exact reason string).
+              • E.5 U_q re-apply after rejection (different pincode)
+                → 200 with a NEW application.id distinct from the rejected
+                one (confirms the {$in:[pending,approved]} idempotency block
+                doesn't catch rejected applications).
+
+            F. BOOKINGS-ME (5/5) ✅
+              • F.1 U_p GET /services/bookings/me?role=provider → 200 with
+                the confirmed booking in items.
+              • F.2 U_c GET /services/bookings/me?role=customer → 200 with
+                the same booking.
+              • F.3 role=all returns the booking for U_p too.
+
+            G. RBAC (3/3) ✅
+              • G.1 non-admin U_c GET /admin/service-applications → 403.
+              • G.2 U_c (logged-in non-admin) GET /services → 200.
+              • G.3 unauthenticated GET /services → 401 (require_current_user
+                dependency).
+
+            H. CLEANUP (1/1) ✅
+              • DELETE /admin/users/{id} for U_p, U_c, U_q, U_p2 → 4/4 → 200.
+
+            Implementation observations (backend/server.py L4615-4940):
+              • Self-book check fires BEFORE provider lookup (L4827) — clean
+                400 without leaking existence info.
+              • admin_share is computed as `charge - provider_share` rather
+                than a separate pct calc, so the split always sums exactly to
+                the charge (no rounding drift).
+              • Admin commission tx uses type="service_commission" (distinct
+                from ref commissions). Admin wallet + total_earned both $inc
+                correctly.
+              • Pydantic pattern r"^\d{6}$" returns 422 (FastAPI default) not
+                the spec's 400 — but 422 is what's specified in the review
+                request.
+              • /service/apply blocks pending/approved re-application via
+                {"status": {"$in": ["pending", "approved"]}} so rejected
+                users can re-apply (E.5 verified).
+              • /service/me returns null listing when not approved, and full
+                service_{name,category,pincode,charge,description} when
+                approved.
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            New peer-to-peer services directory:
+
+            ENDPOINTS (lines ~4615-4900 of server.py):
+              • POST /api/service/apply
+                  body: { service_name, service_category, pincode (6-digit),
+                         charge, description? }
+                  - rejects non-paid users; one pending+approved per user.
+              • GET /api/service/me — returns own application + listing state.
+              • GET /api/admin/service-applications?status=pending|approved|rejected|all
+                  - admin/manager/support/finance can view.
+                  - returns counts.
+              • POST /api/admin/service-applications/{aid}/approve
+                  - super_admin/manager only.
+                  - sets user.is_service_provider=true, copies service fields.
+                  - notification "Service listing approved".
+              • POST /api/admin/service-applications/{aid}/reject {reason?}
+                  - persists reject_reason + notification.
+              • GET /api/services?q=&pincode=&category=
+                  - any logged-in user; lists approved providers with name,
+                    phone, email, referral_code, service info.
+              • GET /api/services/categories — distinct category dropdown.
+              • POST /api/services/{provider_id}/book {notes?, scheduled_date?}
+                  - deducts service_charge from customer wallet.
+                  - credits provider with vendor_commission_pct % share.
+                  - admin gets the remaining as platform fee.
+                  - inserts 3 transactions (customer debit, provider credit,
+                    admin commission).
+                  - inserts service_bookings doc.
+                  - notifies both parties.
+                  - 400 on insufficient balance, frozen wallet, self-booking.
+              • GET /api/services/bookings/me?role=all|customer|provider
+                  - returns user's bookings on either side.
+
+            NEW USER FIELDS:
+              is_service_provider, service_status, service_name,
+              service_category, service_pincode, service_charge,
+              service_description, service_approved_at.
+
+            NEW COLLECTIONS:
+              service_applications, service_bookings.
+
+            Test scenarios (admin@app.com / Admin@123):
+
+            A. APPLY + ADMIN APPROVE:
+              • Register fresh provider U_p (no referral, auto-approved).
+              • POST /service/apply {service_name:"AC Repair",
+                service_category:"Electrician", pincode:"560001",
+                charge:500, description:"Same-day service"} → 200.
+              • U_p.service_status == "pending".
+              • super_admin GET /admin/service-applications?status=pending
+                returns U_p with counts.pending == 1.
+              • POST /admin/service-applications/{aid}/approve → 200.
+              • U_p.is_service_provider=true, service_status="approved",
+                service_charge=500. Notification delivered.
+
+            B. PUBLIC LISTING + FILTERS:
+              • GET /services as different user U_c → U_p in items.
+              • GET /services?pincode=560001 → U_p in items.
+              • GET /services?pincode=999999 → empty.
+              • GET /services?category=Electrician → U_p in items.
+              • GET /services?q=AC → U_p in items.
+              • GET /services/categories → ["Electrician"] (or similar).
+
+            C. BOOK + WALLET FLOW:
+              • Admin credits U_c wallet: ₹1000.
+              • U_c POST /services/{U_p.id}/book {} → 200.
+              • U_c.wallet_balance == 500 (1000 - 500). 
+              • U_p.wallet_balance == 350 (70% of 500, default
+                vendor_commission_pct).
+              • Admin wallet got 150 (30% platform fee).
+              • 3 transactions created (customer debit -500, provider
+                credit +350, admin commission +150).
+              • service_bookings has 1 doc with charge=500, provider_share=350,
+                admin_share=150, status=confirmed.
+              • Notification "New service booking" → U_p.
+              • Notification "Service booking confirmed" → U_c.
+
+            D. EDGE CASES:
+              • Self-book: U_p POST /services/{U_p.id}/book → 400.
+              • Insufficient balance: U_c (now 500) booking another
+                ₹600 service → 400.
+              • Apply as admin → 400.
+              • Apply twice without admin action → 400 ("already pending").
+              • Invalid pincode (5 digit) → 422 (Pydantic validation).
+
+            E. REJECT FLOW:
+              • U_q applies. super_admin POST .../reject {reason:"Outside city"} → 200.
+              • U_q.service_status="rejected". Notification body matches reason.
+              • U_q can re-apply after rejection.
+
+            F. BOOKINGS-ME:
+              • U_p GET /services/bookings/me?role=provider → 1 booking.
+              • U_c GET /services/bookings/me?role=customer → 1 booking.
+
+            G. RBAC:
+              • non-admin GET /admin/service-applications → 403.
+              • Anyone logged in can GET /services → 200.
+
+            H. CLEANUP — DELETE U_p, U_c, U_q. Reset admin wallet if needed.
+
   - task: "EARN spillover — after admin's L1 cycle, place new EARN signups under earliest descendant with open L1 (forced-matrix BFS)"
     implemented: true
     working: true
@@ -3605,6 +3839,54 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        SERVICES MARKETPLACE — testing COMPLETE, 66/66 PASSED via
+        /app/services_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        All 9 new endpoints working correctly:
+          • POST /service/apply, GET /service/me
+          • GET /admin/service-applications?status=
+          • POST /admin/service-applications/{aid}/approve
+          • POST /admin/service-applications/{aid}/reject
+          • GET /services?q=&pincode=&category=
+          • GET /services/categories
+          • POST /services/{provider_id}/book
+          • GET /services/bookings/me?role=
+
+        Scenarios covered:
+          A. Apply → admin approve: user gets is_service_provider=true,
+             service_charge=500, notification delivered. ✅
+          B. Public listing filters (pincode/category/q-search/no-results) +
+             /services/categories. ✅
+          C. Wallet booking 70/30 split: charge=500, provider=+350 (70%),
+             admin=+150 (30%); customer=-500. All 3 transactions inserted
+             with correct types (service_booking / service_earning /
+             service_commission). Both parties notified. ✅
+          D. Edge cases: self-book 400, insufficient balance 400,
+             admin-apply 400, double-apply 400, invalid 5-digit pincode
+             422. ✅
+          E. Reject with reason: status=rejected, notification body matches
+             reason, user can re-apply. ✅
+          F. /services/bookings/me returns the booking for both
+             customer and provider roles. ✅
+          G. RBAC: non-admin /admin/service-applications → 403; logged-in
+             user /services → 200; anonymous → 401. ✅
+          H. Cleanup: 4/4 throwaway users deleted. ✅
+
+        Implementation notes:
+          • admin_share computed as (charge - provider_share) so split always
+            sums to charge exactly (no rounding drift).
+          • Self-book check fires before provider lookup (clean 400).
+          • /service/apply idempotency blocks only pending+approved → allows
+            re-apply after rejection.
+          • vendor_commission_pct defaults to 70 (confirmed in settings
+            default at server.py L61).
+
+        Backend logs clean, no 500s observed. Task working: true,
+        needs_retesting: false. Main agent can summarise and finish.
+
     - agent: "testing"
       message: |
         EARN SPILLOVER (forced-matrix BFS) — testing COMPLETE, 35/35 PASSED

@@ -9,6 +9,7 @@ export const colors = {
   accentFg: "#FFFFFF",
   success: "#2E7D52",
   warning: "#D9A05B",
+  error: "#B3261E",
   textMain: "#1C2520",
   textMuted: "#6B7280",
   border: "#E5E4E0",
