@@ -40,6 +40,15 @@ export type Branding = {
   colors: typeof defaultColors;
   font: "system" | "inter" | "poppins" | "jakarta" | "manrope" | "dmsans";
   tabs: BrandingTab[];
+  // Legal / business info (shown on Legal pages & used by payment gateway KYC)
+  business_name?: string;
+  business_address?: string;
+  business_city?: string;
+  business_state?: string;
+  business_pincode?: string;
+  business_gst?: string;
+  support_email?: string;
+  support_phone?: string;
 };
 
 const DEFAULT_BRANDING: Branding = {
@@ -57,6 +66,14 @@ const DEFAULT_BRANDING: Branding = {
     { key: "shop", label: "Shop", icon: "shopping-bag", visible: true },
     { key: "profile", label: "Profile", icon: "user", visible: true },
   ],
+  business_name: "NetworkPay",
+  business_address: "",
+  business_city: "",
+  business_state: "",
+  business_pincode: "",
+  business_gst: "",
+  support_email: "support@networkpay.app",
+  support_phone: "",
 };
 
 const FONT_FAMILY_MAP: Record<Branding["font"], string | undefined> = {

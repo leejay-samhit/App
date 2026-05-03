@@ -130,6 +130,15 @@ export default function ProfileScreen() {
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
 
+          <TouchableOpacity onPress={() => router.push("/legal" as any)} style={styles.kycCard} testID="profile-legal-link">
+            <View style={[styles.kycDot, { backgroundColor: colors.textMuted }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.kycTitle}>Legal & Policies</Text>
+              <Text style={styles.kycSub}>TERMS · PRIVACY · REFUND · CONTACT</Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+
           <Text style={styles.sectionLabel}>PAYOUT DETAILS</Text>
           <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
 

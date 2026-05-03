@@ -167,6 +167,16 @@ export default function Login() {
               </TouchableOpacity>
             </Link>
           </View>
+
+          <View style={[styles.footerRow, { marginTop: 8, flexWrap: "wrap", justifyContent: "center" }]}>
+            <Link href={"/legal/terms" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Terms</Text></TouchableOpacity></Link>
+            <Text style={styles.muted}> · </Text>
+            <Link href={"/legal/privacy" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Privacy</Text></TouchableOpacity></Link>
+            <Text style={styles.muted}> · </Text>
+            <Link href={"/legal/refund" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Refund</Text></TouchableOpacity></Link>
+            <Text style={styles.muted}> · </Text>
+            <Link href={"/legal/contact" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Contact</Text></TouchableOpacity></Link>
+          </View>
           </Animated.View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -225,6 +235,7 @@ const styles = StyleSheet.create({
   footerRow: { flexDirection: "row", justifyContent: "center", marginTop: 24 },
   muted: { color: colors.textMuted, fontSize: 14 },
   link: { color: colors.primary, fontWeight: "700", fontSize: 14 },
+  legalLink: { color: colors.textMuted, fontSize: 12, fontWeight: "600", textDecorationLine: "underline" },
   error: { color: "#B3261E", marginBottom: 8, fontSize: 13 },
   helperBox: {
     flexDirection: "row",
