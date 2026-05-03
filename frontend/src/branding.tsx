@@ -66,14 +66,14 @@ const DEFAULT_BRANDING: Branding = {
     { key: "shop", label: "Shop", icon: "shopping-bag", visible: true },
     { key: "profile", label: "Profile", icon: "user", visible: true },
   ],
-  business_name: "NetworkRuPay",
-  business_address: "",
-  business_city: "",
-  business_state: "",
-  business_pincode: "",
+  business_name: "Network RuPay Solutions Pvt Ltd",
+  business_address: "Near Police Station, Beside Ram Mandiram, Valluru",
+  business_city: "Cuddapah",
+  business_state: "Andhra Pradesh",
+  business_pincode: "516293",
   business_gst: "",
   support_email: "support@networkrupay.com",
-  support_phone: "",
+  support_phone: "+91 91547 35888",
 };
 
 const FONT_FAMILY_MAP: Record<Branding["font"], string | undefined> = {
