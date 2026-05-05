@@ -57,6 +57,7 @@ export default function AdminUsers() {
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<AdminUser | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
 
   const canCreate = ["super_admin", "manager", "support"].includes(
@@ -155,6 +156,18 @@ export default function AdminUsers() {
         currentAdminId={currentAdmin?.id}
         onClose={() => setEditing(null)}
         onSaved={async () => { setEditing(null); await load(); }}
+        onRequestDelete={(u) => {
+          // Close edit modal first, THEN open the confirmation as a clean
+          // sibling Modal so it portals to body root and renders cleanly on web.
+          setEditing(null);
+          setTimeout(() => setPendingDelete(u), 250);
+        }}
+      />
+
+      <DeleteConfirmModal
+        user={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onDeleted={async () => { setPendingDelete(null); await load(); }}
       />
 
       <NewUserModal
@@ -262,7 +275,7 @@ const nuStyles = StyleSheet.create({
   confirmInput: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, padding: 14, fontSize: 17, color: colors.textMain, fontWeight: "800", letterSpacing: 6, textAlign: "center", borderWidth: 1.5, borderColor: colors.border },
 });
 
-function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: AdminUser | null; currentAdminId?: string; onClose: () => void; onSaved: () => void }) {
+function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete }: { user: AdminUser | null; currentAdminId?: string; onClose: () => void; onSaved: () => void; onRequestDelete: (u: AdminUser) => void }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
@@ -279,8 +292,6 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
   // Reset form when user changes
   if (user && (name === "" || email === "" || (user.email !== email && msg === ""))) {
@@ -357,36 +368,8 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
   };
 
   const onDelete = () => {
-    setMsg("");
-    setDeleteConfirmText("");
-    setConfirmDelete(true);
-  };
-
-  const performDelete = async () => {
-    setBusy("delete");
-    setMsg("");
-    try {
-      const res = await api.delete(`/admin/users/${user.id}`);
-      const data: any = res.data || {};
-      const summary = data.cascade || {};
-      const total = Object.values(summary).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
-      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
-      setConfirmDelete(false);
-      setDeleteConfirmText("");
-      setTimeout(() => {
-        const msg = `User deleted${total ? ` · ${total} related records cleaned up` : ""}.${snapId ? `\n\nAuto-backup taken (#${snapId}). Restore from Admin → Data Backups if needed.` : ""}`;
-        if (Platform.OS === "web") {
-          (typeof window !== "undefined" ? window.alert : Alert.alert)(msg);
-        } else {
-          Alert.alert("User deleted", msg);
-        }
-        onSaved();
-      }, 50);
-    } catch (e) {
-      setMsg(formatApiError(e));
-    } finally {
-      setBusy(null);
-    }
+    if (!user) return;
+    onRequestDelete(user);
   };
 
   const isSelf = currentAdminId === user.id;
@@ -612,60 +595,130 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
-
-        {/* In-app delete confirmation — absolute overlay inside the parent (no nested Modal — that has RN-Web stacking quirks). Always opaque, always on top. */}
-        {confirmDelete && (
-          <View style={modalStyles.confirmOverlay} pointerEvents="auto">
-            <TouchableOpacity activeOpacity={1} style={StyleSheet.absoluteFillObject} onPress={() => !busy && setConfirmDelete(false)} />
-            <View style={modalStyles.confirmCard}>
-              <View style={modalStyles.confirmIcon}>
-                <Feather name="alert-triangle" size={26} color="#B3261E" />
-              </View>
-              <Text style={modalStyles.confirmTitle}>Delete {user.name}?</Text>
-              <Text style={modalStyles.confirmBody}>
-                This will permanently delete the user account and clean up all related records: cart, notifications,
-                withdrawals, service bookings, vendor &amp; service applications, tickets, registrations, and downline
-                sponsor links.{"\n\n"}
-                Their <Text style={{ fontWeight: "800" }}>transactions and orders are kept</Text> for audit.{"\n\n"}
-                <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first</Text> — restore from
-                <Text style={{ fontWeight: "800" }}> Admin → Data Backups</Text> if needed.{"\n\n"}
-                Type <Text style={{ fontWeight: "800", color: "#B3261E" }}>DELETE</Text> to confirm.
-              </Text>
-              <TextInput
-                value={deleteConfirmText}
-                onChangeText={(v) => setDeleteConfirmText(v.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6))}
-                placeholder="DELETE"
-                placeholderTextColor={colors.textMuted}
-                autoCapitalize="characters"
-                style={modalStyles.confirmInput}
-                testID="delete-confirm-input"
-              />
-              {!!msg && (
-                <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
-                  <Feather name="x-circle" size={16} color="#B3261E" />
-                  <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{msg}</Text>
-                </View>
-              )}
-              <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-                <TouchableOpacity onPress={() => { setConfirmDelete(false); setDeleteConfirmText(""); }} disabled={busy === "delete"} style={[modalStyles.btn, { backgroundColor: colors.surfaceMuted }]} testID="delete-confirm-cancel">
-                  <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={performDelete}
-                  disabled={deleteConfirmText !== "DELETE" || busy === "delete"}
-                  style={[modalStyles.btn, { backgroundColor: "#B3261E" }, (deleteConfirmText !== "DELETE" || busy === "delete") && { opacity: 0.5 }]}
-                  testID="delete-confirm-go"
-                >
-                  {busy === "delete" ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Delete user</Text>}
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        )}
       </SafeAreaView>
     </Modal>
   );
 }
+
+// Standalone top-level confirmation Modal — rendered by the parent screen, NOT
+// nested inside the Edit modal. This avoids the RN-Web stacking-context bug
+// where a parent Modal's transform animation traps `position:fixed` overlays
+// (causing the "popup not clearly visible / overlap" issue).
+function DeleteConfirmModal({ user, onClose, onDeleted }: { user: AdminUser | null; onClose: () => void; onDeleted: () => Promise<void> | void }) {
+  const [confirmText, setConfirmText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const reset = () => { setConfirmText(""); setErr(null); setBusy(false); };
+  const handleClose = () => { reset(); onClose(); };
+
+  const handleDelete = async () => {
+    if (!user) return;
+    setBusy(true); setErr(null);
+    try {
+      const res = await api.delete(`/admin/users/${user.id}`);
+      const data: any = res.data || {};
+      const summary = data.cascade || {};
+      const total = Object.values(summary).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
+      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
+      reset();
+      const msg = `User deleted${total ? ` · ${total} related records cleaned up` : ""}.${snapId ? `\n\nAuto-backup taken (#${snapId}). Restore from Admin → Data Backups if needed.` : ""}`;
+      if (Platform.OS === "web") {
+        (typeof window !== "undefined" ? window.alert : Alert.alert)(msg);
+      } else {
+        Alert.alert("User deleted", msg);
+      }
+      await onDeleted();
+    } catch (e) {
+      setErr(formatApiError(e));
+      setBusy(false);
+    }
+  };
+
+  // role tag for header (User / Admin / Finance / Support)
+  const roleTag = (() => {
+    if (!user) return "";
+    if (user.role !== "admin") return "User";
+    const ar = (user as any).admin_role || "admin";
+    if (ar === "super_admin") return "Super Admin";
+    if (ar === "finance") return "Finance Admin";
+    if (ar === "support") return "Support Admin";
+    if (ar === "manager") return "Manager Admin";
+    return "Admin";
+  })();
+
+  return (
+    <Modal
+      visible={!!user}
+      transparent
+      animationType="fade"
+      statusBarTranslucent
+      onRequestClose={handleClose}
+    >
+      <View style={dcStyles.backdrop}>
+        <TouchableOpacity activeOpacity={1} style={StyleSheet.absoluteFillObject} onPress={() => !busy && handleClose()} />
+        <View style={dcStyles.card}>
+          <View style={dcStyles.icon}>
+            <Feather name="alert-triangle" size={26} color="#B3261E" />
+          </View>
+          <Text style={dcStyles.tag}>{roleTag.toUpperCase()}</Text>
+          <Text style={dcStyles.title}>Delete {user?.name || "user"}?</Text>
+          <Text style={dcStyles.body}>
+            This will permanently delete the account and clean up all related records: cart, notifications, withdrawals,
+            service bookings, vendor &amp; service applications, tickets, registrations, and downline sponsor links.{"\n\n"}
+            Their <Text style={{ fontWeight: "800" }}>transactions and orders are kept</Text> for audit.{"\n\n"}
+            <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first</Text> — restore from
+            <Text style={{ fontWeight: "800" }}> Admin → Data Backups</Text> if needed.{"\n\n"}
+            Type <Text style={{ fontWeight: "800", color: "#B3261E" }}>DELETE</Text> to confirm.
+          </Text>
+          <TextInput
+            value={confirmText}
+            onChangeText={(v) => { setErr(null); setConfirmText(v.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6)); }}
+            placeholder="DELETE"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="characters"
+            style={dcStyles.input}
+            testID="delete-confirm-input"
+            editable={!busy}
+          />
+          {err && (
+            <View style={dcStyles.errBox}>
+              <Feather name="x-circle" size={16} color="#B3261E" />
+              <Text style={dcStyles.errText}>{err}</Text>
+            </View>
+          )}
+          <View style={dcStyles.btnRow}>
+            <TouchableOpacity onPress={handleClose} disabled={busy} style={[dcStyles.btn, { backgroundColor: colors.surfaceMuted }]} testID="delete-confirm-cancel">
+              <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={handleDelete}
+              disabled={confirmText !== "DELETE" || busy}
+              style={[dcStyles.btn, { backgroundColor: "#B3261E" }, (confirmText !== "DELETE" || busy) && { opacity: 0.5 }]}
+              testID="delete-confirm-go"
+            >
+              {busy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Delete user</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const dcStyles = StyleSheet.create({
+  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", alignItems: "center", padding: 18 },
+  card: { width: "100%", maxWidth: 420, backgroundColor: colors.surface, borderRadius: 22, padding: 22, shadowColor: "#000", shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.35, shadowRadius: 28, elevation: 30 },
+  icon: { width: 56, height: 56, borderRadius: 28, backgroundColor: "#FCE9E5", alignItems: "center", justifyContent: "center", alignSelf: "center", marginBottom: 12 },
+  tag: { fontSize: 10, fontWeight: "800", color: "#B3261E", letterSpacing: 1.5, textAlign: "center", marginBottom: 4 },
+  title: { fontSize: 19, fontWeight: "800", color: colors.textMain, textAlign: "center" },
+  body: { fontSize: 13, color: colors.textMuted, marginTop: 10, marginBottom: 14, lineHeight: 20, textAlign: "center" },
+  input: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, padding: 14, fontSize: 17, color: colors.textMain, fontWeight: "800", letterSpacing: 6, textAlign: "center", borderWidth: 1.5, borderColor: colors.border },
+  errBox: { flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 },
+  errText: { color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 },
+  btnRow: { flexDirection: "row", gap: 10, marginTop: 14 },
+  btn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
+});
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

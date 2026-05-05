@@ -5497,15 +5497,89 @@ agent_communication:
 frontend:
   - task: "Delete-User confirmation popup overlay (no nested Modal) on Edit User screen — admin/users.tsx"
     implemented: true
-    working: false
+    working: "NA"
     file: "frontend/app/admin/users.tsx"
     stuck_count: 1
     priority: "high"
-    needs_retesting: false
+    needs_retesting: true
     status_history:
-        - working: false
+        - working: "NA"
           agent: "testing"
           comment: |
+            ROUND-3 RETEST — UNABLE TO COMPLETE UI VERIFICATION.
+
+            CODE REVIEW (✅ implementation looks correct):
+              The refactor in /app/frontend/app/admin/users.tsx is structurally
+              sound and addresses the round-2 root cause (nested Modal +
+              transform-induced containing block on RN-Web).
+
+              • UsersScreen now keeps two SEPARATE state vars: `editing`
+                (drives EditUserModal) and `pendingDelete` (drives a
+                top-level <DeleteConfirmModal/>). They are SIBLING modals,
+                not nested.
+              • UserEditModal.onDelete bubbles up via
+                `onRequestDelete(user)` and the parent does
+                `setEditing(null); setTimeout(()=>setPendingDelete(u), 250)`
+                — guaranteeing only ONE Modal is open at a time.
+              • DeleteConfirmModal is a full <Modal transparent
+                animationType="fade" statusBarTranslucent> with its own
+                <View style={dcStyles.backdrop}> (rgba(0,0,0,0.7), flex:1,
+                center justify+align) and a card (maxWidth 420, white bg,
+                rounded 22, padding 22, shadow). Cancel/Delete-user
+                buttons + DELETE-typed input gating + role tag all match
+                the spec.
+              • Because RN's Modal renders to a sibling React-Web portal at
+                document.body root, it does NOT inherit a transform
+                containing block from the now-closed Edit modal — the
+                round-2 trap is gone.
+
+            WHAT FAILED IN MY UI TEST RUN:
+              I exhausted the 3-call budget for browser_automation. In
+              every Playwright run on http://localhost:3000 (which the
+              frontend is correctly configured to point at the preview
+              backend per EXPO_PUBLIC_BACKEND_URL=https://network-pay-1
+              .preview.emergentagent.com), the Users list rendered
+              empty ("0 USERS / No users match") even though a direct
+              curl against /api/admin/users with a fresh JWT returns 5
+              users (admin, finance, support.test, manager.test,
+              rahul.test). Conclusion: my Playwright login handshake
+              (clicking the "Sign in" button after fill) did not persist
+              the JWT into the storage that `api` reads, so /admin/users
+              returned 401 and the silent try/catch in load() left the
+              list empty. This is a TEST-HARNESS issue on my side, NOT a
+              defect in admin/users.tsx.
+
+              First attempt also misclicked the "Add new user (offline-paid)"
+              button because my row-locator
+              `[data-testid^="admin-user-"]` accidentally matched
+              testid=`admin-user-new`. I corrected the selector with
+              `:not([data-testid="admin-user-new"])` in subsequent runs.
+
+            NET RESULT:
+              The 4 round-2 visual failure modes (no backdrop, inline
+              card, parent edit modal sections still readable, no white
+              card framing) are very unlikely to recur given that:
+                a) the parent Modal is now CLOSED before the confirm
+                   Modal opens (250ms separation),
+                b) the confirm overlay is its own RN <Modal> (web
+                   portal), not an absolute View nested in a parent
+                   Modal's transform tree,
+                c) backdrop has explicit rgba(0,0,0,0.7) and the card
+                   has explicit white bg + shadow.
+              However I could NOT visually confirm in this run.
+
+            RECOMMENDATION TO MAIN AGENT:
+              Either (1) ask another testing pass with a working auth
+              setup (e.g. seed JWT into AsyncStorage/localStorage before
+              navigating to /admin/users so the list actually loads), or
+              (2) accept the code review and ship — the structural fix
+              addresses the documented root cause.
+
+            NO CHANGES MADE TO CODE in this round. Status set to "NA"
+            with needs_retesting=true so a future testing pass with a
+            working login can do the visual confirmation.
+
+            ────────── ROUND-2 RESULT (preserved for context) ──────────
             REGRESSION CONFIRMED — fix did NOT resolve the bleed-through bug.
 
             Setup (4 users created/verified via API):
@@ -5610,6 +5684,40 @@ test_plan:
 agent_communication:
     - agent: "testing"
       message: |
+        ROUND-3 retest on Delete-user confirmation popup (admin/users.tsx).
+
+        OUTCOME: code review PASS, UI verification BLOCKED by my own
+        test-harness issue (Playwright login click did NOT persist the
+        JWT — backend logs show /api/admin/users returning 401 from my
+        runs; direct curl with a fresh token returns the expected 5 users
+        so the backend + data are fine, and the seed users
+        rahul.test@app.com, manager.test@app.com, support.test@app.com,
+        finance@app.com all exist).
+
+        STRUCTURAL FIX REVIEW (passes):
+          • DeleteConfirmModal is now a TOP-LEVEL <Modal/> sibling of
+            EditUserModal at UsersScreen root — they are NEVER both
+            mounted simultaneously (parent does setEditing(null) then
+            setTimeout(setPendingDelete, 250)).
+          • The confirm overlay uses dcStyles.backdrop with explicit
+            rgba(0,0,0,0.7), flex:1, justifyContent/alignItems:center,
+            and an opaque white card maxWidth 420 with rounded corners
+            and shadow. Triangle icon, USER/FINANCE ADMIN/SUPPORT ADMIN
+            role tag, "Type DELETE" gating, Cancel + red Delete-user
+            buttons all match the spec.
+          • Because RN renders <Modal/> via a portal at document.body
+            on web, this confirm modal escapes the previous Edit-modal's
+            transform-induced containing block which was the documented
+            round-2 root cause.
+
+        I exhausted my 3-call browser_automation budget without a
+        successful login session, so I could NOT visually screenshot
+        the modal in this round. Status set to "NA" with
+        needs_retesting=true so a follow-up test pass (with a working
+        token-injection or login flow) can do the final visual
+        confirmation.
+
+        ────────── Round-2 message (preserved) ──────────
         Delete-user confirmation popup retested on mobile 390x844 across all 4 user roles.
         DOM looks correct (title/body/input/buttons all render with proper testIDs and disabled state),
         BUT the visual layout is still broken — NO dark backdrop, NO centered card, the confirmation
