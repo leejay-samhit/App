@@ -45,6 +45,13 @@ export default function More() {
   const [wipeBusy, setWipeBusy] = useState(false);
   const [wipeError, setWipeError] = useState<string | null>(null);
 
+  // Full factory-reset state ("Reset app to zero")
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetPin, setResetPin] = useState("");
+  const [resetPhrase, setResetPhrase] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+
   const isPin = (p: string) => /^[0-9]{6}$/.test(p);
 
   const onExport = async (kind: string) => {
@@ -97,6 +104,30 @@ export default function More() {
     router.replace("/login");
   };
 
+  const onFullReset = async () => {
+    setResetError(null);
+    if (!isPin(resetPin)) { setResetError("PIN must be exactly 6 digits."); return; }
+    if (resetPhrase.trim().toUpperCase() !== "RESET") { setResetError('Please type RESET (in capitals) to confirm.'); return; }
+    setResetBusy(true);
+    try {
+      const { data } = await api.post("/admin/system/wipe-all", {
+        danger_pin: resetPin,
+        confirm_phrase: resetPhrase.trim().toUpperCase(),
+      });
+      setResetOpen(false); setResetPin(""); setResetPhrase("");
+      const s = data.summary || {};
+      const total = Object.values(s).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
+      Alert.alert(
+        "App reset to zero",
+        `${total} records cleared.\n\n• ${s.users_deleted || 0} users\n• ${s.transactions_deleted || 0} transactions\n• ${s.orders_deleted || 0} orders\n• ${s.withdrawals_deleted || 0} withdrawals\n• ${s.products_deleted || 0} products\n• ${s.tickets_deleted || 0} tickets\n• ${s.system_wallet_deposits_deleted || 0} system deposits\n\nSettings & super-admin login preserved.`,
+      );
+    } catch (e) {
+      setResetError(formatApiError(e));
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   const isSuperAdmin = ((user as any)?.admin_role || "super_admin") === "super_admin";
 
   return (
@@ -134,6 +165,15 @@ export default function More() {
                 <Text style={styles.dangerHint}>Deletes every non-admin user + their transactions, orders, withdrawals, cart, and notifications.</Text>
               </View>
               <Feather name="alert-triangle" size={16} color="#B3261E" />
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => { setResetError(null); setResetPin(""); setResetPhrase(""); setResetOpen(true); }} style={[styles.dangerRow, { backgroundColor: "#FFE6E6", borderColor: "#B3261E", borderWidth: 2 }]} testID="more-reset-app">
+              <View style={[styles.dangerIcon, { backgroundColor: "#B3261E" }]}><Feather name="zap" size={16} color="#fff" /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.dangerText, { fontSize: 15 }]}>Reset app to zero</Text>
+                <Text style={styles.dangerHint}>Deletes EVERYTHING — users, transactions, orders, products, services, vendors, tickets, audit log, deposits and snapshots. Settings &amp; super-admin login are preserved.</Text>
+              </View>
+              <Feather name="alert-octagon" size={18} color="#B3261E" />
             </TouchableOpacity>
           </>
         )}
@@ -202,6 +242,79 @@ export default function More() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* FULL RESET MODAL */}
+      <Modal
+        visible={resetOpen}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        presentationStyle="overFullScreen"
+        onRequestClose={() => setResetOpen(false)}
+      >
+        <KeyboardAvoidingView
+          style={[styles.modalOverlay, Platform.OS === "web" ? ({ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999 } as any) : null]}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <TouchableOpacity activeOpacity={1} style={{ flex: 1 }} onPress={() => setResetOpen(false)} />
+          <View style={styles.modalSheet}>
+            <View style={[styles.modalIconWrap, { backgroundColor: "#FFE6E6", borderWidth: 2, borderColor: "#B3261E" }]}>
+              <Feather name="alert-octagon" size={28} color="#B3261E" />
+            </View>
+            <Text style={styles.modalTitle}>Reset app to zero?</Text>
+            <Text style={styles.modalBody}>
+              This will permanently delete <Text style={{ fontWeight: "800", color: "#B3261E" }}>EVERYTHING</Text>:
+              users, transactions, withdrawals, orders, products, services, vendors, tickets,
+              audit logs, deposits and snapshots.{"\n\n"}
+              Only <Text style={{ fontWeight: "800" }}>Settings</Text> (branding/payouts) and your
+              <Text style={{ fontWeight: "800" }}> super-admin login</Text> are preserved.{"\n\n"}
+              <Text style={{ color: "#B3261E", fontWeight: "800" }}>This action cannot be undone.</Text>
+            </Text>
+            <Text style={styles.label}>Type RESET to confirm</Text>
+            <TextInput
+              testID="reset-phrase-input"
+              value={resetPhrase}
+              onChangeText={(v) => { setResetError(null); setResetPhrase(v.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 5)); }}
+              autoCapitalize="characters"
+              placeholder="RESET"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.modalInput, { letterSpacing: 6, fontSize: 18 }, !!resetError && { borderWidth: 2, borderColor: "#B3261E" }]}
+            />
+            <Text style={[styles.label, { marginTop: 14 }]}>6-digit Danger PIN</Text>
+            <TextInput
+              testID="reset-pin-input"
+              value={resetPin}
+              onChangeText={(v) => { setResetError(null); setResetPin(v.replace(/[^0-9]/g, "").slice(0, 6)); }}
+              secureTextEntry
+              keyboardType="number-pad"
+              maxLength={6}
+              placeholder="••••••"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.modalInput, !!resetError && { borderWidth: 2, borderColor: "#B3261E" }]}
+            />
+            {!!resetError && (
+              <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
+                <Feather name="x-circle" size={16} color="#B3261E" />
+                <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{resetError}</Text>
+              </View>
+            )}
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+              <TouchableOpacity onPress={() => { setResetOpen(false); setResetPin(""); setResetPhrase(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} testID="reset-cancel">
+                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={onFullReset}
+                disabled={!isPin(resetPin) || resetPhrase !== "RESET" || resetBusy}
+                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (!isPin(resetPin) || resetPhrase !== "RESET" || resetBusy) && { opacity: 0.5 }]}
+                testID="reset-confirm"
+              >
+                {resetBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Reset to zero</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
     </SafeAreaView>
   );
 }
@@ -228,5 +341,6 @@ const styles = StyleSheet.create({
   modalTitle: { fontSize: 22, fontWeight: "800", color: colors.textMain, textAlign: "center" },
   modalBody: { fontSize: 13, color: colors.textMuted, marginTop: 10, marginBottom: 14, lineHeight: 20, textAlign: "center" },
   modalInput: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, padding: 14, fontSize: 16, color: colors.textMain, fontWeight: "800", letterSpacing: 4, textAlign: "center" },
+  label: { fontSize: 11, letterSpacing: 1.5, color: colors.textMuted, fontWeight: "700", marginBottom: 6, textTransform: "uppercase" },
   modalBtn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
 });

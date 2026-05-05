@@ -2396,6 +2396,81 @@ async def admin_wipe_users(
     }
 
 
+class WipeAllRequest(BaseModel):
+    danger_pin: str
+    confirm_phrase: Optional[str] = None  # require user to type "RESET" client-side
+
+
+@api_router.post("/admin/system/wipe-all")
+async def admin_wipe_all(
+    payload: WipeAllRequest,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """ULTRA DESTRUCTIVE: Full factory reset. Deletes every business record
+    (users, txns, orders, products, vendors, services, tickets, audit log,
+    backups, deposits) and resets the seeded super-admin's wallet to ₹0.
+    Preserves: settings (branding + payouts) and the super-admin login itself.
+    Caller must provide the 6-digit Danger PIN AND type the phrase 'RESET'."""
+    if not await get_danger_pin_hash():
+        raise HTTPException(status_code=400, detail="Danger PIN not set. Please set it in Admin → Admin access.")
+    if not await verify_danger_pin(payload.danger_pin):
+        raise HTTPException(status_code=401, detail="Invalid Danger PIN")
+    if (payload.confirm_phrase or "").strip().upper() != "RESET":
+        raise HTTPException(status_code=400, detail='You must type "RESET" to confirm a full factory wipe')
+
+    # Identify the seed super-admin so we can keep their account but reset stats.
+    seed_admin_email = ADMIN_EMAIL.lower()
+    seed = await db.users.find_one({"email": seed_admin_email})
+    seed_id = seed["id"] if seed else None
+
+    summary: Dict[str, int] = {}
+
+    # --- Wipe data collections ---
+    wipe_collections = [
+        "transactions", "withdrawals", "orders", "cart_items", "notifications",
+        "products", "vendor_sales", "vendor_applications",
+        "service_bookings", "service_applications",
+        "tickets", "ticket_messages",
+        "system_wallet_deposits",
+        "approved_registrations", "rejected_registrations",
+        "db_snapshots",
+    ]
+    for coll in wipe_collections:
+        res = await db[coll].delete_many({})
+        summary[f"{coll}_deleted"] = res.deleted_count
+
+    # --- Delete users (preserve only the seed super-admin) ---
+    user_q: Dict[str, Any] = {"id": {"$ne": seed_id}} if seed_id else {}
+    users_res = await db.users.delete_many(user_q)
+    summary["users_deleted"] = users_res.deleted_count
+
+    # --- Reset the seed admin's wallet & counters to zero ---
+    if seed_id:
+        await db.users.update_one(
+            {"id": seed_id},
+            {"$set": {
+                "wallet_balance": 0.0,
+                "total_earned": 0.0,
+                "direct_referrals_count": 0,
+                "payouts_received": 0,
+                "wallet_buckets": {b: 0.0 for b in SYSTEM_WALLET_BUCKETS},
+                "wallet_frozen": False,
+                "is_blocked": False,
+                "block_reason": None,
+            }},
+        )
+
+    # --- Audit log: wipe LAST so this entry survives ---
+    await db.audit_logs.delete_many({})
+    await _audit_log(
+        admin, "system.wipe_all", "system", "all",
+        {"summary": summary, "preserved": ["settings", "seed_admin"]},
+    )
+    summary["audit_logs_deleted"] = 0  # we just wiped them and re-wrote 1
+
+    return {"ok": True, "summary": summary, "message": "App reset to zero. Settings and super-admin account preserved."}
+
+
 # ------------------ Admin: Settings (Payout Structure) ------------------
 class SettingsUpdate(BaseModel):
     registration_fee: Optional[float] = Field(default=None, ge=0)
