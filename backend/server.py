@@ -623,11 +623,18 @@ async def logout(user: Dict[str, Any] = Depends(get_current_user)):
 
 # ------------------ Payment (Mock) ------------------
 async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = ""):
-    """Credit payout to sponsor at a given level, log transaction & notification."""
-    inc = {"wallet_balance": amount, "total_earned": amount}
-    if level == 1:
-        inc["payouts_received"] = 1
-    await db.users.update_one({"id": sponsor_user["id"]}, {"$inc": inc})
+    """Credit payout to sponsor at a given level, log transaction & notification.
+    If the sponsor IS the admin, credit goes into the referral_commission bucket
+    of the system wallet (instead of plain wallet_balance) so the admin dashboard
+    shows it under the right category."""
+    is_admin_recipient = (sponsor_user.get("email") or "").lower() == ADMIN_EMAIL.lower()
+    if is_admin_recipient:
+        await credit_admin_bucket("referral_commission", amount, also_total_earned=True)
+    else:
+        inc: Dict[str, Any] = {"wallet_balance": amount, "total_earned": amount}
+        if level == 1:
+            inc["payouts_received"] = 1
+        await db.users.update_one({"id": sponsor_user["id"]}, {"$inc": inc})
     desc = (
         f"Level {level} payout from {source_user_name}" if source_user_name
         else f"Level {level} referral payout"
@@ -638,10 +645,17 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
         "type": "referral_payout",
         "level": level,
         "amount": amount,
-        "status": "credited",
+        "status": "success",
         "description": desc,
+        "source_user_name": source_user_name or None,
         "created_at": now_utc().isoformat(),
     })
+    await _create_notification(
+        sponsor_user["id"],
+        "payout",
+        f"₹{int(amount)} credited!",
+        desc,
+    )
     await _create_notification(
         sponsor_user["id"],
         "payout",
@@ -2369,10 +2383,29 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         "user_id": user["id"],
         "type": "order",
         "amount": -total,
-        "status": "paid",
+        "status": "success",
         "description": f"Order #{order_id[:8]} ({len(enriched)} items)",
+        "order_id": order_id,
         "created_at": now_utc().isoformat(),
     })
+
+    # Credit admin's shopping_margin bucket with the platform share total
+    platform_total = round(sum(float(it.get("platform_share") or 0) for it in enriched), 2)
+    if platform_total > 0:
+        admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+        if admin_doc:
+            await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": admin_doc["id"],
+                "type": "shop_commission",
+                "amount": platform_total,
+                "status": "success",
+                "description": f"Shop margin from order #{order_id[:8]}",
+                "order_id": order_id,
+                "source_user_name": user.get("name"),
+                "created_at": now_utc().isoformat(),
+            })
 
     # Credit vendor wallets and write vendor sales ledger entries
     for it in enriched:
@@ -2400,7 +2433,7 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
             "user_id": vid,
             "type": "vendor_sale",
             "amount": amount,
-            "status": "credited",
+            "status": "success",
             "description": f"Vendor share credited from order #{order_id[:8]}",
             "order_id": order_id,
             "created_at": now_utc().isoformat(),
@@ -3190,35 +3223,116 @@ async def admin_unblock_user(user_id: str, admin: Dict[str, Any] = Depends(requi
 class WalletAdjust(BaseModel):
     amount: float = Field(gt=0)
     type: str
-    reason: str
+    reason: str  # required remarks for audit trail
+
+
+class SystemWalletDeposit(BaseModel):
+    amount: float = Field(gt=0)
+    utr: str = Field(min_length=4, max_length=40)
+    bank_ref: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+@api_router.get("/admin/system-wallet")
+async def get_system_wallet(admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
+    """Return the admin's wallet broken down by bucket + recent deposits."""
+    a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not a:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    buckets = a.get("wallet_buckets") or {}
+    out = {b: float(buckets.get(b) or 0) for b in SYSTEM_WALLET_BUCKETS}
+    deposits = await db.system_wallet_deposits.find({}, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    return {
+        "buckets": out,
+        "total": float(a.get("wallet_balance") or 0),
+        "deposits": deposits,
+    }
+
+
+@api_router.post("/admin/system-wallet/deposit")
+async def system_wallet_deposit(payload: SystemWalletDeposit, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance"))):
+    """Manual UTR deposit into the system wallet. Once recorded, the
+    direct_added bucket grows and admin/finance can credit user wallets
+    from this bucket only."""
+    a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not a:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    # Idempotency: same UTR cannot be re-deposited.
+    dup = await db.system_wallet_deposits.find_one({"utr": payload.utr})
+    if dup:
+        raise HTTPException(status_code=400, detail=f"UTR {payload.utr} already recorded")
+    ts = now_utc().isoformat()
+    dep_id = str(uuid.uuid4())
+    await db.system_wallet_deposits.insert_one({
+        "id": dep_id,
+        "amount": float(payload.amount),
+        "utr": payload.utr.strip(),
+        "bank_ref": (payload.bank_ref or "").strip() or None,
+        "remarks": (payload.remarks or "").strip() or None,
+        "deposited_by": admin["id"],
+        "deposited_by_email": admin.get("email"),
+        "created_at": ts,
+    })
+    await credit_admin_bucket("direct_added", float(payload.amount), also_total_earned=False)
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": a["id"],
+        "type": "system_deposit",
+        "amount": float(payload.amount),
+        "status": "success",
+        "description": f"System wallet top-up · UTR {payload.utr}" + (f" · {payload.remarks}" if payload.remarks else ""),
+        "reference_number": payload.utr,
+        "deposit_id": dep_id,
+        "created_at": ts,
+    })
+    await _audit_log(admin, "system_wallet.deposit", "deposit", dep_id, {"amount": payload.amount, "utr": payload.utr})
+    return {"ok": True, "deposit_id": dep_id}
 
 
 @api_router.post("/admin/users/{user_id}/wallet")
-async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
+async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance"))):
     if payload.type not in ("credit", "debit"):
         raise HTTPException(status_code=400, detail="type must be credit or debit")
+    if not (payload.reason or "").strip():
+        raise HTTPException(status_code=400, detail="Remarks are required for every wallet adjustment")
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     delta = payload.amount if payload.type == "credit" else -payload.amount
     if delta < 0 and target.get("wallet_balance", 0) + delta < 0:
         raise HTTPException(status_code=400, detail="Cannot debit beyond available balance")
+
+    # CREDIT path: must come from the system wallet's direct_added bucket.
+    if payload.type == "credit":
+        ok = await debit_admin_bucket("direct_added", payload.amount)
+        if not ok:
+            raise HTTPException(status_code=400, detail="Insufficient Direct-Added funds in system wallet. Please deposit first.")
+
+    # DEBIT path: return funds to direct_added bucket so they're re-spendable.
+    if payload.type == "debit":
+        await credit_admin_bucket("direct_added", payload.amount, also_total_earned=False)
+
     inc = {"wallet_balance": delta}
     if payload.type == "credit":
         inc["total_earned"] = payload.amount
     await db.users.update_one({"id": user_id}, {"$inc": inc})
+    txn_id = str(uuid.uuid4())
     await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
+        "id": txn_id,
         "user_id": user_id,
-        "type": "admin_adjust",
+        "type": "admin_credit" if payload.type == "credit" else "admin_debit",
         "amount": delta,
-        "status": "credited" if delta > 0 else "debited",
-        "description": f"Admin {payload.type}: {payload.reason}",
+        "status": "success",
+        "description": f"Admin {payload.type}: {payload.reason.strip()}",
+        "reference_number": txn_id[:8].upper(),
+        "from_admin_id": admin["id"],
+        "from_admin_email": admin.get("email"),
+        "remarks": payload.reason.strip(),
         "created_at": now_utc().isoformat(),
     })
-    await _create_notification(user_id, "wallet", f"Wallet {payload.type}ed by ₹{int(payload.amount)}", payload.reason)
+    await _create_notification(user_id, "wallet", f"Wallet {payload.type}ed by ₹{int(payload.amount)}", payload.reason.strip())
     await _audit_log(admin, f"wallet.{payload.type}", "user", user_id, {"amount": payload.amount, "reason": payload.reason})
-    return {"ok": True}
+    return {"ok": True, "transaction_id": txn_id}
 
 
 @api_router.post("/admin/users/{user_id}/wallet/freeze")
@@ -3556,6 +3670,62 @@ async def seed_admin():
                         {"$set": {"referred_by": "EARN"}},
                     )
                 logger.info(f"Admin referral_code migrated from {old_code} → EARN")
+        # Backfill system-wallet buckets on existing admin if missing
+        if not isinstance(existing.get("wallet_buckets"), dict):
+            current_balance = float(existing.get("wallet_balance") or 0)
+            await db.users.update_one(
+                {"email": ADMIN_EMAIL.lower()},
+                {"$set": {"wallet_buckets": {
+                    # Preserve existing balance under referral_commission since
+                    # historically that's where most admin earnings came from.
+                    "referral_commission": current_balance,
+                    "direct_added": 0.0,
+                    "service_margin": 0.0,
+                    "shopping_margin": 0.0,
+                }}},
+            )
+
+
+# ============================================================
+# SYSTEM WALLET — admin's wallet broken down into 4 categorised buckets
+# ============================================================
+SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_added", "service_margin", "shopping_margin")
+
+
+async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: bool = True):
+    """Credit a specific bucket of the admin's system wallet AND the rolled-up
+    wallet_balance. Use this everywhere admin earns money so the dashboard
+    shows the right category breakdown.
+
+    bucket ∈ {referral_commission, direct_added, service_margin, shopping_margin}
+    """
+    if bucket not in SYSTEM_WALLET_BUCKETS:
+        raise ValueError(f"Unknown bucket: {bucket}")
+    if amount <= 0:
+        return
+    admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not admin:
+        return
+    update: Dict[str, Any] = {f"wallet_buckets.{bucket}": amount, "wallet_balance": amount}
+    if also_total_earned:
+        update["total_earned"] = amount
+    await db.users.update_one({"id": admin["id"]}, {"$inc": update})
+
+
+async def debit_admin_bucket(bucket: str, amount: float) -> bool:
+    """Debit a specific bucket and the rolled-up balance. Returns False (no-op) if
+    insufficient balance in that bucket. Atomic via filter on bucket value.
+    """
+    if bucket not in SYSTEM_WALLET_BUCKETS:
+        raise ValueError(f"Unknown bucket: {bucket}")
+    admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not admin:
+        return False
+    res = await db.users.update_one(
+        {"id": admin["id"], f"wallet_buckets.{bucket}": {"$gte": amount}},
+        {"$inc": {f"wallet_buckets.{bucket}": -amount, "wallet_balance": -amount}},
+    )
+    return res.modified_count == 1
 
 
 async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
@@ -4877,10 +5047,7 @@ async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict
     if admin_share > 0:
         admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin:
-            await db.users.update_one(
-                {"id": admin["id"]},
-                {"$inc": {"wallet_balance": admin_share, "total_earned": admin_share}},
-            )
+            await credit_admin_bucket("service_margin", admin_share, also_total_earned=True)
             await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": admin["id"],
@@ -4889,6 +5056,7 @@ async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict
                 "status": "success",
                 "description": f"Service platform fee from {provider.get('name')} (booking by {user.get('name')})",
                 "booking_id": book_id,
+                "source_user_name": user.get("name"),
                 "created_at": ts,
             })
     booking = {

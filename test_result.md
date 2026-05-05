@@ -107,6 +107,321 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Phase 1 — System Wallet buckets, UTR-verified deposits, gated user wallet credits, transaction status fixes"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Phase 1 System Wallet rework — end-to-end testing COMPLETE.
+            ALL 78/78 checks PASSED via /app/system_wallet_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            SETUP:
+              • admin@app.com / Admin@123 → super_admin token.
+              • Live settings: directs_required=6, payout_l1=400, payout_l2=12,
+                vendor_commission_pct=70, registration_fee=118.
+              • Auto-approval pipeline used (HMAC + signature_only branch with
+                pay_test_<rand> payment_id) for all throwaway-user creation.
+
+            A. SYSTEM WALLET INITIAL STATE (4/4) ✅
+              • A.0 GET /admin/system-wallet → 200.
+              • A.1 buckets has exactly 4 keys: referral_commission,
+                direct_added, service_margin, shopping_margin.
+              • A.2 total == sum(buckets) (1150 = 150+1000+0+0 at start).
+              • A.3 total == admin.wallet_balance (1150). Roll-up correct.
+
+            B. DEPOSIT (7/7) ✅
+              • B.1 POST /admin/system-wallet/deposit {amount:1000,
+                utr:"UTR-DEP-<rand>"} → 200 with deposit_id.
+              • B.2 Re-deposit same UTR → 400 "UTR ... already recorded"
+                (idempotency).
+              • B.3 direct_added += 1000 (1000 → 2000).
+              • B.4 deposits[] contains the new UTR row (sorted desc).
+              • B.5 admin /transactions/me has type=system_deposit row with
+                reference_number == UTR.
+              • B.6 system_deposit.status == "success".
+              • B.7 system_deposit.amount == 1000.
+
+            C. ADMIN CREDITS USER WALLET — gated (12/12) ✅
+              • C.0 throwaway U_x register + auto-approve (signature_only).
+              • C.1 POST /admin/users/{U_x.id}/wallet {amount:200,
+                type:"credit", reason:"Test bonus"} → 200 with
+                transaction_id.
+              • C.2 U_x.wallet_balance == 200.0.
+              • C.3 U_x.total_earned == 200.0.
+              • C.4 U_x has type=admin_credit transaction.
+              • C.5 admin_credit.status == "success" (NOT "credited").
+              • C.6 admin_credit.amount == +200.
+              • C.7 admin_credit.remarks == "Test bonus".
+              • C.8 reference_number is 8 chars upper (txn_id[:8].upper).
+              • C.9 from_admin_email == admin@app.com.
+              • C.10 admin direct_added bucket dropped by exactly 200
+                (atomic debit).
+              • C.11 reason="   " (whitespace only) → 400 "Remarks are
+                required for every wallet adjustment".
+
+            D. INSUFFICIENT FUNDS GATE (4/4) ✅
+              • D.1 amount:1_000_000 → 400.
+              • D.2 detail == "Insufficient Direct-Added funds in system
+                wallet. Please deposit first."
+              • D.3 direct_added unchanged (1800 → 1800).
+              • D.4 U_x.wallet_balance unchanged (200 → 200).
+
+            E. DEBIT PATH RESTORES BUCKET (6/6) ✅
+              • E.1 POST .../wallet {amount:50, type:"debit",
+                reason:"correction"} → 200.
+              • E.2 U_x.wallet_balance == 150.
+              • E.3 admin direct_added grew by 50 (1800 → 1850) — funds
+                returned to bucket and remain re-spendable.
+              • E.4 admin_debit transaction exists on U_x.
+              • E.5 admin_debit.status == "success" (NOT "debited").
+              • E.6 admin_debit.amount == -50.
+
+            F. SERVICE BOOKING → service_margin (8/8) ✅
+              • F.0/F.0b/F.0d throwaway provider U_p + customer U_c, U_c
+                wallet credited ₹600 from admin direct_added.
+              • F.1 U_p POST /service/apply (AC Repair, 560001, ₹500) → 200.
+              • F.2 super_admin POST /admin/service-applications/{aid}
+                /approve → 200.
+              • F.3 U_c POST /services/{U_p.id}/book → 200.
+              • F.4 service_margin += 150 (= 30% of ₹500). EXACT delta.
+              • F.5 referral_commission unchanged.
+              • F.6 direct_added unchanged.
+              • F.7 shopping_margin unchanged.
+              • F.8 total == sum(buckets) post-booking (1974 = sum).
+
+            G. SHOP CHECKOUT → shopping_margin (9/9) ✅
+              • G.1 admin POST /admin/products (vendor_id:null, price:100)
+                → 200.
+              • G.2 U_c cart/add → 200.
+              • G.3 U_c POST /orders/checkout → 200.
+              • G.4 shopping_margin += 100 (full price since vendor_id=null
+                → platform_share = line_total). EXACT delta.
+              • G.5 service_margin unchanged.
+              • G.6 referral_commission unchanged.
+              • G.7 direct_added unchanged.
+              • G.8 admin /transactions/me has new type=shop_commission row.
+              • G.9 shop_commission.status == "success".
+
+            H. REFERRAL CASCADE → referral_commission (5/5) ✅
+              • H.0 U_h register (no referral) + auto-approve.
+              • Spillover chain: U_h → 9b50f743 (depth 1) → admin@app.com
+                (depth 2). admin_level=2.
+              • H.1 referral_commission += payout_l2 = 12.0. EXACT delta.
+              • H.2 direct_added unchanged.
+              • H.3 service_margin unchanged.
+              • H.4 shopping_margin unchanged.
+
+            I. STATUS CONSISTENCY (10/10) ✅
+              • I.1 No legacy "credited"/"debited"/"paid" status on any
+                transaction created during this test (filtered by
+                created_at >= TEST_START_ISO).
+              • I.2 Per-type checks ALL passed (status=="success"):
+                - admin_credit (2 sampled)
+                - admin_debit (1)
+                - system_deposit (1)
+                - service_commission (1)
+                - shop_commission (1)
+                - service_booking (1)
+                - service_earning (1)
+                - order (1)
+                - referral_payout (4 — incl L1 cascade firing on U_p2's
+                  Nth direct from prior cascade walks).
+              NOTE: registration_fee transactions still use status="paid"
+              — that pipeline is OUTSIDE the Phase 1 wallet rework and
+              spec didn't call it out. Otherwise zero legacy statuses.
+              Pre-existing rows in db (e.g. legacy admin_adjust=credited)
+              were excluded by the timestamp filter — they predate this
+              rework and would only matter if a historical migration is
+              expected.
+
+            J. RBAC (8/8) ✅
+              • J.1 non-admin GET /admin/system-wallet → 403.
+              • J.2 non-admin POST deposit → 403.
+              • J.3 finance / manager / support admins created via
+                /admin/admins and login successful.
+              • J.4 finance GET /admin/system-wallet → 200 (read access).
+              • J.5 finance POST deposit → 200 (write access — finance
+                allowed).
+              • J.6 manager GET /admin/system-wallet → 200 (read access).
+              • J.7 manager POST deposit → 403 "Requires admin role:
+                super_admin or finance".
+              • J.8 support POST deposit → 403 (same message).
+
+            K. CLEANUP (2/2) ✅
+              • K.1 DELETE /admin/users/{id} for all 7 throwaway users
+                (U_x, U_p, U_c, U_h, finance, manager, support) → 200 each.
+              • K.2 DELETE /admin/products/{id} for non-vendor product
+                → 200.
+
+            Implementation observations (backend/server.py):
+              • L3692-3728 SYSTEM_WALLET_BUCKETS tuple + credit/debit
+                helpers. debit_admin_bucket uses an atomic conditional
+                update {f"wallet_buckets.{bucket}": {"$gte": amount}} —
+                guarantees no race-condition double-spend.
+              • L3236-3250 GET /admin/system-wallet correctly aggregates
+                all 4 buckets and returns last-50 deposits sorted by
+                created_at desc.
+              • L3252-3289 POST deposit: idempotent on UTR; credits
+                direct_added with also_total_earned=False (deposits aren't
+                "earnings" — they're just topups); inserts system_deposit
+                tx with status=success and reference_number=UTR; emits
+                audit log "system_wallet.deposit".
+              • L3292-3335 admin_wallet_adjust: requires reason (whitespace
+                rejected); CREDIT path debits direct_added BEFORE updating
+                user wallet (atomic), 400 on insufficient; DEBIT returns
+                funds to direct_added; status="success"; persists
+                from_admin_id, from_admin_email, remarks, reference_number
+                (8 char upper). RBAC: super_admin + finance only.
+              • L625-664 _credit_payout: when sponsor.email == admin
+                → routes to referral_commission bucket. L1/L2..L10 all use
+                this path.
+              • L2392-2408 checkout: platform_total = sum of platform_share
+                across line items → credit_admin_bucket("shopping_margin")
+                + shop_commission tx with status=success.
+              • L5046-5061 service booking: admin_share → service_margin
+                bucket + service_commission tx with status=success.
+              • L3673-3687 seed_admin migration: backfill wallet_buckets
+                on existing admin doc using current wallet_balance →
+                referral_commission. Idempotent.
+
+            Backend logs clean, no 500s observed. Task working: true,
+            needs_retesting: false. Main agent can summarise and finish.
+
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Phase 1 of the user-requested wallet rework:
+
+            1) Admin's wallet now categorised into 4 buckets (rolled up into the
+               existing wallet_balance field):
+                 wallet_buckets.referral_commission
+                 wallet_buckets.direct_added
+                 wallet_buckets.service_margin
+                 wallet_buckets.shopping_margin
+               Backfill on existing admin: their current wallet_balance is moved
+               into referral_commission so totals stay consistent.
+
+            2) Admin earnings now route to the right bucket via two helpers:
+                 credit_admin_bucket(bucket, amount, also_total_earned=True)
+                 debit_admin_bucket(bucket, amount) → bool atomic.
+               • _credit_payout: when sponsor is admin → referral_commission.
+               • Service booking 30% platform fee → service_margin.
+               • Shop checkout platform_share → shopping_margin (NEW — was
+                 previously not credited anywhere; the platform's cut from
+                 shop orders is now properly tracked).
+
+            3) New endpoints (admin-only):
+                 GET  /api/admin/system-wallet
+                       → { buckets: {…}, total: X, deposits: [last 50] }
+                 POST /api/admin/system-wallet/deposit
+                       body: { amount > 0, utr (4-40 chars), bank_ref?, remarks? }
+                       → unique UTR (idempotent), credits direct_added,
+                         inserts a system_deposit transaction on admin's
+                         transactions feed.
+                       RBAC: super_admin + finance only.
+
+            4) POST /api/admin/users/{user_id}/wallet upgraded:
+                 • status now "success" (was "credited"/"debited" → fixed bug
+                   #2 where credits did not appear with proper colour in user
+                   wallet).
+                 • reason field now REQUIRED (raises 400 if empty/whitespace).
+                 • CREDIT path: must atomically debit the admin's
+                   direct_added bucket; raises 400
+                   "Insufficient Direct-Added funds in system wallet" when
+                   the bucket has less than the requested amount.
+                 • DEBIT path: returns funds back to direct_added bucket so
+                   they remain re-spendable.
+                 • Transaction record now persists from_admin_id,
+                   from_admin_email, remarks, reference_number for the
+                   forthcoming transaction-detail modal (item #6).
+                 • RBAC: super_admin + finance only (was super_admin only).
+
+            5) Status fixes (consistency for transaction-history display):
+                 • _credit_payout transactions: "credited" → "success".
+                 • Vendor sale credit transactions: "credited" → "success".
+                 • Order checkout transaction: "paid" → "success".
+                 • Admin adjust transactions: "credited"/"debited" → "success".
+
+            Test scenarios (admin@app.com / Admin@123, settings.directs_required=5):
+
+            A. SYSTEM WALLET INITIAL STATE:
+              • GET /admin/system-wallet → 200.
+              • buckets has 4 keys: referral_commission, direct_added,
+                service_margin, shopping_margin.
+              • total == sum of buckets and matches admin.wallet_balance.
+
+            B. DEPOSIT:
+              • POST /admin/system-wallet/deposit
+                {amount:1000, utr:"UTR-DEP-001", remarks:"HDFC IMPS"} → 200.
+              • Re-deposit same UTR → 400 (idempotency).
+              • GET /admin/system-wallet → direct_added increased by 1000;
+                deposits[] has 1 entry.
+              • A "system_deposit" transaction now exists on admin's
+                /transactions/me feed with status="success" and the UTR.
+
+            C. ADMIN CREDITS USER WALLET (new gating):
+              • Brand-new user U_x; admin POST /admin/users/{U_x.id}/wallet
+                {amount:200, type:"credit", reason:"Test bonus"} → 200.
+              • U_x.wallet_balance == 200; U_x.total_earned == 200.
+              • A NEW transaction on U_x: type=admin_credit, status=success,
+                amount=+200, remarks="Test bonus", reference_number 8 chars,
+                from_admin_email==admin@app.com.
+              • Admin direct_added bucket reduced by 200 (1000→800).
+              • Repeat with reason="" → 400 "Remarks are required".
+
+            D. INSUFFICIENT FUNDS GATE:
+              • Admin POST same /wallet {amount:1_000_000, type:"credit",
+                reason:"too much"} → 400
+                "Insufficient Direct-Added funds in system wallet."
+              • U_x.wallet_balance unchanged.
+
+            E. DEBIT PATH RESTORES BUCKET:
+              • Admin POST /wallet {amount:50, type:"debit", reason:"correction"}
+                → 200.
+              • U_x.wallet_balance == 150. Admin direct_added grew by 50
+                (800→850). A admin_debit transaction with status=success,
+                amount=-50.
+
+            F. SERVICE BOOKING ROUTES TO service_margin:
+              • U_p applies + admin approves (charge=500). U_c books.
+              • Admin's service_margin += 150 (30% of 500); referral_commission
+                unchanged; direct_added unchanged.
+              • Total system wallet = referral_commission + direct_added +
+                service_margin + shopping_margin (verifies sum).
+
+            G. SHOP CHECKOUT ROUTES TO shopping_margin:
+              • Admin creates a non-vendor product (₹100) — vendor_id null.
+              • U_c (with wallet >= 100) checkouts. shopping_margin += 100.
+              • If product.vendor_id is set, shopping_margin += platform_share
+                (line_total * 0.30).
+
+            H. REFERRAL CASCADE ROUTES TO referral_commission:
+              • Use the EARN spillover so admin earns L2 from a 5-direct
+                completion.
+              • referral_commission grew by exactly settings.payout_l2;
+                other buckets unchanged.
+
+            I. STATUS CONSISTENCY:
+              • All new transactions inserted by these flows have
+                status=="success". No "credited"/"paid"/"debited" leaks.
+
+            J. RBAC:
+              • non-admin GET /admin/system-wallet → 403.
+              • non-admin POST /admin/system-wallet/deposit → 403.
+              • finance can do both. manager/support cannot deposit (only
+                super_admin + finance).
+
+            K. CLEANUP — DELETE all throwaway users.
+
+            Credentials: admin@app.com / Admin@123.
+
   - task: "Services Marketplace — apply, admin approve/reject, public listing with filters, wallet booking with admin commission split"
     implemented: true
     working: true
@@ -3839,6 +4154,42 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        PHASE 1 SYSTEM WALLET — testing COMPLETE, 78/78 PASSED via
+        /app/system_wallet_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        All scenarios A-K green:
+          A. System wallet has 4 buckets, total = sum, total = wallet_balance.
+          B. Deposit endpoint UTR-idempotent; system_deposit tx with status=success.
+          C. Admin credit user wallet → atomic debit of direct_added; remarks
+             required; tx has status=success, +200 amount, 8-char ref,
+             from_admin_email persisted.
+          D. Insufficient direct_added → 400 with exact error string;
+             user wallet & bucket unchanged.
+          E. Admin debit returns funds to direct_added; admin_debit tx with
+             status=success, -50 amount.
+          F. Service booking @₹500 → service_margin += 150 (30%);
+             other 3 buckets unchanged; total = sum.
+          G. Non-vendor product checkout @₹100 → shopping_margin += 100;
+             shop_commission tx with status=success.
+          H. EARN spillover places U_h under depth-1 user; admin sits at
+             L2; referral_commission += payout_l2 (12.0) exactly.
+          I. Status consistency — all newly-created admin_credit/admin_debit
+             /system_deposit/service_commission/shop_commission/order/
+             service_booking/service_earning/referral_payout transactions
+             have status="success". No legacy "credited"/"debited"/"paid"
+             leaks (registration_fee=paid is outside spec scope).
+          J. RBAC — non-admin → 403; finance can GET+POST; manager/support
+             can GET but POST → 403 "Requires admin role: super_admin or
+             finance".
+          K. Cleanup — all 7 throwaway users + 1 product deleted.
+
+        Backend logs clean, no 500s observed. Test file:
+        /app/system_wallet_test.py. Task working: true, needs_retesting:
+        false. Main agent can summarise and finish.
+
     - agent: "testing"
       message: |
         SERVICES MARKETPLACE — testing COMPLETE, 66/66 PASSED via
