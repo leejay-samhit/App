@@ -5493,3 +5493,134 @@ agent_communication:
           ALL 7 STEPS PASSED. No data was wiped. UI guards function
           exactly as specified.
 
+
+frontend:
+  - task: "Delete-User confirmation popup overlay (no nested Modal) on Edit User screen — admin/users.tsx"
+    implemented: true
+    working: false
+    file: "frontend/app/admin/users.tsx"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "testing"
+          comment: |
+            REGRESSION CONFIRMED — fix did NOT resolve the bleed-through bug.
+
+            Setup (4 users created/verified via API):
+              • regular user: rahul.test@app.com (Rahul Sharma)
+              • admin/manager: manager.test@app.com (Test Manager)
+              • finance: finance@app.com (Finance Officer, admin_role=finance)
+              • admin/support: support.test@app.com (Test Support)
+
+            Test (mobile 390x844, signed in as admin@app.com):
+            For each of the 4 roles I tapped the user row, scrolled to the red
+            "Delete user" button (testID=edit-delete), tapped it, and inspected
+            the resulting confirmation overlay.
+
+            DOM-level assertions PASS for all 4 roles:
+              • Title "Delete <username>?" renders with the user's name.
+              • Body contains "permanently delete", "automatic backup", "Type DELETE to confirm".
+              • TextInput (delete-confirm-input) is visible.
+              • Cancel + Delete user buttons render.
+              • Delete user button computed opacity = 0.5 (disabled while input empty).
+              • Cancel cleanly closes the confirmation.
+
+            VISUAL assertions FAIL for all 4 roles (see screenshots
+            .screenshots/02_regular_user_confirm.png, 03_admin_manager_confirm.png,
+            04_finance_confirm.png, 05_support_confirm.png):
+              • There is NO dark rgba(0,0,0,0.75) backdrop at all.
+              • The confirmation card is NOT centered — it renders
+                INLINE in the document flow at the bottom of the
+                parent Edit-User scroll content.
+              • The parent modal's sections are FULLY VISIBLE above the
+                confirmation: "WALLET ADJUST" header, Amount/Reason inputs,
+                "Credit" / "Debit" buttons, "KYC STATUS" / "RESET PASSWORD"
+                section, "Block", "Freeze wallet", "IFSC", "Account holder"
+                — all clearly readable in the same screenshot as
+                "Delete <user>?", "Type DELETE to confirm", "Cancel",
+                "Delete user".
+              • The confirmation card has NO white opaque background — it
+                appears as plain text/buttons with no card framing.
+
+            ROOT CAUSE (suspected, in styles at users.tsx L256-258):
+              confirmOverlay: { position: "absolute", top:0, left:0,
+                right:0, bottom:0, backgroundColor: "rgba(0,0,0,0.75)",
+                justifyContent: "center", alignItems: "center", padding: 18,
+                zIndex: 9999, ...(Platform.OS === "web" ?
+                ({ position: "fixed" } as any) : {}) }
+
+            On RN-Web inside a parent <Modal> (which uses transform for
+            slide-up animation), `position: fixed` is degraded to
+            `position: absolute` because the parent creates a containing
+            block. Combined with the View being placed AFTER the
+            <KeyboardAvoidingView><ScrollView> sibling, the overlay ends
+            up flowing AFTER the scroll content and the absolute layout
+            collapses to inline because the SafeAreaView's actual layout
+            is content-sized in the scrollable host, not the viewport.
+
+            The previous "fix" (removing nested Modal in favor of an
+            absolute View) does NOT solve the original complaint — the
+            "Reset password" + "WALLET ADJUST" sections still bleed
+            through every confirmation.
+
+            RECOMMENDED FIXES for main agent (any one will work):
+              1) RE-WRAP the confirmation in a real <Modal
+                 transparent visible={confirmDelete} animationType="fade">
+                 PORTALED at the SCREEN ROOT (return BOTH the parent Modal
+                 AND a sibling Modal from the component — they render as
+                 siblings, second one stacks above). React Native Web
+                 renders Modal via a top-level portal to document.body so
+                 it escapes the parent's transform-induced containing
+                 block.
+              2) Render the overlay through a Portal
+                 (`react-native-web`'s ReactDOM.createPortal targeting
+                 document.body) on web, falling back to a normal absolute
+                 View on native.
+              3) Move the confirmDelete UI OUT of EditUserModal and lift
+                 it to the parent screen (admin/users.tsx top level),
+                 still controlled from inside the edit modal — that way
+                 it's not a child of the parent <Modal>.
+
+            Pass/fail per role:
+              regular_user (Rahul Sharma) — ❌ overlay broken (bleed-through)
+              admin_manager (Test Manager) — ❌ overlay broken
+              finance (Finance Officer) — ❌ overlay broken
+              support (Test Support) — ❌ overlay broken
+
+            Cleanup: 3 throwaway test admins (manager.test, support.test)
+            and 1 user (rahul.test) were CREATED for this test and are
+            still in the DB. Main agent should DELETE them after fixing,
+            or leave them in place for a follow-up retest. finance@app.com
+            and admin@app.com are pre-existing seed accounts and were not
+            modified.
+
+metadata:
+  test_sequence: 1
+
+test_plan:
+  current_focus:
+    - "Delete-User confirmation popup overlay (no nested Modal) on Edit User screen — admin/users.tsx"
+  stuck_tasks:
+    - "Delete-User confirmation popup overlay (no nested Modal) on Edit User screen — admin/users.tsx"
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "testing"
+      message: |
+        Delete-user confirmation popup retested on mobile 390x844 across all 4 user roles.
+        DOM looks correct (title/body/input/buttons all render with proper testIDs and disabled state),
+        BUT the visual layout is still broken — NO dark backdrop, NO centered card, the confirmation
+        renders INLINE at the bottom of the parent edit modal with "WALLET ADJUST", "Reset password",
+        "Credit/Debit", "Block/Freeze wallet" all clearly visible above the confirmation text.
+        Original user complaint is NOT fixed.
+        Likely cause: parent <Modal>'s transform creates a containing block on RN-Web,
+        degrading `position: fixed` to `position: absolute` and trapping the overlay inside
+        the scroll content. Recommended fix: render the confirmation in a SIBLING <Modal
+        transparent animationType="fade"> (React Native's Modal portals to document.body on web),
+        or use ReactDOM.createPortal. Screenshots saved in .screenshots/02..05_*_confirm.png.
+        Created 3 test users (manager.test@app.com, support.test@app.com, rahul.test@app.com) —
+        please clean up after fix or keep for retest.
+

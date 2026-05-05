@@ -252,10 +252,12 @@ const nuStyles = StyleSheet.create({
   switchTitle: { fontSize: 13, fontWeight: "700", color: colors.textMain },
   switchSub: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 16 },
   btn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
-  confirmOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "flex-end" },
-  confirmSheet: { backgroundColor: colors.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 36, shadowColor: "#000", shadowOffset: { width: 0, height: -6 }, shadowOpacity: 0.25, shadowRadius: 16, elevation: 24 },
+  // Absolute overlay rendered inside the parent's SafeAreaView. Always opaque, always covers the parent.
+  confirmOverlay: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.75)", justifyContent: "center", alignItems: "center", padding: 18, zIndex: 9999, ...(Platform.OS === "web" ? ({ position: "fixed" } as any) : {}) },
+  // Centered card (was a bottom-sheet — center is more reliable on small viewports + form sheets)
+  confirmCard: { width: "100%", maxWidth: 420, backgroundColor: colors.surface, borderRadius: 22, padding: 22, shadowColor: "#000", shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.35, shadowRadius: 28, elevation: 30 },
   confirmIcon: { width: 56, height: 56, borderRadius: 28, backgroundColor: "#FCE9E5", alignItems: "center", justifyContent: "center", alignSelf: "center", marginBottom: 12 },
-  confirmTitle: { fontSize: 20, fontWeight: "800", color: colors.textMain, textAlign: "center" },
+  confirmTitle: { fontSize: 19, fontWeight: "800", color: colors.textMain, textAlign: "center" },
   confirmBody: { fontSize: 13, color: colors.textMuted, marginTop: 10, marginBottom: 14, lineHeight: 20, textAlign: "center" },
   confirmInput: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, padding: 14, fontSize: 17, color: colors.textMain, fontWeight: "800", letterSpacing: 6, textAlign: "center", borderWidth: 1.5, borderColor: colors.border },
 });
@@ -390,8 +392,7 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
   const isSelf = currentAdminId === user.id;
 
   return (
-    <>
-    <Modal visible animationType="slide" presentationStyle="formSheet" onRequestClose={onClose}>
+    <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={modalStyles.safe} edges={["top"]}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
           <View style={modalStyles.header}>
@@ -611,69 +612,58 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
+
+        {/* In-app delete confirmation — absolute overlay inside the parent (no nested Modal — that has RN-Web stacking quirks). Always opaque, always on top. */}
+        {confirmDelete && (
+          <View style={modalStyles.confirmOverlay} pointerEvents="auto">
+            <TouchableOpacity activeOpacity={1} style={StyleSheet.absoluteFillObject} onPress={() => !busy && setConfirmDelete(false)} />
+            <View style={modalStyles.confirmCard}>
+              <View style={modalStyles.confirmIcon}>
+                <Feather name="alert-triangle" size={26} color="#B3261E" />
+              </View>
+              <Text style={modalStyles.confirmTitle}>Delete {user.name}?</Text>
+              <Text style={modalStyles.confirmBody}>
+                This will permanently delete the user account and clean up all related records: cart, notifications,
+                withdrawals, service bookings, vendor &amp; service applications, tickets, registrations, and downline
+                sponsor links.{"\n\n"}
+                Their <Text style={{ fontWeight: "800" }}>transactions and orders are kept</Text> for audit.{"\n\n"}
+                <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first</Text> — restore from
+                <Text style={{ fontWeight: "800" }}> Admin → Data Backups</Text> if needed.{"\n\n"}
+                Type <Text style={{ fontWeight: "800", color: "#B3261E" }}>DELETE</Text> to confirm.
+              </Text>
+              <TextInput
+                value={deleteConfirmText}
+                onChangeText={(v) => setDeleteConfirmText(v.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6))}
+                placeholder="DELETE"
+                placeholderTextColor={colors.textMuted}
+                autoCapitalize="characters"
+                style={modalStyles.confirmInput}
+                testID="delete-confirm-input"
+              />
+              {!!msg && (
+                <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
+                  <Feather name="x-circle" size={16} color="#B3261E" />
+                  <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{msg}</Text>
+                </View>
+              )}
+              <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+                <TouchableOpacity onPress={() => { setConfirmDelete(false); setDeleteConfirmText(""); }} disabled={busy === "delete"} style={[modalStyles.btn, { backgroundColor: colors.surfaceMuted }]} testID="delete-confirm-cancel">
+                  <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={performDelete}
+                  disabled={deleteConfirmText !== "DELETE" || busy === "delete"}
+                  style={[modalStyles.btn, { backgroundColor: "#B3261E" }, (deleteConfirmText !== "DELETE" || busy === "delete") && { opacity: 0.5 }]}
+                  testID="delete-confirm-go"
+                >
+                  {busy === "delete" ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Delete user</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
       </SafeAreaView>
     </Modal>
-
-    {/* In-app delete confirmation — sibling Modal so it overlays correctly on web (nested Modals don't layer reliably on RN-Web) */}
-    <Modal
-      visible={confirmDelete}
-      transparent
-      animationType="fade"
-      statusBarTranslucent
-      presentationStyle="overFullScreen"
-      onRequestClose={() => setConfirmDelete(false)}
-    >
-      <KeyboardAvoidingView
-        style={[modalStyles.confirmOverlay, Platform.OS === "web" ? ({ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999 } as any) : null]}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
-        <TouchableOpacity activeOpacity={1} style={{ flex: 1 }} onPress={() => !busy && setConfirmDelete(false)} />
-        <View style={modalStyles.confirmSheet}>
-          <View style={modalStyles.confirmIcon}>
-            <Feather name="alert-triangle" size={26} color="#B3261E" />
-          </View>
-          <Text style={modalStyles.confirmTitle}>Delete {user.name}?</Text>
-          <Text style={modalStyles.confirmBody}>
-            This will permanently delete the user account and clean up all related records: cart, notifications,
-            withdrawals, service bookings, vendor &amp; service applications, tickets, registrations, and downline
-            sponsor links.{"\n\n"}
-            Their <Text style={{ fontWeight: "800" }}>transactions and orders are kept</Text> for audit.{"\n\n"}
-            <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first</Text> — restore from
-            <Text style={{ fontWeight: "800" }}> Admin → Data Backups</Text> if needed.{"\n\n"}
-            Type <Text style={{ fontWeight: "800", color: "#B3261E" }}>DELETE</Text> to confirm.
-          </Text>
-          <TextInput
-            value={deleteConfirmText}
-            onChangeText={(v) => setDeleteConfirmText(v.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6))}
-            placeholder="DELETE"
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="characters"
-            style={modalStyles.confirmInput}
-            testID="delete-confirm-input"
-          />
-          {!!msg && (
-            <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
-              <Feather name="x-circle" size={16} color="#B3261E" />
-              <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{msg}</Text>
-            </View>
-          )}
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-            <TouchableOpacity onPress={() => { setConfirmDelete(false); setDeleteConfirmText(""); }} disabled={busy === "delete"} style={[modalStyles.btn, { backgroundColor: colors.surfaceMuted }]} testID="delete-confirm-cancel">
-              <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={performDelete}
-              disabled={deleteConfirmText !== "DELETE" || busy === "delete"}
-              style={[modalStyles.btn, { backgroundColor: "#B3261E" }, (deleteConfirmText !== "DELETE" || busy === "delete") && { opacity: 0.5 }]}
-              testID="delete-confirm-go"
-            >
-              {busy === "delete" ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Delete user</Text>}
-            </TouchableOpacity>
-          </View>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-    </>
   );
 }
 
