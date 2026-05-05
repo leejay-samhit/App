@@ -1318,8 +1318,8 @@ def _auto_remarks_for(tx: Dict[str, Any]) -> str:
         "shop_commission": f"Shop margin from order {tx.get('order_id', '')[:8]} · {sign}₹{int(abs_amt)}",
         "vendor_sale": f"Vendor share · {sign}₹{int(abs_amt)}",
         "order": f"Shop order placed · {sign}₹{int(abs_amt)}",
-        "admin_credit": f"Admin credited ₹{int(abs_amt)} · {tx.get('remarks') or 'no remarks'}",
-        "admin_debit": f"Admin debited ₹{int(abs_amt)} · {tx.get('remarks') or 'no remarks'}",
+        "admin_credit": tx.get("remarks") or f"Credit ₹{int(abs_amt)} from admin",
+        "admin_debit": tx.get("remarks") or f"Debit ₹{int(abs_amt)} by admin",
         "system_deposit": f"System wallet top-up · UTR {ref or 'n/a'} · {sign}₹{int(abs_amt)}",
         "withdrawal": f"Withdrawal · {sign}₹{int(abs_amt)}{(' · UTR ' + ref) if ref else ''}",
     }
@@ -3464,7 +3464,11 @@ async def system_wallet_deposit(payload: SystemWalletDeposit, admin: Dict[str, A
             "type": "system_deposit",
             "amount": float(payload.amount),
             "status": "success",
-            "description": f"System wallet top-up · UTR {payload.utr}" + (f" · {payload.remarks}" if payload.remarks else ""),
+            # Use the admin's typed remarks verbatim if present; otherwise a
+            # short auto-generated label. Either way the UTR/amount remain on
+            # separate fields so they're not swallowed by free-text remarks.
+            "description": (payload.remarks.strip() if (payload.remarks and payload.remarks.strip()) else f"System wallet top-up · UTR {payload.utr}"),
+            "remarks": (payload.remarks or "").strip() or None,
             "reference_number": payload.utr,
             "deposit_id": dep_id,
             "created_at": ts,
@@ -3509,7 +3513,9 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
         "type": "admin_credit" if payload.type == "credit" else "admin_debit",
         "amount": delta,
         "status": "success",
-        "description": f"Admin {payload.type}: {payload.reason.strip()}",
+        # Use the admin's typed remarks verbatim — no auto-prefix. The type
+        # itself is already conveyed by `type` and shown as a separate label.
+        "description": payload.reason.strip(),
         "reference_number": txn_id[:8].upper(),
         "from_admin_id": admin["id"],
         "from_admin_email": admin.get("email"),
@@ -4153,6 +4159,26 @@ async def on_startup():
         await db.system_wallet_deposits.create_index("utr", unique=True, name="uniq_deposit_utr")
     except Exception as _idx_err:
         logger.warning(f"Transaction unique-index setup failed: {_idx_err}")
+
+    # ---------- Backfill: clean up auto-prefixed admin descriptions ----------
+    # Earlier code stored "Admin credit: <remarks>" / "Admin debit: <remarks>".
+    # Now we store the typed remarks verbatim. Strip the legacy prefix from
+    # any existing transactions so the wallet history shows what the admin typed.
+    try:
+        async for tx in db.transactions.find(
+            {
+                "type": {"$in": ["admin_credit", "admin_debit"]},
+                "description": {"$regex": "^Admin (credit|debit): "},
+            },
+            {"_id": 0, "id": 1, "description": 1, "remarks": 1},
+        ):
+            new_desc = tx["description"].split(": ", 1)[1] if ": " in tx["description"] else tx["description"]
+            update = {"description": new_desc.strip()}
+            if not (tx.get("remarks") or "").strip():
+                update["remarks"] = new_desc.strip()
+            await db.transactions.update_one({"id": tx["id"]}, {"$set": update})
+    except Exception as _bf_err:
+        logger.warning(f"Admin-prefix backfill failed: {_bf_err}")
     await seed_admin()
     await seed_products()
     # Backfill: any existing user without approval_status — assume approved (legacy users
