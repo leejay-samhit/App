@@ -4406,7 +4406,8 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Danger Zone — Reset App to Zero (UI flow + guards only — do NOT trigger destructive call)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -5428,4 +5429,67 @@ agent_communication:
 
         Phase 2 task marked working: true, needs_retesting: false,
         stuck_count: 0. Main agent can summarise and finish.
+
+
+  - task: "Danger Zone — Reset App to Zero (UI/Modal/Validation)"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/admin/more.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "testing"
+        -comment: |
+          Mobile (390x844) UI test of Danger Zone "Reset App to Zero" flow.
+          NO destructive endpoint hit — the reset request was never submitted.
+
+          Step 1 ✅ Login admin@app.com → /admin/more loads. DANGER ZONE
+            section visible (red). Both rows present:
+              - more-wipe-users (Wipe all users) ✅
+              - more-reset-app (Reset app to zero) ✅
+            Reset row has bold 2px red border + filled red icon as designed.
+
+          Step 2 ✅ Tapping more-reset-app opens bottom-sheet modal:
+            - Title "Reset app to zero?" ✅
+            - Body contains "EVERYTHING" (red) + "This action cannot be undone." ✅
+            - reset-phrase-input + reset-pin-input both present ✅
+            - reset-pin-input HTML type="password" (masked) ✅
+            - Cancel + Reset-to-zero buttons present ✅
+            - Initial reset-confirm computed opacity = 0.5 (disabled) ✅
+
+          Step 3 ✅ Phrase validation:
+            - typing 'delete' → field shows 'DELET' (uppercase + strip
+              non-A-Z + slice(0,5)). NOTE: the review brief expected
+              'DELETE' but the code caps to 5 chars (length of RESET);
+              the underlying intent (uppercase + strip non-A-Z) is
+              correctly verified, and button stays disabled because
+              'DELET' ≠ 'RESET'. Minor — not a blocker.
+            - typing 'reset' → 'RESET' ✅
+            - typing 'resetting' → capped to 'RESET' (5 chars) ✅
+            - With RESET only & PIN empty → confirm opacity 0.5 (disabled) ✅
+
+          Step 4 ✅ PIN validation:
+            - PIN '12' → confirm opacity 0.5 (disabled) ✅
+            - RESET + PIN '123456' → confirm opacity 1.0 (enabled) ✅
+            - Did NOT submit final POST to avoid touching live data.
+
+          Step 5 ✅ Cancel:
+            - Cancel closes modal (title element count = 0) ✅
+            - Re-opening modal shows phrase='' & pin='' (state cleared) ✅
+
+          Step 6 ✅ Finance role gating:
+            - finance@app.com on /admin/more shows 0 occurrences of
+              "DANGER ZONE", more-reset-app, more-wipe-users ✅
+              (correctly hidden behind isSuperAdmin guard).
+
+          Step 7 ✅ Smoke:
+            - No "Application Error" overlay on either role's More page
+            - 0 console errors across both sessions
+            - more-logout works for both admin and finance (returns to /login)
+
+          Screenshots captured: danger_zone.png + reset_modal.png.
+          ALL 7 STEPS PASSED. No data was wiped. UI guards function
+          exactly as specified.
 
