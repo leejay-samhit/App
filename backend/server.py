@@ -19,11 +19,17 @@ import bcrypt
 import httpx
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
+from invoices import (
+    invoice_html as _build_invoice_html,
+    invoice_pdf as _build_invoice_pdf,
+    invoice_number_for as _invoice_number_for,
+    is_invoiceable as _is_invoiceable,
+)
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -1367,7 +1373,69 @@ async def transaction_detail(txn_id: str, user: Dict[str, Any] = Depends(get_cur
         "counter_role": counter_role,
         "auto_remarks": _auto_remarks_for(tx),
         "utr": tx.get("reference_number"),
+        "invoice_number": _invoice_number_for(tx),
+        "invoiceable": _is_invoiceable(tx),
     }
+
+
+# ------------------ GST Invoices ------------------
+async def _resolve_invoice_data(txn_id: str, user: Dict[str, Any]):
+    """Shared helper: fetch txn + permission check + resolve owner/counter/branding."""
+    tx = await db.transactions.find_one({"id": txn_id}, {"_id": 0})
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    is_owner = tx.get("user_id") == user["id"]
+    is_admin_view = user.get("role") == "admin" and user.get("admin_role") in ("super_admin", "finance")
+    if not is_owner and not is_admin_view:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    if not _is_invoiceable(tx):
+        raise HTTPException(status_code=400, detail="No invoice available for this transaction type")
+    owner = await db.users.find_one(
+        {"id": tx.get("user_id")},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1},
+    )
+    # Counter-party (mirrors the logic in transaction_detail)
+    counter: Optional[Dict[str, Any]] = None
+    if tx.get("from_admin_id"):
+        counter = await db.users.find_one({"id": tx["from_admin_id"]}, {"_id": 0, "id": 1, "name": 1, "email": 1})
+    elif tx.get("booking_id"):
+        booking = await db.service_bookings.find_one({"id": tx["booking_id"]}, {"_id": 0})
+        if booking:
+            other_id = booking["provider_id"] if tx.get("user_id") == booking.get("customer_id") else booking.get("customer_id")
+            counter = await db.users.find_one({"id": other_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
+    elif tx.get("order_id"):
+        order = await db.orders.find_one({"id": tx["order_id"]}, {"_id": 0})
+        if order and order.get("user_id") != tx.get("user_id"):
+            counter = await db.users.find_one({"id": order.get("user_id")}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
+
+    # Branding
+    branding_doc = await db.settings.find_one({"id": "branding"}, {"_id": 0}) or {}
+    return tx, owner, counter, branding_doc
+
+
+@api_router.get("/transactions/{txn_id}/invoice", response_class=HTMLResponse)
+async def transaction_invoice_html(txn_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Render an HTML GST invoice for the given transaction. Visible to: owner,
+    super_admin, finance roles. Auto-applies 18% GST per Indian GST law."""
+    tx, owner, counter, branding = await _resolve_invoice_data(txn_id, user)
+    html = _build_invoice_html(tx, owner, branding, counter)
+    return HTMLResponse(content=html, status_code=200)
+
+
+@api_router.get("/transactions/{txn_id}/invoice.pdf")
+async def transaction_invoice_pdf(txn_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Render a PDF GST invoice for the given transaction. Same access as HTML version."""
+    tx, owner, counter, branding = await _resolve_invoice_data(txn_id, user)
+    pdf_bytes = _build_invoice_pdf(tx, owner, branding, counter)
+    inv_no = _invoice_number_for(tx).replace("/", "-")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{inv_no}.pdf"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # ------------------ Wallet-to-wallet transfer ------------------

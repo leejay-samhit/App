@@ -16,10 +16,12 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
+import { WebView } from "react-native-webview";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
 
 type Withdrawal = {
   id: string;
@@ -57,6 +59,30 @@ export default function WalletScreen() {
   // Transaction detail modal
   const [txDetail, setTxDetail] = useState<any | null>(null);
   const [txDetailLoading, setTxDetailLoading] = useState(false);
+  // Invoice preview state
+  const [invoiceHtml, setInvoiceHtml] = useState<string | null>(null);
+  const [invoiceBusy, setInvoiceBusy] = useState(false);
+  const onPreviewInvoice = async () => {
+    if (!txDetail?.transaction?.id) return;
+    setInvoiceBusy(true);
+    try {
+      const html = await fetchInvoiceHtml(txDetail.transaction.id);
+      setInvoiceHtml(html);
+    } catch (e: any) {
+      Alert.alert("Could not load invoice", e?.message || "Try again");
+    } finally {
+      setInvoiceBusy(false);
+    }
+  };
+  const onDownloadInvoice = async () => {
+    if (!txDetail?.transaction?.id) return;
+    setInvoiceBusy(true);
+    try {
+      await downloadInvoicePdf(txDetail.transaction.id, txDetail.invoice_number);
+    } finally {
+      setInvoiceBusy(false);
+    }
+  };
   const openTxDetail = async (txnId: string) => {
     setTxDetailLoading(true);
     setTxDetail({ loading: true });
@@ -409,6 +435,35 @@ export default function WalletScreen() {
                   </>
                 )}
 
+                {txDetail.invoiceable && txDetail.invoice_number ? (
+                  <View style={styles.invoiceBox}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Feather name="file-text" size={16} color={colors.primary} />
+                      <Text style={styles.invoiceTitle}>GST Invoice</Text>
+                    </View>
+                    <Text style={styles.invoiceNo}>{txDetail.invoice_number}</Text>
+                    <Text style={styles.invoiceSub}>18% GST applied as per Indian GST law (CGST 9% + SGST 9%).</Text>
+                    <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+                      <TouchableOpacity onPress={onPreviewInvoice} disabled={invoiceBusy} style={[styles.invoiceBtnSecondary, { flex: 1 }]} testID="invoice-preview">
+                        {invoiceBusy ? <ActivityIndicator color={colors.primary} /> : (
+                          <>
+                            <Feather name="eye" size={16} color={colors.primary} />
+                            <Text style={styles.invoiceBtnSecondaryText}>Preview</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={onDownloadInvoice} disabled={invoiceBusy} style={[styles.invoiceBtnPrimary, { flex: 1 }]} testID="invoice-download">
+                        {invoiceBusy ? <ActivityIndicator color={colors.primaryFg} /> : (
+                          <>
+                            <Feather name="download" size={16} color={colors.primaryFg} />
+                            <Text style={styles.invoiceBtnPrimaryText}>Download PDF</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : null}
+
                 <TouchableOpacity onPress={() => setTxDetail(null)} style={[styles.modalBtn, { backgroundColor: colors.primary, marginTop: 18 }]}>
                   <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Close</Text>
                 </TouchableOpacity>
@@ -422,6 +477,40 @@ export default function WalletScreen() {
           </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
+      {/* Invoice HTML Preview modal */}
+      <Modal visible={!!invoiceHtml} animationType="slide" onRequestClose={() => setInvoiceHtml(null)}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+          <View style={styles.invoiceHeader}>
+            <TouchableOpacity onPress={() => setInvoiceHtml(null)} style={styles.invoiceCloseBtn}>
+              <Feather name="x" size={22} color={colors.textMain} />
+            </TouchableOpacity>
+            <Text style={styles.invoiceHeaderTitle}>GST Invoice</Text>
+            <TouchableOpacity onPress={onDownloadInvoice} style={styles.invoiceCloseBtn} disabled={invoiceBusy}>
+              {invoiceBusy ? <ActivityIndicator color={colors.primary} size="small" /> : <Feather name="download" size={20} color={colors.primary} />}
+            </TouchableOpacity>
+          </View>
+          {invoiceHtml ? (
+            Platform.OS === "web" ? (
+              <View style={{ flex: 1, backgroundColor: "#fff" }}>
+                {/* Inline HTML on web via iframe */}
+                {/* @ts-ignore react-native-web allows raw DOM elements via createElement */}
+                <iframe
+                  srcDoc={invoiceHtml}
+                  style={{ flex: 1, border: 0, width: "100%", height: "100%" } as any}
+                  title="invoice-preview"
+                />
+              </View>
+            ) : (
+              <WebView
+                originWhitelist={["*"]}
+                source={{ html: invoiceHtml }}
+                style={{ flex: 1, backgroundColor: "#fff" }}
+              />
+            )
+          ) : null}
+        </SafeAreaView>
+      </Modal>
+
     </SafeAreaView>
   );
 }
@@ -468,4 +557,15 @@ const styles = StyleSheet.create({
   detailRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 12 },
   detailKey: { fontSize: 12, color: colors.textMuted, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0, width: 120 },
   detailVal: { fontSize: 13, color: colors.textMain, fontWeight: "600", textAlign: "right", flex: 1 },
+  invoiceBox: { marginTop: 18, padding: 14, backgroundColor: colors.surfaceMuted, borderRadius: 14, borderWidth: 1, borderColor: colors.border },
+  invoiceTitle: { fontSize: 12, fontWeight: "800", color: colors.textMain, letterSpacing: 1, textTransform: "uppercase" },
+  invoiceNo: { fontSize: 14, fontWeight: "700", color: colors.primary, marginTop: 4 },
+  invoiceSub: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 15 },
+  invoiceBtnPrimary: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 12, borderRadius: radii.button, minHeight: 44 },
+  invoiceBtnPrimaryText: { color: colors.primaryFg, fontWeight: "800", fontSize: 13 },
+  invoiceBtnSecondary: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "transparent", borderWidth: 1.5, borderColor: colors.primary, paddingVertical: 12, borderRadius: radii.button, minHeight: 44 },
+  invoiceBtnSecondaryText: { color: colors.primary, fontWeight: "800", fontSize: 13 },
+  invoiceHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 8, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface },
+  invoiceCloseBtn: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  invoiceHeaderTitle: { fontSize: 16, fontWeight: "800", color: colors.textMain },
 });

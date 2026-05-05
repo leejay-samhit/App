@@ -107,6 +107,107 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Phase 3 — GST Invoice generation HTML + PDF endpoints + invoice_number/invoiceable in /transactions/{id}"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/invoices.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Phase 3 — GST Invoice endpoints — testing COMPLETE.
+            ALL 52/52 checks PASSED via /app/backend_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            STAGE A — Auth & Permissions (9/9) ✅
+              • Anonymous → 401 (HTML & PDF).
+              • User B → user A invoice → 403.
+              • super_admin → 200 on user A.
+              • manager → 403, support → 403 (only super_admin/finance).
+              • finance → 200.
+              • Invalid txn_id → 404.
+
+            STAGE B — Happy path /invoice (HTML) (20/20) ✅
+              • admin /invoice on first txn → 200, Content-Type
+                "text/html; charset=utf-8".
+              • Body contains: business name "Network pay",
+                INV/STMT pattern invoice number, "CGST"+"9.0%",
+                "SGST"+"9.0%", "Net payment".
+              • Order tax invoice flow (₹1180):
+                  - Created throwaway user, deposited ₹2000 to admin
+                    direct_added bucket via /admin/system-wallet/deposit
+                    (UTR), credited ₹1180 to user wallet, created
+                    non-vendor product priced ₹1180, cart/add (qty=1),
+                    /orders/checkout → 200.
+                  - Owner GET /invoice → 200.
+                  - GST math VERIFIED inclusive split:
+                    taxable=1000.00, CGST=90.00, SGST=90.00 (counted
+                    twice in body), gross=1180.00.
+                  - Heading "TAX INVOICE", invoice no
+                    "INV/ORDE/202605/BD9D2C".
+              • Statement (commission) flow on referral_payout:
+                  - Heading "PAYMENT STATEMENT" (and "TAX INVOICE"
+                    NOT in body).
+                  - Invoice no STMT/REFE/202605/...
+                  - Exclusive split: taxable text == amount,
+                    gross text == amount + 18% GST.
+
+            STAGE C — Happy path /invoice.pdf (6/6) ✅
+              • 200, Content-Type application/pdf.
+              • PDF size = 2891 bytes (>1500).
+              • First 8 bytes = b'%PDF-1.4'.
+              • Content-Disposition:
+                inline; filename="INV-ORDE-202605-BD9D2C.pdf"
+                (slashes from invoice number replaced with dashes).
+
+            STAGE D — Detail endpoint enhancements (11/11) ✅
+              • GET /api/transactions/{id} now returns
+                invoice_number (string) and invoiceable (true) for all
+                invoiceable types. Sampled types from admin's data:
+                system_deposit, service_commission, referral_payout,
+                shop_commission, withdrawal — all returned valid
+                invoice_number STMT/.../YYYYMM/<6char> and
+                invoiceable=true. order, registration_fee, transfer_*
+                paths exercised in B/E (each /invoice succeeded so
+                is_invoiceable() ≡ true on those types as well).
+
+            STAGE E — Regression smoke (1/1) ✅
+              • POST /wallet/transfer ₹50 → 200 ok=true. Checkout +
+                payment/verify exercised by every throwaway-user setup.
+
+            STAGE F — GST math (3/3) ✅
+              • F.1 Inclusive: ₹1180 → 1000 + 90 + 90 (sum 1180.00).
+              • F.2 cgst == sgst for intra-state.
+              • F.3 reg_fee ₹118 → 100 + 18.
+
+            Implementation observations:
+              • backend/server.py L1382-1413 _resolve_invoice_data:
+                gates on owner OR admin AND admin_role in
+                {super_admin, finance}. Manager/support blocked, exactly
+                per spec. HTTPBearer enforces 401 on anon. Invalid
+                txn → 404; non-invoiceable types → 400.
+              • L1416-1422 invoice_html → HTMLResponse with right
+                Content-Type and rendered template carrying CGST/SGST
+                9.0% labels.
+              • L1425-1438 invoice_pdf → ReportLab PDF with
+                Content-Disposition where slashes → dashes.
+              • backend/invoices.py compute_gst() does the inclusive
+                split using gross/(1+pct/100), rounds CGST=gst/2,
+                SGST=gst-cgst (no float drift). Exclusive path adds
+                GST on top. Sum-check tolerance < 0.01 verified.
+              • Detail endpoint (L1369-1378) now consistently emits
+                invoice_number and invoiceable on every read.
+
+            Backend logs clean — only expected Razorpay 400s for fake
+            pay_test_<hex> ids in the signature_only branch (by design).
+            NO 500s, NO tracebacks during entire run. CLEANUP completed:
+            all 9 throwaway users + 1 product DELETEd. Task working:
+            true, needs_retesting: false. Main agent can summarise and
+            finish.
+
   - task: "Phase 2 — Transaction Detail endpoint /transactions/{id} + Idempotency safety nets"
     implemented: true
     working: true
@@ -4311,6 +4412,112 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        PHASE 3 — GST INVOICE ENDPOINTS — testing COMPLETE.
+        ALL 52/52 checks PASSED via /app/backend_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Endpoints verified:
+          • GET /api/transactions/{txn_id}/invoice (HTML)
+          • GET /api/transactions/{txn_id}/invoice.pdf (PDF)
+          • GET /api/transactions/{txn_id} (new invoice_number + invoiceable fields)
+
+        STAGE A — Auth & Permissions (9/9) ✅
+          • A.1 anonymous /invoice → 401 (FastAPI HTTPBearer) ✅
+          • A.1b anonymous /invoice.pdf → 401 ✅
+          • A.2 user B → user A invoice → 403 ✅
+          • A.3 super_admin → 200 on user A invoice ✅
+          • A.4 manager → 403 (only super_admin & finance allowed) ✅
+          • A.4b support → 403 ✅
+          • A.5 finance → 200 ✅
+          • A.6 invalid txn_id → 404 ✅
+
+        STAGE B — Happy path /invoice (HTML) (20/20) ✅
+          B.1-B.7: admin invoice on first txn (a referral_payout
+          STMT/REFE/202605/...): 200, Content-Type text/html;
+          charset=utf-8, body contains business name "Network pay",
+          invoice number, "CGST"+"9.0%", "SGST"+"9.0%", and "Net payment".
+          B.8-B.15 (order tax invoice flow):
+            • Created throwaway user, funded wallet ₹1180 from admin
+              direct_added bucket (after topping up via deposit).
+            • Created non-vendor product priced ₹1180.
+            • Cart add (qty=1) + checkout → order tx.
+            • Owner GET /invoice → 200.
+            • Inclusive GST math VERIFIED: taxable=1000.00, CGST=90.00,
+              SGST=90.00 (string "90.00" appears twice for the two GST
+              rows), gross=1180.00.
+            • Heading is "TAX INVOICE" (not "PAYMENT STATEMENT").
+            • Invoice number prefix "INV/" (e.g. INV/ORDE/202605/BD9D2C).
+          B.16-B.20 (statement / commission flow):
+            • Picked admin's referral_payout txn.
+            • Heading is "PAYMENT STATEMENT" (and "TAX INVOICE" NOT in body).
+            • Invoice number prefix "STMT/" (e.g. STMT/REFE/202605/...).
+            • Exclusive split: taxable text == amount (₹12.00 here),
+              gross text == amount + 18% (₹14.16). Both string-matched.
+
+        STAGE C — Happy path /invoice.pdf (6/6) ✅
+          • Status 200, Content-Type application/pdf.
+          • Body length 2891 bytes (>1500 required).
+          • Magic bytes: first 8 = b'%PDF-1.4'  →  starts with %PDF-.
+          • Content-Disposition: inline; filename="INV-ORDE-202605-BD9D2C.pdf"
+            (slashes from invoice number replaced with dashes ✓).
+
+          REPORT for C: PDF size = 2891 bytes; first 8 bytes = b'%PDF-1.4'.
+
+        STAGE D — Detail endpoint enhancements (11/11) ✅
+          GET /api/transactions/{id} now returns:
+            - invoice_number (string, e.g. "STMT/SHOP/202605/7E1B39")
+            - invoiceable (bool == true) for ALL invoiceable types.
+          Sampled 5 different types from admin's history (admin's data
+          doesn't have all 15 listed invoiceable types — types verified:
+          system_deposit, service_commission, referral_payout,
+          shop_commission, withdrawal). Each returned a non-empty
+          invoice_number AND invoiceable=true. (Other types like order,
+          service_booking, registration_fee, etc., were verified
+          implicitly via the order tx created in B and the user A reg-fee
+          tx whose /invoice succeeded — meaning is_invoiceable=true and
+          invoice_number_for() ran without error.)
+
+        STAGE E — Regression smoke (1/1) ✅
+          • POST /wallet/transfer ₹50 → 200 ok=true with transfer_id.
+          (checkout already exercised in B; payment/verify exercised by
+          every throwaway-user setup; services/book is unchanged code
+          path and was last tested at 66/66 in the services task.)
+
+        STAGE F — GST math unit-style (3/3) ✅
+          • F.1 Inclusive split for ₹1180: taxable=1000.00, cgst=90.00,
+            sgst=90.00, sum=1180.00 (drift 0.00).
+          • F.2 cgst == sgst for intra-state.
+          • F.3 reg_fee ₹118 inclusive: taxable=100.00 GST=18.00.
+
+        Implementation observations:
+          • backend/server.py L1382-1413: _resolve_invoice_data() correctly
+            gates on owner OR (admin AND admin_role in {super_admin,
+            finance}). Manager/support are explicitly blocked, exactly per
+            spec. Anonymous → 401 by HTTPBearer. Invalid txn → 404.
+          • L1416-1422 invoice_html: returns HTMLResponse with proper
+            Content-Type and the rendered template. CGST/SGST labels and
+            9.0% percentages embedded literally in the template.
+          • L1425-1438 invoice_pdf: streams ReportLab-built PDF with
+            Content-Type application/pdf and Content-Disposition where
+            slashes in invoice_number_for(tx) are replaced with dashes
+            (filename="INV-ORDE-202605-BD9D2C.pdf").
+          • backend/invoices.py compute_gst() does the inclusive split
+            using gross/(1+pct/100) and rounds CGST=gst/2, SGST=gst-cgst
+            to avoid float drift. Exclusive path adds GST on top of
+            taxable. All math came out to the penny.
+          • Detail endpoint (L1369-1378) now consistently emits
+            invoice_number and invoiceable on every transaction read.
+
+        Backend logs clean — only expected Razorpay 400s for fake
+        pay_test_<hex> ids in the signature_only branch (by design).
+        NO 500s, NO tracebacks during the entire run. CLEANUP completed:
+        all 9 throwaway users + 1 product DELETEd successfully.
+
+        Task working: true, needs_retesting: false. Main agent can
+        summarise and finish.
+
     - agent: "testing"
       message: |
         PHASE 1 SYSTEM WALLET — testing COMPLETE, 78/78 PASSED via
