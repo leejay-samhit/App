@@ -4082,6 +4082,7 @@ async def on_startup():
             partialFilterExpression={"deposit_id": {"$exists": True, "$type": "string"}},
             name="uniq_user_type_deposit",
         )
+        await db.system_wallet_deposits.create_index("utr", unique=True, name="uniq_deposit_utr")
     except Exception as _idx_err:
         logger.warning(f"Transaction unique-index setup failed: {_idx_err}")
     await seed_admin()
