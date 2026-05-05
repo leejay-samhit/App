@@ -2114,11 +2114,81 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
         admin_count = await db.users.count_documents({"role": "admin"})
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin")
+
+    cascade: Dict[str, int] = {}
+
+    # 1. Hard cascade — collections that should be wiped along with the user
+    hard_cascade_specs = [
+        ("cart_items",            {"user_id": user_id}),
+        ("notifications",         {"user_id": user_id}),
+        ("withdrawals",           {"user_id": user_id}),
+        ("vendor_applications",   {"user_id": user_id}),
+        ("service_applications",  {"user_id": user_id}),
+        ("approved_registrations",{"user_id": user_id}),
+        ("rejected_registrations",{"user_id": user_id}),
+        # Service bookings as customer OR provider
+        ("service_bookings",      {"$or": [{"customer_id": user_id}, {"provider_id": user_id}]}),
+        # Tickets they raised + replies on those tickets are in ticket_messages keyed by ticket_id;
+        # we'll delete tickets first then sweep ticket_messages for orphans below.
+        ("tickets",               {"user_id": user_id}),
+    ]
+    for coll, query in hard_cascade_specs:
+        res = await db[coll].delete_many(query)
+        cascade[coll] = res.deleted_count
+
+    # 2. Sweep ticket_messages whose tickets were just deleted (no longer have a parent)
+    remaining_ticket_ids = {t["id"] async for t in db.tickets.find({}, {"_id": 0, "id": 1})}
+    if remaining_ticket_ids:
+        orphan_msgs = await db.ticket_messages.delete_many({"ticket_id": {"$nin": list(remaining_ticket_ids)}})
+    else:
+        orphan_msgs = await db.ticket_messages.delete_many({})
+    cascade["ticket_messages_orphans"] = orphan_msgs.deleted_count
+
+    # 3. Soft cleanup — preserve transactions/orders for audit, but unlink author refs
+    # so the audit trail still resolves. We mark the original user_id as a sentinel.
+    await db.transactions.update_many(
+        {"counterparty_id": user_id}, {"$set": {"counterparty_id": None}},
+    )
+
+    # 4. Reassign downline: move direct referrals to the deleting admin (super_admin or
+    # the seed admin). Without this, downline users have a dangling sponsor_id and the
+    # tree query breaks. We reassign by clearing sponsor_id to None — it surfaces them
+    # as "orphaned" in the network view, which super_admin can re-link manually.
+    downline_unset = await db.users.update_many(
+        {"sponsor_id": user_id},
+        {"$set": {"sponsor_id": None, "sponsor_referral_code": None}},
+    )
+    cascade["downline_orphaned"] = downline_unset.modified_count
+
+    # 5. If they were a vendor, mark their products as unavailable rather than delete
+    products_unlinked = await db.products.update_many(
+        {"vendor_id": user_id},
+        {"$set": {"vendor_id": None, "stock": 0, "is_active": False}},
+    )
+    cascade["products_unlinked"] = products_unlinked.modified_count
+
+    # 6. Vendor sales ledger — keep for audit, just null the vendor_id link
+    vs_nulled = await db.vendor_sales.update_many(
+        {"vendor_id": user_id}, {"$set": {"vendor_id": None}},
+    )
+    cascade["vendor_sales_unlinked"] = vs_nulled.modified_count
+
+    # 7. Finally, the user itself
     await db.users.delete_one({"id": user_id})
-    # Cascade clean: remove their cart items, notifications (keep transactions/orders for audit)
-    await db.cart_items.delete_many({"user_id": user_id})
-    await db.notifications.delete_many({"user_id": user_id})
-    return {"ok": True}
+    cascade["user"] = 1
+
+    await _audit_log(
+        admin, "user.delete", "user", user_id,
+        {
+            "email": target.get("email"),
+            "name": target.get("name"),
+            "role": target.get("role"),
+            "wallet_balance_at_delete": target.get("wallet_balance"),
+            "cascade": cascade,
+        },
+    )
+
+    return {"ok": True, "cascade": cascade}
 
 
 # ------------------ Admin: Admins management (super_admin only) ------------------
