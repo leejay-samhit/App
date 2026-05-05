@@ -2115,6 +2115,13 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin")
 
+    # ---------- AUTO BACKUP before destructive action ----------
+    snap_info = await _take_snapshot(
+        kind="auto-pre-delete",
+        note=f"Auto-backup before deleting user {target.get('email')} ({target.get('name')})",
+        created_by=admin["id"],
+    )
+
     cascade: Dict[str, int] = {}
 
     # 1. Hard cascade — collections that should be wiped along with the user
@@ -2185,10 +2192,11 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
             "role": target.get("role"),
             "wallet_balance_at_delete": target.get("wallet_balance"),
             "cascade": cascade,
+            "snapshot_id": snap_info["id"],
         },
     )
 
-    return {"ok": True, "cascade": cascade}
+    return {"ok": True, "cascade": cascade, "snapshot_id": snap_info["id"], "snapshot_created_at": snap_info["created_at"]}
 
 
 # ------------------ Admin: Admins management (super_admin only) ------------------
@@ -2410,6 +2418,13 @@ async def admin_wipe_users(
     if not await verify_danger_pin(payload.danger_pin):
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
 
+    # ---------- AUTO BACKUP before destructive action ----------
+    snap_info = await _take_snapshot(
+        kind="auto-pre-wipe-users",
+        note="Auto-backup before Wipe-All-Users",
+        created_by=admin["id"],
+    )
+
     user_query: Dict[str, Any] = {"role": {"$ne": "admin"}} if payload.keep_admins else {"id": {"$ne": admin["id"]}}
     if not payload.keep_admins:
         # never wipe self
@@ -2452,6 +2467,7 @@ async def admin_wipe_users(
             "cart_items_deleted": cart_deleted.deleted_count,
             "notifications_deleted": notif_deleted.deleted_count,
             "keep_admins": payload.keep_admins,
+            "snapshot_id": snap_info["id"],
         },
     )
 
@@ -2463,6 +2479,8 @@ async def admin_wipe_users(
         "orders_deleted": orders_deleted.deleted_count,
         "cart_items_deleted": cart_deleted.deleted_count,
         "notifications_deleted": notif_deleted.deleted_count,
+        "snapshot_id": snap_info["id"],
+        "snapshot_created_at": snap_info["created_at"],
     }
 
 
@@ -2488,6 +2506,16 @@ async def admin_wipe_all(
     if (payload.confirm_phrase or "").strip().upper() != "RESET":
         raise HTTPException(status_code=400, detail='You must type "RESET" to confirm a full factory wipe')
 
+    # ---------- AUTO BACKUP before destructive action ----------
+    # Take the snapshot first; it lands in db_snapshots and we deliberately do NOT
+    # include db_snapshots in the wipe list below, so the backup survives the reset
+    # and can be restored from Admin → Data Backups.
+    snap_info = await _take_snapshot(
+        kind="auto-pre-wipe-all",
+        note="Auto-backup before Reset App to Zero",
+        created_by=admin["id"],
+    )
+
     # Identify the seed super-admin so we can keep their account but reset stats.
     seed_admin_email = ADMIN_EMAIL.lower()
     seed = await db.users.find_one({"email": seed_admin_email})
@@ -2495,7 +2523,7 @@ async def admin_wipe_all(
 
     summary: Dict[str, int] = {}
 
-    # --- Wipe data collections ---
+    # --- Wipe data collections (db_snapshots is intentionally NOT in this list) ---
     wipe_collections = [
         "transactions", "withdrawals", "orders", "cart_items", "notifications",
         "products", "vendor_sales", "vendor_applications",
@@ -2503,7 +2531,6 @@ async def admin_wipe_all(
         "tickets", "ticket_messages",
         "system_wallet_deposits",
         "approved_registrations", "rejected_registrations",
-        "db_snapshots",
     ]
     for coll in wipe_collections:
         res = await db[coll].delete_many({})
@@ -2534,11 +2561,17 @@ async def admin_wipe_all(
     await db.audit_logs.delete_many({})
     await _audit_log(
         admin, "system.wipe_all", "system", "all",
-        {"summary": summary, "preserved": ["settings", "seed_admin"]},
+        {"summary": summary, "preserved": ["settings", "seed_admin", "db_snapshots"], "snapshot_id": snap_info["id"]},
     )
     summary["audit_logs_deleted"] = 0  # we just wiped them and re-wrote 1
 
-    return {"ok": True, "summary": summary, "message": "App reset to zero. Settings and super-admin account preserved."}
+    return {
+        "ok": True,
+        "summary": summary,
+        "snapshot_id": snap_info["id"],
+        "snapshot_created_at": snap_info["created_at"],
+        "message": "App reset to zero. Settings, super-admin account, and pre-reset backup preserved.",
+    }
 
 
 # ------------------ Admin: Settings (Payout Structure) ------------------
@@ -4135,6 +4168,12 @@ async def seed_products():
 BACKUP_COLLECTIONS = (
     "users", "transactions", "withdrawals", "orders", "cart_items",
     "notifications", "products", "settings", "audit_logs",
+    # Extended coverage so pre-delete / pre-wipe snapshots are restorable
+    "vendor_applications", "vendor_sales",
+    "service_applications", "service_bookings",
+    "system_wallet_deposits",
+    "approved_registrations", "rejected_registrations",
+    "tickets", "ticket_messages",
 )
 BACKUP_INTERVAL_SECONDS = int(os.environ.get("BACKUP_INTERVAL_SECONDS", 15 * 60))  # 15 min default
 BACKUP_RETENTION = int(os.environ.get("BACKUP_RETENTION", 24))  # keep last 24 snapshots

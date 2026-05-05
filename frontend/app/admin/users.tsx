@@ -365,20 +365,18 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
     setMsg("");
     try {
       const res = await api.delete(`/admin/users/${user.id}`);
-      const summary = (res.data && (res.data as any).cascade) || {};
+      const data: any = res.data || {};
+      const summary = data.cascade || {};
       const total = Object.values(summary).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
+      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
       setConfirmDelete(false);
       setDeleteConfirmText("");
-      // Use a microtask so the modal close animation doesn't fight onSaved's parent re-render
       setTimeout(() => {
+        const msg = `User deleted${total ? ` · ${total} related records cleaned up` : ""}.${snapId ? `\n\nAuto-backup taken (#${snapId}). Restore from Admin → Data Backups if needed.` : ""}`;
         if (Platform.OS === "web") {
-          // window.alert is reliable on web
-          // eslint-disable-next-line no-alert
-          (typeof window !== "undefined" ? window.alert : Alert.alert)(
-            `User deleted${total ? ` · ${total} related records cleaned up` : ""}.`
-          );
+          (typeof window !== "undefined" ? window.alert : Alert.alert)(msg);
         } else {
-          Alert.alert("User deleted", `${total ? `${total} related records cleaned up.` : "Done."}`);
+          Alert.alert("User deleted", msg);
         }
         onSaved();
       }, 50);
@@ -637,6 +635,8 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved }: { user: Admin
                 withdrawals, service bookings, vendor &amp; service applications, tickets, registrations, and downline
                 sponsor links.{"\n\n"}
                 Their <Text style={{ fontWeight: "800" }}>transactions and orders are kept</Text> for audit.{"\n\n"}
+                <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first</Text> — restore from
+                <Text style={{ fontWeight: "800" }}> Admin → Data Backups</Text> if needed.{"\n\n"}
                 Type <Text style={{ fontWeight: "800", color: "#B3261E" }}>DELETE</Text> to confirm.
               </Text>
               <TextInput

@@ -86,11 +86,12 @@ export default function More() {
         keep_admins: true,
         danger_pin: wipePin,
       });
+      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
       setWipeOpen(false);
       setWipePin("");
       Alert.alert(
         "Wipe complete",
-        `Deleted:\n• ${data.users_deleted} users\n• ${data.transactions_deleted} transactions\n• ${data.withdrawals_deleted} withdrawals\n• ${data.orders_deleted} orders\n• ${data.cart_items_deleted} cart items\n• ${data.notifications_deleted} notifications`,
+        `Deleted:\n• ${data.users_deleted} users\n• ${data.transactions_deleted} transactions\n• ${data.withdrawals_deleted} withdrawals\n• ${data.orders_deleted} orders\n• ${data.cart_items_deleted} cart items\n• ${data.notifications_deleted} notifications${snapId ? `\n\nAuto-backup taken (#${snapId}). Restore from Admin → Data Backups if needed.` : ""}`,
       );
     } catch (e) {
       setWipeError(formatApiError(e));
@@ -117,9 +118,10 @@ export default function More() {
       setResetOpen(false); setResetPin(""); setResetPhrase("");
       const s = data.summary || {};
       const total = Object.values(s).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
+      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
       Alert.alert(
         "App reset to zero",
-        `${total} records cleared.\n\n• ${s.users_deleted || 0} users\n• ${s.transactions_deleted || 0} transactions\n• ${s.orders_deleted || 0} orders\n• ${s.withdrawals_deleted || 0} withdrawals\n• ${s.products_deleted || 0} products\n• ${s.tickets_deleted || 0} tickets\n• ${s.system_wallet_deposits_deleted || 0} system deposits\n\nSettings & super-admin login preserved.`,
+        `${total} records cleared.\n\n• ${s.users_deleted || 0} users\n• ${s.transactions_deleted || 0} transactions\n• ${s.orders_deleted || 0} orders\n• ${s.withdrawals_deleted || 0} withdrawals\n• ${s.products_deleted || 0} products\n• ${s.tickets_deleted || 0} tickets\n• ${s.system_wallet_deposits_deleted || 0} system deposits\n\nSettings & super-admin login preserved.${snapId ? `\n\nFull pre-reset backup taken (#${snapId}). Restore from Admin → Data Backups if needed.` : ""}`,
       );
     } catch (e) {
       setResetError(formatApiError(e));
@@ -206,6 +208,8 @@ export default function More() {
               This will permanently delete every non-admin user account and all their related data
               (transactions, withdrawals, orders, cart, notifications).{"\n\n"}
               Admin accounts and the system audit log are kept.{"\n\n"}
+              <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first</Text> — you can
+              restore from <Text style={{ fontWeight: "800" }}>Admin → Data Backups</Text> if needed.{"\n\n"}
               Enter your <Text style={{ fontWeight: "800" }}>6-digit Danger PIN</Text> to confirm.
             </Text>
             <TextInput
@@ -268,7 +272,10 @@ export default function More() {
               audit logs, deposits and snapshots.{"\n\n"}
               Only <Text style={{ fontWeight: "800" }}>Settings</Text> (branding/payouts) and your
               <Text style={{ fontWeight: "800" }}> super-admin login</Text> are preserved.{"\n\n"}
-              <Text style={{ color: "#B3261E", fontWeight: "800" }}>This action cannot be undone.</Text>
+              <Text style={{ fontWeight: "800", color: colors.success }}>An automatic full backup is taken first</Text> — the
+              backup itself survives the reset and can be restored from <Text style={{ fontWeight: "800" }}>Admin → Data
+              Backups</Text>.{"\n\n"}
+              <Text style={{ color: "#B3261E", fontWeight: "800" }}>This action cannot be undone (without restoring the backup).</Text>
             </Text>
             <Text style={styles.label}>Type RESET to confirm</Text>
             <TextInput
