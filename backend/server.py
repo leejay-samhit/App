@@ -23,6 +23,7 @@ from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -976,23 +977,33 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
             "approval_reject_reason": None,
         })
 
-    await db.users.update_one({"id": user["id"]}, {"$set": user_set})
-    await db.transactions.insert_one({
-        "id": txn_id,
-        "user_id": user["id"],
-        "type": "registration_fee",
-        "amount": fee,
-        "status": "paid",
-        "description": (
-            "Registration fee via Razorpay"
-            + (f" · UTR {utr}" if utr else "")
-            + (" (mock)" if creds["is_mock"] else "")
-        ),
-        "razorpay_order_id": payload.razorpay_order_id,
-        "razorpay_payment_id": payload.razorpay_payment_id,
-        "reference_number": utr,
-        "created_at": now_utc().isoformat(),
-    })
+    # ATOMIC: only mark as paid if not already paid — prevents duplicates from concurrent calls.
+    upd = await db.users.update_one(
+        {"id": user["id"], "registration_paid": {"$ne": True}},
+        {"$set": user_set},
+    )
+    if upd.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Registration fee already paid")
+    try:
+        await db.transactions.insert_one({
+            "id": txn_id,
+            "user_id": user["id"],
+            "type": "registration_fee",
+            "amount": fee,
+            "status": "paid",
+            "description": (
+                "Registration fee via Razorpay"
+                + (f" · UTR {utr}" if utr else "")
+                + (" (mock)" if creds["is_mock"] else "")
+            ),
+            "razorpay_order_id": payload.razorpay_order_id,
+            "razorpay_payment_id": payload.razorpay_payment_id,
+            "reference_number": utr,
+            "created_at": now_utc().isoformat(),
+        })
+    except DuplicateKeyError:
+        # Idempotent: a parallel call already wrote the txn. Treat as success.
+        pass
 
     if auto_approve:
         # Trigger commission cascade + archive into approved_registrations
@@ -1390,33 +1401,45 @@ async def wallet_transfer(payload: WalletTransfer, user: Dict[str, Any] = Depend
         raise HTTPException(status_code=400, detail="Recipient is not approved yet")
 
     # Atomic-ish transfer (Mongo without transactions on standalone — best effort).
-    await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -payload.amount}})
+    # Atomic balance check on debit; only proceed if the user has sufficient funds at this exact moment.
+    debit_res = await db.users.update_one(
+        {"id": user["id"], "wallet_balance": {"$gte": payload.amount}},
+        {"$inc": {"wallet_balance": -payload.amount}},
+    )
+    if debit_res.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
     await db.users.update_one({"id": recipient["id"]}, {"$inc": {"wallet_balance": payload.amount}})
 
     ts = now_utc().isoformat()
     transfer_id = str(uuid.uuid4())
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user["id"],
-        "type": "transfer_out",
-        "amount": -payload.amount,
-        "status": "success",
-        "description": f"Transferred ₹{int(payload.amount)} to {recipient.get('name')} ({recipient.get('email')})" + (f" — {payload.note}" if payload.note else ""),
-        "transfer_id": transfer_id,
-        "counterparty_id": recipient["id"],
-        "created_at": ts,
-    })
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": recipient["id"],
-        "type": "transfer_in",
-        "amount": payload.amount,
-        "status": "success",
-        "description": f"Received ₹{int(payload.amount)} from {user.get('name')} ({user.get('email')})" + (f" — {payload.note}" if payload.note else ""),
-        "transfer_id": transfer_id,
-        "counterparty_id": user["id"],
-        "created_at": ts,
-    })
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "transfer_out",
+            "amount": -payload.amount,
+            "status": "success",
+            "description": f"Transferred ₹{int(payload.amount)} to {recipient.get('name')} ({recipient.get('email')})" + (f" — {payload.note}" if payload.note else ""),
+            "transfer_id": transfer_id,
+            "counterparty_id": recipient["id"],
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": recipient["id"],
+            "type": "transfer_in",
+            "amount": payload.amount,
+            "status": "success",
+            "description": f"Received ₹{int(payload.amount)} from {user.get('name')} ({user.get('email')})" + (f" — {payload.note}" if payload.note else ""),
+            "transfer_id": transfer_id,
+            "counterparty_id": user["id"],
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
     await _create_notification(
         recipient["id"], "transfer",
         f"₹{int(payload.amount)} received",
@@ -2439,8 +2462,14 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         })
     if total <= 0:
         raise HTTPException(status_code=400, detail="Cart total invalid")
-    fresh = await db.users.find_one({"id": user["id"]})
-    if fresh.get("wallet_balance", 0) < total:
+
+    # ATOMIC wallet debit — guards against rapid double-clicks creating duplicate orders.
+    # Only succeeds if balance still >= total at the moment of update.
+    debit_res = await db.users.update_one(
+        {"id": user["id"], "wallet_balance": {"$gte": total}},
+        {"$inc": {"wallet_balance": -total}},
+    )
+    if debit_res.modified_count == 0:
         raise HTTPException(status_code=400, detail=f"Insufficient wallet balance. Need ₹{total:.0f}")
 
     order_id = str(uuid.uuid4())
@@ -2454,18 +2483,20 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         "created_at": now_utc().isoformat(),
     }
     await db.orders.insert_one(order)
-    await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -total}})
     await db.cart_items.delete_many({"user_id": user["id"]})
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user["id"],
-        "type": "order",
-        "amount": -total,
-        "status": "success",
-        "description": f"Order #{order_id[:8]} ({len(enriched)} items)",
-        "order_id": order_id,
-        "created_at": now_utc().isoformat(),
-    })
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "order",
+            "amount": -total,
+            "status": "success",
+            "description": f"Order #{order_id[:8]} ({len(enriched)} items)",
+            "order_id": order_id,
+            "created_at": now_utc().isoformat(),
+        })
+    except DuplicateKeyError:
+        pass  # idempotent — entry already exists for this order
 
     # Credit admin's shopping_margin bucket with the platform share total
     platform_total = round(sum(float(it.get("platform_share") or 0) for it in enriched), 2)
@@ -2473,17 +2504,20 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin_doc:
             await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
-            await db.transactions.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": admin_doc["id"],
-                "type": "shop_commission",
-                "amount": platform_total,
-                "status": "success",
-                "description": f"Shop margin from order #{order_id[:8]}",
-                "order_id": order_id,
-                "source_user_name": user.get("name"),
-                "created_at": now_utc().isoformat(),
-            })
+            try:
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": admin_doc["id"],
+                    "type": "shop_commission",
+                    "amount": platform_total,
+                    "status": "success",
+                    "description": f"Shop margin from order #{order_id[:8]}",
+                    "order_id": order_id,
+                    "source_user_name": user.get("name"),
+                    "created_at": now_utc().isoformat(),
+                })
+            except DuplicateKeyError:
+                pass
 
     # Credit vendor wallets and write vendor sales ledger entries
     for it in enriched:
@@ -2506,16 +2540,19 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         })
     for vid, amount in vendor_payouts.items():
         await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": amount}})
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": vid,
-            "type": "vendor_sale",
-            "amount": amount,
-            "status": "success",
-            "description": f"Vendor share credited from order #{order_id[:8]}",
-            "order_id": order_id,
-            "created_at": now_utc().isoformat(),
-        })
+        try:
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": vid,
+                "type": "vendor_sale",
+                "amount": amount,
+                "status": "success",
+                "description": f"Vendor share credited from order #{order_id[:8]}",
+                "order_id": order_id,
+                "created_at": now_utc().isoformat(),
+            })
+        except DuplicateKeyError:
+            pass
         try:
             await _create_notification(vid, "vendor", "New sale!", f"₹{amount:.0f} credited from order #{order_id[:8]}.")
         except Exception:
@@ -3352,17 +3389,20 @@ async def system_wallet_deposit(payload: SystemWalletDeposit, admin: Dict[str, A
         "created_at": ts,
     })
     await credit_admin_bucket("direct_added", float(payload.amount), also_total_earned=False)
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": a["id"],
-        "type": "system_deposit",
-        "amount": float(payload.amount),
-        "status": "success",
-        "description": f"System wallet top-up · UTR {payload.utr}" + (f" · {payload.remarks}" if payload.remarks else ""),
-        "reference_number": payload.utr,
-        "deposit_id": dep_id,
-        "created_at": ts,
-    })
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": a["id"],
+            "type": "system_deposit",
+            "amount": float(payload.amount),
+            "status": "success",
+            "description": f"System wallet top-up · UTR {payload.utr}" + (f" · {payload.remarks}" if payload.remarks else ""),
+            "reference_number": payload.utr,
+            "deposit_id": dep_id,
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
     await _audit_log(admin, "system_wallet.deposit", "deposit", dep_id, {"amount": payload.amount, "utr": payload.utr})
     return {"ok": True, "deposit_id": dep_id}
 
@@ -4007,6 +4047,43 @@ async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("referral_code", unique=True)
     await db.users.create_index("sponsor_id")
+    # ---------- Idempotency safety-net indexes for transactions ----------
+    # Prevent duplicate transaction rows when the same upstream event (an order,
+    # a service booking, a Razorpay payment) is processed twice.
+    # We use partial unique indexes so legacy/free-form transactions are not affected.
+    try:
+        await db.transactions.create_index(
+            [("user_id", 1), ("type", 1), ("order_id", 1)],
+            unique=True,
+            partialFilterExpression={"order_id": {"$exists": True, "$type": "string"}},
+            name="uniq_user_type_order",
+        )
+        await db.transactions.create_index(
+            [("user_id", 1), ("type", 1), ("booking_id", 1)],
+            unique=True,
+            partialFilterExpression={"booking_id": {"$exists": True, "$type": "string"}},
+            name="uniq_user_type_booking",
+        )
+        await db.transactions.create_index(
+            [("user_id", 1), ("type", 1), ("razorpay_payment_id", 1)],
+            unique=True,
+            partialFilterExpression={"razorpay_payment_id": {"$exists": True, "$type": "string"}},
+            name="uniq_user_type_rzp_payment",
+        )
+        await db.transactions.create_index(
+            [("user_id", 1), ("type", 1), ("transfer_id", 1)],
+            unique=True,
+            partialFilterExpression={"transfer_id": {"$exists": True, "$type": "string"}},
+            name="uniq_user_type_transfer",
+        )
+        await db.transactions.create_index(
+            [("user_id", 1), ("type", 1), ("deposit_id", 1)],
+            unique=True,
+            partialFilterExpression={"deposit_id": {"$exists": True, "$type": "string"}},
+            name="uniq_user_type_deposit",
+        )
+    except Exception as _idx_err:
+        logger.warning(f"Transaction unique-index setup failed: {_idx_err}")
     await seed_admin()
     await seed_products()
     # Backfill: any existing user without approval_status — assume approved (legacy users
@@ -5091,52 +5168,63 @@ async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict
     admin_share = round(charge - provider_share, 2)
     book_id = str(uuid.uuid4())
     ts = now_utc().isoformat()
-    # Deduct from customer
-    await db.users.update_one(
-        {"id": user["id"]},
+    # ATOMIC wallet debit — guards against rapid double-clicks.
+    debit_res = await db.users.update_one(
+        {"id": user["id"], "wallet_balance": {"$gte": charge}},
         {"$inc": {"wallet_balance": -charge}},
     )
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user["id"],
-        "type": "service_booking",
-        "amount": -charge,
-        "status": "success",
-        "description": f"Booked service: {provider.get('service_name')} from {provider.get('name')}",
-        "booking_id": book_id,
-        "created_at": ts,
-    })
+    if debit_res.modified_count == 0:
+        raise HTTPException(status_code=400, detail=f"Insufficient wallet balance — need ₹{int(charge)}")
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "service_booking",
+            "amount": -charge,
+            "status": "success",
+            "description": f"Booked service: {provider.get('service_name')} from {provider.get('name')}",
+            "booking_id": book_id,
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
     # Credit provider
     await db.users.update_one(
         {"id": provider_id},
         {"$inc": {"wallet_balance": provider_share, "total_earned": provider_share}},
     )
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": provider_id,
-        "type": "service_earning",
-        "amount": provider_share,
-        "status": "success",
-        "description": f"Service booking from {user.get('name')} (₹{int(charge)} - ₹{int(admin_share)} platform fee)",
-        "booking_id": book_id,
-        "created_at": ts,
-    })
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": provider_id,
+            "type": "service_earning",
+            "amount": provider_share,
+            "status": "success",
+            "description": f"Service booking from {user.get('name')} (₹{int(charge)} - ₹{int(admin_share)} platform fee)",
+            "booking_id": book_id,
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
     # Credit admin platform fee
     if admin_share > 0:
         admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin:
             await credit_admin_bucket("service_margin", admin_share, also_total_earned=True)
-            await db.transactions.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": admin["id"],
-                "type": "service_commission",
-                "amount": admin_share,
-                "status": "success",
-                "description": f"Service platform fee from {provider.get('name')} (booking by {user.get('name')})",
-                "booking_id": book_id,
-                "source_user_name": user.get("name"),
-                "created_at": ts,
-            })
+            try:
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": admin["id"],
+                    "type": "service_commission",
+                    "amount": admin_share,
+                    "status": "success",
+                    "description": f"Service platform fee from {provider.get('name')} (booking by {user.get('name')})",
+                    "booking_id": book_id,
+                    "source_user_name": user.get("name"),
+                    "created_at": ts,
+                })
+            except DuplicateKeyError:
+                pass
     booking = {
         "id": book_id,
         "customer_id": user["id"],

@@ -465,4 +465,7 @@ const styles = StyleSheet.create({
   modalInput: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, paddingHorizontal: 16, paddingVertical: 16, fontSize: 18, color: colors.textMain, fontWeight: "700" },
   errorText: { color: "#B3261E", fontSize: 13, marginTop: 8 },
   modalBtn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
+  detailRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 12 },
+  detailKey: { fontSize: 12, color: colors.textMuted, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0, width: 120 },
+  detailVal: { fontSize: 13, color: colors.textMain, fontWeight: "600", textAlign: "right", flex: 1 },
 });

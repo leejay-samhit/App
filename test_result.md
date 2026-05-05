@@ -107,6 +107,163 @@ user_problem_statement: |
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
 backend:
+  - task: "Phase 2 — Transaction Detail endpoint /transactions/{id} + Idempotency safety nets"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Phase 2 — Transaction Detail + Idempotency safety net testing
+            COMPLETE. ALL 50/50 checks PASSED via
+            /app/phase2_idempotency_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            SETUP:
+              • admin@app.com / Admin@123 → super_admin.
+              • Throwaway users built via /auth/register +
+                /payment/verify (HMAC signature_only branch, pay_test_<hex>
+                payment_id) for auto-approval.
+              • Admin direct_added bucket topped up via repeated
+                /admin/system-wallet/deposit so admin can credit user
+                wallets.
+
+            C. SMOKE — /admin/system-wallet (5/5) ✅
+              • C.1 GET /admin/system-wallet → 200.
+              • C.2 buckets keys exactly = {referral_commission,
+                direct_added, service_margin, shopping_margin}.
+              • C.3 total == sum(buckets) (2136.0).
+              • C.4 Fresh UTR deposit → 200.
+              • C.5 Re-deposit same UTR → 400 "UTR ... already recorded".
+              Phase 1 still works.
+
+            A. TRANSACTION DETAIL — GET /api/transactions/{txn_id} (15/15) ✅
+              • A.1 Owner GET → 200.
+              • A.2 Response shape: {transaction, owner, counter_party,
+                counter_role, auto_remarks, utr} — all present.
+              • A.3 admin_credit tx → counter_role == "admin".
+              • A.4 counter_party.email == admin@app.com.
+              • A.5 counter_party.name populated.
+              • A.6 utr == transaction.reference_number (8-char ref
+                "A9D8E2AA").
+              • A.7 auto_remarks non-empty (35 chars: "Admin credited
+                ₹800 · phase2 credit").
+              • A.8 Other user GET → 403.
+              • A.9 super_admin GET → 200 (admin can view any user txn).
+              • A.10 Non-existent txn_id → 404.
+              • A.11 service_booking tx → counter_role == "provider".
+              • A.12 counter_party includes phone field.
+              • A.13 counter_party.id == provider.id.
+              • A.14 service_earning tx (provider's view) →
+                counter_role == "customer".
+              • A.15 counter_party.id == customer.id.
+
+            B1. /payment/verify IDEMPOTENCY (4/4) ✅
+              • Two near-simultaneous /payment/verify with identical
+                razorpay_order_id, razorpay_payment_id, razorpay_signature.
+              • B1.1 Statuses sorted == [200, 400] — exactly one wins.
+              • B1.2 Loser response detail == "Registration fee already
+                paid".
+              • B1.3 Exactly ONE registration_fee transaction for the
+                razorpay_payment_id (atomic
+                update_one({registration_paid: {$ne: True}}) gate +
+                DuplicateKeyError catch).
+              • B1.4 user.registration_paid == True post-call.
+
+            B2. /wallet/transfer IDEMPOTENCY (6/6) ✅
+              • Sender U_a credited with EXACTLY ₹100; transfers ₹100
+                twice in parallel to U_b.
+              • B2.1 Statuses == [200, 400].
+              • B2.2 U_a.wallet_balance == 0 post-call (NO double debit).
+              • B2.3 U_b.wallet_balance increased by exactly +100 (NO
+                double credit).
+              • B2.4 Exactly one transfer_out tx on U_a.
+              • B2.5 Exactly one transfer_in tx on U_b.
+              Atomic conditional update_one({wallet_balance: {$gte:
+              amount}}) is the protection — second call sees balance < 100
+              and returns 400.
+
+            B3. /orders/checkout IDEMPOTENCY (5/5) ✅
+              • Buyer wallet exactly ₹100; cart has one ₹100 product;
+                two checkout calls in parallel.
+              • B3.1 Statuses == [200, 400] (loser: "Insufficient wallet
+                balance. Need ₹100").
+              • B3.2 Buyer wallet == 0 (no double debit).
+              • B3.3 Single order_id returned by 200.
+              • B3.4 Exactly ONE 'order' transaction for that order_id on
+                buyer.
+              • B3.5 Exactly ONE shop_commission transaction on admin for
+                that order_id.
+
+            B4. /services/{provider_id}/book IDEMPOTENCY (6/6) ✅
+              • Customer wallet exactly ₹100; provider charge ₹100;
+                two book calls in parallel.
+              • B4.1 Statuses == [200, 400].
+              • B4.2 Customer wallet == 0.
+              • B4.3 Provider wallet += 70 only (70% commission, single
+                booking — no double credit).
+              • B4.4 Exactly ONE service_booking tx on customer.
+              • B4.5 Exactly ONE service_earning tx on provider.
+              • B4.6 Exactly ONE service_commission tx on admin (filtered
+                by booking_id).
+
+            B5. /admin/system-wallet/deposit IDEMPOTENCY (3/3) ✅
+              • Two parallel deposits with the SAME UTR.
+              • B5.1 Statuses == [200, 400] (loser: "UTR ... already
+                recorded").
+              • B5.2 direct_added bucket increased by exactly +250
+                (single deposit).
+              • B5.3 Exactly ONE deposits[] row for the UTR.
+              NOTE: there is no DB-level unique index on
+              system_wallet_deposits.utr — protection is the
+              find_one({utr}) check before insert. In practice both
+              concurrent calls were correctly serialized; in theory a
+              tight enough race could let both check before either insert.
+              Recommend Main agent add a unique index on
+              system_wallet_deposits.utr for full guarantee, but observed
+              behavior is correct under the test's parallel double-click.
+
+            CLEANUP (2/2) ✅
+              • DELETE /admin/users/{id} for all 8 throwaway users → 200.
+              • DELETE /admin/products/{id} for the test product → 200.
+
+            Implementation observations (backend/server.py):
+              • L4054-4084 startup: 5 partial unique compound indexes on
+                transactions for {(user_id, type, X)} where X ∈
+                {order_id, booking_id, razorpay_payment_id, transfer_id,
+                deposit_id}, with partialFilterExpression so legacy
+                free-form txns are unaffected.
+              • L981-1007 /payment/verify: atomic
+                update_one({registration_paid: {$ne: True}}) → 400 on
+                loser; insert_one wrapped in try/except DuplicateKeyError.
+              • L1404-1448 /wallet/transfer: atomic conditional
+                update_one({wallet_balance: {$gte: amount}}) protects
+                debit; transfer_out/transfer_in inserts in
+                try/except DuplicateKeyError.
+              • L2466-2520 /orders/checkout: atomic conditional debit
+                guards; order, shop_commission, vendor_sale all wrapped
+                in try/except DuplicateKeyError.
+              • L5170-5227 /services/{provider_id}/book: atomic debit
+                guard; service_booking, service_earning, service_commission
+                wrapped in try/except.
+              • L1295-1370 /transactions/{txn_id}: 200/403/404 logic
+                correct; counter-party inferred from from_admin_id /
+                booking_id / order_id; utr mirrors reference_number;
+                auto_remarks generator covers all major tx types.
+
+            Backend logs clean — only expected Razorpay 400s for fake
+            pay_test_<hex> ids in the signature_only branch (by design).
+            NO 500s, NO tracebacks during the entire run.
+
+            Task working: true, needs_retesting: false. Main agent can
+            summarise and finish. One MINOR recommendation: add a unique
+            index on system_wallet_deposits.utr to harden B5 against a
+            theoretical race between the find_one and insert_one calls.
+
   - task: "Phase 1 — System Wallet buckets, UTR-verified deposits, gated user wallet credits, transaction status fixes"
     implemented: true
     working: true
@@ -4986,3 +5143,82 @@ agent_communication:
 
         Task "Withdrawal Settlement Enhancements" marked:
           working: false, needs_retesting: true, stuck_count: 1.
+
+    - agent: "testing"
+      message: |
+        PHASE 2 — TRANSACTION DETAIL + IDEMPOTENCY testing COMPLETE.
+        ALL 50/50 PASSED via /app/phase2_idempotency_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        Coverage:
+          A) GET /api/transactions/{txn_id} (15/15)
+             — owner 200, other-user 403, missing 404, super_admin 200
+               on any user's tx.
+             — Response shape: {transaction, owner, counter_party,
+               counter_role, auto_remarks, utr} all present.
+             — admin_credit → counter_role="admin", counter_party.email
+               ==admin@app.com.
+             — service_booking → counter_role="provider",
+               counter_party has phone field, id==provider.
+             — service_earning → counter_role="customer",
+               counter_party.id==customer.
+             — utr mirrors transaction.reference_number.
+             — auto_remarks non-empty descriptive string.
+
+          B1) /payment/verify idempotency (4/4) — concurrent verify with
+              identical razorpay_payment_id: [200,400] ("Registration
+              fee already paid"); exactly 1 registration_fee tx;
+              registration_paid=True.
+
+          B2) /wallet/transfer idempotency (6/6) — sender bal=100,
+              transfer 100 twice in parallel: [200,400]; sender=0,
+              recipient +100 only; 1 transfer_out + 1 transfer_in.
+
+          B3) /orders/checkout idempotency (5/5) — cart=100, balance=100,
+              two checkouts: [200,400]; balance=0; 1 'order' tx + 1
+              shop_commission tx for order_id.
+
+          B4) /services/{provider_id}/book idempotency (6/6) — charge=100,
+              customer bal=100, two bookings: [200,400]; customer=0,
+              provider +70 only; 1 service_booking + 1 service_earning
+              + 1 service_commission for booking_id.
+
+          B5) /admin/system-wallet/deposit idempotency (3/3) — same UTR
+              twice in parallel: [200,400]; direct_added += 250 only;
+              1 deposit row.
+
+          C) Smoke /admin/system-wallet (5/5) — Phase 1 still works:
+             4 buckets, total==sum, fresh UTR 200, dup UTR 400.
+
+        Cleanup (2/2): 8 throwaway users + 1 product all deleted.
+
+        Backend logs CLEAN — only expected Razorpay 400s for fake
+        pay_test_<hex> ids in signature_only branch (by design).
+        NO 500s, NO tracebacks during the entire run.
+
+        IMPLEMENTATION REVIEW:
+        • backend/server.py L4054-4084: 5 partial unique compound
+          indexes on transactions for {(user_id, type, X)} where X is
+          one of order_id/booking_id/razorpay_payment_id/transfer_id/
+          deposit_id. partialFilterExpression keeps legacy free-form
+          txns unaffected.
+        • All five idempotency endpoints (checkout, service book,
+          payment verify, wallet transfer, system deposit) use atomic
+          conditional update_one() to gate the state-change
+          (registration_paid != True / wallet_balance >= amount), and
+          all transaction inserts are wrapped in try/except
+          DuplicateKeyError. shop_commission, vendor_sale, transfer_in,
+          transfer_out, service_commission, service_earning all wrapped.
+
+        MINOR RECOMMENDATION (not a blocker):
+        • system_wallet_deposits collection has NO unique index on utr.
+          Idempotency relies on a find_one({utr}) check before
+          insert_one. Test passed (concurrent calls were correctly
+          serialized by FastAPI's I/O), but a tight race between the
+          two operations could in theory let both inserts succeed.
+          Adding `await db.system_wallet_deposits.create_index("utr",
+          unique=True)` at startup would fully harden this.
+
+        Phase 2 task marked working: true, needs_retesting: false,
+        stuck_count: 0. Main agent can summarise and finish.
+
