@@ -1281,6 +1281,84 @@ async def my_transactions(user: Dict[str, Any] = Depends(get_current_user)):
     return items
 
 
+def _auto_remarks_for(tx: Dict[str, Any]) -> str:
+    """Generate a human-readable summary line for any transaction. Used in
+    the transaction-detail modal so users always see context even if the
+    description is terse."""
+    t = (tx.get("type") or "").lower()
+    amt = tx.get("amount") or 0
+    sign = "+" if (amt or 0) >= 0 else "-"
+    abs_amt = abs(float(amt or 0))
+    src = tx.get("source_user_name") or ""
+    ref = tx.get("reference_number") or ""
+    lvl = tx.get("level")
+    pretty = {
+        "registration_fee": f"Registration fee paid · ₹{int(abs_amt)}",
+        "referral_payout": f"Level {lvl} referral payout from {src or 'a downline member'} · {sign}₹{int(abs_amt)}",
+        "service_booking": f"Service booking · {sign}₹{int(abs_amt)}{(' · ref ' + ref) if ref else ''}",
+        "service_earning": f"Service earning · {sign}₹{int(abs_amt)}",
+        "service_commission": f"Service platform fee from {src or 'customer'} · {sign}₹{int(abs_amt)}",
+        "shop_commission": f"Shop margin from order {tx.get('order_id', '')[:8]} · {sign}₹{int(abs_amt)}",
+        "vendor_sale": f"Vendor share · {sign}₹{int(abs_amt)}",
+        "order": f"Shop order placed · {sign}₹{int(abs_amt)}",
+        "admin_credit": f"Admin credited ₹{int(abs_amt)} · {tx.get('remarks') or 'no remarks'}",
+        "admin_debit": f"Admin debited ₹{int(abs_amt)} · {tx.get('remarks') or 'no remarks'}",
+        "system_deposit": f"System wallet top-up · UTR {ref or 'n/a'} · {sign}₹{int(abs_amt)}",
+        "withdrawal": f"Withdrawal · {sign}₹{int(abs_amt)}{(' · UTR ' + ref) if ref else ''}",
+    }
+    return pretty.get(t, tx.get("description") or f"{t.replace('_', ' ').title()} · {sign}₹{int(abs_amt)}")
+
+
+@api_router.get("/transactions/{txn_id}")
+async def transaction_detail(txn_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Return a single transaction with enriched counter-party info + auto-remarks.
+    Visible to: the owning user, super_admin, and finance roles."""
+    tx = await db.transactions.find_one({"id": txn_id}, {"_id": 0})
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    is_owner = tx.get("user_id") == user["id"]
+    is_admin_view = user.get("role") == "admin" and user.get("admin_role") in ("super_admin", "finance", "manager", "support")
+    if not is_owner and not is_admin_view:
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    # Owner basics
+    owner = await db.users.find_one({"id": tx.get("user_id")}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
+
+    # Counter-party inference
+    counter: Optional[Dict[str, Any]] = None
+    counter_role = ""
+    if tx.get("from_admin_id"):
+        c = await db.users.find_one({"id": tx["from_admin_id"]}, {"_id": 0, "id": 1, "name": 1, "email": 1, "admin_role": 1})
+        if c:
+            counter = c
+            counter_role = "admin"
+    elif tx.get("booking_id"):
+        booking = await db.service_bookings.find_one({"id": tx["booking_id"]}, {"_id": 0})
+        if booking:
+            other_id = booking["provider_id"] if tx.get("user_id") == booking.get("customer_id") else booking.get("customer_id")
+            other_role = "provider" if tx.get("user_id") == booking.get("customer_id") else "customer"
+            c = await db.users.find_one({"id": other_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
+            if c:
+                counter = c
+                counter_role = other_role
+    elif tx.get("order_id"):
+        order = await db.orders.find_one({"id": tx["order_id"]}, {"_id": 0})
+        if order and order.get("user_id") != tx.get("user_id"):
+            c = await db.users.find_one({"id": order.get("user_id")}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
+            if c:
+                counter = c
+                counter_role = "buyer"
+
+    return {
+        "transaction": tx,
+        "owner": owner,
+        "counter_party": counter,
+        "counter_role": counter_role,
+        "auto_remarks": _auto_remarks_for(tx),
+        "utr": tx.get("reference_number"),
+    }
+
+
 # ------------------ Wallet-to-wallet transfer ------------------
 class WalletTransfer(BaseModel):
     recipient: str = Field(..., description="Recipient email or referral code")

@@ -54,6 +54,21 @@ export default function WalletScreen() {
   // Wallet-to-wallet transfer state
   const [showTransfer, setShowTransfer] = useState(false);
   const [txFilter, setTxFilter] = useState<"all" | "credits" | "debits">("all");
+  // Transaction detail modal
+  const [txDetail, setTxDetail] = useState<any | null>(null);
+  const [txDetailLoading, setTxDetailLoading] = useState(false);
+  const openTxDetail = async (txnId: string) => {
+    setTxDetailLoading(true);
+    setTxDetail({ loading: true });
+    try {
+      const { data } = await api.get(`/transactions/${txnId}`);
+      setTxDetail(data);
+    } catch (e) {
+      setTxDetail(null);
+    } finally {
+      setTxDetailLoading(false);
+    }
+  };
   // Type-aware classification (some legacy txns store positive amount for debits like registration_fee/order).
   const isDebit = (t: Txn) => {
     if ((t.amount || 0) < 0) return true;
@@ -256,7 +271,7 @@ export default function WalletScreen() {
               : t.status === "rejected" ? "#B3261E"
               : null;
             return (
-              <View key={t.id} style={styles.row}>
+              <TouchableOpacity key={t.id} style={styles.row} onPress={() => openTxDetail(t.id)} testID={`tx-row-${t.id}`}>
                 <View style={styles.rowLeft}>
                   <Feather name={icon as any} size={18} color={t.amount > 0 ? colors.success : colors.textMain} style={{ marginRight: 12 }} />
                   <View style={{ flex: 1 }}>
@@ -270,7 +285,7 @@ export default function WalletScreen() {
                 <Text style={[styles.amountText, { color: t.amount >= 0 ? colors.success : statusColor || "#B3261E" }]}>
                   {t.amount >= 0 ? "+" : ""}{formatINR(t.amount)}
                 </Text>
-              </View>
+              </TouchableOpacity>
             );
           })
         )}
@@ -347,6 +362,65 @@ export default function WalletScreen() {
             </View>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Transaction detail modal */}
+      <Modal visible={!!txDetail} transparent animationType="slide" onRequestClose={() => setTxDetail(null)}>
+        <TouchableOpacity activeOpacity={1} style={styles.modalOverlay} onPress={() => setTxDetail(null)}>
+          <TouchableOpacity activeOpacity={1} style={styles.modalSheet} onPress={() => {}}>
+            <View style={styles.modalHandle} />
+            {txDetailLoading || txDetail?.loading ? (
+              <View style={{ paddingVertical: 30, alignItems: "center" }}><ActivityIndicator color={colors.primary} /></View>
+            ) : txDetail?.transaction ? (
+              <>
+                <Text style={styles.modalTitle}>Transaction details</Text>
+                <Text style={[styles.modalSub, { marginBottom: 14 }]}>{txDetail.auto_remarks}</Text>
+
+                <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, marginBottom: 14 }}>
+                  <Text style={{ fontSize: 28, fontWeight: "800", color: txDetail.transaction.amount >= 0 ? colors.success : "#B3261E" }}>
+                    {txDetail.transaction.amount >= 0 ? "+" : ""}{formatINR(txDetail.transaction.amount)}
+                  </Text>
+                  <Text style={{ fontSize: 12, color: colors.textMuted, textTransform: "uppercase", letterSpacing: 1 }}>{txDetail.transaction.status}</Text>
+                </View>
+
+                {[
+                  ["Type", (txDetail.transaction.type || "").replace(/_/g, " ")],
+                  ["Date", new Date(txDetail.transaction.created_at).toLocaleString()],
+                  ["Reference / UTR", txDetail.utr || "—"],
+                  ["Transaction ID", (txDetail.transaction.id || "").slice(0, 16) + "…"],
+                  ["Description", txDetail.transaction.description || "—"],
+                  ["Remarks", txDetail.transaction.remarks || "—"],
+                ].map(([k, v], i) => (
+                  <View key={i} style={styles.detailRow}>
+                    <Text style={styles.detailKey}>{k}</Text>
+                    <Text style={styles.detailVal}>{String(v)}</Text>
+                  </View>
+                ))}
+
+                {txDetail.counter_party && (
+                  <>
+                    <Text style={[styles.modalSub, { marginTop: 14, marginBottom: 6, fontWeight: "800", color: colors.textMain, fontSize: 13, letterSpacing: 0.5 }]}>
+                      {txDetail.counter_role === "admin" ? "FROM ADMIN" : `${txDetail.counter_role.toUpperCase()} INFO`}
+                    </Text>
+                    <View style={styles.detailRow}><Text style={styles.detailKey}>Name</Text><Text style={styles.detailVal}>{txDetail.counter_party.name || "—"}</Text></View>
+                    <View style={styles.detailRow}><Text style={styles.detailKey}>Email</Text><Text style={styles.detailVal}>{txDetail.counter_party.email || "—"}</Text></View>
+                    {txDetail.counter_party.phone ? <View style={styles.detailRow}><Text style={styles.detailKey}>Phone</Text><Text style={styles.detailVal}>{txDetail.counter_party.phone}</Text></View> : null}
+                    {txDetail.counter_party.referral_code ? <View style={styles.detailRow}><Text style={styles.detailKey}>Referral</Text><Text style={styles.detailVal}>{txDetail.counter_party.referral_code}</Text></View> : null}
+                  </>
+                )}
+
+                <TouchableOpacity onPress={() => setTxDetail(null)} style={[styles.modalBtn, { backgroundColor: colors.primary, marginTop: 18 }]}>
+                  <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Close</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={{ paddingVertical: 30, alignItems: "center" }}>
+                <Feather name="alert-circle" size={28} color={colors.textMuted} />
+                <Text style={{ color: colors.textMuted, marginTop: 8 }}>Could not load transaction</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        </TouchableOpacity>
       </Modal>
     </SafeAreaView>
   );
