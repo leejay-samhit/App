@@ -1004,26 +1004,60 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
     )
     if upd.modified_count == 0:
         raise HTTPException(status_code=400, detail="Registration fee already paid")
-    try:
-        await db.transactions.insert_one({
-            "id": txn_id,
+
+    # Convert the pending "Razorpay order created" row into a single "paid" entry
+    # instead of writing a second row — this fixes the duplicate-entry bug
+    # ("order created" + "payment successful" both showing for one payment).
+    pending_set = {
+        "status": "paid",
+        "description": (
+            "Registration fee via Razorpay"
+            + (f" · UTR {utr}" if utr else "")
+            + (" (mock)" if creds["is_mock"] else "")
+        ),
+        "razorpay_payment_id": payload.razorpay_payment_id,
+        "reference_number": utr,
+        "paid_at": now_utc().isoformat(),
+    }
+    pending_res = await db.transactions.update_one(
+        {
             "user_id": user["id"],
             "type": "registration_fee",
-            "amount": fee,
-            "status": "paid",
-            "description": (
-                "Registration fee via Razorpay"
-                + (f" · UTR {utr}" if utr else "")
-                + (" (mock)" if creds["is_mock"] else "")
-            ),
             "razorpay_order_id": payload.razorpay_order_id,
-            "razorpay_payment_id": payload.razorpay_payment_id,
-            "reference_number": utr,
-            "created_at": now_utc().isoformat(),
-        })
-    except DuplicateKeyError:
-        # Idempotent: a parallel call already wrote the txn. Treat as success.
-        pass
+            "status": "created",
+        },
+        {"$set": pending_set},
+    )
+    if pending_res.modified_count > 0:
+        # Reuse that row's id as the canonical txn_id so the response matches the DB.
+        existing = await db.transactions.find_one(
+            {"user_id": user["id"], "razorpay_order_id": payload.razorpay_order_id, "type": "registration_fee"},
+            {"_id": 0, "id": 1},
+        )
+        if existing:
+            txn_id = existing["id"]
+    else:
+        # No pre-existing pending row (e.g. direct verify without prior create-order, or it was already cleaned)
+        try:
+            await db.transactions.insert_one({
+                "id": txn_id,
+                "user_id": user["id"],
+                "type": "registration_fee",
+                "amount": fee,
+                "status": "paid",
+                "description": (
+                    "Registration fee via Razorpay"
+                    + (f" · UTR {utr}" if utr else "")
+                    + (" (mock)" if creds["is_mock"] else "")
+                ),
+                "razorpay_order_id": payload.razorpay_order_id,
+                "razorpay_payment_id": payload.razorpay_payment_id,
+                "reference_number": utr,
+                "created_at": now_utc().isoformat(),
+            })
+        except DuplicateKeyError:
+            # Idempotent: a parallel call already wrote the txn. Treat as success.
+            pass
 
     if auto_approve:
         # Trigger commission cascade + archive into approved_registrations
@@ -4382,6 +4416,35 @@ async def on_startup():
             await db.transactions.update_one({"id": tx["id"]}, {"$set": update})
     except Exception as _bf_err:
         logger.warning(f"Admin-prefix backfill failed: {_bf_err}")
+
+    # ---------- Backfill: collapse duplicate registration_fee rows ----------
+    # Earlier code wrote one txn at /payment/create-order (status=created) AND
+    # another at /payment/verify (status=paid) for the same razorpay_order_id.
+    # Now we update the pending row in place; clean up legacy doubles by
+    # deleting the orphaned `created` row when a `paid` sibling exists.
+    try:
+        pipeline = [
+            {"$match": {"type": "registration_fee", "razorpay_order_id": {"$exists": True, "$ne": None}}},
+            {"$group": {
+                "_id": "$razorpay_order_id",
+                "count": {"$sum": 1},
+                "ids": {"$push": {"id": "$id", "status": "$status"}},
+            }},
+            {"$match": {"count": {"$gt": 1}}},
+        ]
+        dupe_groups = await db.transactions.aggregate(pipeline).to_list(5000)
+        removed = 0
+        for grp in dupe_groups:
+            statuses = {x["status"] for x in grp["ids"]}
+            if "paid" in statuses and "created" in statuses:
+                # Drop the "created" rows; keep "paid"
+                created_ids = [x["id"] for x in grp["ids"] if x["status"] == "created"]
+                res = await db.transactions.delete_many({"id": {"$in": created_ids}})
+                removed += res.deleted_count
+        if removed:
+            logger.info(f"Reg-fee duplicate backfill: removed {removed} legacy 'created' rows")
+    except Exception as _bf_err:
+        logger.warning(f"Reg-fee duplicate backfill failed: {_bf_err}")
     await seed_admin()
     await seed_products()
     # Backfill: any existing user without approval_status — assume approved (legacy users

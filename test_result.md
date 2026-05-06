@@ -238,6 +238,108 @@ user_problem_statement: |
 
 
 backend:
+  - task: "Registration-fee duplicate-entry fix — payment/verify updates pending 'created' row instead of inserting a 2nd, plus startup backfill"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Registration-fee duplicate-entry fix — testing COMPLETE.
+            ALL 14/14 checks PASSED via /app/backend_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            SCENARIO C — Code review (PASS) ✅
+              • backend/server.py L1008-1060 /payment/verify: NEW update-first
+                block. Attempts
+                  db.transactions.update_one(
+                    { user_id, type:"registration_fee",
+                      razorpay_order_id, status:"created" },
+                    {$set:{status:"paid", description:"Registration fee via Razorpay ..." ,
+                           razorpay_payment_id, reference_number=utr, paid_at}}
+                  )
+                first. Only falls back to insert_one if modified_count==0
+                (wrapped in try/except DuplicateKeyError). Reuses the pending
+                row's id as canonical txn_id in the response.
+              • backend/server.py L4420-4447 on_startup: backfill aggregation
+                pipeline groups transactions by razorpay_order_id for
+                type=registration_fee, finds groups containing BOTH "paid"
+                AND "created" rows, and delete_many's the "created" ids.
+                Logs "Reg-fee duplicate backfill: removed N legacy 'created'
+                rows" — confirmed in live backend log:
+                "2026-05-06 03:44:15,605 - server - INFO -
+                 Reg-fee duplicate backfill: removed 1 legacy 'created' rows"
+
+            SCENARIO A — LIVE mode end-to-end, no duplicates (PASS) ✅
+              • Registered fresh user dupebug.<rand>@mailinator.com with
+                referral_code="EARN" → user_id=f1527b65... (sponsor=admin).
+              • POST /payment/create-order → 200, real Razorpay order
+                order_Slw2h9TimyRmmt created, amount_paise=11800 (₹118).
+              • DB snapshot BEFORE verify (via admin /admin/transactions):
+                  1 registration_fee row:
+                  - id=151fbe07... status=created
+                    order_id=order_Slw2h9TimyRmmt
+                    description="Razorpay order created"
+                ✓ Exactly one pending row as expected.
+              • HMAC-valid signature computed with RAZORPAY_KEY_SECRET from
+                /app/backend/.env (QrEEeWzxU5xJdRh1HrXeDUIy), with
+                payment_id="pay_NONEXISTENT_FOR_DUPE_TEST". Razorpay
+                /v1/payments returns 400 "id does not exist" → backend
+                falls through to signature_only branch (by design).
+              • POST /payment/verify → 200:
+                  rzp_status=signature_only, auto_approved=False (no real UTR),
+                  approval_status="pending", utr="".
+              • DB snapshot AFTER verify:
+                  1 registration_fee row (SAME id as before):
+                  - id=151fbe07... status=paid
+                    order_id=order_Slw2h9TimyRmmt
+                    razorpay_payment_id=pay_NONEXISTENT_FOR_DUPE_TEST
+                    description="Registration fee via Razorpay"
+              • ALL duplicate-bug assertions verified:
+                  A.1 ✅ Exactly ONE reg_fee row for this order_id (count=1)
+                  A.2 ✅ Exactly ONE reg_fee row across all rows for user (count=1)
+                  A.3 ✅ status == "paid"
+                  A.4 ✅ razorpay_payment_id == "pay_NONEXISTENT_FOR_DUPE_TEST"
+                  A.5 ✅ description starts with "Registration fee via Razorpay"
+                  A.6 ✅ description is NOT "Razorpay order created"
+                  — the pending row was IN-PLACE UPDATED, not duplicated.
+              • Cleanup: DELETE /admin/users/{user_id} → 200.
+
+            SCENARIO B — Backfill verification on live DB (PASS) ✅
+              • admin GET /admin/transactions?limit=500.
+              • Grouped all type=registration_fee rows by razorpay_order_id:
+                  - Total reg_fee order groups examined: 2
+                  - Groups with BOTH "paid" AND "created" rows: 0
+              • B.1 ✅ No order_id has both a "paid" and "created" row.
+                Startup backfill successfully collapsed the 1 legacy
+                duplicate that existed prior to the fix (evidenced by the
+                "removed 1 legacy 'created' rows" log line captured in
+                /var/log/supervisor/backend.err.log at container startup).
+
+            Backend logs clean during entire run:
+              • POST /v1/orders → 200 (real Razorpay order).
+              • GET /v1/payments/pay_NONEXISTENT_FOR_DUPE_TEST → 400
+                (expected, falls back to signature_only).
+              • No 500s, no tracebacks.
+
+            VERDICT: Bug correctly fixed.
+              - /payment/verify now converts the pending "created" row
+                (written at /create-order) into a "paid" row via
+                update_one, rather than inserting a new row. Users see
+                ONE transaction for ONE payment in their wallet history.
+              - The startup backfill cleanly collapsed the 1 pre-existing
+                legacy duplicate on the preview DB.
+              - Fallback insert_one path still exists for edge-cases
+                (direct verify without prior create-order), correctly
+                wrapped in try/except DuplicateKeyError.
+
+            Task working: true, needs_retesting: false. Main agent can
+            summarise and finish.
+
   - task: "Phase 3 — GST Invoice generation HTML + PDF endpoints + invoice_number/invoiceable in /transactions/{id}"
     implemented: true
     working: true
