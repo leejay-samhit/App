@@ -2138,8 +2138,10 @@ class AdminUserUpdate(BaseModel):
     phone: Optional[str] = None
     role: Optional[str] = None  # "user" or "admin"
     admin_role: Optional[str] = None  # "super_admin" | "manager" | "support"
-    wallet_balance: Optional[float] = None
-    total_earned: Optional[float] = None
+    # NOTE: wallet_balance and total_earned are intentionally NOT editable here.
+    # All money movements MUST go through /admin/users/{id}/wallet (credit/debit)
+    # which atomically debits the system-wallet's `direct_added` bucket — this
+    # enforces the "only money that's been deposited can be paid out" invariant.
     registration_paid: Optional[bool] = None
     upi_id: Optional[str] = None
     bank_account: Optional[str] = None

@@ -332,7 +332,8 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
         email: email.trim() || undefined,
         phone: phone.trim() || undefined,
         role,
-        wallet_balance: walletBalance ? parseFloat(walletBalance) : undefined,
+        // wallet_balance is INTENTIONALLY OMITTED — it can only be changed via
+        // the credit/debit endpoint which goes through the System Wallet.
         registration_paid: registrationPaid,
         upi_id: upi.trim() || undefined,
         bank_account: bank.trim() || undefined,
@@ -415,15 +416,17 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
                 testID="edit-paid-switch"
               />
             </View>
-            <Field label="Wallet balance (₹)">
-              <TextInput
-                testID="edit-wallet"
-                value={walletBalance}
-                onChangeText={setWalletBalance}
-                keyboardType="numeric"
-                style={modalStyles.input}
-                placeholderTextColor={colors.textMuted}
-              />
+            <Field label="Wallet balance (read-only)">
+              <View style={[modalStyles.input, { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: colors.surfaceMuted, opacity: 0.85 }]} testID="edit-wallet-readonly">
+                <Text style={{ fontSize: 16, fontWeight: "800", color: colors.textMain }}>₹{Number(walletBalance || 0).toLocaleString("en-IN")}</Text>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Feather name="lock" size={12} color={colors.textMuted} />
+                  <Text style={{ fontSize: 10, color: colors.textMuted, fontWeight: "700", letterSpacing: 0.5 }}>READ-ONLY</Text>
+                </View>
+              </View>
+              <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, lineHeight: 16 }}>
+                Wallet balance can&apos;t be edited directly. Use <Text style={{ fontWeight: "800", color: colors.primary }}>Wallet adjust ⤵</Text> below to credit/debit — it will atomically debit the System Wallet&apos;s Direct-Added bucket so every rupee paid out maps to a real deposit.
+              </Text>
             </Field>
 
             <Text style={modalStyles.section}>PAYOUT DETAILS</Text>
