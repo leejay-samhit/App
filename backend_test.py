@@ -1,406 +1,367 @@
-"""Phase 3 — GST Invoice endpoints test.
-
-Tests:
-  GET /api/transactions/{txn_id}/invoice (HTML)
-  GET /api/transactions/{txn_id}/invoice.pdf (PDF)
-  GET /api/transactions/{txn_id} new fields (invoice_number, invoiceable)
 """
+Razorpay verify UTR-required behavior fix — backend test.
 
-from __future__ import annotations
+Scenarios:
+  D — Code review (lines around _extract_utr and verify endpoint).
+  B — LIVE mode, payment without real UTR → no auto-approve, no commission cascade.
+  C — Manual admin approval still triggers commissions.
+  A — Mock mode behavior preserved (informational/code-review only if LIVE keys configured).
 
-import os
-import re
-import sys
+BASE: https://network-pay-1.preview.emergentagent.com
+"""
 import hmac
 import hashlib
 import secrets
+import sys
+from typing import Dict, Any, List, Optional, Tuple
+
 import requests
 
-BASE = "https://network-pay-1.preview.emergentagent.com"
-API = f"{BASE}/api"
-
+BASE = "https://network-pay-1.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASS = "Admin@123"
+ADMIN_PASSWORD = "Admin@123"
 
-RZP_SECRET = "QrEEeWzxU5xJdRh1HrXeDUIy"  # backend/.env RAZORPAY_KEY_SECRET
+ENV_KEY_ID = "rzp_test_SjgtHA4CxiFyTK"
+ENV_KEY_SECRET = "QrEEeWzxU5xJdRh1HrXeDUIy"
 
-results = []
-
-
-def rec(label: str, ok: bool, info: str = ""):
-    results.append((label, ok, info))
-    sym = "PASS" if ok else "FAIL"
-    print(f"[{sym}] {label}{(' :: ' + info) if info else ''}")
+session = requests.Session()
 
 
-def login(email: str, password: str) -> str:
-    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=20)
-    if r.status_code != 200:
-        raise RuntimeError(f"login failed for {email}: {r.status_code} {r.text}")
-    j = r.json()
-    return j.get("token") or j.get("access_token")
+def _headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
-def H(token):
-    return {"Authorization": f"Bearer {token}"} if token else {}
+def _login(email: str, password: str) -> str:
+    r = session.post(f"{BASE}/auth/login", json={"email": email, "password": password}, timeout=20)
+    assert r.status_code == 200, f"Login failed for {email}: {r.status_code} {r.text}"
+    return r.json()["token"]
 
 
-def fresh_email(prefix: str) -> str:
-    return f"{prefix}_{secrets.token_hex(4)}@invtest.com"
+def _get_admin() -> Tuple[str, Dict[str, Any]]:
+    tok = _login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    r = session.get(f"{BASE}/auth/me", headers=_headers(tok), timeout=20)
+    assert r.status_code == 200, r.text
+    return tok, r.json()
 
 
-def register(name: str, email: str, password: str, referral=None) -> dict:
-    body = {"name": name, "email": email, "password": password, "phone": "9000000000"}
-    if referral:
-        body["referral_code"] = referral
-    r = requests.post(f"{API}/auth/register", json=body, timeout=20)
-    r.raise_for_status()
+def _admin_users(token: str) -> List[Dict[str, Any]]:
+    r = session.get(f"{BASE}/admin/users", headers=_headers(token), timeout=30)
+    assert r.status_code == 200, r.text
+    items = r.json()
+    return items if isinstance(items, list) else (items.get("items") or items.get("users") or [])
+
+
+def _find_user_by_id(token: str, uid: str) -> Optional[Dict[str, Any]]:
+    for u in _admin_users(token):
+        if u.get("id") == uid:
+            return u
+    return None
+
+
+def _delete_user(token: str, user_id: str) -> bool:
+    r = session.delete(f"{BASE}/admin/users/{user_id}", headers=_headers(token), timeout=20)
+    return r.status_code in (200, 204, 404)
+
+
+def code_review_d() -> Tuple[bool, List[str]]:
+    notes: List[str] = []
+    src = open("/app/backend/server.py", "r").read()
+
+    # 1) _extract_utr should NOT include payment_id fallback
+    idx = src.find("def _extract_utr(")
+    assert idx > 0, "_extract_utr not found"
+    end = src.find("\n\n\n", idx)
+    block = src[idx: end if end > 0 else idx + 1500]
+    bad = ('rzp_payment.get("id")' in block) or ("rzp_payment.get('id')" in block)
+    if bad:
+        return False, notes + ["FAIL: _extract_utr still falls back to rzp_payment.id"]
+    notes.append("OK: _extract_utr does NOT fall back to rzp_payment.id")
+
+    if "has_real_utr = bool(utr)" not in src:
+        return False, notes + ["FAIL: 'has_real_utr = bool(utr)' missing"]
+    notes.append("OK: has_real_utr flag present")
+
+    if 'creds["is_mock"] or has_real_utr' not in src and "creds['is_mock'] or has_real_utr" not in src:
+        return False, notes + ["FAIL: auto_approve does not gate on (creds.is_mock or has_real_utr)"]
+    notes.append("OK: auto_approve gates on (creds.is_mock or has_real_utr)")
+
+    if "awaiting bank-side UTR confirmation" not in src:
+        return False, notes + ["FAIL: pending notification missing 'awaiting bank-side UTR confirmation'"]
+    notes.append("OK: pending notification mentions 'awaiting bank-side UTR confirmation'")
+
+    return True, notes
+
+
+def _gateway_source(admin_tok: str) -> Dict[str, Any]:
+    r = session.get(f"{BASE}/admin/payment-gateway", headers=_headers(admin_tok), timeout=15)
+    assert r.status_code == 200, r.text
     return r.json()
 
 
-def auto_approve_pay(user_token: str) -> dict:
-    h = H(user_token)
-    co = requests.post(f"{API}/payment/create-order", headers=h, timeout=20)
-    co.raise_for_status()
-    order_id = co.json()["order_id"]
-    pay_id = "pay_test_" + secrets.token_hex(8)
-    sig = hmac.new(
-        RZP_SECRET.encode("utf-8"),
-        f"{order_id}|{pay_id}".encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    v = requests.post(
-        f"{API}/payment/verify",
-        headers=h,
-        json={
-            "razorpay_order_id": order_id,
-            "razorpay_payment_id": pay_id,
-            "razorpay_signature": sig,
-        },
-        timeout=20,
-    )
-    v.raise_for_status()
-    return v.json()
-
-
-def get_my_txs(token: str) -> list:
-    r = requests.get(f"{API}/transactions/me", headers=H(token), timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-
-def main():
-    cleanup_user_ids = []
-    cleanup_product_ids = []
-
-    print("\n=== STAGE 0: Logins ===")
-    admin_token = login(ADMIN_EMAIL, ADMIN_PASS)
-    rec("login admin", True)
-
-    me = requests.get(f"{API}/auth/me", headers=H(admin_token), timeout=20).json()
-    admin_id = me["id"]
-
-    admin_txs = get_my_txs(admin_token)
-    rec("admin /transactions/me", len(admin_txs) >= 1, f"count={len(admin_txs)}")
-
-    by_type = {}
-    for t in admin_txs:
-        ty = (t.get("type") or "").lower()
-        if ty not in by_type:
-            by_type[ty] = t
-    print(f"Admin txn types available: {list(by_type.keys())}")
-
-    # === STAGE A ===
-    print("\n=== STAGE A: Auth & Permissions ===")
-
-    ua_email = fresh_email("ua")
-    ua = register("Aarav Mehta", ua_email, "Aaaa1!aa")
-    cleanup_user_ids.append(ua["user"]["id"])
-    ua_token = login(ua_email, "Aaaa1!aa")
-    auto_approve_pay(ua_token)
-    ua_txs = get_my_txs(ua_token)
-    ua_reg_tx = next((t for t in ua_txs if t.get("type") == "registration_fee"), None)
-    if not ua_reg_tx:
-        rec("user A has registration_fee txn", False, "no reg fee txn")
-        return
-    rec("user A has registration_fee txn", True, f"id={ua_reg_tx['id'][:8]}")
-
-    ub_email = fresh_email("ub")
-    ub = register("Bhavna Kapoor", ub_email, "Bbbb2!bb")
-    cleanup_user_ids.append(ub["user"]["id"])
-    ub_token = login(ub_email, "Bbbb2!bb")
-    auto_approve_pay(ub_token)
-
-    r = requests.get(f"{API}/transactions/{ua_reg_tx['id']}/invoice", timeout=20)
-    rec("A.1 anonymous /invoice → 401/403", r.status_code in (401, 403), f"{r.status_code}")
-
-    r = requests.get(f"{API}/transactions/{ua_reg_tx['id']}/invoice.pdf", timeout=20)
-    rec("A.1b anonymous /invoice.pdf → 401/403", r.status_code in (401, 403), f"{r.status_code}")
-
-    r = requests.get(f"{API}/transactions/{ua_reg_tx['id']}/invoice", headers=H(ub_token), timeout=20)
-    rec("A.2 user B → user A invoice → 403", r.status_code == 403, f"{r.status_code}")
-
-    r = requests.get(f"{API}/transactions/{ua_reg_tx['id']}/invoice", headers=H(admin_token), timeout=20)
-    rec("A.3 super_admin → 200 on user A invoice", r.status_code == 200, f"{r.status_code}")
-
-    def make_admin(role: str):
-        em = fresh_email(role)
-        u = register(f"{role.title()} Admin", em, "Pppp9!pp")
-        cleanup_user_ids.append(u["user"]["id"])
-        rr = requests.patch(
-            f"{API}/admin/users/{u['user']['id']}",
-            headers=H(admin_token),
-            json={"role": "admin", "admin_role": role},
-            timeout=20,
-        )
-        rr.raise_for_status()
-        return em, login(em, "Pppp9!pp")
-
-    mgr_email, mgr_token = make_admin("manager")
-    sup_email, sup_token = make_admin("support")
-    fin_email, fin_token = make_admin("finance")
-
-    r = requests.get(f"{API}/transactions/{ua_reg_tx['id']}/invoice", headers=H(mgr_token), timeout=20)
-    rec("A.4 manager → user A invoice → 403", r.status_code == 403, f"{r.status_code}")
-    r = requests.get(f"{API}/transactions/{ua_reg_tx['id']}/invoice", headers=H(sup_token), timeout=20)
-    rec("A.4b support → user A invoice → 403", r.status_code == 403, f"{r.status_code}")
-
-    r = requests.get(f"{API}/transactions/{ua_reg_tx['id']}/invoice", headers=H(fin_token), timeout=20)
-    rec("A.5 finance → user A invoice → 200", r.status_code == 200, f"{r.status_code}")
-
-    r = requests.get(f"{API}/transactions/nonexistent_xxx_yyy/invoice", headers=H(admin_token), timeout=20)
-    rec("A.6 invalid txn_id → 404", r.status_code == 404, f"{r.status_code}")
-
-    # === STAGE B ===
-    print("\n=== STAGE B: Happy path /invoice (HTML) ===")
-
-    target_tx = admin_txs[0]
-    target_id = target_tx["id"]
-    r = requests.get(f"{API}/transactions/{target_id}/invoice", headers=H(admin_token), timeout=20)
-    rec("B.1 admin /invoice → 200", r.status_code == 200, f"{r.status_code}")
-    ct = r.headers.get("Content-Type", "")
-    rec("B.2 Content-Type starts with text/html", ct.startswith("text/html"), ct)
-    body = r.text
-    branding = requests.get(f"{API}/branding", timeout=20).json()
-    biz = branding.get("business_name") or branding.get("app_name") or ""
-    rec("B.3 HTML contains company name", biz and biz in body, f"biz={biz!r}")
-    m = re.search(r"(INV|STMT)/[A-Z]+/\d{6}/[A-F0-9]+", body)
-    rec("B.4 HTML contains invoice number (INV/ or STMT/)", m is not None, f"inv={m.group(0) if m else None}")
-    rec("B.5 HTML has CGST 9.0%", "CGST" in body and "9.0%" in body, "")
-    rec("B.6 HTML has SGST 9.0%", "SGST" in body and "9.0%" in body, "")
-    rec("B.7 HTML has 'Total payable' or 'Net payment'",
-        ("Total payable" in body) or ("Net payment" in body), "")
-
-    # Build order ₹1180
-    sw = requests.get(f"{API}/admin/system-wallet", headers=H(admin_token), timeout=20).json()
-    direct_added = sw["buckets"]["direct_added"]
-    if direct_added < 1500:
-        utr = "UTR-INVTEST-" + secrets.token_hex(4).upper()
-        d = requests.post(
-            f"{API}/admin/system-wallet/deposit",
-            headers=H(admin_token),
-            json={"amount": 2000, "utr": utr, "remarks": "invoice test top-up"},
-            timeout=20,
-        )
-        d.raise_for_status()
-
-    uo_email = fresh_email("uo")
-    uo = register("Order User", uo_email, "Oooo3!oo")
-    cleanup_user_ids.append(uo["user"]["id"])
-    uo_token = login(uo_email, "Oooo3!oo")
-    auto_approve_pay(uo_token)
-
-    cred = requests.post(
-        f"{API}/admin/users/{uo['user']['id']}/wallet",
-        headers=H(admin_token),
-        json={"amount": 1180, "type": "credit", "reason": "invoice test fund"},
-        timeout=20,
-    )
-    cred.raise_for_status()
-
-    prod = requests.post(
-        f"{API}/admin/products",
-        headers=H(admin_token),
-        json={
-            "name": "GST Test Product",
-            "description": "For invoice math test",
-            "price": 1180,
-            "stock": 10,
-            "image_url": "https://via.placeholder.com/150",
-        },
-        timeout=20,
-    )
-    if prod.status_code != 200:
-        print("Product creation failed:", prod.status_code, prod.text[:300])
-    else:
-        pj = prod.json()
-        pid = pj.get("id") or (pj.get("product") or {}).get("id") or pj.get("product_id")
-        cleanup_product_ids.append(pid)
-
-        requests.post(f"{API}/cart/add", headers=H(uo_token), json={"product_id": pid, "qty": 1}, timeout=20).raise_for_status()
-        co = requests.post(f"{API}/orders/checkout", headers=H(uo_token), timeout=20)
-        rec("B.8 checkout for ₹1180 → 200", co.status_code == 200, f"{co.status_code} {co.text[:200]}")
-
-        uo_txs = get_my_txs(uo_token)
-        order_tx = next((t for t in uo_txs if t.get("type") == "order"), None)
-        rec("B.9 order tx exists", order_tx is not None, f"id={order_tx['id'][:8] if order_tx else 'none'}")
-
-        if order_tx:
-            r = requests.get(f"{API}/transactions/{order_tx['id']}/invoice", headers=H(uo_token), timeout=20)
-            rec("B.10 owner /invoice on order → 200", r.status_code == 200, f"{r.status_code}")
-            body = r.text
-            rec("B.11 order invoice taxable=1000.00", "1000.00" in body, "")
-            rec("B.12 order invoice CGST/SGST 90.00 (twice)", body.count("90.00") >= 2, f"count90={body.count('90.00')}")
-            rec("B.13 order invoice gross=1180.00", "1180.00" in body, "")
-            rec("B.14 order is TAX INVOICE heading", "TAX INVOICE" in body, "")
-            rec("B.15 has INV/ prefix invoice no",
-                re.search(r"INV/[A-Z]+/\d{6}/[A-F0-9]+", body) is not None, "")
-            globals()["_order_tx_id"] = order_tx["id"]
-            globals()["_order_tx"] = order_tx
-
-    # Statement (commission) invoice
-    stmt_tx = (by_type.get("referral_payout")
-               or by_type.get("system_deposit")
-               or by_type.get("admin_credit"))
-    if stmt_tx:
-        r = requests.get(f"{API}/transactions/{stmt_tx['id']}/invoice", headers=H(admin_token), timeout=20)
-        rec("B.16 statement /invoice → 200", r.status_code == 200, f"{r.status_code}")
-        sb = r.text
-        rec("B.17 statement heading = PAYMENT STATEMENT (not TAX INVOICE)",
-            ("PAYMENT STATEMENT" in sb) and ("TAX INVOICE" not in sb), "")
-        rec("B.18 statement uses STMT/ prefix",
-            re.search(r"STMT/[A-Z]+/\d{6}/[A-F0-9]+", sb) is not None, "")
-        amt = abs(float(stmt_tx.get("amount") or 0))
-        # exclusive: taxable=amt, gst added on top
-        expected_gst = round(amt * 0.18, 2)
-        expected_gross = round(amt + expected_gst, 2)
-        gross_str = f"{expected_gross:.2f}"
-        # The 'taxable' value should be amt itself
-        taxable_str = f"{amt:.2f}"
-        rec("B.19 statement exclusive: taxable equals amount",
-            taxable_str in sb, f"expected taxable={taxable_str}")
-        rec("B.20 statement exclusive: gross = amount + 18%",
-            gross_str in sb, f"expected gross={gross_str}")
-    else:
-        rec("B.16 statement type tx available", False, "no admin stmt-type txn found")
-
-    # === STAGE C: PDF ===
-    print("\n=== STAGE C: Happy path /invoice.pdf ===")
-    pdf_tx = globals().get("_order_tx") or target_tx
-    pdf_token = uo_token if globals().get("_order_tx") else admin_token
-    r = requests.get(f"{API}/transactions/{pdf_tx['id']}/invoice.pdf", headers=H(pdf_token), timeout=30)
-    rec("C.1 /invoice.pdf → 200", r.status_code == 200, f"{r.status_code}")
-    ct = r.headers.get("Content-Type", "")
-    rec("C.2 Content-Type application/pdf", ct.startswith("application/pdf"), ct)
-    pdf_bytes = r.content
-    rec("C.3 PDF body length > 1500", len(pdf_bytes) > 1500, f"len={len(pdf_bytes)}")
-    rec("C.4 PDF magic %PDF-", pdf_bytes[:5] == b"%PDF-", f"first8={pdf_bytes[:8]!r}")
-    cd = r.headers.get("Content-Disposition", "")
-    rec("C.5 Content-Disposition has filename", "filename=" in cd, f"cd={cd}")
-    has_dashed_invno = bool(re.search(r"filename=\"(INV|STMT)-[A-Z]+-\d{6}-[A-F0-9]+\.pdf\"", cd))
-    rec("C.6 filename contains invoice no with dashes", has_dashed_invno, f"cd={cd}")
-    print(f"\n[PDF info] size={len(pdf_bytes)} bytes  first8={pdf_bytes[:8]!r}")
-
-    # === STAGE D: Detail enhancements ===
-    print("\n=== STAGE D: Detail endpoint /transactions/{id} new fields ===")
-
-    invoiceable_types = {
-        "order", "service_booking", "registration_fee",
-        "referral_payout", "level_payout", "vendor_sale", "service_earning",
-        "shop_commission", "service_commission", "admin_credit", "transfer_in",
-        "transfer_out", "withdrawal", "admin_debit", "system_deposit",
+def _register_user(prefix: str = "utrtest") -> Tuple[str, Dict[str, Any]]:
+    rand = secrets.token_hex(4)
+    payload = {
+        "name": f"UTR Bug Test {rand}",
+        "email": f"{prefix}.{rand}@mailinator.com",
+        "phone": f"9{secrets.randbelow(10**9):09d}",
+        "password": "TestPass@123",
+        "referral_code": "EARN",
+        "pan": "ABCDE1234F",
     }
-    sampled = 0
-    for ty in invoiceable_types:
-        sample = by_type.get(ty)
-        if not sample:
-            continue
-        sampled += 1
-        r = requests.get(f"{API}/transactions/{sample['id']}", headers=H(admin_token), timeout=20)
-        if r.status_code != 200:
-            rec(f"D.{ty} detail GET 200", False, f"{r.status_code}")
-            continue
-        j = r.json()
-        ok_inv_no = isinstance(j.get("invoice_number"), str) and len(j.get("invoice_number")) > 0
-        ok_inv_able = j.get("invoiceable") is True
-        rec(f"D.{ty} returns invoice_number string", ok_inv_no, f"{j.get('invoice_number')}")
-        rec(f"D.{ty} returns invoiceable=true", ok_inv_able, f"{j.get('invoiceable')}")
-    rec("D.sampled_at_least_3", sampled >= 3, f"sampled={sampled}")
+    r = session.post(f"{BASE}/auth/register", json=payload, timeout=20)
+    assert r.status_code == 200, f"Register failed: {r.status_code} {r.text}"
+    j = r.json()
+    return j["token"], j["user"]
 
-    # === STAGE E: Regression smoke ===
-    print("\n=== STAGE E: Regression smoke ===")
-    ut1_email = fresh_email("ut1")
-    ut1 = register("Transfer Sender", ut1_email, "Tttt4!tt")
-    cleanup_user_ids.append(ut1["user"]["id"])
-    ut1_token = login(ut1_email, "Tttt4!tt")
-    auto_approve_pay(ut1_token)
-    ut2_email = fresh_email("ut2")
-    ut2 = register("Transfer Recv", ut2_email, "Tttt5!tt")
-    cleanup_user_ids.append(ut2["user"]["id"])
-    ut2_token = login(ut2_email, "Tttt5!tt")
-    auto_approve_pay(ut2_token)
-    requests.post(
-        f"{API}/admin/users/{ut1['user']['id']}/wallet",
-        headers=H(admin_token),
-        json={"amount": 100, "type": "credit", "reason": "smoke transfer"},
-        timeout=20,
-    ).raise_for_status()
-    tr = requests.post(
-        f"{API}/wallet/transfer",
-        headers=H(ut1_token),
-        json={"recipient": ut2_email, "amount": 50, "note": "smoke"},
-        timeout=20,
-    )
-    rec("E.1 wallet/transfer 50 → 200", tr.status_code == 200, f"{tr.status_code} {tr.text[:120]}")
 
-    # === STAGE F: GST math ===
-    print("\n=== STAGE F: GST math unit-style verification ===")
-    order_tx = globals().get("_order_tx")
-    if order_tx:
-        amt = abs(float(order_tx["amount"]))
-        taxable = round(amt / 1.18, 2)
-        gst_total = round(amt - taxable, 2)
-        cgst = round(gst_total / 2, 2)
-        sgst = round(gst_total - cgst, 2)
-        sumcheck = round(taxable + cgst + sgst, 2)
-        rec("F.1 inclusive split sum-check",
-            abs(sumcheck - amt) < 0.01,
-            f"taxable={taxable} cgst={cgst} sgst={sgst} sum={sumcheck} amt={amt}")
-        rec("F.2 cgst==sgst for intra-state",
-            abs(cgst - sgst) < 0.01, f"cgst={cgst} sgst={sgst}")
-    amt2 = abs(float(ua_reg_tx["amount"]))
-    taxable2 = round(amt2 / 1.18, 2)
-    gst2 = round(amt2 - taxable2, 2)
-    rec(f"F.3 reg_fee {amt2} inclusive: taxable~{round(amt2/1.18,2)} GST~{round(amt2-(amt2/1.18),2)}",
-        abs(taxable2 + gst2 - amt2) < 0.01,
-        f"taxable={taxable2} gst={gst2}")
+def _create_order(user_tok: str) -> Dict[str, Any]:
+    r = session.post(f"{BASE}/payment/create-order", headers=_headers(user_tok), timeout=30)
+    assert r.status_code == 200, f"create-order failed: {r.status_code} {r.text}"
+    return r.json()
 
-    # CLEANUP
-    print("\n=== CLEANUP ===")
-    for uid in cleanup_user_ids:
-        try:
-            requests.delete(f"{API}/admin/users/{uid}", headers=H(admin_token), timeout=20)
-        except Exception:
-            pass
-    for pid in cleanup_product_ids:
-        if pid:
-            try:
-                requests.delete(f"{API}/admin/products/{pid}", headers=H(admin_token), timeout=20)
-            except Exception:
-                pass
 
-    total = len(results)
-    passed = sum(1 for _, ok, _ in results if ok)
-    print("\n" + "=" * 60)
-    print(f"SUMMARY: {passed}/{total} passed")
-    print("=" * 60)
-    fails = [(l, i) for l, ok, i in results if not ok]
-    if fails:
-        print("FAILURES:")
-        for l, i in fails:
-            print(f"  - {l} :: {i}")
-    sys.exit(0 if passed == total else 1)
+def _hmac_sig(order_id: str, payment_id: str, secret: str) -> str:
+    return hmac.new(secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
+
+
+def _user_transactions(admin_tok: str, user_id: str) -> List[Dict[str, Any]]:
+    r = session.get(f"{BASE}/admin/transactions", headers=_headers(admin_tok),
+                    params={"user_id": user_id, "limit": 200}, timeout=30)
+    if r.status_code != 200:
+        return []
+    j = r.json()
+    items = j if isinstance(j, list) else (j.get("items") or [])
+    return [tx for tx in items if tx.get("user_id") == user_id]
+
+
+def scenario_b(admin_tok: str, admin_user: Dict[str, Any], gw: Dict[str, Any]) -> Tuple[bool, List[str], Optional[str], Optional[Dict[str, Any]]]:
+    notes: List[str] = []
+    if gw.get("is_mock"):
+        return False, ["SKIP: is_mock=True; cannot exercise LIVE branch"], None, None
+
+    if gw.get("source") == "env":
+        if gw.get("key_id") != ENV_KEY_ID:
+            return False, [f"key_id mismatch with env: db_key_id={gw.get('key_id')}"], None, None
+        secret = ENV_KEY_SECRET
+        notes.append(f"Using ENV creds key_id={gw.get('key_id')}")
+    elif gw.get("source") == "db":
+        return False, [f"Cannot compute HMAC: source=db (secret hidden). key_id={gw.get('key_id')}"], None, None
+    else:
+        return False, [f"Unknown gateway source: {gw.get('source')}"], None, None
+
+    admin_before = _find_user_by_id(admin_tok, admin_user["id"])
+    assert admin_before
+    admin_bal_before = float(admin_before.get("wallet_balance") or 0)
+    admin_buckets_before = dict(admin_before.get("wallet_buckets") or {})
+    notes.append(f"Admin BEFORE wallet_balance={admin_bal_before} buckets={admin_buckets_before}")
+
+    u_tok, u = _register_user("utrbugb")
+    notes.append(f"Registered user id={u['id']} email={u['email']} sponsor_id={u.get('sponsor_id')} referred_by={u.get('referred_by')}")
+
+    order = _create_order(u_tok)
+    notes.append(f"Order: order_id={order['order_id']} is_mock={order['is_mock']}")
+
+    payment_id = "pay_TEST_NO_UTR"
+    sig = _hmac_sig(order["order_id"], payment_id, secret)
+    body = {
+        "razorpay_order_id": order["order_id"],
+        "razorpay_payment_id": payment_id,
+        "razorpay_signature": sig,
+    }
+    r = session.post(f"{BASE}/payment/verify", headers=_headers(u_tok), json=body, timeout=30)
+    notes.append(f"Verify response: status={r.status_code} body={r.text[:600]}")
+    if r.status_code != 200:
+        return False, notes + [f"FAIL: verify returned {r.status_code}"], u["id"], None
+
+    vresp = r.json()
+    notes.append(f"Verify JSON: auto_approved={vresp.get('auto_approved')} approval_status={vresp.get('approval_status')} utr={vresp.get('utr')!r} rzp_status={vresp.get('rzp_status')} is_mock={vresp.get('is_mock')}")
+    if vresp.get("auto_approved") is not False:
+        return False, notes + [f"FAIL: auto_approved={vresp.get('auto_approved')} expected False"], u["id"], vresp
+    if vresp.get("approval_status") != "pending":
+        return False, notes + [f"FAIL: approval_status={vresp.get('approval_status')}"], u["id"], vresp
+    if vresp.get("utr") not in ("", None):
+        return False, notes + [f"FAIL: utr={vresp.get('utr')!r}"], u["id"], vresp
+    notes.append("OK: verify response auto_approved=false, approval_status=pending, utr=''")
+
+    fresh = _find_user_by_id(admin_tok, u["id"])
+    assert fresh
+    if float(fresh.get("wallet_balance") or 0) != 0:
+        return False, notes + [f"FAIL: user wallet_balance={fresh.get('wallet_balance')}"], u["id"], vresp
+    if not fresh.get("registration_paid"):
+        return False, notes + ["FAIL: registration_paid != True"], u["id"], vresp
+    if fresh.get("approval_status") != "pending":
+        return False, notes + [f"FAIL: approval_status={fresh.get('approval_status')}"], u["id"], vresp
+    notes.append("OK: user wallet_balance=0, registration_paid=True, approval_status=pending")
+
+    admin_after = _find_user_by_id(admin_tok, admin_user["id"])
+    admin_bal_after = float(admin_after.get("wallet_balance") or 0)
+    admin_buckets_after = dict(admin_after.get("wallet_buckets") or {})
+    notes.append(f"Admin AFTER wallet_balance={admin_bal_after} buckets={admin_buckets_after}")
+    if admin_bal_after != admin_bal_before:
+        return False, notes + [f"FAIL: admin wallet_balance changed by {admin_bal_after - admin_bal_before}"], u["id"], vresp
+    if admin_buckets_after.get("referral_commission") != admin_buckets_before.get("referral_commission"):
+        return False, notes + ["FAIL: admin referral_commission bucket changed"], u["id"], vresp
+    notes.append("OK: admin wallet UNCHANGED — no upline cascade fired")
+
+    txs = _user_transactions(admin_tok, u["id"])
+    reg_txs = [t for t in txs if t.get("type") == "registration_fee" and t.get("status") == "paid"]
+    notes.append(f"User registration_fee paid txs found: {len(reg_txs)}")
+    if not reg_txs:
+        return False, notes + [f"FAIL: no paid registration_fee tx. All types: {[t.get('type') + '/' + str(t.get('status')) for t in txs]}"], u["id"], vresp
+    reg_tx = reg_txs[0]
+    if reg_tx.get("reference_number") not in (None, ""):
+        return False, notes + [f"FAIL: reg_tx.reference_number={reg_tx.get('reference_number')!r}"], u["id"], vresp
+    notes.append(f"OK: registration_fee tx reference_number=''; description={reg_tx.get('description')!r}")
+
+    nr = session.get(f"{BASE}/notifications/me", headers=_headers(u_tok), timeout=20)
+    if nr.status_code == 200:
+        notifs = nr.json()
+        if isinstance(notifs, dict):
+            notifs = notifs.get("items") or []
+        any_match = [n for n in notifs if "awaiting bank-side UTR confirmation" in (n.get("body") or "")]
+        notes.append(f"User notification titles: {[n.get('title') for n in notifs[:5]]}")
+        if not any_match:
+            return False, notes + ["FAIL: no notification body contains 'awaiting bank-side UTR confirmation'"], u["id"], vresp
+        notes.append(f"OK: notification body matches (title='{any_match[0].get('title')}')")
+    else:
+        notes.append(f"WARN: /notifications/me returned {nr.status_code}")
+
+    return True, notes, u["id"], vresp
+
+
+def scenario_c(admin_tok: str, admin_user: Dict[str, Any], pending_user_id: str) -> Tuple[bool, List[str]]:
+    notes: List[str] = []
+    pending = _find_user_by_id(admin_tok, pending_user_id)
+    sponsor_id = pending.get("sponsor_id")
+    notes.append(f"Pending user sponsor_id={sponsor_id}")
+
+    sponsor_before = _find_user_by_id(admin_tok, sponsor_id) if sponsor_id else None
+    sponsor_directs_before = int((sponsor_before or {}).get("direct_referrals_count") or 0)
+    sponsor_bal_before = float((sponsor_before or {}).get("wallet_balance") or 0)
+    notes.append(f"Sponsor BEFORE direct_referrals_count={sponsor_directs_before} wallet_balance={sponsor_bal_before}")
+
+    admin_before = _find_user_by_id(admin_tok, admin_user["id"])
+    admin_buckets_before = dict(admin_before.get("wallet_buckets") or {})
+    admin_directs_before = int(admin_before.get("direct_referrals_count") or 0)
+    notes.append(f"Admin BEFORE direct_referrals_count={admin_directs_before} buckets={admin_buckets_before}")
+
+    r = session.post(f"{BASE}/admin/approvals/{pending_user_id}/approve", headers=_headers(admin_tok), timeout=30)
+    notes.append(f"approve resp: {r.status_code} {r.text[:300]}")
+    if r.status_code != 200:
+        return False, notes + [f"FAIL: approve returned {r.status_code}"]
+
+    fresh = _find_user_by_id(admin_tok, pending_user_id)
+    if fresh.get("approval_status") != "approved":
+        return False, notes + [f"FAIL: user.approval_status={fresh.get('approval_status')}"]
+    notes.append("OK: user approval_status=approved")
+
+    sponsor_after = _find_user_by_id(admin_tok, sponsor_id) if sponsor_id else None
+    sponsor_directs_after = int((sponsor_after or {}).get("direct_referrals_count") or 0)
+    sponsor_bal_after = float((sponsor_after or {}).get("wallet_balance") or 0)
+    notes.append(f"Sponsor AFTER direct_referrals_count={sponsor_directs_after} wallet_balance={sponsor_bal_after}")
+
+    admin_after = _find_user_by_id(admin_tok, admin_user["id"])
+    admin_buckets_after = dict(admin_after.get("wallet_buckets") or {})
+    admin_directs_after = int(admin_after.get("direct_referrals_count") or 0)
+    notes.append(f"Admin AFTER direct_referrals_count={admin_directs_after} buckets={admin_buckets_after}")
+
+    # Validate that the cascade RAN: the immediate sponsor's direct_referrals_count must have incremented.
+    if sponsor_before is None:
+        return False, notes + ["FAIL: pending user has no sponsor; cannot validate cascade"]
+    if sponsor_directs_after != sponsor_directs_before + 1:
+        return False, notes + [f"FAIL: sponsor direct_referrals_count did not increment by 1 ({sponsor_directs_before} -> {sponsor_directs_after})"]
+    notes.append("OK: sponsor.direct_referrals_count incremented by 1 — _trigger_referral_commissions ran")
+
+    # Look for any new credit transaction created for any user since approval (referral_payout).
+    rt = session.get(f"{BASE}/admin/transactions", headers=_headers(admin_tok),
+                     params={"limit": 200}, timeout=30)
+    new_payouts: List[Dict[str, Any]] = []
+    if rt.status_code == 200:
+        items = rt.json()
+        if isinstance(items, dict):
+            items = items.get("items") or []
+        # Use source_user_name of just-approved user as a stable filter
+        match_name = fresh.get("name") or ""
+        new_payouts = [t for t in items if t.get("type") == "referral_payout" and (t.get("source_user_name") or "") == match_name]
+    notes.append(f"referral_payout txs sourced by approved user '{fresh.get('name')}': {len(new_payouts)}")
+    if new_payouts:
+        for t in new_payouts[:5]:
+            notes.append(f"  payout: level={t.get('level')} amount={t.get('amount')} user_id={t.get('user_id')} ts={t.get('created_at')}")
+        notes.append(f"OK: cascade emitted {len(new_payouts)} referral_payout transaction(s) on manual approval")
+    else:
+        # If sponsor is admin itself and L1 didn't fire (count not Nth), and there's no L2 for root admin,
+        # cascade can legitimately produce 0 *credit* transactions yet still 'run'. The direct_count
+        # increment above already proves _trigger_referral_commissions executed.
+        notes.append("INFO: no referral_payout txs created — cascade ran but no level threshold met (sponsor=admin at root, L1 only on Nth direct)")
+
+    rar = session.get(f"{BASE}/admin/approved-registrations", headers=_headers(admin_tok),
+                       params={"search": pending_user_id}, timeout=20)
+    if rar.status_code == 200:
+        items = rar.json()
+        if isinstance(items, dict):
+            items = items.get("items") or []
+        matches = [it for it in items if it.get("original_user_id") == pending_user_id]
+        if matches:
+            notes.append(f"OK: approved_registrations entry id={matches[0].get('id')} approver_role={matches[0].get('approver_role')}")
+        else:
+            notes.append("WARN: no approved_registrations entry visible via search filter")
+    return True, notes
+
+
+def main() -> int:
+    print(f"=== Razorpay verify UTR-required test ===")
+    print(f"BASE = {BASE}")
+    failures: List[str] = []
+    summary: List[str] = []
+
+    okD, notesD = code_review_d()
+    summary.append(f"Scenario D (code review): {'PASS' if okD else 'FAIL'}")
+    for n in notesD:
+        print("  D:", n)
+    if not okD:
+        failures.append("D")
+
+    admin_tok, admin_user = _get_admin()
+    print(f"Admin id={admin_user['id']} role={admin_user.get('admin_role')}")
+
+    gw = _gateway_source(admin_tok)
+    print(f"Gateway: source={gw.get('source')} key_id={gw.get('key_id')} is_mock={gw.get('is_mock')} is_test_mode={gw.get('is_test_mode')}")
+    summary.append(f"Gateway: source={gw.get('source')} is_mock={gw.get('is_mock')} key_id={gw.get('key_id')}")
+
+    if gw.get("is_mock"):
+        summary.append("Scenario A (MOCK): is_mock=True — auto_approve still fires, no commission gate (informational, by design).")
+    else:
+        summary.append("Scenario A (MOCK): is_mock=False; mock-mode logic verified via code review (creds.is_mock branch in `or` short-circuits).")
+
+    okB, notesB, pending_uid, vresp = scenario_b(admin_tok, admin_user, gw)
+    summary.append(f"Scenario B (LIVE no-UTR pending): {'PASS' if okB else 'FAIL'}")
+    if vresp is not None:
+        summary.append(f"  B response body: {vresp}")
+    for n in notesB:
+        print("  B:", n)
+    if not okB:
+        failures.append("B")
+
+    if pending_uid and okB:
+        okC, notesC = scenario_c(admin_tok, admin_user, pending_uid)
+        summary.append(f"Scenario C (manual approve cascade): {'PASS' if okC else 'FAIL'}")
+        for n in notesC:
+            print("  C:", n)
+        if not okC:
+            failures.append("C")
+    else:
+        summary.append("Scenario C: SKIPPED (B did not produce pending user)")
+
+    if pending_uid:
+        ok = _delete_user(admin_tok, pending_uid)
+        print(f"Cleanup: delete user {pending_uid} → {ok}")
+
+    print("\n=== SUMMARY ===")
+    for line in summary:
+        print(line)
+    print(f"Failures: {failures or 'none'}")
+    return 0 if not failures else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

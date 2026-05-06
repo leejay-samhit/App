@@ -803,8 +803,14 @@ async def _fetch_razorpay_payment(payment_id: str, creds: Dict[str, Any]) -> Opt
 
 
 def _extract_utr(rzp_payment: Optional[Dict[str, Any]]) -> str:
-    """Pull UTR / acquirer reference number from Razorpay payment object.
-    UPI: rrn. Netbanking: bank_transaction_id. Card: auth_code. Fallback: payment id."""
+    """Pull the REAL UTR / acquirer reference number from Razorpay payment object.
+    UPI: rrn or upi_transaction_id. Netbanking: bank_transaction_id. Card: auth_code.
+
+    Returns empty string if no real settlement reference is present. We deliberately
+    DO NOT fall back to the Razorpay payment id (`pay_xxx`) — that's a payment-gateway
+    handle, not proof of bank settlement, so callers must treat the absence of a real
+    UTR as "money has not yet been confirmed at the bank".
+    """
     if not rzp_payment:
         return ""
     ad = rzp_payment.get("acquirer_data") or {}
@@ -813,7 +819,6 @@ def _extract_utr(rzp_payment: Optional[Dict[str, Any]]) -> str:
         or (ad.get("upi_transaction_id") or "").strip()
         or (ad.get("bank_transaction_id") or "").strip()
         or (ad.get("auth_code") or "").strip()
-        or (rzp_payment.get("id") or "").strip()
     )
 
 
@@ -962,8 +967,17 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
         cross_check_ok = True
         rzp_status = "signature_only"
 
-    utr = _extract_utr(rzp_payment) or payload.razorpay_payment_id
-    auto_approve = bool(settings.get("auto_approve_on_payment", True)) and cross_check_ok
+    utr = _extract_utr(rzp_payment)
+    has_real_utr = bool(utr)
+    # In live mode, refuse to auto-approve (and skip the upline commission cascade)
+    # if Razorpay hasn't yet returned a real bank-side UTR (rrn / upi_transaction_id /
+    # bank_transaction_id / auth_code). The Razorpay payment_id (`pay_xxx`) by itself
+    # is NOT proof that money settled at the bank — settling can take seconds–minutes.
+    # In mock/test mode the gateway never returns a real UTR, so we treat any signature
+    # as authoritative there to keep dev flow smooth.
+    if not has_real_utr and not creds["is_mock"]:
+        utr = ""  # explicit: no UTR on file yet
+    auto_approve = bool(settings.get("auto_approve_on_payment", True)) and cross_check_ok and (creds["is_mock"] or has_real_utr)
 
     txn_id = str(uuid.uuid4())
     user_set: Dict[str, Any] = {
@@ -1037,9 +1051,14 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
              ". You're now approved and can start earning."),
         )
     else:
+        pending_reason = (
+            "We're awaiting bank-side UTR confirmation from Razorpay. The finance team will review and approve once the UTR is on file."
+            if not has_real_utr and not creds["is_mock"]
+            else "Your registration payment was successful. The finance team will review your profile shortly."
+        )
         await _create_notification(
             user["id"], "welcome", "Payment received — awaiting approval",
-            "Your registration payment was successful. The finance team will review your profile shortly.",
+            pending_reason,
         )
 
     return {

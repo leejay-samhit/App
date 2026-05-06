@@ -106,6 +106,137 @@ user_problem_statement: |
   Referral & E-commerce Platform "NetworkPay" with 1+4 recursive referral model, automated payouts,
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
+  - task: "Razorpay verify — UTR-required behavior fix (no auto-approve / no upline commission cascade when bank UTR is missing in LIVE mode)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Razorpay verify UTR-required fix — testing COMPLETE.
+            ALL scenarios PASSED via /app/backend_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Gateway state at test time: source=env, key_id=rzp_test_SjgtHA4CxiFyTK,
+            is_mock=False, is_test_mode=True (env-fallback creds active; no DB
+            override in settings.razorpay).
+
+            SCENARIO D — Code review (PASS) ✅
+              • backend/server.py L805-822 _extract_utr: only checks
+                acquirer_data.{rrn, upi_transaction_id, bank_transaction_id,
+                auth_code}; returns "" otherwise. NO fallback to
+                rzp_payment.id (verified absence of `rzp_payment.get("id")`
+                in the function body).
+              • L971 has_real_utr = bool(utr) — flag present.
+              • L980 auto_approve = ... and (creds["is_mock"] or has_real_utr)
+                — gating present.
+              • L1055 pending notification body contains the new phrase
+                "We're awaiting bank-side UTR confirmation from Razorpay."
+
+            SCENARIO B — LIVE mode, payment without real UTR (PASS) ✅
+              • Registered fresh user utrbugb.e4a3d280@mailinator.com with
+                referral_code="EARN" → sponsor_id=admin, referred_by="EARN".
+              • POST /payment/create-order → real Razorpay order
+                order_SluI5ycFmzf589 created (api.razorpay.com/v1/orders 200).
+              • POST /payment/verify with payment_id="pay_TEST_NO_UTR" and
+                valid HMAC computed against the env key_secret.
+                Razorpay /v1/payments/pay_TEST_NO_UTR returned 400 (BAD_REQUEST_ERROR,
+                "The id provided does not exist") — backend correctly fell
+                back to signature_only branch.
+              • Verify RESPONSE BODY (verbatim):
+                  {
+                    "ok": true,
+                    "transaction_id": "b4dc5873-e0f2-46d3-b010-b292116e959d",
+                    "amount": 118.0,
+                    "approval_status": "pending",
+                    "auto_approved": false,
+                    "utr": "",
+                    "rzp_status": "signature_only",
+                    "is_mock": false
+                  }
+                ✓ auto_approved=false, approval_status="pending", utr=""
+                — exactly per spec.
+              • DB-state snapshot AFTER verify:
+                  - user.wallet_balance = 0
+                  - user.registration_paid = true (can't pay again)
+                  - user.approval_status = "pending"
+                  - admin.wallet_balance UNCHANGED (0.0 → 0.0)
+                  - admin.wallet_buckets UNCHANGED
+                    (referral_commission=0.0 → 0.0, direct_added=0.0,
+                    service_margin=0.0, shopping_margin=0.0)
+                  - registration_fee transaction exists for user with
+                    status="paid", reference_number="" (empty UTR),
+                    description="Registration fee via Razorpay"
+                  - User notification: title="Payment received — awaiting
+                    approval", body contains
+                    "awaiting bank-side UTR confirmation".
+              • CONFIRMED: NO upline wallet credits — admin (sponsor for EARN)
+                received 0 across both wallet_balance and all 4 buckets.
+
+            SCENARIO C — Manual admin approval still triggers commissions
+            (PASS) ✅
+              • Same user (now in pending state).
+              • POST /admin/approvals/{user_id}/approve → 200 {ok: true}.
+              • user.approval_status flipped pending → approved.
+              • Sponsor (admin) direct_referrals_count: 2 → 3 (incremented
+                by 1) — proves _trigger_referral_commissions actually ran
+                inside the manual approve handler (server.py L3170-3171).
+              • No referral_payout transaction was created on this
+                approval because the chosen sponsor is admin itself (root)
+                and admin's directs went 2→3 — not a multiple of N=5, so
+                L1 doesn't fire on this single approval, and L2..L10
+                cascade has no upline above admin to credit. This is
+                BY DESIGN, not a regression. The fix correctly defers the
+                cascade from /payment/verify (where it would have
+                incorrectly fired without a UTR) to /admin/approvals/.../
+                approve (where it fires per existing N-based logic).
+              • Approval audit trail: backend/server.py L3186-3221
+                _archive_approved_user runs on manual approval and writes
+                an approved_registrations record.
+
+            SCENARIO A — Mock-mode behavior preserved (informational) ℹ️
+              • The deployed preview has rzp_test_ env keys configured →
+                creds.is_mock=False, so mock-mode cannot be exercised
+                end-to-end without rotating settings.razorpay (which
+                would pollute prod state).
+              • Verified via code review (server.py L980): the `or`
+                short-circuit `creds["is_mock"] or has_real_utr` means
+                when is_mock is True, has_real_utr is irrelevant and
+                auto_approve is granted as long as cross_check_ok is
+                True (which is unconditionally True in mock mode at
+                L950). Dev/QA flow preserved.
+
+            CLEANUP ✅
+              • DELETE /admin/users/{id} for the throwaway test user
+                returned 200. No orphan data left in preview.
+
+            BACKEND LOGS (during the run):
+              • POST /v1/orders → 200 (real Razorpay order created)
+              • GET /v1/payments/pay_TEST_NO_UTR → 400 BAD_REQUEST_ERROR
+                "The id provided does not exist" → server logged warning
+                and fell through to signature_only branch as designed.
+              • No 500s, no tracebacks.
+
+            VERDICT: Bug correctly fixed.
+              - In LIVE mode, a payment_id without a real bank UTR no
+                longer auto-approves the user and no longer triggers the
+                upline commission cascade. The user is moved to pending,
+                receives the new "awaiting bank-side UTR confirmation"
+                notification, and a registration_fee transaction is
+                logged with an empty reference_number.
+              - Manual admin approval still fires the cascade so finance
+                can approve once the UTR lands at the bank.
+              - Mock-mode behavior is unchanged by the patch (verified
+                via code).
+
+            Task working: true, needs_retesting: false. Main agent can
+            summarise and finish.
+
+
 backend:
   - task: "Phase 3 — GST Invoice generation HTML + PDF endpoints + invoice_number/invoiceable in /transactions/{id}"
     implemented: true
@@ -4407,7 +4538,7 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Danger Zone — Reset App to Zero (UI flow + guards only — do NOT trigger destructive call)"
+    - "Razorpay verify: skip auto-approval & commission cascade when no real UTR present (LIVE mode)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -5683,6 +5814,82 @@ test_plan:
 
 agent_communication:
     - agent: "testing"
+    - agent: "testing"
+      message: |
+        Razorpay verify UTR-required behavior fix — testing COMPLETE
+        (backend only, per review_request). All scenarios PASSED via
+        /app/backend_test.py.
+
+        Gateway state: source=env, key_id=rzp_test_SjgtHA4CxiFyTK,
+        is_mock=False (DB has no settings.razorpay override → env-fallback
+        creds in use). Live Razorpay reachable; api.razorpay.com hits
+        observed in backend logs.
+
+        ── Scenario D — code review (PASS) ──
+        backend/server.py:
+          • L805-822 _extract_utr returns "" when no rrn/upi_transaction_id
+            /bank_transaction_id/auth_code; NO fallback to rzp_payment.id.
+          • L971 has_real_utr = bool(utr).
+          • L980 auto_approve = … and (creds["is_mock"] or has_real_utr).
+          • L1055 pending notification body contains "We're awaiting
+            bank-side UTR confirmation from Razorpay."
+
+        ── Scenario B — LIVE no-UTR (PASS) ──
+        Registered fresh user with referral_code="EARN", created live
+        order_SluI5ycFmzf589, posted /payment/verify with payment_id=
+        "pay_TEST_NO_UTR" + valid HMAC (env key_secret). Razorpay /v1/
+        payments/pay_TEST_NO_UTR returned 400 (BAD_REQUEST_ERROR — id
+        does not exist) → backend correctly fell back to signature_only.
+        VERIFY RESPONSE BODY:
+          { ok: true, transaction_id: "b4dc5873-…", amount: 118.0,
+            approval_status: "pending", auto_approved: false, utr: "",
+            rzp_status: "signature_only", is_mock: false }
+        DB-state snapshot:
+          • user.wallet_balance = 0
+          • user.registration_paid = true (cannot pay again)
+          • user.approval_status = "pending"
+          • admin.wallet_balance UNCHANGED (0.0 → 0.0)
+          • admin.wallet_buckets UNCHANGED across all 4 keys
+            (referral_commission, direct_added, service_margin,
+            shopping_margin)
+          • registration_fee tx exists, status="paid",
+            reference_number="" (empty), description="Registration fee
+            via Razorpay"
+          • Notification: title="Payment received — awaiting approval",
+            body contains "awaiting bank-side UTR confirmation".
+        => NO upline cascade fired. Bug fix CONFIRMED.
+
+        ── Scenario C — manual approve cascade (PASS) ──
+        POST /admin/approvals/{user_id}/approve → 200 {ok: true}.
+          • user.approval_status flipped pending → approved.
+          • Sponsor (admin) direct_referrals_count: 2 → 3 (incremented),
+            proving _trigger_referral_commissions ran on manual approve.
+          • No referral_payout transaction was generated this single
+            approval because the sponsor IS admin (root) and admin's
+            count moved 2→3, not a multiple of N=5; L2..L10 has no upline
+            above admin. This is the correct, pre-existing N-based gating
+            — the patch did not change manual-approval behavior.
+
+        ── Scenario A — mock-mode preserved (informational) ──
+        Cannot exercise end-to-end without rotating settings.razorpay
+        (would pollute prod state). Verified by code: at server.py L980
+        the `or` short-circuit `creds["is_mock"] or has_real_utr` means
+        when is_mock=True, has_real_utr is irrelevant and auto_approve
+        is granted (cross_check_ok is unconditionally True in mock mode
+        per L950). Dev/QA flow unchanged.
+
+        Cleanup: DELETE /api/admin/users/{id} for the throwaway test
+        user → 200. No orphan data left in preview.
+
+        Backend logs clean during the run (only the expected Razorpay
+        400 for the fake pay_TEST_NO_UTR id, handled by the
+        signature_only fallback). NO 500s, NO tracebacks.
+
+        Task working: true, needs_retesting: false. Main agent: please
+        summarise and finish — bug fix verified end-to-end against the
+        live preview environment.
+
+
       message: |
         ROUND-3 retest on Delete-user confirmation popup (admin/users.tsx).
 
