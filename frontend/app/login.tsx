@@ -9,7 +9,6 @@ import {
   Platform,
   ScrollView,
   ActivityIndicator,
-  Alert,
 } from "react-native";
 import { useRouter, Link } from "expo-router";
 import { Feather } from "@expo/vector-icons";
@@ -18,18 +17,16 @@ import { useAuth } from "../src/auth";
 import { useBranding } from "../src/branding";
 import { colors, radii, spacing } from "../src/theme";
 import { formatApiError } from "../src/api";
-import { signInWithGoogle } from "../src/google";
 import { GradientCard } from "../src/gradient-card";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
 export default function Login() {
-  const { login, setSession } = useAuth();
+  const { login } = useAuth();
   const { app_name, tagline, login_subtitle } = useBranding();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState("");
 
   const navigateAfter = (u: any) => {
@@ -52,23 +49,6 @@ export default function Login() {
       setError(formatApiError(e));
     } finally {
       setLoading(false);
-    }
-  };
-
-  const onGoogle = async () => {
-    setError("");
-    setGoogleLoading(true);
-    try {
-      // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-      const res = await signInWithGoogle();
-      if (res.ok && res.token && res.user) {
-        await setSession(res.token, res.user);
-        navigateAfter(res.user);
-      } else if (!res.cancelled) {
-        setError(res.error || "Google sign-in failed");
-      }
-    } finally {
-      setGoogleLoading(false);
     }
   };
 
@@ -132,30 +112,6 @@ export default function Login() {
               <ActivityIndicator color={colors.primaryFg} />
             ) : (
               <Text style={styles.primaryBtnText}>Sign in</Text>
-            )}
-          </TouchableOpacity>
-
-          <View style={styles.dividerRow}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>OR</Text>
-            <View style={styles.dividerLine} />
-          </View>
-
-          <TouchableOpacity
-            testID="login-google-button"
-            style={[styles.googleBtn, googleLoading && { opacity: 0.7 }]}
-            onPress={onGoogle}
-            disabled={googleLoading || loading}
-          >
-            {googleLoading ? (
-              <ActivityIndicator color={colors.textMain} />
-            ) : (
-              <>
-                <View style={styles.googleIcon}>
-                  <Text style={styles.googleG}>G</Text>
-                </View>
-                <Text style={styles.googleBtnText}>Continue with Google</Text>
-              </>
             )}
           </TouchableOpacity>
 
@@ -225,13 +181,6 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   primaryBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 16 },
-  dividerRow: { flexDirection: "row", alignItems: "center", marginVertical: 18, gap: 10 },
-  dividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
-  dividerText: { fontSize: 11, fontWeight: "700", color: colors.textMuted, letterSpacing: 2 },
-  googleBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.button, paddingVertical: 14 },
-  googleIcon: { width: 22, height: 22, borderRadius: 11, backgroundColor: "#fff", borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
-  googleG: { fontSize: 13, fontWeight: "900", color: "#4285F4" },
-  googleBtnText: { color: colors.textMain, fontWeight: "700", fontSize: 15 },
   footerRow: { flexDirection: "row", justifyContent: "center", marginTop: 24 },
   muted: { color: colors.textMuted, fontSize: 14 },
   link: { color: colors.primary, fontWeight: "700", fontSize: 14 },
