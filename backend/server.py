@@ -892,17 +892,35 @@ async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user))
             raise HTTPException(status_code=502, detail=f"Razorpay order failed: {r.text}")
         order_id = r.json().get("id")
 
-    # Record a pending transaction for traceability
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user["id"],
-        "type": "registration_fee",
-        "amount": amount_paise / 100.0,
-        "status": "created",
-        "description": "Razorpay order created" + (" (mock)" if creds["is_mock"] else ""),
-        "razorpay_order_id": order_id,
-        "created_at": now_utc().isoformat(),
-    })
+    # Record / refresh the pending transaction for traceability. We keep AT MOST
+    # ONE `created` row per user — every "Pay" click replaces the previous pending
+    # one rather than spawning a new row. This prevents the "5 phantom rows for
+    # 1 payment" pollution that was inflating wallet history & total revenue.
+    existing_pending = await db.transactions.find_one(
+        {"user_id": user["id"], "type": "registration_fee", "status": "created"},
+        {"_id": 0, "id": 1},
+    )
+    if existing_pending:
+        await db.transactions.update_one(
+            {"id": existing_pending["id"]},
+            {"$set": {
+                "razorpay_order_id": order_id,
+                "amount": amount_paise / 100.0,
+                "description": "Razorpay order created" + (" (mock)" if creds["is_mock"] else ""),
+                "created_at": now_utc().isoformat(),
+            }},
+        )
+    else:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "registration_fee",
+            "amount": amount_paise / 100.0,
+            "status": "created",
+            "description": "Razorpay order created" + (" (mock)" if creds["is_mock"] else ""),
+            "razorpay_order_id": order_id,
+            "created_at": now_utc().isoformat(),
+        })
 
     return CreateOrderResponse(
         order_id=order_id,
@@ -1139,13 +1157,12 @@ async def payment_failure(payload: PaymentFailureRequest, user: Dict[str, Any] =
             user, category="payment_unsuccessful", remarks=reason_text, rejected_by="system",
         )
         archived = True
-        # Log a failed transaction for trail
-        settings = await get_settings()
+        # Log a failed transaction for trail (amount=0 — must NOT count as revenue)
         await db.transactions.insert_one({
             "id": str(uuid.uuid4()),
             "user_id": user["id"],
             "type": "registration_fee",
-            "amount": settings["registration_fee"],
+            "amount": 0.0,
             "status": "failed",
             "description": f"Payment failed (attempt {attempts}/{MAX_PAYMENT_ATTEMPTS}) — archived",
             "razorpay_order_id": payload.razorpay_order_id,
@@ -1167,18 +1184,37 @@ async def payment_failure(payload: PaymentFailureRequest, user: Dict[str, Any] =
     }
     await db.users.update_one({"id": user["id"]}, {"$set": update_doc})
 
-    # Log a pending-failed transaction for traceability
-    settings = await get_settings()
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user["id"],
-        "type": "registration_fee",
-        "amount": settings["registration_fee"],
-        "status": "failed",
-        "description": f"Payment failed (attempt {attempts}/{MAX_PAYMENT_ATTEMPTS})" + (f" — {payload.reason}" if payload.reason else ""),
-        "razorpay_order_id": payload.razorpay_order_id,
-        "created_at": now_utc().isoformat(),
-    })
+    # Convert the existing pending `created` row for this order into a `failed`
+    # row instead of inserting a new one. amount=0 so failed attempts never
+    # pollute revenue/wallet aggregations. This eliminates the "5 phantom rows
+    # for 1 payment" bug.
+    failed_desc = f"Payment failed (attempt {attempts}/{MAX_PAYMENT_ATTEMPTS})" + (f" — {payload.reason}" if payload.reason else "")
+    pending_q: Dict[str, Any] = {
+        "user_id": user["id"], "type": "registration_fee", "status": "created",
+    }
+    if payload.razorpay_order_id:
+        pending_q["razorpay_order_id"] = payload.razorpay_order_id
+    upd_failed = await db.transactions.update_one(
+        pending_q,
+        {"$set": {
+            "status": "failed",
+            "amount": 0.0,  # zero — failed attempts must NOT count as revenue
+            "description": failed_desc,
+            "failed_at": now_utc().isoformat(),
+        }},
+    )
+    if upd_failed.modified_count == 0:
+        # No matching pending row — write a standalone zero-amount failure note.
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "registration_fee",
+            "amount": 0.0,
+            "status": "failed",
+            "description": failed_desc,
+            "razorpay_order_id": payload.razorpay_order_id,
+            "created_at": now_utc().isoformat(),
+        })
 
     return {
         "ok": True,
@@ -1346,8 +1382,17 @@ async def my_withdrawals(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @api_router.get("/transactions/me")
-async def my_transactions(user: Dict[str, Any] = Depends(get_current_user)):
-    items = await db.transactions.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+async def my_transactions(
+    user: Dict[str, Any] = Depends(get_current_user),
+    include_pending: bool = False,
+):
+    """User wallet history. By default we hide pre-payment / failed registration
+    rows (status in {created, failed}) so the wallet view shows only money that
+    actually moved. Pass ?include_pending=true to see all rows for debugging."""
+    q: Dict[str, Any] = {"user_id": user["id"]}
+    if not include_pending:
+        q["status"] = {"$nin": ["created", "failed"]}
+    items = await db.transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return items
 
 
@@ -2013,8 +2058,14 @@ async def admin_withdrawals_digest(_: Dict[str, Any] = Depends(require_admin_rol
 
 
 @api_router.get("/admin/transactions")
-async def admin_transactions(_: Dict[str, Any] = Depends(require_admin)):
-    items = await db.transactions.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+async def admin_transactions(_: Dict[str, Any] = Depends(require_admin), include_pending: bool = False):
+    """Admin transaction feed. By default hides pre-payment / failed registration
+    rows so the wallet & revenue figures match. Pass ?include_pending=true to
+    surface them for support / debugging."""
+    q: Dict[str, Any] = {}
+    if not include_pending:
+        q["status"] = {"$nin": ["created", "failed"]}
+    items = await db.transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
     return items
 
 
@@ -3915,7 +3966,7 @@ async def admin_analytics(_: Dict[str, Any] = Depends(require_admin), days: int 
     system_wallet = bal_agg[0]["total"] if bal_agg else 0
 
     rev_agg = await db.transactions.aggregate([
-        {"$match": {"type": "registration_fee"}},
+        {"$match": {"type": "registration_fee", "status": "paid"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     total_revenue = rev_agg[0]["total"] if rev_agg else 0
@@ -4445,6 +4496,25 @@ async def on_startup():
             logger.info(f"Reg-fee duplicate backfill: removed {removed} legacy 'created' rows")
     except Exception as _bf_err:
         logger.warning(f"Reg-fee duplicate backfill failed: {_bf_err}")
+
+    # ---------- Backfill: zero-out amount on stale created/failed rows ----------
+    # Earlier `created` and `failed` registration_fee rows had positive amounts,
+    # so they polluted total_revenue (e.g. 5 phantom rows × ₹118 = ₹590).
+    # Going forward, those rows are kept with amount=0, but legacy data needs the
+    # same correction so the dashboard numbers are accurate.
+    try:
+        zero_res = await db.transactions.update_many(
+            {
+                "type": "registration_fee",
+                "status": {"$in": ["created", "failed"]},
+                "amount": {"$gt": 0},
+            },
+            {"$set": {"amount": 0.0}},
+        )
+        if zero_res.modified_count:
+            logger.info(f"Reg-fee phantom amount backfill: zeroed {zero_res.modified_count} pending/failed rows")
+    except Exception as _bf_err:
+        logger.warning(f"Reg-fee phantom amount backfill failed: {_bf_err}")
     await seed_admin()
     await seed_products()
     # Backfill: any existing user without approval_status — assume approved (legacy users
