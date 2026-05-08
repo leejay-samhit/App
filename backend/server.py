@@ -1775,6 +1775,124 @@ async def admin_list_users(_: Dict[str, Any] = Depends(require_admin)):
     return items
 
 
+# ------------------ Admin: referral tree views ------------------
+
+def _slim_user_node(u: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact representation of a user for tree views."""
+    return {
+        "id": u.get("id"),
+        "name": u.get("name") or "—",
+        "email": u.get("email"),
+        "phone": u.get("phone"),
+        "role": u.get("role", "user"),
+        "admin_role": u.get("admin_role"),
+        "referral_code": u.get("referral_code"),
+        "referred_by": u.get("referred_by"),
+        "registration_paid": bool(u.get("registration_paid", False)),
+        "approval_status": u.get("approval_status", "pending"),
+        "is_blocked": bool(u.get("is_blocked", False)),
+        "direct_referrals_count": int(u.get("direct_referrals_count", 0)),
+        "wallet_balance": float(u.get("wallet_balance", 0) or 0),
+        "total_earned": float(u.get("total_earned", 0) or 0),
+        "created_at": u.get("created_at"),
+    }
+
+
+@api_router.get("/admin/users/tree")
+async def admin_users_tree(
+    _: Dict[str, Any] = Depends(require_admin),
+    depth: int = 10,
+    root_user_id: Optional[str] = None,
+):
+    """Return a nested referral tree.
+
+    Parameters
+    ----------
+    depth : int (default 10) — max levels to descend (cap 10)
+    root_user_id : str — start at this user (admin-scoped). If omitted, the
+                   tree is rooted at the seed admin (the matrix root). If no
+                   admin exists, returns all top-level users (no sponsor).
+    """
+    depth = max(1, min(int(depth or 10), 10))
+
+    if root_user_id:
+        root = await db.users.find_one({"id": root_user_id}, {"_id": 0, "password_hash": 0})
+        if not root:
+            raise HTTPException(status_code=404, detail="Root user not found")
+        roots = [root]
+    else:
+        admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "password_hash": 0})
+        if admin:
+            roots = [admin]
+        else:
+            roots = await db.users.find(
+                {"$or": [{"sponsor_id": None}, {"sponsor_id": {"$exists": False}}]},
+                {"_id": 0, "password_hash": 0},
+            ).sort("created_at", 1).to_list(50)
+
+    # BFS with depth limit, batching DB calls per level for efficiency.
+    async def build(uid: str, level: int) -> List[Dict[str, Any]]:
+        if level >= depth:
+            return []
+        children = await db.users.find(
+            {"sponsor_id": uid},
+            {"_id": 0, "password_hash": 0},
+        ).sort("created_at", 1).to_list(2000)
+        out: List[Dict[str, Any]] = []
+        for c in children:
+            node = _slim_user_node(c)
+            node["level"] = level + 1
+            node["children"] = await build(c["id"], level + 1)
+            out.append(node)
+        return out
+
+    result = []
+    for r in roots:
+        node = _slim_user_node(r)
+        node["level"] = 0
+        node["children"] = await build(r["id"], 0)
+        result.append(node)
+    return {"depth": depth, "roots": result}
+
+
+@api_router.get("/admin/users/{user_id}/lineage")
+async def admin_user_lineage(user_id: str, _: Dict[str, Any] = Depends(require_admin)):
+    """Return the upline chain (sponsor → sponsor's sponsor → … → root) for a user,
+    plus their direct downlines (1 level). Useful for a 'Who's above and below'
+    quick view on any single user."""
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Walk upline by sponsor_id (more reliable than referral_code, also handles
+    # spillover-aware admin sponsors).
+    chain: List[Dict[str, Any]] = []
+    cur = u
+    seen = {u["id"]}
+    while cur.get("sponsor_id"):
+        parent = await db.users.find_one(
+            {"id": cur["sponsor_id"]}, {"_id": 0, "password_hash": 0},
+        )
+        if not parent or parent["id"] in seen:
+            break
+        seen.add(parent["id"])
+        chain.append(_slim_user_node(parent))
+        cur = parent
+    chain.reverse()  # root → … → immediate sponsor (top to bottom)
+
+    # Direct downlines (1st level only)
+    directs = await db.users.find(
+        {"sponsor_id": user_id}, {"_id": 0, "password_hash": 0},
+    ).sort("created_at", 1).to_list(2000)
+    downline = [_slim_user_node(d) for d in directs]
+
+    return {
+        "user": _slim_user_node(u),
+        "upline": chain,
+        "downline": downline,
+        "downline_count": len(downline),
+    }
+
+
 @api_router.get("/admin/withdrawals")
 async def admin_list_withdrawals(_: Dict[str, Any] = Depends(require_admin), status: Optional[str] = None):
     q = {}

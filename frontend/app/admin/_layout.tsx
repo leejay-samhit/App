@@ -54,6 +54,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="service-applications" options={{ href: null }} />
       <Tabs.Screen name="system-wallet" options={{ href: null }} />
       <Tabs.Screen name="vendors" options={{ href: null }} />
+      <Tabs.Screen name="users-tree" options={{ href: null }} />
     </Tabs>
   );
 }

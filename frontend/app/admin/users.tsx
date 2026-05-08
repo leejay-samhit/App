@@ -17,7 +17,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
@@ -50,6 +50,7 @@ type Stats = {
 };
 
 export default function AdminUsers() {
+  const router = useRouter();
   const { user: currentAdmin } = useAuth();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -107,6 +108,15 @@ export default function AdminUsers() {
                 <Text style={styles.newUserBtnText}>  Add new user (offline-paid)</Text>
               </TouchableOpacity>
             )}
+            <TouchableOpacity
+              onPress={() => router.push("/admin/users-tree")}
+              style={styles.treeBtn}
+              testID="admin-users-tree"
+            >
+              <Feather name="git-branch" size={16} color={colors.primary} />
+              <Text style={styles.treeBtnText}>  View network tree (upline · downline)</Text>
+              <Feather name="chevron-right" size={16} color={colors.primary} style={{ marginLeft: "auto" }} />
+            </TouchableOpacity>
             <View style={styles.searchWrap}>
               <Feather name="search" size={16} color={colors.textMuted} style={{ marginLeft: 12 }} />
               <TextInput
@@ -754,6 +764,15 @@ const styles = StyleSheet.create({
   searchWrap: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16, gap: 8 },
   newUserBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 14, marginBottom: 16 },
   newUserBtnText: { color: colors.primaryFg, fontSize: 14, fontWeight: "800" },
+  treeBtn: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: colors.primary + "10",
+    borderRadius: radii.lg,
+    paddingVertical: 12, paddingHorizontal: 14,
+    marginBottom: 14,
+    borderWidth: 1, borderColor: colors.primary + "33",
+  },
+  treeBtnText: { color: colors.primary, fontSize: 13, fontWeight: "700" },
   searchInput: { flex: 1, paddingVertical: 12, paddingHorizontal: 8, fontSize: 14, color: colors.textMain },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12 },
   userRow: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 12, marginBottom: 10, gap: 12 },
