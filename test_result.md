@@ -6251,6 +6251,42 @@ agent_communication:
           no gst_collected row created. Pre-existing earn_spillover_test
           history already covers the live L2-to-admin path.
 
+
+## Bug Fix (2025-06) — Suppress GST invoice for referral payouts
+
+  - Changed `INVOICEABLE_COMMISSION` set in /app/backend/invoices.py to remove
+    `referral_payout` and `level_payout`. Admin-side `gst_collected` mirror
+    entries were also already excluded.
+  - Effect: `is_invoiceable()` now returns False for any referral commission
+    transaction. Therefore:
+    - GET /api/transactions/{id} returns `invoiceable: false` for these txns.
+    - GET /api/transactions/{id}/invoice and /invoice.pdf return 400 (verified).
+    - Wallet detail modal in /app/frontend/app/(tabs)/wallet.tsx no longer
+      shows the GST Invoice panel (Preview + Download PDF) for referral
+      payouts. The panel is rendered conditionally on
+      `txDetail.invoiceable && txDetail.invoice_number`.
+  - The split itself is UNCHANGED:
+      • User wallet receives NET (gross / 1.18) as a `referral_payout` txn
+      • Admin's `gst_collected` bucket receives GST as a separate txn
+        carrying `source_user_name`, `reference_number` (REF-Lx-...-GST),
+        `linked_payout_to_user_id`, level, description.
+  - Added explicit "Gross Payout / GST Withheld (18%) / Net Credited" rows
+    to the user's transaction-detail modal so the deduction is transparent
+    even without an invoice document. Rows are only added when
+    `gross_amount` and `gst_amount` are present on the txn.
+  - Live verification: curled /api/transactions/{ref_payout_id}/invoice as
+    admin → 400 ("No invoice available for this transaction type"). Detail
+    endpoint returned `invoiceable: false`.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Referral GST invoice suppression done. Money split logic untouched
+        — net to user, 18% to admin's gst_collected bucket with user_name +
+        reference_number. Invoice button now hidden in wallet UI for these
+        txns. User can still see exact gross/net/GST breakdown in the
+        transaction detail modal.
+
         SCENARIO C (/admin/transactions enrichment) ✅ — every row has
           user_name, user_email, user_referral_code, reference_number keys.
           Sample: row 0 (system_deposit) → user_name="Admin",

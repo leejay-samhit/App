@@ -28,9 +28,14 @@ GST_PCT_DEFAULT = 18.0  # India standard rate
 
 # Transaction types that yield "tax invoices" (B2C goods/services sold by platform)
 INVOICEABLE_TAX_INVOICE = {"order", "service_booking", "registration_fee"}
-# Transaction types that yield "commission/income statements" (paid TO the user)
+# Transaction types that yield "commission/income statements" (paid TO the user).
+#
+# NOTE: `referral_payout`, `level_payout` and the admin-side `gst_collected`
+# mirror entries are intentionally EXCLUDED. Per business rule, the GST split
+# happens silently inside the wallet (net credited to user, 18% routed to
+# admin), but no invoice/statement document is issued for referral commissions.
 INVOICEABLE_COMMISSION = {
-    "referral_payout", "level_payout", "vendor_sale", "service_earning",
+    "vendor_sale", "service_earning",
     "shop_commission", "service_commission", "admin_credit", "transfer_in",
     "transfer_out", "withdrawal", "admin_debit", "system_deposit",
 }

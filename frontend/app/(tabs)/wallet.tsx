@@ -416,6 +416,11 @@ export default function WalletScreen() {
                   ["Transaction ID", (txDetail.transaction.id || "").slice(0, 16) + "…"],
                   ["Description", txDetail.transaction.description || "—"],
                   ["Remarks", txDetail.transaction.remarks || "—"],
+                  ...(txDetail.transaction.gross_amount != null && txDetail.transaction.gst_amount != null ? [
+                    ["Gross Payout", formatINR(txDetail.transaction.gross_amount)],
+                    [`GST Withheld (${txDetail.transaction.gst_pct ?? 18}%)`, `− ${formatINR(txDetail.transaction.gst_amount)}`],
+                    ["Net Credited", formatINR(txDetail.transaction.amount)],
+                  ] : []),
                 ].map(([k, v], i) => (
                   <View key={i} style={styles.detailRow}>
                     <Text style={styles.detailKey}>{k}</Text>
