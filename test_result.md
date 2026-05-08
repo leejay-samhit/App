@@ -367,6 +367,61 @@ user_problem_statement: |
 
 
 backend:
+  - task: "Phase 1 refactor — Pydantic models extracted to backend/models.py (47 classes), server.py imports them"
+    implemented: true
+    working: true
+    file: "backend/models.py, backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Phase 1 refactor smoke test — testing COMPLETE.
+            ALL 10/10 checks PASSED via /app/refactor_smoke_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Setup verified:
+              • /app/backend/models.py exists, 313 lines, 47 Pydantic classes.
+              • server.py L33-83 imports all 47 classes via `from models import (...)`.
+              • Backend supervisor RUNNING uptime 32m+ — no import errors during
+                reload after the refactor.
+
+            Smoke results:
+              1. ✅ POST /api/auth/login admin → 200 + token
+                   (LoginRequest still validates).
+              2. ✅ POST /api/auth/register missing email → 422 with proper
+                   Pydantic detail [{"loc":["body","email"],"type":"missing"}]
+                   (RegisterRequest still validates).
+              3. ✅ PUT /api/admin/branding {app_name, tagline, login_subtitle,
+                   colors:{primary,accent}, font:"inter"} → 200 (BrandingPayload
+                   parsed correctly; field-level font enum check fired only for
+                   bad value, not from import).
+              4a. ✅ POST /api/admin/users/{uid}/wallet
+                   {amount:1, type:"credit", reason:"refactor smoke"} → 200
+                   ok=true with transaction_id (WalletAdjust).
+              4b. ✅ Reverse debit ₹1 → 200 (state restored).
+              5. ✅ GET /api/admin/transactions → 200.
+                 GET /api/admin/system-wallet → 200.
+                 GET /api/admin/users → 200.
+                 GET /api/branding → 200.
+              6. ✅ POST /api/admin/products with missing 'name' → 422 with
+                   proper Pydantic detail [{"loc":["body","name"],
+                   "type":"missing"}] (ProductCreate still validates).
+
+            Backend logs clean: no 500s, no import errors, no tracebacks
+            during smoke test. Only legacy Razorpay 400 WARNINGs from prior
+            test runs (unrelated to this refactor).
+
+            VERDICT: Phase 1 model extraction is regression-free. All 47
+            Pydantic models import cleanly from /app/backend/models.py and
+            request/response validation still works identically. server.py
+            shrunk from 5,796 → 5,562 lines as expected. Main agent can
+            summarise and finish.
+
+
+backend:
   - task: "Registration-fee duplicate-entry fix — payment/verify updates pending 'created' row instead of inserting a 2nd, plus startup backfill"
     implemented: true
     working: true
@@ -6222,3 +6277,34 @@ agent_communication:
         Backend logs clean — no 500s, no tracebacks. Task working: true,
         needs_retesting: false. Main agent can summarise and finish.
 
+
+
+## Refactor (2025-06) — Phase 1: Pydantic models extracted
+
+  - Extracted all 47 Pydantic request/response classes from /app/backend/server.py
+    into a new /app/backend/models.py (313 lines). server.py is now 5,562 lines
+    (down from 5,796; ~234 lines removed).
+  - server.py imports them via `from models import (RegisterRequest, …)` block
+    placed right after `from pydantic import BaseModel, …`.
+  - models.py is pure data: only stdlib typing + pydantic imports. No business
+    logic, no I/O. Safe to import from any future router module without
+    circular-import risk.
+  - Smoke test (admin login + 9 GET endpoints) returned 200 OK on all probes:
+    /auth/me, /branding, /admin/users, /admin/transactions, /admin/system-wallet,
+    /admin/settings, /products, /admin/audit-logs, /admin/analytics?days=7.
+  - Backend reload via watchfiles succeeded with no traceback in
+    /var/log/supervisor/backend.err.log.
+  - server.py.bak retained for safety (will remove after next phase).
+  - Phase 2 (extract feature route modules into /app/backend/routes/*.py) is
+    deferred and requires a follow-up session — it will need a small core/
+    module first to break the dependency cycle (db, get_current_user,
+    require_admin_role helpers used by every route).
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Refactor Phase 1 done — models.py created and imported. Backend
+        smoke-tested OK (no testing-agent run requested for a pure data-class
+        move; can run deep_testing_backend_v2 if user wants the full sweep).
+        Phase 2 (route module split) is the next priority but was not started
+        in this session.

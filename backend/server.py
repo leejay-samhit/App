@@ -31,6 +31,56 @@ from invoices import (
     is_invoiceable as _is_invoiceable,
 )
 from pydantic import BaseModel, EmailStr, Field
+from models import (
+    RegisterRequest,
+    LoginRequest,
+    BankUpdate,
+    WithdrawalRequest,
+    ProductCreate,
+    ProductUpdate,
+    BrandingPayload,
+    GoogleExchange,
+    CreateOrderResponse,
+    VerifyPaymentRequest,
+    PaymentFailureRequest,
+    WalletTransfer,
+    WithdrawalCompleteRequest,
+    WithdrawalRejectRequest,
+    WithdrawalBatchRequest,
+    AdminUserUpdate,
+    AdminPasswordReset,
+    AdminCreate,
+    PromoteRequest,
+    SuperPasswordSet,
+    SuperPasswordVerify,
+    DangerPinSet,
+    WipeUsersRequest,
+    WipeAllRequest,
+    SettingsUpdate,
+    CartItem,
+    CartRemove,
+    KYCSubmit,
+    KYCReject,
+    ApprovalReject,
+    AdminCreateUserRequest,
+    ExtraDocsSubmit,
+    BlockRequest,
+    WalletAdjust,
+    SystemWalletDeposit,
+    TxnStatusUpdate,
+    OrderStatusUpdate,
+    TakeBackupRequest,
+    RestoreBackupRequest,
+    TicketCreateRequest,
+    TicketReplyRequest,
+    TicketUpdateRequest,
+    PaymentGatewayPayload,
+    VendorApplyRequest,
+    VendorRejectRequest,
+    ServiceApplyRequest,
+    ServiceRejectRequest,
+    ServiceBookRequest,
+)
 
 
 # ------------------ Config ------------------
@@ -190,7 +240,6 @@ async def verify_danger_pin(provided: str) -> bool:
         return False
 
 
-
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -270,50 +319,6 @@ async def _audit_log(admin: Dict[str, Any], action: str, target_type: str = "", 
 
 
 # ------------------ Models ------------------
-class RegisterRequest(BaseModel):
-    name: str
-    email: EmailStr
-    password: str = Field(min_length=6)
-    phone: Optional[str] = None
-    referral_code: Optional[str] = None  # sponsor code
-
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class BankUpdate(BaseModel):
-    upi_id: Optional[str] = None
-    bank_account: Optional[str] = None
-    ifsc: Optional[str] = None
-    account_holder: Optional[str] = None
-
-
-class WithdrawalRequest(BaseModel):
-    amount: float = Field(gt=0)
-
-
-class ProductCreate(BaseModel):
-    name: str
-    price: float
-    image_url: str
-    description: Optional[str] = ""
-    stock: int = 100
-    category: Optional[str] = None
-    is_published: bool = True
-    vendor_id: Optional[str] = None  # admin can assign to a vendor
-
-
-class ProductUpdate(BaseModel):
-    name: Optional[str] = None
-    price: Optional[float] = None
-    image_url: Optional[str] = None
-    description: Optional[str] = None
-    stock: Optional[int] = None
-    category: Optional[str] = None
-    is_published: Optional[bool] = None
-    vendor_id: Optional[str] = None
 
 
 # ------------------ Branding (public-readable, super_admin writable) ------------------
@@ -349,17 +354,6 @@ DEFAULT_BRANDING: Dict[str, Any] = {
 
 ALLOWED_FONTS = {"system", "inter", "poppins", "jakarta", "manrope", "dmsans"}
 ALLOWED_TAB_KEYS = {"dashboard", "network", "wallet", "shop", "profile"}
-
-
-class BrandingPayload(BaseModel):
-    app_name: Optional[str] = None
-    tagline: Optional[str] = None
-    login_subtitle: Optional[str] = None
-    payment_hero: Optional[str] = None
-    pending_hero: Optional[str] = None
-    colors: Optional[Dict[str, str]] = None
-    font: Optional[str] = None
-    tabs: Optional[List[Dict[str, Any]]] = None
 
 
 # ------------------ FastAPI App ------------------
@@ -492,9 +486,6 @@ async def login(payload: LoginRequest):
 
 
 # REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-class GoogleExchange(BaseModel):
-    session_id: str
-    referral_code: Optional[str] = None
 
 
 @api_router.post("/auth/google/exchange")
@@ -902,14 +893,6 @@ async def payment_config(user: Dict[str, Any] = Depends(get_current_user)):
     }
 
 
-class CreateOrderResponse(BaseModel):
-    order_id: str
-    amount_paise: int
-    currency: str
-    key_id: str
-    is_mock: bool
-
-
 @api_router.post("/payment/create-order")
 async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user)):
     """Create a Razorpay order (or mock order in dev). Returns order_id for checkout."""
@@ -981,12 +964,6 @@ async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user))
         key_id=creds["key_id"] or "rzp_test_MOCK",
         is_mock=creds["is_mock"],
     )
-
-
-class VerifyPaymentRequest(BaseModel):
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str
 
 
 @api_router.post("/payment/verify")
@@ -1175,11 +1152,6 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
         "rzp_status": rzp_status,
         "is_mock": creds["is_mock"],
     }
-
-
-class PaymentFailureRequest(BaseModel):
-    razorpay_order_id: Optional[str] = None
-    reason: Optional[str] = None
 
 
 @api_router.post("/payment/failure")
@@ -1589,10 +1561,6 @@ async def transaction_invoice_pdf(txn_id: str, user: Dict[str, Any] = Depends(ge
 
 
 # ------------------ Wallet-to-wallet transfer ------------------
-class WalletTransfer(BaseModel):
-    recipient: str = Field(..., description="Recipient email or referral code")
-    amount: float = Field(..., gt=0)
-    note: Optional[str] = None
 
 
 @api_router.post("/wallet/transfer")
@@ -1814,19 +1782,6 @@ async def admin_list_withdrawals(_: Dict[str, Any] = Depends(require_admin), sta
         q["status"] = status
     items = await db.withdrawals.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return items
-
-
-class WithdrawalCompleteRequest(BaseModel):
-    reference_number: Optional[str] = ""
-
-
-class WithdrawalRejectRequest(BaseModel):
-    reason: Optional[str] = ""
-
-
-class WithdrawalBatchRequest(BaseModel):
-    ids: List[str]
-    reference_prefix: Optional[str] = ""
 
 
 @api_router.post("/admin/withdrawals/{wid}/approve")
@@ -2211,25 +2166,6 @@ async def admin_delete_product(product_id: str, admin: Dict[str, Any] = Depends(
 
 
 # ------------------ Admin: User Management ------------------
-class AdminUserUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    phone: Optional[str] = None
-    role: Optional[str] = None  # "user" or "admin"
-    admin_role: Optional[str] = None  # "super_admin" | "manager" | "support"
-    # NOTE: wallet_balance and total_earned are intentionally NOT editable here.
-    # All money movements MUST go through /admin/users/{id}/wallet (credit/debit)
-    # which atomically debits the system-wallet's `direct_added` bucket — this
-    # enforces the "only money that's been deposited can be paid out" invariant.
-    registration_paid: Optional[bool] = None
-    upi_id: Optional[str] = None
-    bank_account: Optional[str] = None
-    ifsc: Optional[str] = None
-    account_holder: Optional[str] = None
-
-
-class AdminPasswordReset(BaseModel):
-    new_password: str = Field(min_length=6)
 
 
 @api_router.patch("/admin/users/{user_id}")
@@ -2395,14 +2331,6 @@ async def admin_list_admins(_: Dict[str, Any] = Depends(require_admin)):
     return items
 
 
-class AdminCreate(BaseModel):
-    name: str = Field(min_length=1)
-    email: EmailStr
-    password: str = Field(min_length=6)
-    admin_role: str = "manager"  # super_admin | manager | support
-    phone: Optional[str] = None
-
-
 @api_router.post("/admin/admins")
 async def admin_create_admin(payload: AdminCreate, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
     """Create a new admin account directly (no public registration)."""
@@ -2455,10 +2383,6 @@ async def admin_create_admin(payload: AdminCreate, admin: Dict[str, Any] = Depen
     return fresh
 
 
-class PromoteRequest(BaseModel):
-    admin_role: str = "manager"  # super_admin | manager | support
-
-
 @api_router.post("/admin/users/{user_id}/promote")
 async def admin_promote_user(user_id: str, payload: PromoteRequest, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
     """Promote an existing user to admin with a sub-role."""
@@ -2504,13 +2428,6 @@ async def admin_demote_user(user_id: str, admin: Dict[str, Any] = Depends(requir
 
 
 # ------------------ Admin: Super Password (Danger-zone gate) ------------------
-class SuperPasswordSet(BaseModel):
-    new_password: str
-    current_password: Optional[str] = None  # required if one is already set
-
-
-class SuperPasswordVerify(BaseModel):
-    super_password: str
 
 
 @api_router.get("/admin/super-password")
@@ -2553,9 +2470,6 @@ async def admin_verify_super_password(
 
 
 # ------------------ Danger PIN endpoints ------------------
-class DangerPinSet(BaseModel):
-    new_pin: str
-    current_pin: Optional[str] = None  # required if one is already set
 
 
 @api_router.get("/admin/danger-pin")
@@ -2584,11 +2498,6 @@ async def admin_set_danger_pin(
     )
     await _audit_log(admin, "danger_pin.set", "system", "global")
     return {"ok": True}
-
-
-class WipeUsersRequest(BaseModel):
-    keep_admins: bool = True
-    danger_pin: str  # required — unified danger-zone PIN
 
 
 @api_router.post("/admin/system/wipe-users")
@@ -2667,11 +2576,6 @@ async def admin_wipe_users(
         "snapshot_id": snap_info["id"],
         "snapshot_created_at": snap_info["created_at"],
     }
-
-
-class WipeAllRequest(BaseModel):
-    danger_pin: str
-    confirm_phrase: Optional[str] = None  # require user to type "RESET" client-side
 
 
 @api_router.post("/admin/system/wipe-all")
@@ -2760,20 +2664,6 @@ async def admin_wipe_all(
 
 
 # ------------------ Admin: Settings (Payout Structure) ------------------
-class SettingsUpdate(BaseModel):
-    registration_fee: Optional[float] = Field(default=None, ge=0)
-    payout_l1: Optional[float] = Field(default=None, ge=0)
-    payout_l2: Optional[float] = Field(default=None, ge=0)
-    payout_l3: Optional[float] = Field(default=None, ge=0)
-    payout_l4: Optional[float] = Field(default=None, ge=0)
-    payout_l5: Optional[float] = Field(default=None, ge=0)
-    payout_l6: Optional[float] = Field(default=None, ge=0)
-    payout_l7: Optional[float] = Field(default=None, ge=0)
-    payout_l8: Optional[float] = Field(default=None, ge=0)
-    payout_l9: Optional[float] = Field(default=None, ge=0)
-    payout_l10: Optional[float] = Field(default=None, ge=0)
-    directs_required: Optional[int] = Field(default=None, ge=1, le=20)
-    auto_approve_on_payment: Optional[bool] = None
 
 
 @api_router.get("/admin/settings")
@@ -2795,15 +2685,6 @@ async def admin_update_settings(payload: SettingsUpdate, admin: Dict[str, Any] =
 
 
 # ------------------ Health ------------------
-
-
-class CartItem(BaseModel):
-    product_id: str
-    qty: int = Field(gt=0)
-
-
-class CartRemove(BaseModel):
-    product_id: str
 
 
 # ------------------ Cart & Orders ------------------
@@ -3017,14 +2898,6 @@ async def read_all_notifications(user: Dict[str, Any] = Depends(get_current_user
 
 
 # ------------------ Phase 1: KYC ------------------
-class KYCSubmit(BaseModel):
-    full_name: str
-    aadhaar: str
-    pan: str
-    aadhaar_front: Optional[str] = None  # base64 data URL ("data:image/jpeg;base64,...")
-    aadhaar_back: Optional[str] = None
-    pan_image: Optional[str] = None
-    selfie: Optional[str] = None
 
 
 def _validate_b64_image(s: Optional[str], field: str, max_bytes: int = 1_600_000) -> Optional[str]:
@@ -3173,10 +3046,6 @@ async def admin_approve_kyc(user_id: str, admin: Dict[str, Any] = Depends(requir
     await _create_notification(user_id, "kyc", "KYC approved", "Your KYC has been verified.")
     await _audit_log(admin, "kyc.approve", "user", user_id)
     return {"ok": True}
-
-
-class KYCReject(BaseModel):
-    reason: str
 
 
 @api_router.post("/admin/kyc/{user_id}/reject")
@@ -3459,11 +3328,6 @@ async def admin_delete_approved(rec_id: str, admin: Dict[str, Any] = Depends(req
     return {"ok": True}
 
 
-class ApprovalReject(BaseModel):
-    category: str  # one of REJECT_CATEGORIES keys
-    reason: Optional[str] = None  # optional remarks; required for the new "other" category
-
-
 @api_router.post("/admin/approvals/{user_id}/reject")
 async def admin_reject_user(user_id: str, payload: ApprovalReject, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
@@ -3511,13 +3375,6 @@ async def admin_reject_user(user_id: str, payload: ApprovalReject, admin: Dict[s
 
 
 # ------------------ Admin: Create user (offline-paid) ------------------
-class AdminCreateUserRequest(BaseModel):
-    name: str
-    email: EmailStr
-    password: str = Field(min_length=6)
-    phone: Optional[str] = None
-    referral_code: Optional[str] = None  # sponsor code
-    mark_paid_offline: bool = True  # admin collected the fee outside the app
 
 
 @api_router.post("/admin/users/create")
@@ -3684,11 +3541,6 @@ async def admin_delete_rejected(rec_id: str, admin: Dict[str, Any] = Depends(req
 
 
 # ------------------ User: Additional Documents (CIBIL etc.) ------------------
-class ExtraDocsSubmit(BaseModel):
-    cibil_report: Optional[str] = None
-    bank_statement: Optional[str] = None
-    income_proof: Optional[str] = None
-    other: Optional[str] = None
 
 
 @api_router.post("/users/me/additional-docs")
@@ -3743,8 +3595,6 @@ async def admin_get_user_extra_docs(user_id: str, _: Dict[str, Any] = Depends(re
 
 
 # ------------------ Phase 1: User Block / Wallet Admin ------------------
-class BlockRequest(BaseModel):
-    reason: str
 
 
 @api_router.post("/admin/users/{user_id}/block")
@@ -3764,19 +3614,6 @@ async def admin_unblock_user(user_id: str, admin: Dict[str, Any] = Depends(requi
     await db.users.update_one({"id": user_id}, {"$set": {"is_blocked": False, "block_reason": None}})
     await _audit_log(admin, "user.unblock", "user", user_id)
     return {"ok": True}
-
-
-class WalletAdjust(BaseModel):
-    amount: float = Field(gt=0)
-    type: str
-    reason: str  # required remarks for audit trail
-
-
-class SystemWalletDeposit(BaseModel):
-    amount: float = Field(gt=0)
-    utr: str = Field(min_length=4, max_length=40)
-    bank_ref: Optional[str] = None
-    remarks: Optional[str] = None
 
 
 @api_router.get("/admin/system-wallet")
@@ -3937,10 +3774,6 @@ async def admin_filter_transactions(
     return items
 
 
-class TxnStatusUpdate(BaseModel):
-    status: str
-
-
 @api_router.patch("/admin/transactions/{txn_id}")
 async def admin_update_txn_status(txn_id: str, payload: TxnStatusUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     txn = await db.transactions.find_one({"id": txn_id})
@@ -3984,10 +3817,6 @@ async def admin_list_orders(_: Dict[str, Any] = Depends(require_admin), status: 
         q["status"] = status
     items = await db.orders.find(q, {"_id": 0}).sort("created_at", -1).limit(1000).to_list(1000)
     return items
-
-
-class OrderStatusUpdate(BaseModel):
-    status: str
 
 
 @api_router.patch("/admin/orders/{order_id}/status")
@@ -4437,10 +4266,6 @@ async def admin_list_backups(_: Dict[str, Any] = Depends(require_admin_not_finan
     }
 
 
-class TakeBackupRequest(BaseModel):
-    note: Optional[str] = None
-
-
 @api_router.post("/admin/backups")
 async def admin_take_backup(payload: TakeBackupRequest,
                             admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
@@ -4448,10 +4273,6 @@ async def admin_take_backup(payload: TakeBackupRequest,
     snap = await _take_snapshot(kind="manual", note=payload.note, created_by=admin["id"])
     await _audit_log(admin, "backup.create", "snapshot", snap["id"])
     return snap
-
-
-class RestoreBackupRequest(BaseModel):
-    danger_pin: str
 
 
 @api_router.post("/admin/backups/{snap_id}/restore")
@@ -4641,24 +4462,6 @@ TICKET_CATEGORIES = ("payment", "withdrawal", "account", "kyc", "product", "othe
 TICKET_STATUSES = ("open", "in_progress", "resolved", "closed")
 TICKET_PRIORITIES = ("low", "normal", "high", "urgent")
 TICKET_ADMIN_ROLES = ("super_admin", "support", "finance")
-
-
-class TicketCreateRequest(BaseModel):
-    subject: str
-    category: str = "other"
-    message: str
-    attachment_b64: Optional[str] = None  # optional image screenshot
-
-
-class TicketReplyRequest(BaseModel):
-    message: str
-    attachment_b64: Optional[str] = None
-
-
-class TicketUpdateRequest(BaseModel):
-    status: Optional[str] = None
-    priority: Optional[str] = None
-    assigned_to: Optional[str] = None  # admin user id or null to unassign
 
 
 def _sanitize_ticket(t: Dict[str, Any]) -> Dict[str, Any]:
@@ -5016,7 +4819,6 @@ async def admin_export_tickets(admin: Dict[str, Any] = Depends(require_admin_rol
     return Response(content=csv, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=tickets.csv"})
 
 
-
 # ----------------------------------------------------------------------------
 # PAYMENT GATEWAY (Razorpay) — Admin-managed credentials
 # ----------------------------------------------------------------------------
@@ -5024,10 +4826,6 @@ async def admin_export_tickets(admin: Dict[str, Any] = Depends(require_admin_rol
 # Admin Panel without redeploying. Stored in settings.razorpay subdoc.
 # DB override always wins over .env credentials.
 # ----------------------------------------------------------------------------
-
-class PaymentGatewayPayload(BaseModel):
-    key_id: str
-    key_secret: str
 
 
 def _mask_secret(s: str) -> str:
@@ -5151,7 +4949,6 @@ async def admin_payment_gateway_test(admin: Dict[str, Any] = Depends(require_adm
         return {"ok": False, "error": str(e)}
 
 
-
 # ----------------------------------------------------------------------------
 # VENDOR PANEL — Sellers manage their own products, earnings, applications
 # ----------------------------------------------------------------------------
@@ -5166,20 +4963,6 @@ async def admin_payment_gateway_test(admin: Dict[str, Any] = Depends(require_adm
 # ----------------------------------------------------------------------------
 
 VENDOR_STATUSES = ("pending", "approved", "rejected", "suspended")
-
-
-class VendorApplyRequest(BaseModel):
-    shop_name: str
-    gst_number: Optional[str] = ""
-    pan_number: Optional[str] = ""
-    bank_name: Optional[str] = ""
-    bank_account: Optional[str] = ""
-    bank_ifsc: Optional[str] = ""
-    description: Optional[str] = ""
-
-
-class VendorRejectRequest(BaseModel):
-    reason: Optional[str] = ""
 
 
 def _is_vendor_active(u: Dict[str, Any]) -> bool:
@@ -5452,7 +5235,6 @@ async def admin_reactivate_vendor(user_id: str, admin: Dict[str, Any] = Depends(
     return {"ok": True}
 
 
-
 # ============================================================
 # SERVICES MARKETPLACE — admin-approved peer-to-peer service directory
 # ============================================================
@@ -5461,22 +5243,6 @@ async def admin_reactivate_vendor(user_id: str, admin: Dict[str, Any] = Depends(
 # logged-in user to browse. Other users can book a service which deducts the
 # charge from the customer's wallet and credits the provider's wallet (minus
 # the platform's `vendor_commission_pct` cut going to the admin).
-
-class ServiceApplyRequest(BaseModel):
-    service_name: str = Field(min_length=2, max_length=80)
-    service_category: str = Field(min_length=2, max_length=40)  # e.g. "Plumber", "Tutor"
-    pincode: str = Field(pattern=r"^\d{6}$")
-    charge: float = Field(ge=0, le=1_000_000)
-    description: Optional[str] = Field(default=None, max_length=500)
-
-
-class ServiceRejectRequest(BaseModel):
-    reason: Optional[str] = None
-
-
-class ServiceBookRequest(BaseModel):
-    notes: Optional[str] = Field(default=None, max_length=300)
-    scheduled_date: Optional[str] = None  # ISO date the customer wants service
 
 
 @api_router.post("/service/apply")
