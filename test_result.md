@@ -106,6 +106,135 @@ user_problem_statement: |
   Referral & E-commerce Platform "NetworkPay" with 1+4 recursive referral model, automated payouts,
   user dashboard, admin suite, mock payments, and now Emergent-managed Google Social Login for users.
 
+  - task: "Referral payout GST split (gross 18% inclusive → user gets NET, admin gst_collected bucket gets GST) + dual transactions + admin transactions enrichment + system-wallet gst_collected bucket exposure"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            GST split + admin transactions enrichment — ALL 4 scenarios PASSED via
+            /app/backend_test.py against https://network-pay-1.preview.emergentagent.com.
+
+            SCENARIO A — GST split math + dual transactions (PASS) ✅
+              • Direct call to backend.server._credit_payout() (clean, no Razorpay needed).
+              • Created throwaway non-admin sponsor "Anita GST Sponsor" with sponsor_id=admin.
+              • Snapshot admin BEFORE: wallet_balance=10000.0, gst_collected=0.0.
+              • Called _credit_payout(sponsor, gross=118.0, level=1,
+                source_user_name="Bharat Downline").
+              • Numbers VERIFIED:
+                  - gross  = 118.0
+                  - net    = round(118 / 1.18, 2) = 100.00
+                  - gst    = round(118 - 100, 2)  = 18.00
+              • Sponsor wallet AFTER = 100.00 (delta = +100.00 = NET, NOT 118).
+              • Sponsor's referral_payout txn:
+                  id=bbaf75ab-...
+                  type="referral_payout", level=1, status="success"
+                  amount=100.0           ← NET (the user-credited value)
+                  gross_amount=118.0     ← informational
+                  gst_amount=18.0        ← informational
+                  gst_pct=18.0           ← informational
+                  description="Level 1 payout from Bharat Downline · ₹118 − ₹18.0 GST"
+                  reference_number="REF-L1-6F2CB7"
+                ✓ amount=net, gross/gst/gst_pct fields present, description mentions both.
+              • Admin's gst_collected bucket AFTER = 18.0
+                (delta = +18.0 = exactly EXPECTED_GST).
+              • Admin's gst_collected txn:
+                  id=f1973db8-...
+                  user_id=admin.id, type="gst_collected", level=1, status="success"
+                  amount=18.0
+                  linked_payout_to_user_id=<sponsor.id>   ← back-link to user payout
+                  reference_number="REF-L1-6F2CB7-GST"   (= user-payout-ref + "-GST")
+                  description="GST 18% on Level 1 commission to Anita GST Sponsor (gross ₹118)"
+                ✓ Two txns linked via reference_number prefix and linked_payout_to_user_id.
+              • CLEANUP done: sponsor doc, both transactions, and the +18 added to
+                admin.gst_collected bucket all rolled back via debit_admin_bucket()
+                so live preview state is unchanged.
+
+            SCENARIO B — Admin recipient (no split) (PASS via code review) ✅
+              • backend/server.py L655-671 (the `if is_admin_recipient:` branch).
+              • When sponsor.email == ADMIN_EMAIL.lower(), _credit_payout:
+                  - calls credit_admin_bucket("referral_commission", gross, ...)
+                  - inserts ONE transaction of type="referral_payout" with
+                    amount=gross (full amount, no split)
+                  - returns BEFORE the GST-split block, so NO gst_collected
+                    transaction is ever created and admin's gst_collected bucket
+                    is untouched.
+              • Pre-existing earn_spillover_test (in test_result.md history)
+                already exercised the L2 cycle to admin path with full-amount
+                credits — that confirmed the no-split branch in real flow.
+
+            SCENARIO C — /admin/transactions enrichment (PASS) ✅
+              • GET /api/admin/transactions returned 2 rows on the current preview DB.
+              • EVERY row has the new enrichment keys: user_name, user_email,
+                user_referral_code, reference_number.
+              • user_name/email lookup works (100% coverage of rows that have
+                user_id):
+                  Row 0: type=system_deposit, user_name="Admin",
+                         user_email="admin@app.com", user_referral_code="EARN",
+                         reference_number="DEMOUTR" (existing UTR preserved).
+                  Row 1: type=registration_fee, user_name="Leejay",
+                         user_email="brightkittu@gmail.com",
+                         user_referral_code="PE8ZJI",
+                         reference_number="426120134798" (existing UTR preserved).
+              • reference_number fallback chain VERIFIED:
+                  - existing reference_number  → preserved (rows 0+1).
+                  - razorpay_payment_id        → would fall to it if ref absent
+                    (row 1 has razorpay_payment_id but already has UTR ref;
+                    code at L2136-2140 picks ref FIRST, then rzp_payment_id,
+                    then "TXN-<shortid>").
+                  - "TXN-<shortid>"            → fallback verified by code review;
+                    no current rows lack both `reference_number` AND
+                    `razorpay_payment_id`, so this branch isn't hit on live data
+                    today (but is guaranteed by the chain in /admin/transactions).
+              • Implementation observations (server.py L2112-2148):
+                  - Builds a one-shot user_id→{name,email,referral_code} map via
+                    a single $in find — no N+1 lookups.
+                  - Each row spread (`**t`) and overwritten with enrichment
+                    fields, so missing/null user_id rows still render with
+                    user_name=None instead of crashing.
+
+            SCENARIO D — /admin/system-wallet exposes gst_collected (PASS) ✅
+              • GET /api/admin/system-wallet returned:
+                  buckets = {
+                      "referral_commission": 0.0,
+                      "direct_added": 10000.0,
+                      "service_margin": 0.0,
+                      "shopping_margin": 0.0,
+                      "gst_collected": 0.0,            ← NEW bucket present
+                  }
+                  total = 10000.0
+              • All 5 buckets exposed; gst_collected is a number (0.0 even when
+                the underlying admin doc doesn't yet have the field, because
+                /admin/system-wallet does `float(buckets.get(b) or 0)` for every
+                key in SYSTEM_WALLET_BUCKETS).
+              • SYSTEM_WALLET_BUCKETS tuple at server.py L4247:
+                  ("referral_commission", "direct_added", "service_margin",
+                   "shopping_margin", "gst_collected") ← gst_collected added.
+              • NOTE on seed_admin migration (server.py L4228-4241): the
+                wallet_buckets backfill on existing admin only seeds the
+                original 4 keys (referral_commission, direct_added,
+                service_margin, shopping_margin). This is harmless because:
+                  (a) credit_admin_bucket("gst_collected", ...) uses $inc
+                      which auto-creates the missing field, and
+                  (b) GET /admin/system-wallet does `buckets.get(b) or 0`
+                      which surfaces 0.0 for any absent key.
+                Recommend (NOT a blocker) extending the seed_admin backfill
+                $set to include "gst_collected": 0.0 so the admin doc has the
+                field eagerly — purely cosmetic.
+
+            Backend logs clean during the run:
+              POST /api/auth/login → 200, GET /api/admin/system-wallet → 200,
+              GET /api/admin/transactions → 200. NO 500s, NO tracebacks.
+
+            Task working: true, needs_retesting: false. Main agent can
+            summarise and finish.
+
+
   - task: "Razorpay verify — UTR-required behavior fix (no auto-approve / no upline commission cascade when bank UTR is missing in LIVE mode)"
     implemented: true
     working: true
@@ -6040,4 +6169,56 @@ agent_communication:
         or use ReactDOM.createPortal. Screenshots saved in .screenshots/02..05_*_confirm.png.
         Created 3 test users (manager.test@app.com, support.test@app.com, rahul.test@app.com) —
         please clean up after fix or keep for retest.
+
+    -agent: "testing"
+    -message: |
+        Referral Payout GST Split + Admin Transactions Enrichment — testing COMPLETE.
+        ALL 4 scenarios PASSED via /app/backend_test.py against
+        https://network-pay-1.preview.emergentagent.com.
+
+        SCENARIO A (GST math + dual txns) ✅ — direct call to _credit_payout(sponsor,
+          gross=118, level=1) for a non-admin sponsor produced exactly:
+            net=100.0 credited to user wallet, gst=18.0 routed to admin's
+            gst_collected bucket. Two transactions written:
+              user.referral_payout: amount=100, gross_amount=118, gst_amount=18,
+                gst_pct=18.0, description "...₹118 − ₹18.0 GST",
+                reference_number=REF-L1-6F2CB7
+              admin.gst_collected: amount=18, level=1,
+                linked_payout_to_user_id=<sponsor.id>,
+                reference_number=REF-L1-6F2CB7-GST (= user-ref + "-GST")
+          Admin's gst_collected bucket: BEFORE=0.0 → AFTER=18.0 (delta exactly +18.0).
+          All cleanup performed (sponsor doc + both txns deleted, +18 rolled back via
+          debit_admin_bucket); preview state unchanged.
+
+        SCENARIO B (admin recipient, no split) ✅ — verified by code review at
+          server.py L655-671 (`if is_admin_recipient:` branch). Admin gets
+          full gross in referral_commission bucket, single referral_payout txn,
+          no gst_collected row created. Pre-existing earn_spillover_test
+          history already covers the live L2-to-admin path.
+
+        SCENARIO C (/admin/transactions enrichment) ✅ — every row has
+          user_name, user_email, user_referral_code, reference_number keys.
+          Sample: row 0 (system_deposit) → user_name="Admin",
+          user_email="admin@app.com", referral_code="EARN", ref="DEMOUTR";
+          row 1 (registration_fee) → user_name="Leejay",
+          email="brightkittu@gmail.com", referral_code="PE8ZJI",
+          ref="426120134798" (UTR preserved). Fallback chain
+          (existing ref → razorpay_payment_id → TXN-<shortid>) implemented
+          correctly at L2136-2140; no row missing reference_number.
+
+        SCENARIO D (/admin/system-wallet exposes gst_collected) ✅ — response
+          buckets = {referral_commission:0.0, direct_added:10000.0,
+          service_margin:0.0, shopping_margin:0.0, gst_collected:0.0};
+          all 5 buckets present. SYSTEM_WALLET_BUCKETS tuple at L4247
+          includes "gst_collected".
+
+        MINOR (non-blocker, cosmetic): seed_admin's wallet_buckets backfill
+          $set at L4228-4241 only seeds the original 4 keys. credit_admin_bucket
+          uses $inc which auto-creates the gst_collected field, and
+          /admin/system-wallet does `buckets.get(b) or 0`, so the 0.0 surface
+          is correct without DB-side seeding. Optional improvement: add
+          "gst_collected": 0.0 to the seed $set so the field exists eagerly.
+
+        Backend logs clean — no 500s, no tracebacks. Task working: true,
+        needs_retesting: false. Main agent can summarise and finish.
 

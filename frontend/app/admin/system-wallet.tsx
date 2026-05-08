@@ -7,11 +7,12 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 
-const BUCKETS: { key: "referral_commission" | "direct_added" | "service_margin" | "shopping_margin"; label: string; icon: any; color: string; desc: string }[] = [
+const BUCKETS: { key: "referral_commission" | "direct_added" | "service_margin" | "shopping_margin" | "gst_collected"; label: string; icon: any; color: string; desc: string }[] = [
   { key: "referral_commission", label: "Referral Commission", icon: "git-branch", color: "#7C3AED", desc: "From the 1+10 cascade" },
   { key: "direct_added", label: "Direct Added Money", icon: "arrow-down-circle", color: "#2E7D52", desc: "UTR-verified deposits" },
   { key: "service_margin", label: "Service Margin", icon: "briefcase", color: "#E57A44", desc: "Platform fee from bookings" },
   { key: "shopping_margin", label: "Shopping Margin", icon: "shopping-bag", color: "#1E40AF", desc: "Commission from shop orders" },
+  { key: "gst_collected", label: "GST Collected", icon: "percent", color: "#B3261E", desc: "18% withheld from referral payouts" },
 ];
 
 type Deposit = { id: string; amount: number; utr: string; bank_ref?: string; remarks?: string; deposited_by_email?: string; created_at: string };
@@ -78,7 +79,7 @@ export default function AdminSystemWallet() {
         <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 18 }}>
           <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>TOTAL FUNDS</Text>
           <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>{formatINR(data?.total || 0)}</Text>
-          <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>Sum of all 4 categorised buckets below</Text>
+          <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>Sum of all 5 categorised buckets below</Text>
         </GradientCard>
 
         <View style={styles.bucketGrid}>

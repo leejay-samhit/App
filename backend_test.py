@@ -1,230 +1,245 @@
 """
-Test: registration-fee duplicate-entry fix verification
-Covers scenarios A (E2E no-duplicate), B (backfill verification), C (code review)
+Backend test for Referral Payout GST Split + Admin Transactions Enrichment.
+
+Covers:
+  A) GST split math + dual transaction creation (direct call to _credit_payout)
+  B) Admin recipient (no split) — code review note
+  C) Admin transactions enrichment (user_name/email/referral_code + reference_number fallback)
+  D) System-wallet exposes the gst_collected bucket
 """
+import asyncio
 import os
 import sys
-import hmac
-import hashlib
-import secrets
 import time
+import uuid
+import json
 import requests
 
 BASE = "https://network-pay-1.preview.emergentagent.com"
 API = f"{BASE}/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
-RAZORPAY_KEY_SECRET = "QrEEeWzxU5xJdRh1HrXeDUIy"
 
-results = []
-
-def log(tag, ok, msg=""):
-    mark = "PASS" if ok else "FAIL"
-    line = f"[{mark}] {tag}: {msg}"
-    print(line)
-    results.append((tag, ok, msg))
+# Allow direct import of server module
+sys.path.insert(0, "/app/backend")
 
 
-def login(email, password):
+def _login(email: str, password: str) -> str:
     r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=20)
-    assert r.status_code == 200, f"login failed: {r.status_code} {r.text}"
-    body = r.json()
-    return body.get("token") or body.get("access_token")
+    r.raise_for_status()
+    return r.json()["token"]
 
 
-def auth_headers(tok):
+def _hdrs(tok: str):
     return {"Authorization": f"Bearer {tok}"}
 
 
-def scenario_C_code_review():
-    print("\n=== SCENARIO C: Code review ===")
-    src = open("/app/backend/server.py").read()
+# ---------- SCENARIO A ----------
+async def scenario_a_manual_credit_payout():
+    """Directly call backend.server._credit_payout for a non-admin sponsor with
+    gross=118 and verify:
+      - sponsor wallet got NET = 100 (118/1.18 rounded to 2dp)
+      - admin's gst_collected bucket grew by GST = 18
+      - two transactions written: referral_payout (user) + gst_collected (admin)
+    """
+    print("\n=== SCENARIO A: GST split (direct _credit_payout call) ===")
+    import server  # type: ignore
 
-    c1 = ("await db.transactions.update_one(" in src
-          and '"status": "created"' in src
-          and '"razorpay_order_id": payload.razorpay_order_id' in src
-          and "pending_res.modified_count" in src)
-    log("C.1 payment_verify update-first logic", c1,
-        "update_one pending row -> paid before insert_one fallback")
+    db = server.db
+    ADMIN = await db.users.find_one({"email": server.ADMIN_EMAIL.lower()}, {"_id": 0})
+    assert ADMIN is not None, "admin user must exist in DB"
 
-    c2 = ("Reg-fee duplicate backfill" in src
-          and 'created_ids = [x["id"] for x in grp["ids"] if x["status"] == "created"]' in src
-          and 'delete_many({"id": {"$in": created_ids}})' in src)
-    log("C.2 on_startup backfill deletes created rows when paid exists", c2,
-        "backfill block present in startup")
+    admin_buckets_before = dict(ADMIN.get("wallet_buckets") or {})
+    admin_balance_before = float(ADMIN.get("wallet_balance") or 0)
+    gst_before = float(admin_buckets_before.get("gst_collected") or 0)
+    print(f"[A] Admin before: wallet_balance={admin_balance_before}, gst_collected={gst_before}")
+
+    sponsor_id = str(uuid.uuid4())
+    sponsor_doc = {
+        "id": sponsor_id,
+        "name": "Anita GST Sponsor",
+        "email": f"anita.gstsponsor.{uuid.uuid4().hex[:8]}@mailinator.com",
+        "password_hash": server.hash_password("ABCxyz!@1A"),
+        "phone": None,
+        "role": "user",
+        "admin_role": None,
+        "referral_code": "GSTTST",
+        "referred_by": "EARN",
+        "sponsor_id": ADMIN["id"],
+        "wallet_balance": 0.0,
+        "total_earned": 0.0,
+        "registration_paid": True,
+        "direct_referrals_count": 0,
+        "payouts_received": 0,
+        "approval_status": "approved",
+        "created_at": server.now_utc().isoformat(),
+    }
+    await db.users.insert_one(sponsor_doc)
+    print(f"[A] Created sponsor id={sponsor_id}")
+
+    GROSS = 118.0
+    EXPECTED_NET = round(GROSS / 1.18, 2)
+    EXPECTED_GST = round(GROSS - EXPECTED_NET, 2)
+
+    fresh_sponsor = await db.users.find_one({"id": sponsor_id})
+    await server._credit_payout(fresh_sponsor, GROSS, level=1, source_user_name="Bharat Downline")
+
+    sponsor_after = await db.users.find_one({"id": sponsor_id})
+    sp_balance_after = float(sponsor_after.get("wallet_balance") or 0)
+    print(f"[A] Sponsor wallet_balance after: {sp_balance_after} (expected {EXPECTED_NET})")
+    assert abs(sp_balance_after - EXPECTED_NET) < 0.005, \
+        f"Sponsor wallet should be NET={EXPECTED_NET}, got {sp_balance_after}"
+
+    user_txs = await db.transactions.find(
+        {"user_id": sponsor_id, "type": "referral_payout"}, {"_id": 0}
+    ).sort("created_at", -1).to_list(10)
+    assert user_txs, "No referral_payout txn for sponsor"
+    utx = user_txs[0]
+    print(f"[A] User txn: amount={utx.get('amount')}, gross={utx.get('gross_amount')}, "
+          f"gst={utx.get('gst_amount')}, gst_pct={utx.get('gst_pct')}, desc={utx.get('description')}")
+    assert abs(float(utx.get("amount") or 0) - EXPECTED_NET) < 0.005, "user txn amount must be NET"
+    assert abs(float(utx.get("gross_amount") or 0) - GROSS) < 0.005, "gross_amount mismatch"
+    assert abs(float(utx.get("gst_amount") or 0) - EXPECTED_GST) < 0.005, "gst_amount mismatch"
+    assert float(utx.get("gst_pct") or 0) == 18.0, "gst_pct must be 18.0"
+    assert utx.get("status") == "success"
+    assert utx.get("level") == 1
+    desc = (utx.get("description") or "")
+    assert "118" in desc and "18" in desc, f"description should mention gross+gst, got: {desc}"
+
+    admin_after = await db.users.find_one({"email": server.ADMIN_EMAIL.lower()})
+    admin_buckets_after = admin_after.get("wallet_buckets") or {}
+    gst_after = float(admin_buckets_after.get("gst_collected") or 0)
+    print(f"[A] Admin gst_collected after: {gst_after} (delta = {round(gst_after - gst_before, 4)})")
+    assert abs((gst_after - gst_before) - EXPECTED_GST) < 0.005, \
+        f"gst_collected bucket should grow by {EXPECTED_GST}; was {gst_before} → {gst_after}"
+
+    admin_gst_txs = await db.transactions.find({
+        "user_id": admin_after["id"],
+        "type": "gst_collected",
+        "linked_payout_to_user_id": sponsor_id,
+    }, {"_id": 0}).to_list(10)
+    assert admin_gst_txs, "Admin gst_collected txn linked to sponsor not found"
+    gtx = admin_gst_txs[0]
+    print(f"[A] Admin GST txn: amount={gtx.get('amount')}, level={gtx.get('level')}, "
+          f"linked={gtx.get('linked_payout_to_user_id')}, ref={gtx.get('reference_number')}")
+    assert abs(float(gtx.get("amount") or 0) - EXPECTED_GST) < 0.005
+    assert gtx.get("level") == 1
+    assert gtx.get("linked_payout_to_user_id") == sponsor_id
+    assert gtx.get("status") == "success"
+
+    base_ref_user = utx.get("reference_number") or ""
+    base_ref_admin = gtx.get("reference_number") or ""
+    assert base_ref_user and base_ref_admin and base_ref_admin.startswith(base_ref_user), \
+        f"admin GST ref ({base_ref_admin}) should be prefixed by user payout ref ({base_ref_user})"
+
+    print("[A] ✅ ALL Scenario A assertions PASSED")
+    print(f"[A] Numbers: gross={GROSS}, net={EXPECTED_NET}, gst={EXPECTED_GST}")
+    print(f"[A] User txn doc: {json.dumps({k: utx.get(k) for k in ('id','user_id','type','level','amount','gross_amount','gst_amount','gst_pct','status','description','reference_number')}, default=str)}")
+    print(f"[A] Admin txn doc: {json.dumps({k: gtx.get(k) for k in ('id','user_id','type','level','amount','linked_payout_to_user_id','status','description','reference_number')}, default=str)}")
+    print(f"[A] Admin gst_collected bucket: BEFORE={gst_before} AFTER={gst_after}")
+
+    # CLEANUP
+    await db.users.delete_one({"id": sponsor_id})
+    await db.transactions.delete_many({"user_id": sponsor_id})
+    await db.transactions.delete_many({"id": gtx["id"]})
+    rolled = await server.debit_admin_bucket("gst_collected", EXPECTED_GST)
+    print(f"[A] cleanup done — sponsor + txns deleted, admin bucket rolled back: {rolled}")
+    return {
+        "gross": GROSS, "net": EXPECTED_NET, "gst": EXPECTED_GST,
+        "gst_before": gst_before, "gst_after": gst_after,
+        "user_txn": {k: utx.get(k) for k in ('id','type','level','amount','gross_amount','gst_amount','gst_pct','description','reference_number')},
+        "admin_txn": {k: gtx.get(k) for k in ('id','type','level','amount','linked_payout_to_user_id','description','reference_number')},
+    }
 
 
-def scenario_A_e2e():
-    print("\n=== SCENARIO A: End-to-end no-duplicate ===")
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+# ---------- SCENARIO C ----------
+def scenario_c_admin_transactions_enrichment(admin_tok: str):
+    print("\n=== SCENARIO C: /admin/transactions enrichment ===")
+    r = requests.get(f"{API}/admin/transactions", headers=_hdrs(admin_tok), timeout=30)
+    assert r.status_code == 200, f"GET /admin/transactions failed: {r.status_code} {r.text[:200]}"
+    rows = r.json()
+    assert isinstance(rows, list) and rows, "Expected non-empty admin transactions list"
+    print(f"[C] Got {len(rows)} txn rows")
 
-    suffix = secrets.token_hex(4)
-    email = f"dupebug.{suffix}@mailinator.com"
-    password = "Test@1234"
+    keys_expected = {"user_name", "user_email", "user_referral_code", "reference_number"}
+    for k in keys_expected:
+        assert all(k in r_ for r_ in rows), f"Row missing key {k}"
 
-    r = requests.post(
-        f"{API}/auth/register",
-        json={
-            "name": f"Dupe Test {suffix}",
-            "email": email,
-            "password": password,
-            "phone": f"9{secrets.randbelow(10**9):09d}",
-            "referral_code": "EARN",
-        },
-        timeout=20,
-    )
-    if r.status_code != 200:
-        log("A.register", False, f"{r.status_code} {r.text[:200]}")
-        return
-    user_data = r.json()
-    user_id = user_data.get("user", {}).get("id") or user_data.get("id")
-    log("A.register", bool(user_id), f"user_id={user_id}")
+    not_null_name = [r_ for r_ in rows if r_.get("user_name")]
+    print(f"[C] rows with non-null user_name: {len(not_null_name)}/{len(rows)}")
+    assert not_null_name, "At least some rows must have user_name populated from users map"
 
-    user_tok = login(email, password)
+    no_ref = [r_ for r_ in rows if not r_.get("reference_number")]
+    print(f"[C] rows missing reference_number after fallback: {len(no_ref)}")
+    assert not no_ref, "reference_number should be auto-filled (UTR or razorpay_payment_id or TXN-<id>)"
 
-    r = requests.post(f"{API}/payment/create-order", headers=auth_headers(user_tok), timeout=20)
-    if r.status_code != 200:
-        log("A.create-order", False, f"{r.status_code} {r.text[:300]}")
-        return
+    in_app_rows = [
+        r_ for r_ in rows
+        if not (r_.get("razorpay_payment_id"))
+        and (r_.get("reference_number") or "").startswith("TXN-")
+    ]
+    print(f"[C] in-app txns with TXN-<shortid> fallback: {len(in_app_rows)} "
+          f"(sample={in_app_rows[0]['reference_number'] if in_app_rows else None})")
+
+    rzp_rows = [r_ for r_ in rows if r_.get("razorpay_payment_id")]
+    print(f"[C] rows with razorpay_payment_id: {len(rzp_rows)}")
+    for r_ in rzp_rows[:3]:
+        ref = r_.get("reference_number") or ""
+        assert ref, "reference_number should be present"
+
+    for i, r_ in enumerate(rows[:5]):
+        print(f"[C] sample[{i}] type={r_.get('type')} user_name={r_.get('user_name')!r} "
+              f"user_email={r_.get('user_email')!r} ref={r_.get('reference_number')!r} "
+              f"user_referral_code={r_.get('user_referral_code')!r}")
+
+    # Check that user_name populates from the users-map for non-orphan rows
+    # (i.e., rows whose user_id still exists in users collection)
+    rows_with_uid = [r_ for r_ in rows if r_.get("user_id")]
+    enriched = [r_ for r_ in rows_with_uid if r_.get("user_name")]
+    pct = round(100.0 * len(enriched) / max(1, len(rows_with_uid)), 1)
+    print(f"[C] enrichment coverage: {len(enriched)}/{len(rows_with_uid)} ({pct}%)")
+    assert pct >= 50.0, "Expected majority of rows with user_id to be enriched"
+
+    print("[C] ✅ Scenario C PASSED")
+
+
+# ---------- SCENARIO D ----------
+def scenario_d_system_wallet_gst_bucket(admin_tok: str):
+    print("\n=== SCENARIO D: /admin/system-wallet exposes gst_collected ===")
+    r = requests.get(f"{API}/admin/system-wallet", headers=_hdrs(admin_tok), timeout=20)
+    assert r.status_code == 200, f"GET /admin/system-wallet failed: {r.status_code} {r.text[:200]}"
     body = r.json()
-    order_id = body.get("order_id")
-    log("A.create-order", bool(order_id), f"order_id={order_id}, amount_paise={body.get('amount_paise')}")
-
-    def list_user_reg_fee_txns():
-        r = requests.get(f"{API}/admin/transactions",
-                         headers=auth_headers(admin_tok),
-                         params={"limit": 200}, timeout=30)
-        assert r.status_code == 200, r.text
-        payload = r.json()
-        items = payload.get("items") if isinstance(payload, dict) else payload
-        if items is None:
-            items = payload
-        txns = [t for t in items
-                if t.get("user_id") == user_id and t.get("type") == "registration_fee"]
-        return txns
-
-    before = list_user_reg_fee_txns()
-    print(f"  [DB snapshot BEFORE verify] {len(before)} registration_fee row(s):")
-    for t in before:
-        print(f"    - id={t.get('id')} status={t.get('status')} "
-              f"order_id={t.get('razorpay_order_id')} desc={t.get('description')!r}")
-    created_rows = [t for t in before if t.get("status") == "created"
-                    and t.get("razorpay_order_id") == order_id]
-    log("A.before: exactly one 'created' reg_fee row", len(created_rows) == 1,
-        f"found={len(created_rows)}")
-
-    payment_id = "pay_NONEXISTENT_FOR_DUPE_TEST"
-    msg = f"{order_id}|{payment_id}".encode()
-    signature = hmac.new(RAZORPAY_KEY_SECRET.encode(), msg, hashlib.sha256).hexdigest()
-
-    r = requests.post(
-        f"{API}/payment/verify",
-        headers=auth_headers(user_tok),
-        json={
-            "razorpay_order_id": order_id,
-            "razorpay_payment_id": payment_id,
-            "razorpay_signature": signature,
-        },
-        timeout=30,
-    )
-    if r.status_code != 200:
-        log("A.verify", False, f"{r.status_code} {r.text[:300]}")
-        requests.delete(f"{API}/admin/users/{user_id}", headers=auth_headers(admin_tok), timeout=20)
-        return
-    vbody = r.json()
-    log("A.verify 200", True,
-        f"rzp_status={vbody.get('rzp_status')} auto_approved={vbody.get('auto_approved')} "
-        f"approval_status={vbody.get('approval_status')} utr={vbody.get('utr')!r}")
-
-    time.sleep(0.5)
-
-    after = list_user_reg_fee_txns()
-    print(f"  [DB snapshot AFTER verify] {len(after)} registration_fee row(s):")
-    for t in after:
-        print(f"    - id={t.get('id')} status={t.get('status')} "
-              f"order_id={t.get('razorpay_order_id')} "
-              f"pay_id={t.get('razorpay_payment_id')} "
-              f"desc={t.get('description')!r}")
-
-    reg_rows_for_order = [t for t in after if t.get("razorpay_order_id") == order_id]
-    log("A.1 exactly ONE reg_fee row for this order_id", len(reg_rows_for_order) == 1,
-        f"count={len(reg_rows_for_order)}")
-
-    log("A.2 exactly ONE reg_fee row for this user (across all)", len(after) == 1,
-        f"count={len(after)}")
-
-    if reg_rows_for_order:
-        row = reg_rows_for_order[0]
-        log("A.3 status == 'paid'", row.get("status") == "paid",
-            f"actual={row.get('status')}")
-        log("A.4 razorpay_payment_id matches", row.get("razorpay_payment_id") == payment_id,
-            f"actual={row.get('razorpay_payment_id')}")
-        desc = row.get("description") or ""
-        log("A.5 description starts with 'Registration fee via Razorpay'",
-            desc.startswith("Registration fee via Razorpay"),
-            f"actual={desc!r}")
-        log("A.6 description is NOT 'Razorpay order created'",
-            not desc.startswith("Razorpay order created"),
-            f"actual={desc!r}")
-
-    r = requests.delete(f"{API}/admin/users/{user_id}", headers=auth_headers(admin_tok), timeout=20)
-    log("A.cleanup DELETE user", r.status_code == 200, f"{r.status_code}")
+    print(f"[D] system-wallet body: buckets={body.get('buckets')}, total={body.get('total')}")
+    buckets = body.get("buckets") or {}
+    assert "gst_collected" in buckets, f"gst_collected bucket missing — keys={list(buckets.keys())}"
+    val = buckets["gst_collected"]
+    assert isinstance(val, (int, float)), f"gst_collected must be a number, got {type(val).__name__}"
+    expected = {"referral_commission", "direct_added", "service_margin", "shopping_margin", "gst_collected"}
+    assert set(buckets.keys()) >= expected, f"Buckets missing keys: expected superset of {expected}, got {set(buckets.keys())}"
+    print(f"[D] ✅ gst_collected bucket present (value={val}); all 5 buckets exposed")
 
 
-def scenario_B_backfill_verification():
-    print("\n=== SCENARIO B: Backfill verification (read-only) ===")
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    r = requests.get(f"{API}/admin/transactions",
-                     headers=auth_headers(admin_tok),
-                     params={"limit": 500}, timeout=30)
-    if r.status_code != 200:
-        log("B.list", False, f"{r.status_code} {r.text[:300]}")
-        return
-    payload = r.json()
-    items = payload.get("items") if isinstance(payload, dict) else payload
-    if items is None:
-        items = payload
+def main():
+    print(f"BASE = {BASE}")
+    admin_tok = _login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    print(f"admin token: {admin_tok[:30]}...")
 
-    groups = {}
-    for t in items:
-        if t.get("type") != "registration_fee":
-            continue
-        oid = t.get("razorpay_order_id")
-        if not oid:
-            continue
-        groups.setdefault(oid, []).append(t)
+    scenario_d_system_wallet_gst_bucket(admin_tok)
 
-    duplicates = []
-    for oid, rows in groups.items():
-        statuses = {r.get("status") for r in rows}
-        if "paid" in statuses and "created" in statuses:
-            duplicates.append((oid, rows))
+    res_a = asyncio.run(scenario_a_manual_credit_payout())
 
-    print(f"  Total reg_fee order groups examined: {len(groups)}")
-    print(f"  Groups with both 'paid' AND 'created' (duplicates remaining): {len(duplicates)}")
-    for oid, rows in duplicates[:5]:
-        print(f"    - order_id={oid}: statuses={[r.get('status') for r in rows]}")
+    scenario_c_admin_transactions_enrichment(admin_tok)
 
-    log("B.1 no order_id has both 'paid' and 'created' rows (duplicates collapsed)",
-        len(duplicates) == 0,
-        f"remaining_duplicate_order_ids={len(duplicates)}")
+    print("\n=== SCENARIO B: admin recipient — no split (code review) ===")
+    print("[B] backend/server.py L655-671: when sponsor.email == ADMIN_EMAIL,")
+    print("[B] _credit_payout writes a single referral_payout txn with amount=gross,")
+    print("[B] credits referral_commission bucket, and DOES NOT create a gst_collected row.")
+    print("[B] ✅ Scenario B PASSED via code review")
+
+    print("\n========== SUMMARY ==========")
+    print(json.dumps(res_a, indent=2, default=str))
+    print("\nALL SCENARIOS PASSED ✅")
 
 
 if __name__ == "__main__":
-    try:
-        scenario_C_code_review()
-        scenario_A_e2e()
-        scenario_B_backfill_verification()
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-    print("\n=== SUMMARY ===")
-    passed = sum(1 for _, ok, _ in results if ok)
-    total = len(results)
-    for tag, ok, msg in results:
-        mark = "PASS" if ok else "FAIL"
-        print(f"  [{mark}] {tag}")
-    print(f"\n{passed}/{total} checks passed")
-    sys.exit(0 if passed == total else 2)
+    main()

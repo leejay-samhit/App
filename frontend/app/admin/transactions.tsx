@@ -14,10 +14,14 @@ import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
 type Txn = {
   id: string;
   user_id: string;
+  user_name?: string;
+  user_email?: string;
+  user_referral_code?: string;
   type: string;
   amount: number;
   status: string;
   description?: string;
+  reference_number?: string;
   created_at: string;
 };
 
@@ -118,14 +122,20 @@ export default function AdminTxns() {
           <TouchableOpacity onPress={() => openDetail(item.id)} style={styles.row} testID={`txn-${item.id}`}>
             <View style={styles.iconBox}>
               <Feather
-                name={item.type === "referral_payout" ? "trending-up" : item.type === "withdrawal" ? "arrow-up-right" : "credit-card"}
+                name={item.type === "referral_payout" ? "trending-up" : item.type === "withdrawal" ? "arrow-up-right" : item.type === "gst_collected" ? "percent" : "credit-card"}
                 size={16}
                 color={colors.primary}
               />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.title} numberOfLines={1}>{item.description || item.type}</Text>
-              <Text style={styles.meta}>{new Date(item.created_at).toLocaleString()} · {item.status}</Text>
+              <Text style={styles.title} numberOfLines={1}>
+                {item.user_name || "—"} · <Text style={{ color: colors.textMuted, fontWeight: "500" }}>{(item.type || "").replace(/_/g, " ")}</Text>
+              </Text>
+              <Text style={styles.desc} numberOfLines={1}>{item.description || ""}</Text>
+              <Text style={styles.meta} numberOfLines={1}>
+                {new Date(item.created_at).toLocaleString()}
+                {item.reference_number ? ` · Ref ${item.reference_number}` : ""}
+              </Text>
             </View>
             <View style={{ alignItems: "flex-end" }}>
               <Text style={[styles.amount, { color: item.amount >= 0 ? colors.success : "#B3261E" }]}>
@@ -287,6 +297,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 8 },
   iconBox: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center", marginRight: 12 },
   title: { fontSize: 13, fontWeight: "700", color: colors.textMain },
+  desc: { fontSize: 12, color: colors.textMain, marginTop: 2 },
   meta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   amount: { fontSize: 14, fontWeight: "800" },
   empty: { padding: 24, textAlign: "center", color: colors.textMuted },

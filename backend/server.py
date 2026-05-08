@@ -629,46 +629,98 @@ async def logout(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 # ------------------ Payment (Mock) ------------------
+REFERRAL_GST_PCT = 18.0  # Indian GST rate. Commission amounts are treated as
+                          # GST-inclusive: net = gross / 1.18 → user; gst = gross - net → admin
+
+
 async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = ""):
-    """Credit payout to sponsor at a given level, log transaction & notification.
-    If the sponsor IS the admin, credit goes into the referral_commission bucket
-    of the system wallet (instead of plain wallet_balance) so the admin dashboard
-    shows it under the right category."""
+    """Credit a referral payout to a sponsor at a given level.
+
+    Business rule (FinCom #3): the configured payout amount is GST-inclusive.
+    For non-admin sponsors, we split the gross into:
+      - NET = gross / 1.18  → credited to the user's wallet
+      - GST = gross - NET   → routed to the admin's `gst_collected` bucket
+    The user only gets the NET; the GST portion is held by the company so it can
+    be remitted to the government.
+
+    For admin recipients (Level-1 reaching the seed admin via cycle), no split
+    happens — admin receives the full amount in `referral_commission`.
+    """
+    gross = float(amount)
     is_admin_recipient = (sponsor_user.get("email") or "").lower() == ADMIN_EMAIL.lower()
+    ts = now_utc().isoformat()
+    src_short = (source_user_name or "")[:30]
+    base_ref = f"REF-L{level}-{str(uuid.uuid4())[:6].upper()}"
+
     if is_admin_recipient:
-        await credit_admin_bucket("referral_commission", amount, also_total_earned=True)
-    else:
-        inc: Dict[str, Any] = {"wallet_balance": amount, "total_earned": amount}
-        if level == 1:
-            inc["payouts_received"] = 1
-        await db.users.update_one({"id": sponsor_user["id"]}, {"$inc": inc})
-    desc = (
-        f"Level {level} payout from {source_user_name}" if source_user_name
-        else f"Level {level} referral payout"
-    )
+        # Admin gets full amount in referral_commission bucket — no split needed
+        await credit_admin_bucket("referral_commission", gross, also_total_earned=True)
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": sponsor_user["id"],
+            "type": "referral_payout",
+            "level": level,
+            "amount": gross,
+            "status": "success",
+            "description": f"Level {level} payout from {src_short}" if src_short else f"Level {level} referral payout",
+            "source_user_name": src_short or None,
+            "reference_number": base_ref,
+            "created_at": ts,
+        })
+        await _create_notification(sponsor_user["id"], "payout", f"₹{int(gross)} credited!", f"Level {level} referral payout")
+        return
+
+    # Non-admin sponsor — apply GST split
+    net = round(gross / (1.0 + REFERRAL_GST_PCT / 100.0), 2)
+    gst = round(gross - net, 2)
+
+    # 1. Credit user wallet with NET
+    inc: Dict[str, Any] = {"wallet_balance": net, "total_earned": net}
+    if level == 1:
+        inc["payouts_received"] = 1
+    await db.users.update_one({"id": sponsor_user["id"]}, {"$inc": inc})
+    user_desc = (
+        f"Level {level} payout from {src_short}" if src_short else f"Level {level} referral payout"
+    ) + f" · ₹{int(gross)} − ₹{gst} GST"
     await db.transactions.insert_one({
         "id": str(uuid.uuid4()),
         "user_id": sponsor_user["id"],
         "type": "referral_payout",
         "level": level,
-        "amount": amount,
+        "amount": net,                 # only the net is credited to the user
+        "gross_amount": gross,         # informational — original gross
+        "gst_amount": gst,             # informational — GST that was withheld
+        "gst_pct": REFERRAL_GST_PCT,
         "status": "success",
-        "description": desc,
-        "source_user_name": source_user_name or None,
-        "created_at": now_utc().isoformat(),
+        "description": user_desc,
+        "source_user_name": src_short or None,
+        "reference_number": base_ref,
+        "created_at": ts,
     })
     await _create_notification(
         sponsor_user["id"],
         "payout",
-        f"₹{int(amount)} credited!",
-        desc,
+        f"₹{int(net)} credited!",
+        f"Level {level} referral payout received (₹{int(gross)} gross − ₹{gst} GST = ₹{net} net)",
     )
-    await _create_notification(
-        sponsor_user["id"],
-        "payout",
-        f"₹{int(amount)} credited!",
-        desc,
-    )
+
+    # 2. Credit admin's gst_collected bucket with the GST share
+    await credit_admin_bucket("gst_collected", gst, also_total_earned=False)
+    admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if admin_user and gst > 0:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": admin_user["id"],
+            "type": "gst_collected",
+            "level": level,
+            "amount": gst,
+            "status": "success",
+            "description": f"GST {int(REFERRAL_GST_PCT)}% on Level {level} commission to {sponsor_user.get('name')} (gross ₹{int(gross)})",
+            "source_user_name": sponsor_user.get("name"),
+            "reference_number": base_ref + "-GST",
+            "linked_payout_to_user_id": sponsor_user["id"],
+            "created_at": ts,
+        })
 
 
 async def _create_notification(user_id: str, kind: str, title: str, body: str):
@@ -2061,12 +2113,39 @@ async def admin_withdrawals_digest(_: Dict[str, Any] = Depends(require_admin_rol
 async def admin_transactions(_: Dict[str, Any] = Depends(require_admin), include_pending: bool = False):
     """Admin transaction feed. By default hides pre-payment / failed registration
     rows so the wallet & revenue figures match. Pass ?include_pending=true to
-    surface them for support / debugging."""
+    surface them for support / debugging.
+
+    Each row is enriched with `user_name` (from users collection) and `reference_number`
+    auto-derived if missing — UTR for bank transactions, TXN-{shortid} for in-app moves.
+    """
     q: Dict[str, Any] = {}
     if not include_pending:
         q["status"] = {"$nin": ["created", "failed"]}
     items = await db.transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
-    return items
+
+    # Build a one-shot user_id → name map to avoid N+1 lookups
+    user_ids = {t.get("user_id") for t in items if t.get("user_id")}
+    users_map: Dict[str, str] = {}
+    if user_ids:
+        async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0, "id": 1, "name": 1, "email": 1, "referral_code": 1}):
+            users_map[u["id"]] = u
+
+    enriched = []
+    for t in items:
+        u = users_map.get(t.get("user_id") or "", {})
+        ref = (
+            t.get("reference_number")
+            or t.get("razorpay_payment_id")
+            or (f"TXN-{t['id'][:8].upper()}" if t.get("id") else None)
+        )
+        enriched.append({
+            **t,
+            "user_name": u.get("name"),
+            "user_email": u.get("email"),
+            "user_referral_code": u.get("referral_code"),
+            "reference_number": ref,
+        })
+    return enriched
 
 
 @api_router.get("/admin/stats")
@@ -4165,7 +4244,7 @@ async def seed_admin():
 # ============================================================
 # SYSTEM WALLET — admin's wallet broken down into 4 categorised buckets
 # ============================================================
-SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_added", "service_margin", "shopping_margin")
+SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_added", "service_margin", "shopping_margin", "gst_collected")
 
 
 async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: bool = True):
