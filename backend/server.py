@@ -621,18 +621,20 @@ async def logout(user: Dict[str, Any] = Depends(get_current_user)):
 
 # ------------------ Payment (Mock) ------------------
 REFERRAL_GST_PCT = 18.0  # Indian GST rate. Commission amounts are treated as
-                          # GST-inclusive: net = gross / 1.18 → user; gst = gross - net → admin
+                          # GST-EXCLUSIVE: gst = 18% OF gross → admin; net = gross - gst → user.
+                          # i.e. ₹400 payout → ₹72 GST + ₹328 net.
 
 
 async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = ""):
     """Credit a referral payout to a sponsor at a given level.
 
-    Business rule (FinCom #3): the configured payout amount is GST-inclusive.
-    For non-admin sponsors, we split the gross into:
-      - NET = gross / 1.18  → credited to the user's wallet
-      - GST = gross - NET   → routed to the admin's `gst_collected` bucket
-    The user only gets the NET; the GST portion is held by the company so it can
-    be remitted to the government.
+    Business rule (FinCom #3 — Option B / GST-exclusive):
+    The configured payout is the GROSS commission. We deduct 18% GST from it
+    and route that GST to the admin's `gst_collected` bucket.
+        GST = gross × 18%       → admin
+        NET = gross − GST       → user wallet
+
+    Example: gross ₹400 → GST ₹72 → user receives ₹328.
 
     For admin recipients (Level-1 reaching the seed admin via cycle), no split
     happens — admin receives the full amount in `referral_commission`.
@@ -661,9 +663,9 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
         await _create_notification(sponsor_user["id"], "payout", f"₹{int(gross)} credited!", f"Level {level} referral payout")
         return
 
-    # Non-admin sponsor — apply GST split
-    net = round(gross / (1.0 + REFERRAL_GST_PCT / 100.0), 2)
-    gst = round(gross - net, 2)
+    # Non-admin sponsor — apply GST-exclusive split: 18% OF gross → admin
+    gst = round(gross * (REFERRAL_GST_PCT / 100.0), 2)
+    net = round(gross - gst, 2)
 
     # 1. Credit user wallet with NET
     inc: Dict[str, Any] = {"wallet_balance": net, "total_earned": net}
