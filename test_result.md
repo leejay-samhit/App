@@ -6639,3 +6639,67 @@ agent_communication:
 
         Task working: true. needs_retesting: false. Main agent can
         summarise and finish.
+
+## Feature (2025-06) — Service Application Management Phase 1
+
+### Backend
+  - NEW collection `service_categories` with 13 seeded defaults (Construction
+    Labour, Internet Installation, Plumber, Electrician, Painter, Carpenter,
+    CCTV Technician, AC Repair, Cleaning, Water Tank Cleaning, Toilet Cleaner,
+    House Construction Labour, Mobile Repair). Each has icon (Feather name)
+    + color hex + sort_order + active flag. Seed runs once on startup.
+  - NEW endpoints in /app/backend/server.py:
+      • GET /api/services/categories — public list (active only) + provider_count
+      • GET /api/admin/service-categories — admin list (incl. inactive)
+      • POST /api/admin/service-categories (super_admin/manager) — create
+      • PATCH /api/admin/service-categories/{id} — update name/icon/color/sort/active
+      • DELETE /api/admin/service-categories/{id} (super_admin) — hard-delete if
+        unused, soft-deactivate if linked to providers
+  - ServiceApplyRequest (in models.py) extended with optional category_id and
+    languages (subset of {en, te, hi, ta}).
+  - /api/service/apply now resolves category_id → category name from the
+    collection, validates languages whitelist, stores both on the application.
+  - /admin/service-applications/{id}/approve copies category_id and
+    service_languages onto the user doc.
+  - GET /api/services accepts category_id and language query params; returns
+    category_id and service_languages in each row.
+  - Audit log entries for create/update/delete category actions.
+
+### Frontend
+  - Updated user services view at /app/frontend/app/(tabs)/shop.tsx:
+      • Replaced horizontal text-chip strip with a 3-column colored-icon
+        category grid (each tile shows icon + name + provider count badge).
+      • Added "Browse by category" section header with Clear link.
+      • Added Language filter row (All / English / Telugu / Hindi / Tamil).
+      • Service cards now show language tags inline.
+  - Rebuilt /app/frontend/app/services/apply.tsx:
+      • Replaced free-text category field with a tap-to-pick category grid
+        sourced from /services/categories.
+      • Added required language multi-select (must pick at least one).
+      • Submit sends category_id + languages.
+  - NEW screen /app/frontend/app/admin/service-management.tsx:
+      • Lists all categories (active+inactive) with icon, name, slug, sort
+        order, provider count.
+      • "Add new category" button → bottom sheet editor with live preview,
+        22 icon presets and 16 color presets.
+      • Edit / Show-Hide (toggle active) / Delete actions per row.
+      • Soft-delete prompt for in-use categories with provider count warning.
+      • Quick link to "Review pending provider applications".
+  - Registered new screens in admin/_layout.tsx as hidden tabs (href: null).
+  - Linked from /admin/more.tsx → "Service Application Management" item.
+
+### Verification
+  - `deep_testing_backend_v2` ran 43 checks, all PASSED:
+    seed (13 cats), CRUD, dedupe (400), inactive hiding, soft-deactivate
+    when in use, /service/apply with category_id+languages, approve
+    copies to user, /services filtering by category_id and language,
+    RBAC (super_admin only delete), validation (422), auth (401).
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Phase 1 of Service Application Management shipped: customer grid,
+        admin CRUD, language multi-select, category-aware listing. Phase 2
+        (GPS / nearby workers) and Phase 3 (ratings & comments) deferred to
+        future sessions per user's prioritisation.
+
