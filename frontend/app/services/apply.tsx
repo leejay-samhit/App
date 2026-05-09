@@ -254,6 +254,17 @@ export default function ServiceApply() {
             </TouchableOpacity>
           )}
 
+          {isApproved ? (
+            <TouchableOpacity
+              style={styles.locManageBtn}
+              onPress={() => router.push("/services/location" as any)}
+            >
+              <Feather name="navigation" size={16} color={colors.primary} />
+              <Text style={styles.locManageBtnText}>  Manage Live Location (nearby workers)</Text>
+              <Feather name="chevron-right" size={16} color={colors.primary} style={{ marginLeft: "auto" }} />
+            </TouchableOpacity>
+          ) : null}
+
           <Text style={styles.help}>
             Once approved by admin, you’ll appear in the Services directory in the user’s pincode area. Earnings credit to your wallet (minus a small platform fee).
           </Text>
@@ -315,5 +326,14 @@ const styles = StyleSheet.create({
     borderRadius: radii.button, paddingVertical: 14, alignItems: "center",
   },
   submitText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
+  locManageBtn: {
+    flexDirection: "row", alignItems: "center",
+    paddingVertical: 13, paddingHorizontal: 14,
+    borderRadius: radii.button,
+    backgroundColor: colors.primary + "12",
+    borderWidth: 1, borderColor: colors.primary + "33",
+    marginTop: 14,
+  },
+  locManageBtnText: { color: colors.primary, fontWeight: "700", fontSize: 13 },
   help: { fontSize: 11, color: colors.textMuted, marginTop: 16, lineHeight: 16 },
 });

@@ -20,6 +20,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
 
 type Product = { id: string; name: string; price: number; image_url: string; description?: string };
 type ServiceCategory = {
@@ -45,6 +46,9 @@ type ServiceProvider = {
   service_pincode: string;
   service_charge: number;
   service_description?: string;
+  distance_km?: number | null;
+  is_active?: boolean;
+  location_updated_at?: string | null;
 };
 type Mode = "shop" | "services";
 
@@ -69,6 +73,8 @@ export default function ShopScreen() {
   const [pincodeQ, setPincodeQ] = useState("");
   const [categoryId, setCategoryId] = useState<string | null>(null); // null = "all"
   const [languageQ, setLanguageQ] = useState<string | null>(null);
+  const [myCoords, setMyCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [locating, setLocating] = useState(false);
   const [categories, setCategories] = useState<ServiceCategory[]>([]);
   const [myStatus, setMyStatus] = useState<string | null>(null);
   const [contactOf, setContactOf] = useState<ServiceProvider | null>(null);
@@ -96,6 +102,10 @@ export default function ShopScreen() {
       if (pincodeQ) params.pincode = pincodeQ;
       if (categoryId) params.category_id = categoryId;
       if (languageQ) params.language = languageQ;
+      if (myCoords) {
+        params.lat = String(myCoords.lat);
+        params.lng = String(myCoords.lng);
+      }
       const { data } = await api.get<{ items: ServiceProvider[] }>("/services", { params });
       setServices(data.items || []);
       const cats = await api.get<{ categories: ServiceCategory[] }>("/services/categories");
@@ -107,7 +117,31 @@ export default function ShopScreen() {
     } finally {
       setServicesLoading(false);
     }
-  }, [searchQ, pincodeQ, categoryId, languageQ]);
+  }, [searchQ, pincodeQ, categoryId, languageQ, myCoords]);
+
+  const useMyLocation = useCallback(async () => {
+    if (myCoords) {
+      // toggle off
+      setMyCoords(null);
+      return;
+    }
+    setLocating(true);
+    try {
+      const c = await getCurrentCoords();
+      if (!c) {
+        Alert.alert(
+          "Location unavailable",
+          Platform.OS === "web"
+            ? "Your browser blocked location access. Allow it in the address-bar lock icon and try again."
+            : "Permission denied or GPS off. Enable Location Services and try again.",
+        );
+        return;
+      }
+      setMyCoords({ lat: c.lat, lng: c.lng });
+    } finally {
+      setLocating(false);
+    }
+  }, [myCoords]);
 
   useFocusEffect(useCallback(() => {
     if (mode === "shop") loadShop();
@@ -119,7 +153,7 @@ export default function ShopScreen() {
       const t = setTimeout(loadServices, 300);
       return () => clearTimeout(t);
     }
-  }, [searchQ, pincodeQ, categoryId, languageQ, mode, loadServices]);
+  }, [searchQ, pincodeQ, categoryId, languageQ, myCoords, mode, loadServices]);
 
   const addToCart = async (p: Product) => {
     setAdding(p.id);
@@ -289,7 +323,7 @@ export default function ShopScreen() {
                   onChangeText={setSearchQ}
                 />
               </View>
-              <View style={[styles.searchBox, { width: 110 }]}>
+              <View style={[styles.searchBox, { width: 100 }]}>
                 <Feather name="map-pin" size={14} color={colors.textMuted} />
                 <TextInput
                   style={styles.searchInput}
@@ -302,6 +336,21 @@ export default function ShopScreen() {
                 />
               </View>
             </View>
+            <TouchableOpacity
+              onPress={useMyLocation}
+              disabled={locating}
+              style={[styles.locBtn, myCoords && styles.locBtnActive]}
+              testID="services-use-location"
+            >
+              {locating ? (
+                <ActivityIndicator size="small" color={myCoords ? colors.primaryFg : colors.primary} />
+              ) : (
+                <Feather name={myCoords ? "navigation" : "navigation-2"} size={14} color={myCoords ? colors.primaryFg : colors.primary} />
+              )}
+              <Text style={[styles.locBtnText, myCoords && styles.locBtnTextActive]}>
+                {myCoords ? "  Showing nearby workers (tap to clear)" : "  Use my location for nearby-first results"}
+              </Text>
+            </TouchableOpacity>
 
             {categories.length > 0 && (
               <View style={styles.categoryGridSection}>
@@ -383,10 +432,24 @@ export default function ShopScreen() {
                     <Text style={styles.serviceAvatarText}>{(s.name || "?")[0].toUpperCase()}</Text>
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.serviceName} numberOfLines={1}>{s.name}</Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                      <Text style={styles.serviceName} numberOfLines={1}>{s.name}</Text>
+                      {s.is_active ? (
+                        <View style={styles.activeDot}>
+                          <View style={styles.activeDotInner} />
+                          <Text style={styles.activeDotText}>LIVE</Text>
+                        </View>
+                      ) : null}
+                    </View>
                     <Text style={styles.serviceTitle} numberOfLines={1}>{s.service_name}</Text>
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
                       <View style={styles.tag}><Text style={styles.tagText}>{s.service_category}</Text></View>
+                      {s.distance_km != null ? (
+                        <View style={[styles.tag, { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" }]}>
+                          <Feather name="navigation" size={10} color="#047857" />
+                          <Text style={[styles.tagText, { color: "#047857" }]}> {formatDistance(s.distance_km)}</Text>
+                        </View>
+                      ) : null}
                       <View style={styles.tag}><Feather name="map-pin" size={10} color={colors.textMuted} /><Text style={styles.tagText}> {s.service_pincode}</Text></View>
                       {(s.service_languages || []).map((lc) => (
                         <View key={lc} style={[styles.tag, { backgroundColor: "#EEF2FF", borderColor: "#C7D2FE" }]}>
@@ -395,6 +458,9 @@ export default function ShopScreen() {
                         </View>
                       ))}
                     </View>
+                    {s.is_active && s.location_updated_at ? (
+                      <Text style={styles.activeAgo}>{formatActiveAgo(s.location_updated_at)}</Text>
+                    ) : null}
                   </View>
                   <View style={{ alignItems: "flex-end" }}>
                     <Text style={styles.servicePrice}>{formatINR(s.service_charge || 0)}</Text>
@@ -538,6 +604,29 @@ const styles = StyleSheet.create({
   langChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   langChipText: { fontSize: 11, fontWeight: "700", color: colors.textMuted },
   langChipTextActive: { color: colors.primaryFg },
+
+  // Location button + active badge
+  locBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    paddingVertical: 10, paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: colors.primary + "15",
+    borderWidth: 1, borderColor: colors.primary + "44",
+    marginBottom: 14,
+  },
+  locBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  locBtnText: { fontSize: 12, fontWeight: "700", color: colors.primary },
+  locBtnTextActive: { color: colors.primaryFg },
+  activeDot: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    backgroundColor: "#ECFDF5",
+    paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1, borderColor: "#A7F3D0",
+  },
+  activeDotInner: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#10B981" },
+  activeDotText: { fontSize: 9, fontWeight: "800", color: "#047857", letterSpacing: 0.4 },
+  activeAgo: { fontSize: 10, color: colors.textMuted, marginTop: 2 },
 
   serviceCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 10 },
   serviceAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },

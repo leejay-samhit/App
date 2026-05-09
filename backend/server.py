@@ -82,6 +82,7 @@ from models import (
     ServiceBookRequest,
     ServiceCategoryCreate,
     ServiceCategoryUpdate,
+    ProviderLocationUpdate,
 )
 
 
@@ -4569,6 +4570,8 @@ async def on_startup():
             logger.info(f"Seeded {seeded} default service categories")
     except Exception as _sc_err:
         logger.warning(f"Service category seed failed: {_sc_err}")
+    # Ensure 2dsphere geo index for nearby-worker search
+    await _ensure_geo_index()
     # Backfill: any existing user without approval_status — assume approved (legacy users
     # who joined before the approval gate existed). Admins get auto-approved too.
     await db.users.update_many(
@@ -5562,33 +5565,87 @@ async def list_services(
     category: Optional[str] = None,
     category_id: Optional[str] = None,
     language: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    radius_km: Optional[float] = None,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Public listing of approved service providers. Customer-facing."""
-    filt: Dict[str, Any] = {"is_service_provider": True}
+    """Public listing of approved service providers. Customer-facing.
+
+    When `lat` and `lng` are supplied, results are sorted by distance using a
+    Mongo `$geoNear` aggregation. Optional `radius_km` clamps to a max distance.
+    Each row includes `distance_km` (or null) and `is_active` (true if the
+    provider broadcast a heartbeat within the last ACTIVE_WINDOW_MIN minutes).
+    """
+    base_filt: Dict[str, Any] = {"is_service_provider": True}
     if pincode:
-        filt["service_pincode"] = pincode
+        base_filt["service_pincode"] = pincode
     if category_id:
-        filt["category_id"] = category_id
+        base_filt["category_id"] = category_id
     elif category and category != "all":
-        filt["service_category"] = category
+        base_filt["service_category"] = category
     if language:
-        filt["service_languages"] = language  # Mongo: array contains
+        base_filt["service_languages"] = language
     if q:
         rgx = {"$regex": re.escape(q), "$options": "i"}
-        filt["$or"] = [{"name": rgx}, {"service_name": rgx}, {"service_category": rgx}]
-    rows = await db.users.find(
-        filt,
-        {
-            "_id": 0,
-            "id": 1, "name": 1, "phone": 1, "email": 1, "referral_code": 1,
-            "service_name": 1, "service_category": 1, "category_id": 1,
-            "service_languages": 1,
-            "service_pincode": 1, "service_charge": 1, "service_description": 1,
-            "service_approved_at": 1,
-        },
-    ).sort("service_approved_at", -1).to_list(300)
-    return {"items": rows, "total": len(rows)}
+        base_filt["$or"] = [{"name": rgx}, {"service_name": rgx}, {"service_category": rgx}]
+
+    project = {
+        "_id": 0,
+        "id": 1, "name": 1, "phone": 1, "email": 1, "referral_code": 1,
+        "service_name": 1, "service_category": 1, "category_id": 1,
+        "service_languages": 1,
+        "service_pincode": 1, "service_charge": 1, "service_description": 1,
+        "service_approved_at": 1,
+        "service_location": 1, "location_sharing": 1, "location_updated_at": 1,
+    }
+
+    # ----- Geo path ----------------------------------------------------------
+    if lat is not None and lng is not None:
+        # `$geoNear` MUST be the first stage in an aggregation pipeline.
+        max_meters = float(radius_km) * 1000.0 if radius_km else 50000.0  # default 50 km
+        pipeline: List[Dict[str, Any]] = [
+            {
+                "$geoNear": {
+                    "near": {"type": "Point", "coordinates": [float(lng), float(lat)]},
+                    "distanceField": "distance_m",
+                    "spherical": True,
+                    "maxDistance": max_meters,
+                    "query": {**base_filt, "service_location": {"$type": "object"}},
+                }
+            },
+            {"$project": {**project, "distance_m": 1}},
+            {"$limit": 300},
+        ]
+        try:
+            geo_rows = await db.users.aggregate(pipeline).to_list(300)
+        except Exception as e:
+            logger.warning(f"$geoNear failed (likely missing 2dsphere index): {e}")
+            geo_rows = []
+        # Also fetch providers without location, append at the end (no distance).
+        no_loc_filt = {**base_filt, "$or": [
+            {"service_location": None},
+            {"service_location": {"$exists": False}},
+        ]}
+        no_loc_rows = await db.users.find(no_loc_filt, project).sort("service_approved_at", -1).to_list(300)
+
+        def _enrich(r: Dict[str, Any]) -> Dict[str, Any]:
+            d_m = r.get("distance_m")
+            r["distance_km"] = round(d_m / 1000.0, 2) if d_m is not None else None
+            r["is_active"] = _is_active(r.get("location_updated_at"))
+            r.pop("distance_m", None)
+            r.pop("service_location", None)  # don't leak raw GeoJSON
+            return r
+        items = [_enrich(r) for r in geo_rows] + [_enrich(r) for r in no_loc_rows]
+        return {"items": items, "total": len(items), "geo": True}
+
+    # ----- Non-geo path (default) -------------------------------------------
+    rows = await db.users.find(base_filt, project).sort("service_approved_at", -1).to_list(300)
+    for r in rows:
+        r["distance_km"] = None
+        r["is_active"] = _is_active(r.get("location_updated_at"))
+        r.pop("service_location", None)
+    return {"items": rows, "total": len(rows), "geo": False}
 
 
 @api_router.get("/services/categories")
@@ -5727,6 +5784,70 @@ async def admin_delete_service_category(
     await db.service_categories.delete_one({"id": cat_id})
     await _audit_log(admin, "service_category.delete", "service_category", cat_id, {"name": existing.get("name")})
     return {"ok": True, "deleted": True}
+
+
+# ----- Provider live-location broadcast (Phase 2 — GPS) ------------------
+ACTIVE_WINDOW_MIN = 30  # provider considered "active" if heartbeat ≤ 30 min ago
+
+
+@api_router.post("/service/me/location")
+async def provider_update_location(
+    payload: ProviderLocationUpdate,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Provider broadcasts their current GPS coordinates.
+
+    The user MUST be an approved service provider. Coordinates are stored as
+    GeoJSON Point so we can use Mongo's `$geoNear` to surface nearby workers
+    to customers. When `sharing=false` the location is cleared and the user
+    is removed from nearby search results.
+    """
+    if not user.get("is_service_provider"):
+        raise HTTPException(status_code=400, detail="Only approved service providers can broadcast a location")
+    ts = now_utc().isoformat()
+    if payload.sharing is False:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {
+                "service_location": None,
+                "location_sharing": False,
+                "location_updated_at": ts,
+            }},
+        )
+        return {"ok": True, "sharing": False}
+    # Persist GeoJSON Point — coordinates order is [longitude, latitude] (Mongo convention)
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "service_location": {
+                "type": "Point",
+                "coordinates": [float(payload.lng), float(payload.lat)],
+                "accuracy_m": float(payload.accuracy_m) if payload.accuracy_m is not None else None,
+            },
+            "location_sharing": True,
+            "location_updated_at": ts,
+        }},
+    )
+    return {"ok": True, "sharing": True, "updated_at": ts}
+
+
+def _is_active(updated_at: Optional[str]) -> bool:
+    if not updated_at:
+        return False
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt) <= timedelta(minutes=ACTIVE_WINDOW_MIN)
+    except Exception:
+        return False
+
+
+async def _ensure_geo_index():
+    """Create 2dsphere index on service_location once."""
+    try:
+        await db.users.create_index([("service_location", "2dsphere")])
+    except Exception as e:
+        logger.warning(f"2dsphere index creation failed: {e}")
 
 
 @api_router.post("/services/{provider_id}/book")
