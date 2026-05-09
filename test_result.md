@@ -6387,3 +6387,41 @@ agent_communication:
         (confirmed via shared screenshot showing the new UI). No bugs
         reported. Ready for user approval.
 
+
+## Bug Fix (2025-06) — Payout structure changes no longer "recalculate from start"
+
+  - REPORTED: When admin changed the payout structure (e.g. directs_required
+    or per-level amounts), the L1 payout trigger was firing inconsistently
+    because it used global modular math: `direct_referrals_count %
+    directs_required == 0`. With a rule change mid-flight, this could skip
+    or misalign payouts based on the historical TOTAL count, not on
+    forward progress.
+  - FIX in /app/backend/server.py `_trigger_referral_commissions()`:
+    - Replaced the modulo check with a per-sponsor `pending_directs`
+      counter that increments on each new direct and is decremented by
+      `directs_required` whenever an L1 payout fires.
+    - When admin changes `directs_required` or any `payout_l*`, past
+      transactions are NEVER touched. Only the next threshold uses the
+      new rule, picking up from current `pending_directs` state.
+    - Atomic $inc on both `direct_referrals_count` and `pending_directs`
+      so race conditions can't double-fire.
+    - For existing users without the field, `pending_directs` is treated
+      as 0 by Mongo's $inc — they simply need `directs_required` fresh
+      directs from now on to fire next L1 (cleanest "past is past"
+      semantics; no migration needed; no surprise burst payouts).
+  - Verified with 4 simulations:
+    - Stable rule every 4: payout at 4th direct ✓
+    - Change 4→2 mid-flight: continues correctly under new rule ✓
+    - Change 4→6: previous payout preserved, next at correct 6th-direct ✓
+    - Lower to 1 (every direct): each new direct fires ✓
+  - Also verified via live API: PUT /admin/settings is a pure $set with
+    NO transaction-collection mutations (txn count before == after).
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Payout-structure-change bug fixed. Past payouts are completely
+        immutable. New thresholds apply forward only via per-sponsor
+        pending_directs counter. No admin action needed for existing users —
+        the field is created lazily on the next direct event.
+

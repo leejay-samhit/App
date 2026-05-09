@@ -731,7 +731,14 @@ async def _create_notification(user_id: str, kind: str, title: str, body: str):
 async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     """Pay multi-level referral commissions when a user becomes 'approved'.
     Walks up to 10 levels of upline. L1 is paid every Nth direct, L2..L10 are
-    credited per qualifying activation. Idempotent via commission_triggered flag."""
+    credited per qualifying activation. Idempotent via commission_triggered flag.
+
+    L1 trigger model (FIX 2025-06):
+      Uses a per-sponsor `pending_directs` counter (NOT a modulo on the global
+      direct_referrals_count). When admin changes the payout structure
+      mid-flight, past payouts and progress are preserved — only the *next*
+      threshold uses the new rule. Counter resets on payout.
+    """
     if user.get("commission_triggered"):
         return
     settings = await get_settings()
@@ -743,19 +750,33 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     if not sponsor_id:
         return
 
-    # Level 1 — direct sponsor: increment direct count, payout on every Nth
+    # Level 1 — direct sponsor: increment direct count + pending counter atomically.
     sponsor = await db.users.find_one({"id": sponsor_id})
     if not sponsor:
         return
-    await db.users.update_one({"id": sponsor_id}, {"$inc": {"direct_referrals_count": 1}})
-    new_count = sponsor.get("direct_referrals_count", 0) + 1
+    # Atomically bump both counters; pending_directs starts at 0 if missing.
+    await db.users.update_one(
+        {"id": sponsor_id},
+        {"$inc": {"direct_referrals_count": 1, "pending_directs": 1}},
+    )
+    fresh_sponsor = await db.users.find_one({"id": sponsor_id})
+    new_count = int(fresh_sponsor.get("direct_referrals_count", 0))
+    pending = int(fresh_sponsor.get("pending_directs", 0))
     payout_l1 = level_payouts[0]
+    remaining = max(0, directs_required - pending)
     await _create_notification(
         sponsor_id, "referral",
         f"New referral: {user['name']}",
-        f"{user['name']} just joined your network. {directs_required - (new_count % directs_required or directs_required)} more to next ₹{int(payout_l1)} payout.",
+        f"{user['name']} just joined your network. {remaining} more to next ₹{int(payout_l1)} payout.",
     )
-    if new_count % directs_required == 0 and payout_l1 > 0:
+    # Fire L1 payout when pending counter hits the configured threshold.
+    # Use $inc -directs_required to handle the case where admin lowered the
+    # threshold mid-flight (preserves overflow for next payout).
+    if pending >= directs_required and payout_l1 > 0:
+        await db.users.update_one(
+            {"id": sponsor_id},
+            {"$inc": {"pending_directs": -directs_required}},
+        )
         fresh = await db.users.find_one({"id": sponsor_id})
         await _credit_payout(fresh, payout_l1, 1, user["name"])
 
