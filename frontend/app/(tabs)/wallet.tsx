@@ -187,13 +187,13 @@ export default function WalletScreen() {
 
         <GradientCard variant="emerald" style={styles.balanceCard}>
           <Text style={styles.balanceLabel}>AVAILABLE BALANCE</Text>
-          <Text style={styles.balanceAmount} testID="wallet-balance">{formatINR(user?.wallet_balance || 0)}</Text>
+          <Text style={styles.balanceAmount} testID="wallet-balance" numberOfLines={1} adjustsFontSizeToFit>{formatINR(user?.wallet_balance || 0)}</Text>
           <View style={styles.statsRow}>
-            <View>
+            <View style={styles.statCol}>
               <Text style={styles.statRowLabel}>Total earned</Text>
               <Text style={styles.statRowValue}>{formatINR(user?.total_earned || 0)}</Text>
             </View>
-            <View>
+            <View style={styles.statColRight}>
               <Text style={styles.statRowLabel}>Payouts</Text>
               <Text style={styles.statRowValue}>{user?.payouts_received || 0}</Text>
             </View>
@@ -217,16 +217,30 @@ export default function WalletScreen() {
               }}
               testID="wallet-request-withdraw"
             >
-              <Feather name="arrow-up-right" size={18} color={colors.accentFg} />
-              <Text style={styles.withdrawBtnText}>{hasPayoutMethod ? "Schedule withdrawal" : "Add details to withdraw"}</Text>
+              <Feather name="arrow-up-right" size={16} color={colors.accentFg} />
+              <Text
+                style={styles.withdrawBtnText}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.85}
+              >
+                {hasPayoutMethod ? "Withdraw" : "Add details"}
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.transferBtn, { flex: 1 }]}
               onPress={() => setShowTransfer(true)}
               testID="wallet-transfer"
             >
-              <Feather name="send" size={18} color={colors.primary} />
-              <Text style={styles.transferBtnText}>Send to user</Text>
+              <Feather name="send" size={16} color={colors.primary} />
+              <Text
+                style={styles.transferBtnText}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.85}
+              >
+                Send
+              </Text>
             </TouchableOpacity>
           </View>
         </GradientCard>
@@ -526,16 +540,18 @@ const styles = StyleSheet.create({
   container: { padding: spacing.screen, paddingBottom: 40 },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 8 },
   h1: { fontSize: 30, fontWeight: "800", color: colors.textMain, letterSpacing: -1, marginBottom: 20 },
-  balanceCard: { padding: 24, marginBottom: 24 },
+  balanceCard: { padding: 22, marginBottom: 24 },
   balanceLabel: { color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: 2, fontWeight: "700" },
   balanceAmount: { color: colors.primaryFg, fontSize: 44, fontWeight: "800", marginTop: 6, letterSpacing: -1.5 },
-  statsRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 18, paddingTop: 16, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)" },
+  statsRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginTop: 18, paddingTop: 16, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)" },
+  statCol: { flex: 1, alignItems: "flex-start" },
+  statColRight: { flex: 1, alignItems: "flex-end" },
   statRowLabel: { color: "rgba(255,255,255,0.65)", fontSize: 11, letterSpacing: 0.5, fontWeight: "600", textTransform: "uppercase" },
   statRowValue: { color: colors.primaryFg, fontSize: 18, fontWeight: "800", marginTop: 4, letterSpacing: -0.3 },
-  withdrawBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.accent, paddingVertical: 14, borderRadius: radii.button, gap: 8 },
+  withdrawBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.accent, paddingVertical: 12, paddingHorizontal: 10, borderRadius: radii.button, gap: 6, minHeight: 44 },
   withdrawBtnText: { color: colors.accentFg, fontWeight: "700", fontSize: 14 },
   actionsRow: { flexDirection: "row", gap: 10, marginTop: 18 },
-  transferBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#fff", paddingVertical: 14, borderRadius: radii.button, gap: 8 },
+  transferBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#fff", paddingVertical: 12, paddingHorizontal: 10, borderRadius: radii.button, gap: 6, minHeight: 44 },
   transferBtnText: { color: colors.primary, fontWeight: "700", fontSize: 14 },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12, marginTop: 8 },
   txHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 8, marginBottom: 12 },
