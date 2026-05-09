@@ -14,6 +14,7 @@ import {
   Platform,
   Alert,
   Switch,
+  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -21,6 +22,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { formatActiveAgo } from "../../src/location";
 
 type AdminUser = {
   id: string;
@@ -39,6 +41,10 @@ type AdminUser = {
   ifsc?: string | null;
   account_holder?: string | null;
   created_at: string;
+  // Location (Phase 2 GPS)
+  location_sharing?: boolean;
+  location_updated_at?: string | null;
+  service_location?: { type?: string; coordinates?: [number, number] } | null;
 };
 
 type Stats = {
@@ -148,6 +154,29 @@ export default function AdminUsers() {
                 <Feather name="users" size={11} color={colors.textMuted} style={{ marginLeft: 8 }} />
                 <Text style={styles.userMetaText}>{item.direct_referrals_count} directs</Text>
               </View>
+              {item.location_sharing && item.service_location?.coordinates ? (
+                <TouchableOpacity
+                  onPress={(e) => {
+                    e.stopPropagation && e.stopPropagation();
+                    const [lng, lat] = item.service_location!.coordinates!;
+                    const url = `https://www.google.com/maps?q=${lat},${lng}`;
+                    if (Platform.OS === "web") {
+                      // open in new tab
+                      try { (globalThis as any).open?.(url, "_blank"); } catch {}
+                    } else {
+                      Linking.openURL(url);
+                    }
+                  }}
+                  style={styles.locChip}
+                >
+                  <Feather name="navigation" size={10} color="#047857" />
+                  <Text style={styles.locChipText}>
+                    {" "}{item.service_location.coordinates[1].toFixed(3)}, {item.service_location.coordinates[0].toFixed(3)}
+                    {item.location_updated_at ? `  ·  ${formatActiveAgo(item.location_updated_at)}` : ""}
+                  </Text>
+                  <Feather name="external-link" size={10} color="#047857" style={{ marginLeft: 4 }} />
+                </TouchableOpacity>
+              ) : null}
             </View>
             <View style={{ alignItems: "flex-end" }}>
               <Text style={styles.userAmount}>{formatINR(item.total_earned)}</Text>
@@ -784,6 +813,16 @@ const styles = StyleSheet.create({
   userEmail: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   userMeta: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 4 },
   userMetaText: { fontSize: 11, color: colors.textMuted },
+  locChip: {
+    flexDirection: "row", alignItems: "center",
+    alignSelf: "flex-start",
+    backgroundColor: "#ECFDF5",
+    borderWidth: 1, borderColor: "#A7F3D0",
+    paddingHorizontal: 6, paddingVertical: 3,
+    borderRadius: 8,
+    marginTop: 4,
+  },
+  locChipText: { fontSize: 10, color: "#047857", fontWeight: "700" },
   userAmount: { fontSize: 14, fontWeight: "800", color: colors.textMain },
   statusDot: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginTop: 4 },
   statusDotText: { color: colors.primaryFg, fontSize: 9, fontWeight: "800" },

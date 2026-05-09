@@ -131,25 +131,13 @@ export default function ProviderLocation() {
     );
   }
 
-  if (meStatus !== "approved") {
-    return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
-            <Feather name="chevron-left" size={20} color={colors.textMain} />
-          </TouchableOpacity>
-          <Text style={styles.title}>Live Location</Text>
-        </View>
-        <View style={styles.center}>
-          <Feather name="alert-circle" size={32} color={colors.textMuted} />
-          <Text style={styles.emptyText}>Only approved service providers can broadcast a live location.</Text>
-          <TouchableOpacity onPress={() => router.push("/services/apply" as any)} style={styles.primaryBtn}>
-            <Text style={styles.primaryBtnText}>Become a service provider</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
+  if (meStatus !== "approved" && false) {
+    // gate removed 2025-06: any user can broadcast
+    return null;
   }
+
+  // Customers and providers see slightly different helper copy.
+  const isProvider = meStatus === "approved";
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -162,10 +150,9 @@ export default function ProviderLocation() {
         </View>
 
         <Text style={styles.helper}>
-          When ON, customers nearby see you in their "nearby workers" feed with
-          a live distance and an active indicator. We refresh your location
-          every {Math.round(BROADCAST_INTERVAL_MS / 60000)} minutes while this
-          screen is open.
+          {isProvider
+            ? `When ON, customers nearby see you in their "nearby workers" feed with a live distance and an active indicator. We refresh your location every ${Math.round(BROADCAST_INTERVAL_MS / 60000)} minutes while this screen is open.`
+            : `When ON, your approximate location is shared with admin so they can see where you're connecting from. Refreshes every ${Math.round(BROADCAST_INTERVAL_MS / 60000)} minutes while this screen is open. You can turn it OFF anytime.`}
         </Text>
 
         {/* Toggle card */}

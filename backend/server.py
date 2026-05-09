@@ -5795,15 +5795,15 @@ async def provider_update_location(
     payload: ProviderLocationUpdate,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Provider broadcasts their current GPS coordinates.
+    """Broadcast current GPS coordinates.
 
-    The user MUST be an approved service provider. Coordinates are stored as
-    GeoJSON Point so we can use Mongo's `$geoNear` to surface nearby workers
-    to customers. When `sharing=false` the location is cleared and the user
-    is removed from nearby search results.
+    As of 2025-06 this is open to ANY authenticated user — both service
+    providers (so they appear in nearby-worker search) and regular customers
+    (so admins can see where users are coming from in the admin user list).
+    Coordinates are stored as a GeoJSON Point so we can use Mongo's
+    `$geoNear` to surface nearby workers to customers. When `sharing=false`
+    the location is cleared.
     """
-    if not user.get("is_service_provider"):
-        raise HTTPException(status_code=400, detail="Only approved service providers can broadcast a location")
     ts = now_utc().isoformat()
     if payload.sharing is False:
         await db.users.update_one(

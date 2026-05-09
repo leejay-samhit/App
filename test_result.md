@@ -6953,3 +6953,43 @@ agent_communication:
         a silent failure. Inline error pill stays visible on web too.
         Backend itself was working correctly all along.
 
+
+## Bug Fix (2025-06) — Live Location now open to all users + Admin user-list shows coords
+
+  - REPORTED: (1) Customers couldn't enable Live Location — toggle silently
+    failed because backend gated POST /service/me/location with
+    `is_service_provider == True`. (2) Admin couldn't see customer location
+    in the users list.
+  - FIX 1 (backend, /app/backend/server.py): Removed the
+    `is_service_provider` requirement from POST /service/me/location.
+    Any authenticated user can now broadcast their location. Use case:
+    providers → appear in nearby-worker search; customers → admin can see
+    where users connect from for support / fraud-detection.
+  - FIX 2 (frontend, /app/frontend/app/services/location.tsx):
+    Removed the "Only approved service providers can broadcast" gate.
+    Helper text now adapts: providers see "...nearby workers feed..."
+    while customers see "...shared with admin so they can see where you're
+    connecting from..."
+  - FIX 3 (frontend, /app/frontend/app/(tabs)/profile.tsx):
+    Added a "Live Location" tile under the profile tab. Shows green dot
+    + "SHARING ON" label when active, gray + "OFF · TAP TO SHARE WITH
+    ADMIN" otherwise. Tapping deep-links to /services/location.
+  - FIX 4 (frontend, /app/frontend/app/admin/users.tsx):
+    Each user row now shows a green location pill ("17.385, 78.486 ·
+    Active 5m ago") whenever location_sharing is true. Tap on the pill
+    opens Google Maps in a new tab/native maps app pointing at the
+    coordinates so admin can verify the address. Pill is suppressed
+    when user has not enabled sharing.
+  - Live verification:
+    * Customer (is_service_provider=False) → POST /service/me/location
+      → 200 sharing:true. Admin /admin/users now returns
+      service_location.coordinates and location_sharing for that user.
+    * No regression on provider broadcast or nearby /services geo search.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Live location is now general-purpose. Removed provider-only gate
+        on backend & frontend. Profile tab has a clear entry point for
+        every user. Admin user-list shows location pill with tap-to-map.
+
