@@ -5888,6 +5888,12 @@ async def seed_pincodes():
                 pin = (row.get("Pincode") or "").strip()
                 if not pin or len(pin) != 6 or not pin.isdigit():
                     continue
+                # Skip obvious test/sentinel rows that pollute the public CSV
+                office = (row.get("OfficeName") or "").upper()
+                district = (row.get("District") or "").upper()
+                state = (row.get("StateName") or "").upper()
+                if pin == "999999" or "TEST" in office or "TEST" in district or "TEST" in state:
+                    continue
                 if pin in seen:
                     continue
                 seen[pin] = {
