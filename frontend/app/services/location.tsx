@@ -39,6 +39,7 @@ export default function ProviderLocation() {
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [lastError, setLastError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Initial load: fetch /service/me to know status + current sharing flag
@@ -59,15 +60,15 @@ export default function ProviderLocation() {
 
   const broadcastNow = useCallback(async (): Promise<boolean> => {
     setBusy(true);
+    setLastError(null);
     try {
       const c = await getCurrentCoords();
       if (!c) {
-        Alert.alert(
-          "Location unavailable",
-          Platform.OS === "web"
-            ? "Browser blocked location access. Allow it via the address-bar lock icon."
-            : "Permission denied or GPS off. Enable Location Services and try again.",
-        );
+        const msg = Platform.OS === "web"
+          ? "Browser blocked location access. Allow it via the address-bar lock icon and try again."
+          : "Permission denied or GPS off. Enable Location Services in your device settings and try again.";
+        setLastError(msg);
+        Alert.alert("Location unavailable", msg);
         return false;
       }
       setCoords(c);
@@ -75,9 +76,12 @@ export default function ProviderLocation() {
         lat: c.lat, lng: c.lng, accuracy_m: c.accuracy_m, sharing: true,
       });
       setUpdatedAt(r.data?.updated_at || new Date().toISOString());
+      setLastError(null);
       return true;
     } catch (e) {
-      Alert.alert("Could not update location", formatApiError(e));
+      const msg = formatApiError(e);
+      setLastError(msg);
+      Alert.alert("Could not update location", msg);
       return false;
     } finally { setBusy(false); }
   }, []);
@@ -178,6 +182,13 @@ export default function ProviderLocation() {
           />
         </View>
 
+        {lastError ? (
+          <View style={styles.errorBox}>
+            <Feather name="alert-triangle" size={14} color={colors.error} />
+            <Text style={styles.errorText} numberOfLines={4}>  {lastError}</Text>
+          </View>
+        ) : null}
+
         {sharing ? (
           <TouchableOpacity onPress={broadcastNow} disabled={busy} style={styles.refreshBtn}>
             {busy ? (
@@ -235,6 +246,14 @@ const styles = StyleSheet.create({
   },
   toggleTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain },
   toggleSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  errorBox: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: colors.error + "15",
+    borderWidth: 1, borderColor: colors.error + "55",
+    borderRadius: 12, padding: 10,
+    marginTop: 10,
+  },
+  errorText: { color: colors.error, fontSize: 12, fontWeight: "700", flex: 1 },
   refreshBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center",
     paddingVertical: 11, marginTop: 12,
