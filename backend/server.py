@@ -83,6 +83,8 @@ from models import (
     ServiceCategoryCreate,
     ServiceCategoryUpdate,
     ProviderLocationUpdate,
+    DistributorAreaAssign,
+    DistributorPromote,
 )
 
 
@@ -4572,6 +4574,15 @@ async def on_startup():
         logger.warning(f"Service category seed failed: {_sc_err}")
     # Ensure 2dsphere geo index for nearby-worker search
     await _ensure_geo_index()
+    # Seed all India pincodes (~155k) — idempotent, no-op after first run
+    try:
+        seeded = await seed_pincodes()
+        if seeded:
+            logger.info(f"Seeded {seeded} India pincodes")
+    except Exception as _pin_err:
+        logger.warning(f"Pincode seed failed: {_pin_err}")
+    # Distributor exclusive-territory unique index
+    await _ensure_distributor_indexes()
     # Backfill: any existing user without approval_status — assume approved (legacy users
     # who joined before the approval gate existed). Admins get auto-approved too.
     await db.users.update_many(
@@ -5848,6 +5859,255 @@ async def _ensure_geo_index():
         await db.users.create_index([("service_location", "2dsphere")])
     except Exception as e:
         logger.warning(f"2dsphere index creation failed: {e}")
+
+
+# ====================================================================
+# Distributor Network — pincode area mapping (admin module)
+# ====================================================================
+PINCODES_CSV_PATH = "/app/backend/data/pincodes.csv"
+
+
+async def seed_pincodes():
+    """Idempotent: load all India pincodes from /app/backend/data/pincodes.csv
+    into `pincodes` collection. Skips if collection already populated."""
+    try:
+        existing = await db.pincodes.count_documents({})
+        if existing > 50_000:  # already seeded; we expect ~155k
+            return 0
+        import csv
+        from pathlib import Path
+        if not Path(PINCODES_CSV_PATH).exists():
+            logger.warning(f"Pincode CSV missing at {PINCODES_CSV_PATH}; skipping seed")
+            return 0
+        # Build deduped pincode-level docs: one doc per pincode, keep the first
+        # office's district/state/region (post offices share state/district).
+        seen: Dict[str, Dict[str, Any]] = {}
+        with open(PINCODES_CSV_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                pin = (row.get("Pincode") or "").strip()
+                if not pin or len(pin) != 6 or not pin.isdigit():
+                    continue
+                if pin in seen:
+                    continue
+                seen[pin] = {
+                    "pincode": pin,
+                    "district": (row.get("District") or "").strip().title(),
+                    "state": (row.get("StateName") or "").strip().title(),
+                    "region": (row.get("RegionName") or "").strip(),
+                    "office": (row.get("OfficeName") or "").strip(),
+                }
+        if not seen:
+            return 0
+        # Bulk insert in chunks
+        docs = list(seen.values())
+        BATCH = 5000
+        total = 0
+        for i in range(0, len(docs), BATCH):
+            chunk = docs[i : i + BATCH]
+            await db.pincodes.insert_many(chunk, ordered=False)
+            total += len(chunk)
+        # Indexes
+        await db.pincodes.create_index("pincode", unique=True)
+        await db.pincodes.create_index("state")
+        await db.pincodes.create_index("district")
+        return total
+    except Exception as e:
+        logger.error(f"Pincode seed failed: {e}")
+        return 0
+
+
+async def _ensure_distributor_indexes():
+    """Unique index on distributor_assignments.pincode (exclusive territory)."""
+    try:
+        await db.distributor_assignments.create_index("pincode", unique=True)
+        await db.distributor_assignments.create_index("distributor_id")
+    except Exception as e:
+        logger.warning(f"distributor index creation failed: {e}")
+
+
+@api_router.get("/admin/pincodes/search")
+async def admin_pincode_search(
+    q: str = "",
+    state: Optional[str] = None,
+    limit: int = 50,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """Lookup pincodes for autocomplete in the admin Area-Mapping screen.
+    Matches pincode prefix, district name, or state name (case-insensitive).
+    Returns up to `limit` results (capped at 200)."""
+    limit = max(1, min(int(limit or 50), 200))
+    q = (q or "").strip()
+    filt: Dict[str, Any] = {}
+    if state:
+        filt["state"] = {"$regex": f"^{re.escape(state)}$", "$options": "i"}
+    if q:
+        if q.isdigit():
+            filt["pincode"] = {"$regex": f"^{q}", "$options": "i"}
+        else:
+            rgx = {"$regex": re.escape(q), "$options": "i"}
+            filt["$or"] = [{"district": rgx}, {"state": rgx}, {"region": rgx}, {"office": rgx}]
+    rows = await db.pincodes.find(filt, {"_id": 0}).sort("pincode", 1).to_list(limit)
+    # For each, attach the assigned distributor (if any)
+    pins = [r["pincode"] for r in rows]
+    if pins:
+        assignments = await db.distributor_assignments.find(
+            {"pincode": {"$in": pins}}, {"_id": 0},
+        ).to_list(len(pins))
+        amap = {a["pincode"]: a for a in assignments}
+        for r in rows:
+            a = amap.get(r["pincode"])
+            r["assigned_to"] = (
+                {"distributor_id": a["distributor_id"], "distributor_name": a.get("distributor_name"),
+                 "distributor_email": a.get("distributor_email")}
+                if a else None
+            )
+    return {"items": rows, "total": len(rows)}
+
+
+@api_router.get("/admin/pincodes/{pin}")
+async def admin_pincode_get(pin: str, _: Dict[str, Any] = Depends(require_admin)):
+    p = await db.pincodes.find_one({"pincode": pin}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Pincode not found")
+    a = await db.distributor_assignments.find_one({"pincode": pin}, {"_id": 0})
+    p["assigned_to"] = a if a else None
+    return p
+
+
+@api_router.post("/admin/users/{user_id}/distributor")
+async def admin_promote_distributor(
+    user_id: str,
+    payload: DistributorPromote,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
+):
+    """Toggle a user's `is_distributor` flag."""
+    u = await db.users.find_one({"id": user_id})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    if u.get("role") == "admin":
+        raise HTTPException(status_code=400, detail="Admins cannot also be distributors")
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"is_distributor": bool(payload.is_distributor)}},
+    )
+    # If demoting, drop all their pincode mappings
+    if not payload.is_distributor:
+        await db.distributor_assignments.delete_many({"distributor_id": user_id})
+    await _audit_log(admin, "distributor.toggle", "user", user_id,
+                     {"is_distributor": payload.is_distributor})
+    return {"ok": True, "is_distributor": payload.is_distributor}
+
+
+@api_router.get("/admin/distributors")
+async def admin_list_distributors(_: Dict[str, Any] = Depends(require_admin)):
+    """List all users marked as distributors with their assigned pincode counts."""
+    rows = await db.users.find(
+        {"is_distributor": True},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1},
+    ).sort("name", 1).to_list(2000)
+    # Attach pincode counts
+    for r in rows:
+        r["pincode_count"] = await db.distributor_assignments.count_documents(
+            {"distributor_id": r["id"]}
+        )
+    return {"items": rows, "total": len(rows)}
+
+
+@api_router.get("/admin/distributors/{user_id}/areas")
+async def admin_list_distributor_areas(
+    user_id: str, _: Dict[str, Any] = Depends(require_admin),
+):
+    """List the pincodes assigned to one distributor, joined with district/state."""
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "is_distributor": 1})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    rows = await db.distributor_assignments.find(
+        {"distributor_id": user_id}, {"_id": 0},
+    ).sort("pincode", 1).to_list(5000)
+    # Enrich with pincode metadata (district/state)
+    pins = [r["pincode"] for r in rows]
+    if pins:
+        meta = await db.pincodes.find({"pincode": {"$in": pins}}, {"_id": 0}).to_list(len(pins))
+        mmap = {m["pincode"]: m for m in meta}
+        for r in rows:
+            md = mmap.get(r["pincode"]) or {}
+            r["district"] = md.get("district")
+            r["state"] = md.get("state")
+            r["office"] = md.get("office")
+    return {"distributor": u, "items": rows, "total": len(rows)}
+
+
+@api_router.post("/admin/distributors/{user_id}/areas")
+async def admin_assign_distributor_areas(
+    user_id: str,
+    payload: DistributorAreaAssign,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
+):
+    """Assign one or more pincodes to a distributor (exclusive territory).
+    Any pincode currently held by another distributor is reassigned to this one
+    (the most recent assign wins). Pincodes that don't exist in our pincodes
+    collection are rejected."""
+    u = await db.users.find_one({"id": user_id})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not u.get("is_distributor"):
+        raise HTTPException(status_code=400, detail="User is not marked as distributor. Promote them first.")
+
+    # De-dupe + validate
+    pins = sorted({p.strip() for p in payload.pincodes if p and len(p.strip()) == 6 and p.strip().isdigit()})
+    if not pins:
+        raise HTTPException(status_code=400, detail="No valid 6-digit pincodes provided")
+
+    # Confirm pincodes exist in our master list
+    valid_rows = await db.pincodes.find({"pincode": {"$in": pins}}, {"_id": 0, "pincode": 1}).to_list(len(pins))
+    valid_set = {r["pincode"] for r in valid_rows}
+    invalid = [p for p in pins if p not in valid_set]
+    if invalid:
+        raise HTTPException(status_code=400,
+                            detail=f"{len(invalid)} pincode(s) not in master list: {', '.join(invalid[:5])}{'…' if len(invalid) > 5 else ''}")
+
+    ts = now_utc().isoformat()
+    reassigned: List[str] = []
+    new_assigns: List[str] = []
+    for pin in pins:
+        existing = await db.distributor_assignments.find_one({"pincode": pin})
+        if existing and existing.get("distributor_id") != user_id:
+            reassigned.append(pin)
+        elif not existing:
+            new_assigns.append(pin)
+        await db.distributor_assignments.update_one(
+            {"pincode": pin},
+            {"$set": {
+                "pincode": pin,
+                "distributor_id": user_id,
+                "distributor_name": u.get("name"),
+                "distributor_email": u.get("email"),
+                "assigned_at": ts,
+                "assigned_by": admin.get("id"),
+            }},
+            upsert=True,
+        )
+    await _audit_log(admin, "distributor.areas.assign", "user", user_id,
+                     {"new": len(new_assigns), "reassigned": len(reassigned), "total": len(pins)})
+    return {"ok": True, "new_assignments": len(new_assigns),
+            "reassigned": len(reassigned), "total_now": len(pins)}
+
+
+@api_router.delete("/admin/distributors/{user_id}/areas/{pincode}")
+async def admin_unassign_distributor_area(
+    user_id: str,
+    pincode: str,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
+):
+    res = await db.distributor_assignments.delete_one(
+        {"distributor_id": user_id, "pincode": pincode},
+    )
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    await _audit_log(admin, "distributor.areas.unassign", "user", user_id,
+                     {"pincode": pincode})
+    return {"ok": True}
 
 
 @api_router.post("/services/{provider_id}/book")

@@ -330,6 +330,18 @@ class ProviderLocationUpdate(BaseModel):
     sharing: Optional[bool] = True  # set to false to stop sharing
 
 
+class DistributorAreaAssign(BaseModel):
+    """Bulk-assign one or more pincodes to a distributor user.
+    Each pincode is exclusive: if it's already mapped to another distributor,
+    that mapping is silently *overwritten* (the API caller is the source of
+    truth)."""
+    pincodes: List[str] = Field(min_length=1, max_length=500)
+
+
+class DistributorPromote(BaseModel):
+    is_distributor: bool
+
+
 class ServiceRejectRequest(BaseModel):
     reason: Optional[str] = None
 

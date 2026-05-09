@@ -1,318 +1,351 @@
-"""
-Phase 2 GPS / Nearby-worker backend endpoint tests
-==================================================
-Endpoints under test:
-  • POST /api/service/me/location  (provider GPS broadcast)
-  • GET  /api/services             (now with optional lat/lng/radius_km geo filter)
-  • Startup creates 2dsphere index on users.service_location
+"""Backend test for Distributor Network / Area Mapping feature.
 
-Run: python /app/backend_test.py
+Tests 7 endpoints + 19,300 India pincodes seed against:
+  https://network-pay-1.preview.emergentagent.com
 """
-import math
-import os
-import secrets
 import sys
-from typing import Any, Dict, Optional
-
+import uuid
 import requests
 
-BASE_URL = "https://network-pay-1.preview.emergentagent.com"
-API = f"{BASE_URL}/api"
-
+BASE = "https://network-pay-1.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
+FINANCE_EMAIL = "finance@app.com"
+FINANCE_PASSWORD = "Finance@123"
 
-# Hyderabad coordinates
-PROVIDER_LAT = 17.4140  # somewhere near Banjara Hills
-PROVIDER_LNG = 78.4760
-CENTER_LAT = 17.385     # near Hyderabad city centre
-CENTER_LNG = 78.486
-
-PASS = 0
-FAIL = 0
-FAILURES = []
-
-
-def _hd(token: Optional[str] = None) -> Dict[str, str]:
-    h = {"Content-Type": "application/json"}
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
+PASS = []
+FAIL = []
 
 
 def check(label: str, ok: bool, detail: str = ""):
-    global PASS, FAIL
     if ok:
-        PASS += 1
-        print(f"  PASS  {label}")
+        PASS.append(label)
+        print(f"  PASS {label}")
     else:
-        FAIL += 1
-        FAILURES.append(f"{label} :: {detail}")
-        print(f"  FAIL  {label} :: {detail}")
+        FAIL.append((label, detail))
+        print(f"  FAIL {label}  ::  {detail}")
 
 
-def haversine_km(lat1, lon1, lat2, lon2) -> float:
-    R = 6371.0088
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return R * 2 * math.asin(math.sqrt(a))
+def H(token):
+    return {"Authorization": f"Bearer {token}"}
 
 
-def login(email: str, password: str) -> Dict[str, Any]:
-    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
-
-def main() -> int:
-    print("\n" + "=" * 78)
-    print("PHASE 2 GPS / NEARBY-WORKER BACKEND TESTS")
-    print("=" * 78)
-    print(f"Backend: {API}\n")
-
-    # -------- Login as admin -----------------------------------------------
-    print("[STEP 0] Admin login")
-    admin_login = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    admin_token = admin_login["token"]
-    admin_user = admin_login["user"]
-    check("Admin login -> 200 + token", bool(admin_token) and admin_user.get("email") == ADMIN_EMAIL,
-          f"got {admin_user.get('email')}")
-
-    # ---------- Scenario 1 -------------------------------------------------
-    print("\n[SCENARIO 1] Admin (not service provider) cannot broadcast location")
-    r = requests.post(f"{API}/service/me/location",
-                      json={"lat": 17.4, "lng": 78.5},
-                      headers=_hd(admin_token), timeout=15)
-    check("admin POST /service/me/location -> 400",
-          r.status_code == 400, f"status={r.status_code} body={r.text[:200]}")
-    check("error mentions provider/service",
-          "provider" in r.text.lower() or "service" in r.text.lower(),
-          f"body={r.text[:200]}")
-
-    # ---------- Scenario 10: no auth ---------------------------------------
-    print("\n[SCENARIO 10] Unauthenticated POST /service/me/location -> 401/403")
-    r = requests.post(f"{API}/service/me/location",
-                      json={"lat": 17.4, "lng": 78.5},
-                      headers={"Content-Type": "application/json"}, timeout=15)
-    check("unauth POST /service/me/location -> 401 or 403",
-          r.status_code in (401, 403), f"status={r.status_code}")
-
-    # ---------- Scenario 9: validation -------------------------------------
-    print("\n[SCENARIO 9] Validation: lat=999 -> 422")
-    r = requests.post(f"{API}/service/me/location",
-                      json={"lat": 999, "lng": 0},
-                      headers=_hd(admin_token), timeout=15)
-    check("invalid lat -> 422", r.status_code == 422,
-          f"status={r.status_code} body={r.text[:200]}")
-
-    # ---------- Scenario 2: build approved provider ------------------------
-    print("\n[SCENARIO 2] Build approved service provider")
-
-    r = requests.get(f"{API}/services/categories", headers=_hd(admin_token), timeout=15)
-    check("GET /services/categories -> 200", r.status_code == 200, f"status={r.status_code}")
-    categories = r.json().get("items", []) if r.status_code == 200 else []
-    plumber = next((c for c in categories if (c.get("name") or "").lower() == "plumber"), None)
-    if not plumber and categories:
-        plumber = categories[0]
-    check("Plumber (or fallback) category found", bool(plumber),
-          f"got {len(categories)} categories")
-    plumber_id = plumber["id"] if plumber else None
-
-    rand = secrets.token_hex(4)
-    provider_email = f"gpsprov.{rand}@mailinator.com"
-    provider_pwd = "Provider@2026"
-    create_payload = {
-        "name": f"Ravi GPS {rand[:4].upper()}",
-        "email": provider_email,
-        "password": provider_pwd,
-        "phone": "9876543210",
-        "referral_code": "EARN",
-        "mark_paid_offline": True,
-    }
-    r = requests.post(f"{API}/admin/users/create",
-                      json=create_payload, headers=_hd(admin_token), timeout=20)
-    check("admin POST /admin/users/create -> 200", r.status_code == 200,
-          f"status={r.status_code} body={r.text[:300]}")
+def login(email: str, password: str):
+    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": password}, timeout=20)
     if r.status_code != 200:
-        return _summary()
-    provider_user = r.json().get("user", {})
-    provider_id = provider_user.get("id")
-    check("provider has id", bool(provider_id))
+        return None, r
+    j = r.json()
+    return j["token"], r
 
-    # Approve user
-    r = requests.post(f"{API}/admin/approvals/{provider_id}/approve",
-                      headers=_hd(admin_token), timeout=15)
-    check("admin approves new user -> 200", r.status_code == 200,
-          f"status={r.status_code} body={r.text[:200]}")
 
-    plogin = login(provider_email, provider_pwd)
-    provider_token = plogin["token"]
-    check("provider login -> 200 + token", bool(provider_token))
+def register(name, email, password, ref_code=None):
+    body = {"name": name, "email": email, "password": password}
+    if ref_code:
+        body["referral_code"] = ref_code
+    r = requests.post(f"{BASE}/auth/register", json=body, timeout=20)
+    return r
 
-    apply_payload = {
-        "service_name": "Same-day Plumbing",
-        "service_category": "Plumber",
-        "category_id": plumber_id,
-        "languages": ["en"],
-        "pincode": "500001",
-        "charge": 500,
-        "description": "Quick leak fixes",
-    }
-    r = requests.post(f"{API}/service/apply", json=apply_payload,
-                      headers=_hd(provider_token), timeout=15)
-    check("provider POST /service/apply -> 200", r.status_code == 200,
-          f"status={r.status_code} body={r.text[:300]}")
-    if r.status_code != 200:
-        _cleanup(admin_token, provider_id)
-        return _summary()
-    app_id = r.json().get("application", {}).get("id")
-    check("application id returned", bool(app_id))
 
-    r = requests.post(f"{API}/admin/service-applications/{app_id}/approve",
-                      headers=_hd(admin_token), timeout=15)
-    check("admin approves service-application -> 200",
-          r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
+def main():
+    print("\n=== Login as super_admin ===")
+    admin_tok, r = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    check("admin login -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if not admin_tok:
+        print("FATAL: cannot login admin")
+        return False
 
-    plogin2 = login(provider_email, provider_pwd)
-    provider_token = plogin2["token"]
-    check("provider is_service_provider=True after approve",
-          bool(plogin2["user"].get("is_service_provider")),
-          f"is_service_provider={plogin2['user'].get('is_service_provider')}")
+    r = requests.get(f"{BASE}/auth/me", headers=H(admin_tok), timeout=20)
+    admin_id = r.json()["id"]
+    print(f"  admin_id={admin_id}")
 
-    # ---------- Scenario 3 -------------------------------------------------
-    print("\n[SCENARIO 3] Approved provider broadcasts location -> 200")
-    r = requests.post(f"{API}/service/me/location",
-                      json={"lat": PROVIDER_LAT, "lng": PROVIDER_LNG, "accuracy_m": 12.5},
-                      headers=_hd(provider_token), timeout=15)
-    check("provider POST /service/me/location -> 200",
-          r.status_code == 200, f"status={r.status_code} body={r.text[:300]}")
-    body = r.json() if r.status_code == 200 else {}
-    check("response sharing == True", body.get("sharing") is True, f"sharing={body.get('sharing')}")
-    check("response includes updated_at", bool(body.get("updated_at")), f"updated_at={body.get('updated_at')}")
-    check("response ok == True", body.get("ok") is True)
-
-    # ---------- Scenario 4 -------------------------------------------------
-    print("\n[SCENARIO 4] GET /api/services -> provider visible, is_active=True")
-    r = requests.get(f"{API}/services", headers=_hd(admin_token), timeout=20)
-    check("GET /services (no geo) -> 200", r.status_code == 200, f"status={r.status_code}")
-    items = r.json().get("items", []) if r.status_code == 200 else []
-    prov_row = next((it for it in items if it.get("id") == provider_id), None)
-    check("provider in /services list", bool(prov_row), f"items={len(items)}")
-    if prov_row:
-        check("provider is_active == True (heartbeat <30 min)",
-              prov_row.get("is_active") is True, f"is_active={prov_row.get('is_active')}")
-        check("non-geo distance_km is None",
-              prov_row.get("distance_km") is None, f"distance_km={prov_row.get('distance_km')}")
-        check("service_location not leaked in row",
-              "service_location" not in prov_row,
-              f"keys={list(prov_row.keys())}")
-
-    # ---------- Scenario 5 -------------------------------------------------
-    print("\n[SCENARIO 5] GET /services with lat/lng -> distance_km present")
-    r = requests.get(f"{API}/services",
-                     params={"lat": CENTER_LAT, "lng": CENTER_LNG},
-                     headers=_hd(admin_token), timeout=20)
-    check("GET /services?lat&lng -> 200", r.status_code == 200,
-          f"status={r.status_code} body={r.text[:300]}")
-    body = r.json() if r.status_code == 200 else {}
-    check("response geo == True", body.get("geo") is True, f"geo={body.get('geo')}")
-    geo_items = body.get("items", [])
-    geo_prov = next((it for it in geo_items if it.get("id") == provider_id), None)
-    check("provider present in geo result", bool(geo_prov), f"items={len(geo_items)}")
-    if geo_prov:
-        d = geo_prov.get("distance_km")
-        check("distance_km is a number", isinstance(d, (int, float)), f"distance_km={d!r}")
-        if isinstance(d, (int, float)):
-            expected = haversine_km(CENTER_LAT, CENTER_LNG, PROVIDER_LAT, PROVIDER_LNG)
-            tolerance = max(0.05 * expected, 0.2)
-            check(f"distance_km ~ haversine ({d:.3f} vs {expected:.3f} km, tol {tolerance:.3f})",
-                  abs(d - expected) <= tolerance,
-                  f"got={d} expected={expected}")
-            check(f"distance_km in 2.5-5.0 km plausible window (got {d})",
-                  2.5 <= d <= 5.0, f"distance_km={d}")
-        check("is_active still True", geo_prov.get("is_active") is True,
-              f"is_active={geo_prov.get('is_active')}")
-
-    # ---------- Scenario 6 -------------------------------------------------
-    print("\n[SCENARIO 6] GET /services with radius_km=1 should exclude provider")
-    r = requests.get(f"{API}/services",
-                     params={"lat": CENTER_LAT, "lng": CENTER_LNG, "radius_km": 1},
-                     headers=_hd(admin_token), timeout=20)
-    check("GET /services?radius_km=1 -> 200", r.status_code == 200, f"status={r.status_code}")
-    body = r.json() if r.status_code == 200 else {}
-    items = body.get("items", [])
-    geo_prov = next((it for it in items if it.get("id") == provider_id and it.get("distance_km") is not None), None)
-    check("provider NOT among geo-located rows when radius_km=1",
-          geo_prov is None,
-          f"provider row found at distance={geo_prov.get('distance_km') if geo_prov else None}")
-
-    # ---------- Scenario 7 -------------------------------------------------
-    print("\n[SCENARIO 7] POST {sharing:false} -> location cleared")
-    r = requests.post(f"{API}/service/me/location",
-                      json={"lat": 0, "lng": 0, "sharing": False},
-                      headers=_hd(provider_token), timeout=15)
-    check("provider POST sharing=false -> 200", r.status_code == 200,
-          f"status={r.status_code} body={r.text[:300]}")
-    body = r.json() if r.status_code == 200 else {}
-    check("response sharing == False", body.get("sharing") is False, f"sharing={body.get('sharing')}")
-
-    # ---------- Scenario 8 -------------------------------------------------
-    print("\n[SCENARIO 8] After sharing=false: provider not in geo results")
-    r2 = requests.get(f"{API}/services",
-                      params={"lat": CENTER_LAT, "lng": CENTER_LNG},
-                      headers=_hd(admin_token), timeout=20)
-    geo_items = r2.json().get("items", []) if r2.status_code == 200 else []
-    geo_with_dist = [it for it in geo_items if it.get("id") == provider_id and it.get("distance_km") is not None]
-    check("after sharing=false, provider has NO distance_km in geo search",
-          len(geo_with_dist) == 0,
-          f"found {len(geo_with_dist)} geo-located rows")
-
-    # ---------- 2dsphere index direct verification ------------------------
-    print("\n[BONUS] 2dsphere index existence check")
-    try:
-        from pymongo import MongoClient
-        mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-        db_name = os.environ.get("DB_NAME", "referral_ecom_db")
-        client = MongoClient(mongo_url, serverSelectionTimeoutMS=3000)
-        idx = list(client[db_name].users.list_indexes())
-        has_2dsphere = any(
-            any(v == "2dsphere" for v in i.get("key", {}).values()) and "service_location" in i.get("key", {})
-            for i in idx
+    # Ensure finance admin exists (seed if needed)
+    fin_tok, r = login(FINANCE_EMAIL, FINANCE_PASSWORD)
+    if not fin_tok:
+        print("  finance login failed, creating finance admin via /admin/admins")
+        rc = requests.post(
+            f"{BASE}/admin/admins",
+            headers=H(admin_tok),
+            json={"name": "Finance Admin", "email": FINANCE_EMAIL,
+                  "password": FINANCE_PASSWORD, "phone": "9999000001",
+                  "admin_role": "finance"},
+            timeout=20,
         )
-        idx_names = [i.get('name') for i in idx]
-        check("2dsphere index on users.service_location exists",
-              has_2dsphere, f"indexes={idx_names}")
-    except Exception as e:
-        check("2dsphere index direct check (fallback: $geoNear succeeded earlier)",
-              True, f"direct check error: {e}")
+        print(f"  /admin/admins create -> {rc.status_code} {rc.text[:200]}")
+        fin_tok, r = login(FINANCE_EMAIL, FINANCE_PASSWORD)
+    check("finance login -> 200", bool(fin_tok), f"{r.status_code} {r.text[:200]}")
 
-    # ---------- CLEANUP ---------------------------------------------------
-    _cleanup(admin_token, provider_id)
-    return _summary()
+    # ========== SCENARIO 1: search by digit prefix ==========
+    print("\n=== S1: GET /admin/pincodes/search?q=500001 ===")
+    r = requests.get(f"{BASE}/admin/pincodes/search", headers=H(admin_tok),
+                     params={"q": "500001"}, timeout=20)
+    check("S1.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        items = r.json().get("items", [])
+        check("S1.2 at least 1 row", len(items) >= 1, f"got {len(items)}")
+        if items:
+            row = next((x for x in items if x.get("pincode") == "500001"), items[0])
+            check("S1.3 district == Hyderabad",
+                  (row.get("district") or "").lower() == "hyderabad",
+                  f"district={row.get('district')}")
+            check("S1.4 state == Telangana",
+                  (row.get("state") or "").lower() == "telangana",
+                  f"state={row.get('state')}")
 
+    # ========== SCENARIO 2: text search ==========
+    print("\n=== S2: GET /admin/pincodes/search?q=Bangalore ===")
+    r = requests.get(f"{BASE}/admin/pincodes/search", headers=H(admin_tok),
+                     params={"q": "Bangalore"}, timeout=20)
+    check("S2.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        items = r.json().get("items", [])
+        check("S2.2 at least 1 row", len(items) >= 1, f"got {len(items)}")
+        karnataka_rows = [x for x in items if (x.get("state") or "").lower() == "karnataka"]
+        check("S2.3 has rows with state=Karnataka",
+              len(karnataka_rows) >= 1,
+              f"karnataka_count={len(karnataka_rows)}, sample={items[:2]}")
 
-def _cleanup(admin_token: str, provider_id: Optional[str]):
-    print("\n[CLEANUP]")
-    if not provider_id:
-        return
-    r = requests.delete(f"{API}/admin/users/{provider_id}",
-                        headers=_hd(admin_token), timeout=15)
-    check(f"DELETE /admin/users/{provider_id[:8]}... -> 200",
-          r.status_code == 200, f"status={r.status_code}")
+    # ========== SCENARIO 3: 404 on non-existent pincode ==========
+    print("\n=== S3: GET /admin/pincodes/000000 -> 404 ===")
+    r = requests.get(f"{BASE}/admin/pincodes/000000", headers=H(admin_tok), timeout=20)
+    check("S3.1 status 404", r.status_code == 404, f"{r.status_code} {r.text[:200]}")
 
+    # ========== SCENARIO 4: register two non-admin users + promote ==========
+    print("\n=== S4: register two users + promote first ===")
+    rand_a = uuid.uuid4().hex[:8]
+    rand_b = uuid.uuid4().hex[:8]
+    email_a = f"distb1.{rand_a}@mailinator.com"
+    email_b = f"distb2.{rand_b}@mailinator.com"
 
-def _summary() -> int:
-    print("\n" + "=" * 78)
-    print(f"RESULT: {PASS} passed, {FAIL} failed")
-    if FAILURES:
+    ra = register("Ravi Distributor", email_a, "Pass@1234")
+    check("S4.0a register user A", ra.status_code == 200, f"{ra.status_code} {ra.text[:200]}")
+    if ra.status_code != 200:
+        return False
+    user_a_id = ra.json()["user"]["id"]
+
+    rb = register("Sneha Distributor", email_b, "Pass@1234")
+    check("S4.0b register user B", rb.status_code == 200, f"{rb.status_code} {rb.text[:200]}")
+    if rb.status_code != 200:
+        return False
+    user_b_id = rb.json()["user"]["id"]
+
+    r = requests.post(f"{BASE}/admin/users/{user_a_id}/distributor",
+                      headers=H(admin_tok), json={"is_distributor": True}, timeout=20)
+    check("S4.1 promote A -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        check("S4.2 is_distributor=true",
+              r.json().get("is_distributor") is True, f"resp={r.json()}")
+
+    # ========== SCENARIO 5: list distributors ==========
+    print("\n=== S5: GET /admin/distributors ===")
+    r = requests.get(f"{BASE}/admin/distributors", headers=H(admin_tok), timeout=20)
+    check("S5.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        items = r.json().get("items", [])
+        a_row = next((x for x in items if x.get("id") == user_a_id), None)
+        check("S5.2 user A in distributors list", a_row is not None,
+              f"items_emails={[x.get('email') for x in items]}")
+        if a_row:
+            check("S5.3 pincode_count == 0",
+                  a_row.get("pincode_count") == 0, f"count={a_row.get('pincode_count')}")
+
+    # ========== SCENARIO 6: assign with one invalid pincode -> 400 ==========
+    print("\n=== S6: POST areas with bad pincode -> 400 ===")
+    r = requests.post(
+        f"{BASE}/admin/distributors/{user_a_id}/areas",
+        headers=H(admin_tok),
+        json={"pincodes": ["500001", "500003", "999999"]},
+        timeout=20,
+    )
+    check("S6.1 status 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 400:
+        detail = r.json().get("detail", "")
+        check("S6.2 detail mentions 999999 / not in master",
+              "999999" in detail or "not in master" in detail.lower(),
+              f"detail={detail}")
+
+    # ========== SCENARIO 7: assign 2 valid pincodes -> 200 ==========
+    print("\n=== S7: POST areas {500001, 500003} ===")
+    r = requests.post(
+        f"{BASE}/admin/distributors/{user_a_id}/areas",
+        headers=H(admin_tok),
+        json={"pincodes": ["500001", "500003"]},
+        timeout=20,
+    )
+    check("S7.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        body = r.json()
+        check("S7.2 new_assignments == 2",
+              body.get("new_assignments") == 2, f"resp={body}")
+
+    # ========== SCENARIO 8: GET areas -> 2 items with district/state ==========
+    print("\n=== S8: GET /admin/distributors/{a}/areas ===")
+    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
+                     headers=H(admin_tok), timeout=20)
+    check("S8.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        body = r.json()
+        items = body.get("items", [])
+        check("S8.2 total=2", body.get("total") == 2 and len(items) == 2,
+              f"total={body.get('total')}, items={items}")
+        for it in items:
+            check(f"S8.3[{it.get('pincode')}] district filled",
+                  bool(it.get("district")), f"row={it}")
+            check(f"S8.4[{it.get('pincode')}] state filled",
+                  bool(it.get("state")), f"row={it}")
+        r1 = next((x for x in items if x.get("pincode") == "500001"), None)
+        if r1:
+            check("S8.5 500001 -> Hyderabad/Telangana",
+                  (r1.get("district") or "").lower() == "hyderabad" and
+                  (r1.get("state") or "").lower() == "telangana",
+                  f"row={r1}")
+
+    # ========== SCENARIO 9: promote B + assign 500001 -> reassigned=1 ==========
+    print("\n=== S9: promote B + assign 500001 -> reassigned=1 ===")
+    r = requests.post(f"{BASE}/admin/users/{user_b_id}/distributor",
+                      headers=H(admin_tok), json={"is_distributor": True}, timeout=20)
+    check("S9.0 promote B -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+
+    r = requests.post(
+        f"{BASE}/admin/distributors/{user_b_id}/areas",
+        headers=H(admin_tok),
+        json={"pincodes": ["500001"]},
+        timeout=20,
+    )
+    check("S9.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        body = r.json()
+        check("S9.2 reassigned == 1",
+              body.get("reassigned") == 1, f"resp={body}")
+
+    # ========== SCENARIO 10: A no longer has 500001; B has it ==========
+    print("\n=== S10: exclusivity check ===")
+    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
+                     headers=H(admin_tok), timeout=20)
+    if r.status_code == 200:
+        a_pins = [x.get("pincode") for x in r.json().get("items", [])]
+        check("S10.1 A no longer has 500001",
+              "500001" not in a_pins, f"A pins={a_pins}")
+        check("S10.2 A still has 500003",
+              "500003" in a_pins, f"A pins={a_pins}")
+
+    r = requests.get(f"{BASE}/admin/distributors/{user_b_id}/areas",
+                     headers=H(admin_tok), timeout=20)
+    if r.status_code == 200:
+        b_pins = [x.get("pincode") for x in r.json().get("items", [])]
+        check("S10.3 B has 500001",
+              "500001" in b_pins, f"B pins={b_pins}")
+
+    # Verify via single-pincode lookup
+    r = requests.get(f"{BASE}/admin/pincodes/500001", headers=H(admin_tok), timeout=20)
+    if r.status_code == 200:
+        a = r.json().get("assigned_to") or {}
+        check("S10.4 /pincodes/500001 assigned_to.distributor_id == B",
+              a.get("distributor_id") == user_b_id, f"assigned_to={a}")
+
+    # ========== SCENARIO 11: DELETE B's mapping for 500001 ==========
+    print("\n=== S11: DELETE /distributors/B/areas/500001 ===")
+    r = requests.delete(f"{BASE}/admin/distributors/{user_b_id}/areas/500001",
+                        headers=H(admin_tok), timeout=20)
+    check("S11.1 DELETE -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    r = requests.get(f"{BASE}/admin/distributors/{user_b_id}/areas",
+                     headers=H(admin_tok), timeout=20)
+    if r.status_code == 200:
+        items = r.json().get("items", [])
+        check("S11.2 B's areas now empty",
+              len(items) == 0, f"items={items}")
+
+    # ========== SCENARIO 12: cannot promote admin ==========
+    print("\n=== S12: promote admin user -> 400 ===")
+    r = requests.post(f"{BASE}/admin/users/{admin_id}/distributor",
+                      headers=H(admin_tok), json={"is_distributor": True}, timeout=20)
+    check("S12.1 status 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
+    if r.status_code == 400:
+        check("S12.2 detail mentions admins",
+              "admin" in r.json().get("detail", "").lower(),
+              f"detail={r.json().get('detail')}")
+
+    # ========== SCENARIO 13: demote A -> mappings dropped ==========
+    print("\n=== S13: demote A -> mappings dropped ===")
+    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
+                     headers=H(admin_tok), timeout=20)
+    pre_count = len(r.json().get("items", [])) if r.status_code == 200 else 0
+    check("S13.0 A had >=1 mapping pre-demote", pre_count >= 1, f"pre_count={pre_count}")
+
+    r = requests.post(f"{BASE}/admin/users/{user_a_id}/distributor",
+                      headers=H(admin_tok), json={"is_distributor": False}, timeout=20)
+    check("S13.1 demote A -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+
+    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
+                     headers=H(admin_tok), timeout=20)
+    if r.status_code == 200:
+        items = r.json().get("items", [])
+        check("S13.2 A's mappings dropped",
+              len(items) == 0, f"items={items}")
+
+    r = requests.get(f"{BASE}/admin/distributors", headers=H(admin_tok), timeout=20)
+    if r.status_code == 200:
+        ids = [x.get("id") for x in r.json().get("items", [])]
+        check("S13.3 A not in distributors list anymore",
+              user_a_id not in ids, f"A_in_list={user_a_id in ids}")
+
+    # ========== SCENARIO 14: no auth -> 401 ==========
+    print("\n=== S14: anon -> 401 ===")
+    r = requests.get(f"{BASE}/admin/pincodes/search?q=500001", timeout=20)
+    check("S14.1 search anon -> 401",
+          r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
+    r = requests.get(f"{BASE}/admin/distributors", timeout=20)
+    check("S14.2 list anon -> 401",
+          r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
+    r = requests.post(f"{BASE}/admin/distributors/{user_b_id}/areas",
+                      json={"pincodes": ["500001"]}, timeout=20)
+    check("S14.3 assign anon -> 401",
+          r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
+
+    # ========== SCENARIO 15: finance -> 403 on POST/DELETE ==========
+    print("\n=== S15: finance role -> 403 on mutations ===")
+    if fin_tok:
+        r = requests.get(f"{BASE}/admin/pincodes/search?q=500001",
+                         headers=H(fin_tok), timeout=20)
+        check("S15.0 finance GET search -> 200", r.status_code == 200,
+              f"{r.status_code} {r.text[:200]}")
+
+        r = requests.post(f"{BASE}/admin/users/{user_b_id}/distributor",
+                          headers=H(fin_tok),
+                          json={"is_distributor": False}, timeout=20)
+        check("S15.1 finance promote -> 403", r.status_code == 403,
+              f"{r.status_code} {r.text[:200]}")
+
+        r = requests.post(f"{BASE}/admin/distributors/{user_b_id}/areas",
+                          headers=H(fin_tok),
+                          json={"pincodes": ["500001"]}, timeout=20)
+        check("S15.2 finance assign -> 403", r.status_code == 403,
+              f"{r.status_code} {r.text[:200]}")
+
+        r = requests.delete(f"{BASE}/admin/distributors/{user_b_id}/areas/500001",
+                            headers=H(fin_tok), timeout=20)
+        check("S15.3 finance unassign -> 403", r.status_code == 403,
+              f"{r.status_code} {r.text[:200]}")
+    else:
+        print("  WARNING: skipping finance tests -- login failed")
+
+    # ========== Cleanup ==========
+    print("\n=== Cleanup ===")
+    requests.post(f"{BASE}/admin/users/{user_b_id}/distributor",
+                  headers=H(admin_tok), json={"is_distributor": False}, timeout=20)
+    for uid in (user_a_id, user_b_id):
+        rd = requests.delete(f"{BASE}/admin/users/{uid}", headers=H(admin_tok), timeout=20)
+        print(f"  delete {uid[:8]} -> {rd.status_code}")
+
+    print("\n" + "=" * 70)
+    print(f"TOTAL: PASS={len(PASS)}  FAIL={len(FAIL)}")
+    if FAIL:
         print("\nFAILURES:")
-        for f in FAILURES:
-            print(f"  - {f}")
-    print("=" * 78)
-    return 0 if FAIL == 0 else 1
+        for label, detail in FAIL:
+            print(f"  FAIL {label} :: {detail}")
+    print("=" * 70)
+    return len(FAIL) == 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    ok = main()
+    sys.exit(0 if ok else 1)
