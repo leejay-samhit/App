@@ -47,6 +47,9 @@ export default function ServiceApply() {
   const [submitting, setSubmitting] = useState(false);
   const [existing, setExisting] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
+  const [registrationPaid, setRegistrationPaid] = useState<boolean | null>(null);
+  const [approvalStatus, setApprovalStatus] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -54,6 +57,10 @@ export default function ServiceApply() {
         // load categories first
         const c = await api.get<{ categories: Category[] }>("/services/categories");
         setCategories(c.data.categories || []);
+        // also check registration / approval status — apply requires both
+        const me = await api.get<any>("/auth/me");
+        setRegistrationPaid(!!me.data?.registration_paid);
+        setApprovalStatus(me.data?.approval_status || null);
         const { data } = await api.get("/service/me");
         setExisting(data);
         if (data?.application) {
@@ -75,18 +82,24 @@ export default function ServiceApply() {
     setLanguages((prev) => (prev.includes(code) ? prev.filter((x) => x !== code) : [...prev, code]));
   };
 
+  const showError = (msg: string) => {
+    setFormError(msg);
+    Alert.alert("Heads up", msg);
+  };
+
   const submit = async () => {
+    setFormError(null);
     if (!serviceName.trim() || serviceName.trim().length < 2)
-      return Alert.alert("Service name required", "Please enter a service name (at least 2 characters).");
+      return showError("Please enter a service name (at least 2 characters).");
     if (!categoryId)
-      return Alert.alert("Category required", "Please pick a category from the list.");
+      return showError("Please pick a category from the list.");
     if (!/^\d{6}$/.test(pincode))
-      return Alert.alert("Pincode must be 6 digits");
+      return showError("Pincode must be 6 digits.");
     const c = Number(charge);
-    if (!c || c < 0)
-      return Alert.alert("Charge must be a positive number");
+    if (!c || c <= 0)
+      return showError("Charge must be a positive number greater than 0.");
     if (languages.length === 0)
-      return Alert.alert("Pick at least one language", "Choose the languages you can speak with customers.");
+      return showError("Pick at least one language you can speak with customers.");
     setSubmitting(true);
     try {
       await api.post("/service/apply", {
@@ -102,7 +115,9 @@ export default function ServiceApply() {
         { text: "OK", onPress: () => router.back() },
       ]);
     } catch (e) {
-      Alert.alert("Could not submit", formatApiError(e));
+      const msg = formatApiError(e);
+      setFormError(msg);
+      Alert.alert("Could not submit", msg);
     } finally {
       setSubmitting(false);
     }
@@ -118,8 +133,15 @@ export default function ServiceApply() {
   const status = existing?.service_status as string | null;
   const isApproved = status === "approved";
   const isPending = status === "pending";
-  const locked = isApproved || isPending;
-  const banner = isApproved
+  const needsRegistration = registrationPaid === false;
+  const locked = isApproved || isPending || needsRegistration;
+  const banner = needsRegistration
+    ? {
+        color: colors.error,
+        label: "Pay your ₹100 registration fee first to list a service.",
+        cta: { text: "Pay now", route: "/payment" },
+      }
+    : isApproved
     ? { color: colors.success, label: "You're a verified service provider" }
     : isPending
     ? { color: colors.accent, label: "Application under review" }
@@ -141,9 +163,24 @@ export default function ServiceApply() {
           {banner && (
             <View style={[styles.banner, { backgroundColor: banner.color + "22", borderColor: banner.color }]}>
               <Feather name={isApproved ? "check-circle" : isPending ? "clock" : "alert-circle"} size={16} color={banner.color} />
-              <Text style={[styles.bannerText, { color: banner.color }]}>{banner.label}</Text>
+              <Text style={[styles.bannerText, { color: banner.color }]} numberOfLines={3}>{banner.label}</Text>
+              {(banner as any).cta ? (
+                <TouchableOpacity
+                  onPress={() => router.push((banner as any).cta.route)}
+                  style={[styles.bannerCta, { backgroundColor: banner.color }]}
+                >
+                  <Text style={styles.bannerCtaText}>{(banner as any).cta.text}</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           )}
+
+          {formError ? (
+            <View style={styles.inlineError}>
+              <Feather name="alert-triangle" size={14} color={colors.error} />
+              <Text style={styles.inlineErrorText} numberOfLines={3}>  {formError}</Text>
+            </View>
+          ) : null}
 
           <Text style={styles.label}>Service name</Text>
           <TextInput
@@ -289,7 +326,20 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", gap: 8,
     padding: 10, borderRadius: 10, borderWidth: 1, marginBottom: 14,
   },
-  bannerText: { fontSize: 12, fontWeight: "700", flex: 1 },
+  bannerText: { fontSize: 12, fontWeight: "700", flex: 1, lineHeight: 16 },
+  bannerCta: {
+    paddingVertical: 6, paddingHorizontal: 10,
+    borderRadius: 6,
+  },
+  bannerCtaText: { color: "#fff", fontSize: 11, fontWeight: "800" },
+  inlineError: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: colors.error + "15",
+    borderWidth: 1, borderColor: colors.error + "55",
+    borderRadius: 10, padding: 10,
+    marginBottom: 12,
+  },
+  inlineErrorText: { color: colors.error, fontSize: 12, fontWeight: "700", flex: 1 },
   label: {
     fontSize: 12, fontWeight: "700", color: colors.textMuted,
     marginTop: 14, marginBottom: 8, letterSpacing: 0.6,

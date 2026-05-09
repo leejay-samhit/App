@@ -6912,3 +6912,44 @@ agent_communication:
         Customers see distance + LIVE badge. Phase 3 (ratings & reviews)
         deferred to next session.
 
+
+## Bug Fix (2025-06) — User unable to submit Service registration application
+
+  - REPORT: User reported they could not submit a service application.
+    Backend logs showed POST /service/apply was being called → returning
+    400 "Pay registration first". The frontend wasn't surfacing the reason
+    clearly.
+  - ROOT CAUSE: /service/apply requires `registration_paid: true`. Fresh
+    users who haven't paid the ₹100 fee yet were hitting the endpoint and
+    seeing only a generic Alert that didn't render at all on web (web's
+    react-native Alert.alert is silent), making it look like the form
+    just doesn't work.
+  - FIX in /app/frontend/app/services/apply.tsx:
+    1. Pre-load /auth/me on screen mount; capture registration_paid +
+       approval_status.
+    2. Added a clear red banner with "Pay now" CTA that deep-links to
+       /payment when the user hasn't paid registration yet.
+    3. The form is locked (inputs disabled + submit hidden) until they
+       pay so they don't waste effort.
+    4. Added an inline persistent error pill that remains visible after
+       any submit failure — works on every platform incl. web where
+       Alert.alert is invisible.
+    5. Tightened `c <= 0` charge check (was `< 0`).
+  - Also verified: a paid user (registration_paid=true) with approval_status
+    pending CAN still apply — backend explicitly only blocks on registration
+    payment, not on KYC/approval. So my banner intentionally only blocks
+    on the registration gate.
+  - Live verification:
+    - Created paid user via /admin/users/create → applied → 200 OK with
+      full payload including category_id and languages: ["en","te"].
+    - Unpaid user → backend returns 400 → new banner now tells them to
+      pay first with a tappable button.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Service-apply UX fixed. Users who haven't paid ₹100 registration
+        will now see a clear red banner with a tap-to-pay CTA instead of
+        a silent failure. Inline error pill stays visible on web too.
+        Backend itself was working correctly all along.
+
