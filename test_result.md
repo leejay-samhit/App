@@ -6861,3 +6861,54 @@ agent_communication:
         (GPS / nearby workers) and Phase 3 (ratings & comments) deferred to
         future sessions per user's prioritisation.
 
+
+## Feature (2025-06) — Service Application Management Phase 2 (GPS / Nearby workers)
+
+### Backend
+  - NEW POST /api/service/me/location (auth required, must be approved
+    provider). Body: {lat, lng, accuracy_m?, sharing?}. Stores GeoJSON
+    Point on user doc and sets location_sharing + location_updated_at.
+    sharing=false clears the location.
+  - GET /api/services now accepts lat, lng, radius_km query params.
+    When given, runs Mongo $geoNear pipeline returning providers sorted by
+    distance, plus a tail of providers without coordinates. Each row has
+    distance_km (number|null) and is_active (true if heartbeat ≤ 30 min ago).
+    Strips raw service_location from response (privacy).
+  - Startup creates 2dsphere index on users.service_location automatically.
+  - ProviderLocationUpdate Pydantic model added to /app/backend/models.py.
+
+### Frontend
+  - NEW /app/frontend/src/location.ts helpers — getCurrentCoords (uses
+    expo-location native, browser geolocation on web), formatDistance,
+    formatActiveAgo.
+  - NEW /app/frontend/app/services/location.tsx — provider's "Live Location"
+    screen with Switch toggle, auto-refresh every 5 min while screen is
+    focused, manual refresh button, last-coords card, privacy disclosure.
+  - Updated /app/frontend/app/(tabs)/shop.tsx services view:
+      • "Use my location for nearby-first results" pill button (toggles).
+      • Service cards now show a green "LIVE" badge when is_active is true,
+        a green nav-icon distance pill (e.g. "3.4 km"), and the
+        "Active 5m ago" timestamp under the card.
+  - Updated /app/frontend/app/services/apply.tsx — once approved, a
+    "Manage Live Location (nearby workers)" button appears at the bottom
+    deep-linking to /services/location.
+  - Permissions added to /app/frontend/app.json:
+      • Android: ACCESS_COARSE_LOCATION + ACCESS_FINE_LOCATION
+      • iOS: NSLocationWhenInUseUsageDescription = "Show nearby workers
+        and share your live location with customers."
+
+### Verification
+  - deep_testing_backend_v2 ran 37/37 checks: PASSED.
+    • Distance accuracy: 3.40 km vs Haversine 3.395 km (0.15% delta).
+    • RBAC enforced (non-provider 400, unauthed 401, validation 422).
+    • Sharing toggle off correctly clears coords and excludes from geo feed.
+    • 2dsphere index `service_location_2dsphere` confirmed via list_indexes.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Phase 2 (GPS / nearby workers) shipped. Live location is broadcast
+        every 5 minutes while provider has the Live Location screen open.
+        Customers see distance + LIVE badge. Phase 3 (ratings & reviews)
+        deferred to next session.
+
