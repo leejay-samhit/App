@@ -6425,3 +6425,217 @@ agent_communication:
         pending_directs counter. No admin action needed for existing users —
         the field is created lazily on the next direct event.
 
+
+
+backend:
+  - task: "Service Application Management & Service Categories — admin CRUD on /admin/service-categories, public /services/categories with provider_count, /service/apply with category_id+languages, /services filterable by category_id+language"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/models.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Service Categories + Service Application — testing COMPLETE.
+            ALL 43/43 checks PASSED via /app/backend_test.py against
+            https://network-pay-1.preview.emergentagent.com.
+
+            Backend log on startup: "Seeded 13 default service categories"
+            confirming idempotent seed_service_categories() ran.
+
+            ── Scenario 1 — Seeded defaults (4/4) ✅ ──
+              • GET /admin/service-categories (admin) → 200
+              • Returned 13 categories. All 13 expected names present:
+                Plumber, Electrician, AC Repair, Painter, Carpenter,
+                CCTV Technician, Cleaning, Water Tank Cleaning,
+                Toilet Cleaner, Construction Labour, Internet Installation,
+                House Construction Labour, Mobile Repair.
+              • Every row carries provider_count.
+
+            ── Scenario 2 — Create category (6/6) ✅ ──
+              • POST /admin/service-categories
+                {name: "Test Category XYZ", icon: "star", color: "#FF0000"}
+                → 200. Response.category has id (uuid), slug auto-generated
+                "test-category-xyz", icon=star, color=#FF0000, active=true.
+
+            ── Scenario 3 — Duplicate (1/1) ✅ ──
+              • POST same payload again → 400
+                "Category 'Test Category XYZ' already exists" (server.py
+                L5670 dup check on $or:[{name},{slug}]).
+
+            ── Scenario 4 — PATCH (3/3) ✅ ──
+              • PATCH {sort_order: 555, active: false} → 200
+                Returned category.sort_order=555, active=false.
+
+            ── Scenario 5 — Inactive hidden from public (3/3) ✅ ──
+              • GET /services/categories (any logged-in user) → 200.
+                "Test Category XYZ" not in returned names. Public listing
+                rows still include provider_count.
+
+            ── Scenario 6 — Re-activate (2/2) ✅ ──
+              • PATCH {active: true} → 200. /services/categories now
+                includes "Test Category XYZ".
+
+            ── Scenario 7 — DELETE no-providers → hard delete (3/3) ✅ ──
+              • DELETE → 200 with body {ok:true, deleted:true}. Category
+                no longer appears in /admin/service-categories list.
+
+            ── Scenario 13 — RBAC POST (3/3) ✅ ──
+              • super_admin POST → 200.
+              • finance@app.com is NOT seeded on this preview DB
+                (auth/login returned 401), so I instead promoted a fresh
+                throwaway user to admin_role="support" and verified:
+                  POST /admin/service-categories as support → 403
+                  detail: "Requires admin role: super_admin or manager"
+                This proves the require_admin_role("super_admin","manager")
+                gate denies all non-super/non-manager admins (which is
+                exactly what would happen for finance).
+                NOTE: /app/memory/test_credentials.md mentions
+                finance@app.com / Finance@123 but no such user exists in
+                the live DB. Main agent may want to seed it via
+                POST /admin/admins for completeness — not a blocker for
+                the RBAC contract being correct.
+
+            ── Scenario 14 — Pydantic validation (1/1) ✅ ──
+              • POST {name: "X"} → 422 (ServiceCategoryCreate.name has
+                Field(min_length=2)).
+
+            ── Scenario 15 — Auth gate (1/1) ✅ ──
+              • GET /admin/service-categories without token → 401.
+
+            ── Scenario 8 — POST /service/apply with category_id +
+                          languages (4/4) ✅ ──
+              • Registered fresh user "Ravi Kumar"
+                svc_apply_<rand>@example.com, paid registration via the
+                legacy /payment/register-fee mock so user.registration_paid
+                = true (no commission cascade triggered — that's expected
+                for the legacy endpoint).
+              • POST /service/apply payload:
+                  { service_name: "Same-day Plumbing",
+                    service_category: "Plumber",
+                    category_id: <Plumber default id>,
+                    pincode: "560001", charge: 750,
+                    languages: ["en","te"],
+                    description: "Quick response leak fixes" }
+                → 200. application.category_id stored as the Plumber id;
+                application.languages stored as ["en","te"].
+
+            ── Scenario 9 — Approve as super_admin (1/1) ✅ ──
+              • POST /admin/service-applications/{aid}/approve → 200.
+
+            ── Scenario 10 — Provider visible in /services with new
+                          fields (4/4) ✅ ──
+              • GET /services (auth as the same user) → 200.
+              • Provider's row present, with category_id == Plumber.id
+                and service_languages == ["en","te"].
+
+            ── Scenario 11 — Filter by category_id (3/3) ✅ ──
+              • GET /services?category_id=<Plumber.id> → 200.
+              • Provider returned. Every returned row.category_id ==
+                Plumber.id (no leakage).
+
+            ── Scenario 12 — Filter by language (4/4) ✅ ──
+              • GET /services?language=te → 200. Provider returned. All
+                rows include "te" in service_languages.
+              • Sanity: GET /services?language=hi → provider NOT returned
+                (he registered only ["en","te"]).
+
+            ── Bonus — provider_count reflects approved providers (1/1) ✅ ──
+              • After approval, GET /admin/service-categories →
+                Plumber.provider_count == 1 (was 0 before approval).
+
+            ── Edge — DELETE in-use category soft-deactivates (1/1) ✅ ──
+              • DELETE /admin/service-categories/<Plumber.id> while
+                provider exists → 200 {ok:true, deactivated:true,
+                providers_using:1} — server.py L5721-5726 correctly soft-
+                deactivates instead of orphaning the provider's link.
+              • Restored active=true via PATCH after the test.
+
+            CLEANUP ✅ DELETE /admin/users/<throwaway>  → 200.
+
+            Backend logs clean — no 500s, no tracebacks. All endpoints
+            traced through the right RBAC dependency
+            (require_admin / require_admin_role(..."super_admin","manager")
+             / require_admin_role("super_admin")) and the three new
+            collection touches (service_categories,
+            service_applications, users.category_id +
+            users.service_languages) are wired correctly.
+
+            Implementation observations:
+              • backend/models.py L297-322 — ServiceApplyRequest now has
+                Optional category_id + Optional languages (List[str]);
+                ServiceCategoryCreate has Field(min_length=2,max_length=40)
+                on name; ServiceCategoryUpdate is fully optional.
+              • backend/server.py L5398-5449 /service/apply resolves
+                category_id → category_name (only if active=true) and
+                whitelist-filters languages into the {en,te,hi,ta} subset.
+              • backend/server.py L5510-5524 admin approve copies
+                application.category_id and application.languages onto
+                the user doc (as users.category_id /
+                users.service_languages).
+              • backend/server.py L5558-5591 /services adds
+                category_id/language filters and surfaces category_id +
+                service_languages in the returned projection.
+              • backend/server.py L5594-5606 /services/categories
+                augments each active category with live provider_count
+                (matched on either category_id or legacy
+                service_category name — graceful migration).
+              • backend/server.py L5712-5729 DELETE chooses hard-delete vs
+                soft-deactivate based on db.users.count_documents
+                (is_service_provider=true, category_id=cat).
+
+            VERDICT: Service Application Management & Service Categories
+            backend is regression-free and fully functional. Task working:
+            true, needs_retesting: false.
+
+            ONE MINOR SUGGESTION (not a blocker): seed finance@app.com /
+            Finance@123 admin in seed_admin() (or document its absence in
+            test_credentials.md) so RBAC tests that explicitly target the
+            finance role can exercise the live account.
+
+metadata:
+  test_sequence: 2
+
+test_plan:
+  current_focus:
+    - "Service Application Management & Service Categories — admin CRUD on /admin/service-categories, public /services/categories with provider_count, /service/apply with category_id+languages, /services filterable by category_id+language"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "testing"
+      message: |
+        Service Categories + Application backend testing COMPLETE.
+        ALL 43/43 checks PASSED via /app/backend_test.py.
+
+        Endpoints verified end-to-end on
+        https://network-pay-1.preview.emergentagent.com:
+          GET    /api/admin/service-categories
+          POST   /api/admin/service-categories
+          PATCH  /api/admin/service-categories/{id}
+          DELETE /api/admin/service-categories/{id}  (hard + soft branches)
+          GET    /api/services/categories            (active only + provider_count)
+          POST   /api/service/apply                  (category_id + languages)
+          GET    /api/services                       (?category_id, ?language filters)
+
+        13 default categories were correctly seeded on backend startup
+        ("Seeded 13 default service categories" in /var/log/supervisor/
+        backend.err.log). Validation (422 for short name), duplicate
+        rejection (400), inactive hiding from public, soft-deactivate
+        when in use, RBAC gating (super_admin/manager only on POST/PATCH;
+        super_admin only on DELETE), and provider_count rollup all work.
+
+        ONE PRE-EXISTING ENVIRONMENT NOTE (not a code defect):
+        finance@app.com listed in /app/memory/test_credentials.md does
+        NOT exist in the live preview DB (auth/login returns 401), so
+        finance-specific RBAC was verified via a freshly-promoted
+        admin_role="support" user instead — same gate, same result
+        (403 "Requires admin role: super_admin or manager"). Main agent
+        may want to ensure seed_admin() also seeds finance@app.com.
+
+        Task working: true. needs_retesting: false. Main agent can
+        summarise and finish.

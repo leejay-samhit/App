@@ -80,6 +80,8 @@ from models import (
     ServiceApplyRequest,
     ServiceRejectRequest,
     ServiceBookRequest,
+    ServiceCategoryCreate,
+    ServiceCategoryUpdate,
 )
 
 
@@ -4560,6 +4562,13 @@ async def on_startup():
         logger.warning(f"Reg-fee phantom amount backfill failed: {_bf_err}")
     await seed_admin()
     await seed_products()
+    # Seed default service categories (no-op if already present)
+    try:
+        seeded = await seed_service_categories()
+        if seeded:
+            logger.info(f"Seeded {seeded} default service categories")
+    except Exception as _sc_err:
+        logger.warning(f"Service category seed failed: {_sc_err}")
     # Backfill: any existing user without approval_status — assume approved (legacy users
     # who joined before the approval gate existed). Admins get auto-approved too.
     await db.users.update_many(
@@ -5400,6 +5409,16 @@ async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Dep
         raise HTTPException(status_code=400, detail=f"You already have a {existing['status']} service application")
     app_id = str(uuid.uuid4())
     ts = now_utc().isoformat()
+    # Resolve category: if category_id provided, look up name from collection
+    category_name = payload.service_category.strip()
+    cat_doc = None
+    if payload.category_id:
+        cat_doc = await db.service_categories.find_one({"id": payload.category_id, "active": True})
+        if cat_doc:
+            category_name = cat_doc.get("name") or category_name
+    # Validate languages (subset of allowed codes)
+    allowed_langs = {"en", "te", "hi", "ta"}
+    langs = [l for l in (payload.languages or []) if l in allowed_langs]
     doc = {
         "id": app_id,
         "user_id": user["id"],
@@ -5408,7 +5427,9 @@ async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Dep
         "phone": user.get("phone"),
         "referral_code": user.get("referral_code"),
         "service_name": payload.service_name.strip(),
-        "service_category": payload.service_category.strip(),
+        "service_category": category_name,
+        "category_id": cat_doc["id"] if cat_doc else None,
+        "languages": langs,
         "pincode": payload.pincode,
         "charge": float(payload.charge),
         "description": (payload.description or "").strip() or None,
@@ -5493,6 +5514,8 @@ async def admin_approve_service(aid: str, admin: Dict[str, Any] = Depends(requir
             "service_status": "approved",
             "service_name": app["service_name"],
             "service_category": app["service_category"],
+            "category_id": app.get("category_id"),
+            "service_languages": app.get("languages") or [],
             "service_pincode": app["pincode"],
             "service_charge": app["charge"],
             "service_description": app.get("description"),
@@ -5537,14 +5560,20 @@ async def list_services(
     q: Optional[str] = None,
     pincode: Optional[str] = None,
     category: Optional[str] = None,
+    category_id: Optional[str] = None,
+    language: Optional[str] = None,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Public listing of approved service providers. Customer-facing."""
     filt: Dict[str, Any] = {"is_service_provider": True}
     if pincode:
         filt["service_pincode"] = pincode
-    if category and category != "all":
+    if category_id:
+        filt["category_id"] = category_id
+    elif category and category != "all":
         filt["service_category"] = category
+    if language:
+        filt["service_languages"] = language  # Mongo: array contains
     if q:
         rgx = {"$regex": re.escape(q), "$options": "i"}
         filt["$or"] = [{"name": rgx}, {"service_name": rgx}, {"service_category": rgx}]
@@ -5553,17 +5582,151 @@ async def list_services(
         {
             "_id": 0,
             "id": 1, "name": 1, "phone": 1, "email": 1, "referral_code": 1,
-            "service_name": 1, "service_category": 1, "service_pincode": 1,
-            "service_charge": 1, "service_description": 1, "service_approved_at": 1,
+            "service_name": 1, "service_category": 1, "category_id": 1,
+            "service_languages": 1,
+            "service_pincode": 1, "service_charge": 1, "service_description": 1,
+            "service_approved_at": 1,
         },
     ).sort("service_approved_at", -1).to_list(300)
     return {"items": rows, "total": len(rows)}
 
 
 @api_router.get("/services/categories")
-async def list_service_categories(user: Dict[str, Any] = Depends(get_current_user)):
-    cats = await db.users.distinct("service_category", {"is_service_provider": True})
-    return {"categories": sorted([c for c in cats if c])}
+async def list_service_categories(_: Dict[str, Any] = Depends(get_current_user)):
+    """Public list of admin-curated service categories (active only) sorted by sort_order."""
+    cats = await db.service_categories.find(
+        {"active": True}, {"_id": 0},
+    ).sort([("sort_order", 1), ("name", 1)]).to_list(200)
+    # Augment each with live provider count
+    for c in cats:
+        c["provider_count"] = await db.users.count_documents({
+            "is_service_provider": True,
+            "$or": [{"category_id": c["id"]}, {"service_category": c["name"]}],
+        })
+    return {"categories": cats}
+
+
+# ----- Admin: Service Categories CRUD -----
+
+DEFAULT_SERVICE_CATEGORIES = [
+    {"name": "Construction Labour",   "slug": "construction-labour",   "icon": "tool",         "color": "#EA580C"},
+    {"name": "Internet Installation", "slug": "internet-installation", "icon": "wifi",         "color": "#2563EB"},
+    {"name": "Plumber",               "slug": "plumber",               "icon": "droplet",      "color": "#0891B2"},
+    {"name": "Electrician",           "slug": "electrician",           "icon": "zap",          "color": "#CA8A04"},
+    {"name": "Painter",               "slug": "painter",               "icon": "edit-3",       "color": "#9333EA"},
+    {"name": "Carpenter",             "slug": "carpenter",             "icon": "settings",     "color": "#92400E"},
+    {"name": "CCTV Technician",       "slug": "cctv-technician",       "icon": "camera",       "color": "#475569"},
+    {"name": "AC Repair",             "slug": "ac-repair",             "icon": "wind",         "color": "#0EA5E9"},
+    {"name": "Cleaning",              "slug": "cleaning",              "icon": "feather",      "color": "#10B981"},
+    {"name": "Water Tank Cleaning",   "slug": "water-tank-cleaning",   "icon": "trash-2",      "color": "#06B6D4"},
+    {"name": "Toilet Cleaner",        "slug": "toilet-cleaner",        "icon": "shield",       "color": "#65A30D"},
+    {"name": "House Construction Labour", "slug": "house-construction-labour", "icon": "home", "color": "#DC2626"},
+    {"name": "Mobile Repair",         "slug": "mobile-repair",         "icon": "smartphone",   "color": "#DB2777"},
+]
+
+
+async def seed_service_categories():
+    """Idempotent seed: create the 13 default categories if collection is empty."""
+    existing = await db.service_categories.count_documents({})
+    if existing > 0:
+        return 0
+    ts = now_utc().isoformat()
+    docs = []
+    for i, c in enumerate(DEFAULT_SERVICE_CATEGORIES):
+        docs.append({
+            "id": str(uuid.uuid4()),
+            "name": c["name"],
+            "slug": c["slug"],
+            "icon": c["icon"],
+            "color": c["color"],
+            "sort_order": (i + 1) * 10,
+            "active": True,
+            "created_at": ts,
+        })
+    if docs:
+        await db.service_categories.insert_many(docs)
+    return len(docs)
+
+
+@api_router.get("/admin/service-categories")
+async def admin_list_service_categories(_: Dict[str, Any] = Depends(require_admin)):
+    cats = await db.service_categories.find({}, {"_id": 0}).sort([("sort_order", 1), ("name", 1)]).to_list(200)
+    for c in cats:
+        c["provider_count"] = await db.users.count_documents({
+            "is_service_provider": True,
+            "$or": [{"category_id": c["id"]}, {"service_category": c["name"]}],
+        })
+    return {"categories": cats}
+
+
+@api_router.post("/admin/service-categories")
+async def admin_create_service_category(
+    payload: ServiceCategoryCreate,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
+):
+    name = payload.name.strip()
+    slug = (payload.slug or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"))[:40]
+    # Reject duplicates by name or slug
+    dup = await db.service_categories.find_one({"$or": [{"name": name}, {"slug": slug}]})
+    if dup:
+        raise HTTPException(status_code=400, detail=f"Category '{dup.get('name')}' already exists")
+    cid = str(uuid.uuid4())
+    doc = {
+        "id": cid,
+        "name": name,
+        "slug": slug,
+        "icon": payload.icon or "briefcase",
+        "color": payload.color or "#2563EB",
+        "sort_order": int(payload.sort_order or 0),
+        "active": True if payload.active is None else bool(payload.active),
+        "created_at": now_utc().isoformat(),
+    }
+    await db.service_categories.insert_one(doc)
+    await _audit_log(admin, "service_category.create", "service_category", cid, {"name": name})
+    doc.pop("_id", None)
+    return {"ok": True, "category": doc}
+
+
+@api_router.patch("/admin/service-categories/{cat_id}")
+async def admin_update_service_category(
+    cat_id: str,
+    payload: ServiceCategoryUpdate,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
+):
+    existing = await db.service_categories.find_one({"id": cat_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Category not found")
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    if "name" in update:
+        update["name"] = update["name"].strip()
+    if "slug" in update:
+        update["slug"] = re.sub(r"[^a-z0-9]+", "-", update["slug"].lower()).strip("-")[:40]
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields provided")
+    await db.service_categories.update_one({"id": cat_id}, {"$set": update})
+    await _audit_log(admin, "service_category.update", "service_category", cat_id, update)
+    fresh = await db.service_categories.find_one({"id": cat_id}, {"_id": 0})
+    return {"ok": True, "category": fresh}
+
+
+@api_router.delete("/admin/service-categories/{cat_id}")
+async def admin_delete_service_category(
+    cat_id: str,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    existing = await db.service_categories.find_one({"id": cat_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Category not found")
+    # Check if any provider is currently linked
+    in_use = await db.users.count_documents({"is_service_provider": True, "category_id": cat_id})
+    if in_use > 0:
+        # Soft-delete instead of hard-delete to avoid orphaning providers
+        await db.service_categories.update_one({"id": cat_id}, {"$set": {"active": False}})
+        await _audit_log(admin, "service_category.deactivate", "service_category", cat_id, {"in_use": in_use})
+        return {"ok": True, "deactivated": True, "providers_using": in_use}
+    await db.service_categories.delete_one({"id": cat_id})
+    await _audit_log(admin, "service_category.delete", "service_category", cat_id, {"name": existing.get("name")})
+    return {"ok": True, "deleted": True}
 
 
 @api_router.post("/services/{provider_id}/book")

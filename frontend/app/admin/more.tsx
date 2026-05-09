@@ -17,6 +17,7 @@ const ITEMS = [
   { icon: "credit-card", label: "Payment gateway (Razorpay)", route: "/admin/payment-gateway" },
   { icon: "shopping-bag", label: "Vendor applications", route: "/admin/vendor-applications" },
   { icon: "briefcase", label: "Service applications", route: "/admin/service-applications" },
+  { icon: "grid", label: "Service Application Management", route: "/admin/service-management" },
   { icon: "dollar-sign", label: "System Wallet (treasury)", route: "/admin/system-wallet" },
   { icon: "users", label: "All vendors", route: "/admin/vendors" },
   { icon: "package", label: "Products", route: "/admin/products" },

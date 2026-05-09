@@ -1,245 +1,372 @@
 """
-Backend test for Referral Payout GST Split + Admin Transactions Enrichment.
+Backend test — Service Application Management & Service Categories.
 
-Covers:
-  A) GST split math + dual transaction creation (direct call to _credit_payout)
-  B) Admin recipient (no split) — code review note
-  C) Admin transactions enrichment (user_name/email/referral_code + reference_number fallback)
-  D) System-wallet exposes the gst_collected bucket
+Covers all scenarios from review request:
+  1. GET /admin/service-categories returns 13 seeded categories
+  2. POST creates a category
+  3. Duplicate POST → 400
+  4. PATCH sort_order + active
+  5. /services/categories filters out inactive
+  6. PATCH active=true → reappears
+  7. DELETE hard-deletes when no providers linked
+  8. POST /service/apply with category_id + languages
+  9. Admin approves the application
+ 10. GET /services returns category_id + service_languages
+ 11. GET /services?category_id=...
+ 12. GET /services?language=te
+ 13. RBAC — finance cannot create category (403); super_admin can
+ 14. Validation — name too short → 422
+ 15. Auth — missing token → 401
 """
-import asyncio
-import os
-import sys
+import json
 import time
 import uuid
-import json
 import requests
 
 BASE = "https://network-pay-1.preview.emergentagent.com"
 API = f"{BASE}/api"
+
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
+FINANCE_EMAIL = "finance@app.com"
+FINANCE_PASSWORD = "Finance@123"
 
-# Allow direct import of server module
-sys.path.insert(0, "/app/backend")
 
+# ---------- helpers ----------
 
-def _login(email: str, password: str) -> str:
+def login(email: str, password: str) -> str:
     r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=20)
     r.raise_for_status()
     return r.json()["token"]
 
 
-def _hdrs(tok: str):
-    return {"Authorization": f"Bearer {tok}"}
+def H(token: str):
+    return {"Authorization": f"Bearer {token}"}
 
 
-# ---------- SCENARIO A ----------
-async def scenario_a_manual_credit_payout():
-    """Directly call backend.server._credit_payout for a non-admin sponsor with
-    gross=118 and verify:
-      - sponsor wallet got NET = 100 (118/1.18 rounded to 2dp)
-      - admin's gst_collected bucket grew by GST = 18
-      - two transactions written: referral_payout (user) + gst_collected (admin)
-    """
-    print("\n=== SCENARIO A: GST split (direct _credit_payout call) ===")
-    import server  # type: ignore
-
-    db = server.db
-    ADMIN = await db.users.find_one({"email": server.ADMIN_EMAIL.lower()}, {"_id": 0})
-    assert ADMIN is not None, "admin user must exist in DB"
-
-    admin_buckets_before = dict(ADMIN.get("wallet_buckets") or {})
-    admin_balance_before = float(ADMIN.get("wallet_balance") or 0)
-    gst_before = float(admin_buckets_before.get("gst_collected") or 0)
-    print(f"[A] Admin before: wallet_balance={admin_balance_before}, gst_collected={gst_before}")
-
-    sponsor_id = str(uuid.uuid4())
-    sponsor_doc = {
-        "id": sponsor_id,
-        "name": "Anita GST Sponsor",
-        "email": f"anita.gstsponsor.{uuid.uuid4().hex[:8]}@mailinator.com",
-        "password_hash": server.hash_password("ABCxyz!@1A"),
-        "phone": None,
-        "role": "user",
-        "admin_role": None,
-        "referral_code": "GSTTST",
-        "referred_by": "EARN",
-        "sponsor_id": ADMIN["id"],
-        "wallet_balance": 0.0,
-        "total_earned": 0.0,
-        "registration_paid": True,
-        "direct_referrals_count": 0,
-        "payouts_received": 0,
-        "approval_status": "approved",
-        "created_at": server.now_utc().isoformat(),
-    }
-    await db.users.insert_one(sponsor_doc)
-    print(f"[A] Created sponsor id={sponsor_id}")
-
-    GROSS = 118.0
-    EXPECTED_NET = round(GROSS / 1.18, 2)
-    EXPECTED_GST = round(GROSS - EXPECTED_NET, 2)
-
-    fresh_sponsor = await db.users.find_one({"id": sponsor_id})
-    await server._credit_payout(fresh_sponsor, GROSS, level=1, source_user_name="Bharat Downline")
-
-    sponsor_after = await db.users.find_one({"id": sponsor_id})
-    sp_balance_after = float(sponsor_after.get("wallet_balance") or 0)
-    print(f"[A] Sponsor wallet_balance after: {sp_balance_after} (expected {EXPECTED_NET})")
-    assert abs(sp_balance_after - EXPECTED_NET) < 0.005, \
-        f"Sponsor wallet should be NET={EXPECTED_NET}, got {sp_balance_after}"
-
-    user_txs = await db.transactions.find(
-        {"user_id": sponsor_id, "type": "referral_payout"}, {"_id": 0}
-    ).sort("created_at", -1).to_list(10)
-    assert user_txs, "No referral_payout txn for sponsor"
-    utx = user_txs[0]
-    print(f"[A] User txn: amount={utx.get('amount')}, gross={utx.get('gross_amount')}, "
-          f"gst={utx.get('gst_amount')}, gst_pct={utx.get('gst_pct')}, desc={utx.get('description')}")
-    assert abs(float(utx.get("amount") or 0) - EXPECTED_NET) < 0.005, "user txn amount must be NET"
-    assert abs(float(utx.get("gross_amount") or 0) - GROSS) < 0.005, "gross_amount mismatch"
-    assert abs(float(utx.get("gst_amount") or 0) - EXPECTED_GST) < 0.005, "gst_amount mismatch"
-    assert float(utx.get("gst_pct") or 0) == 18.0, "gst_pct must be 18.0"
-    assert utx.get("status") == "success"
-    assert utx.get("level") == 1
-    desc = (utx.get("description") or "")
-    assert "118" in desc and "18" in desc, f"description should mention gross+gst, got: {desc}"
-
-    admin_after = await db.users.find_one({"email": server.ADMIN_EMAIL.lower()})
-    admin_buckets_after = admin_after.get("wallet_buckets") or {}
-    gst_after = float(admin_buckets_after.get("gst_collected") or 0)
-    print(f"[A] Admin gst_collected after: {gst_after} (delta = {round(gst_after - gst_before, 4)})")
-    assert abs((gst_after - gst_before) - EXPECTED_GST) < 0.005, \
-        f"gst_collected bucket should grow by {EXPECTED_GST}; was {gst_before} → {gst_after}"
-
-    admin_gst_txs = await db.transactions.find({
-        "user_id": admin_after["id"],
-        "type": "gst_collected",
-        "linked_payout_to_user_id": sponsor_id,
-    }, {"_id": 0}).to_list(10)
-    assert admin_gst_txs, "Admin gst_collected txn linked to sponsor not found"
-    gtx = admin_gst_txs[0]
-    print(f"[A] Admin GST txn: amount={gtx.get('amount')}, level={gtx.get('level')}, "
-          f"linked={gtx.get('linked_payout_to_user_id')}, ref={gtx.get('reference_number')}")
-    assert abs(float(gtx.get("amount") or 0) - EXPECTED_GST) < 0.005
-    assert gtx.get("level") == 1
-    assert gtx.get("linked_payout_to_user_id") == sponsor_id
-    assert gtx.get("status") == "success"
-
-    base_ref_user = utx.get("reference_number") or ""
-    base_ref_admin = gtx.get("reference_number") or ""
-    assert base_ref_user and base_ref_admin and base_ref_admin.startswith(base_ref_user), \
-        f"admin GST ref ({base_ref_admin}) should be prefixed by user payout ref ({base_ref_user})"
-
-    print("[A] ✅ ALL Scenario A assertions PASSED")
-    print(f"[A] Numbers: gross={GROSS}, net={EXPECTED_NET}, gst={EXPECTED_GST}")
-    print(f"[A] User txn doc: {json.dumps({k: utx.get(k) for k in ('id','user_id','type','level','amount','gross_amount','gst_amount','gst_pct','status','description','reference_number')}, default=str)}")
-    print(f"[A] Admin txn doc: {json.dumps({k: gtx.get(k) for k in ('id','user_id','type','level','amount','linked_payout_to_user_id','status','description','reference_number')}, default=str)}")
-    print(f"[A] Admin gst_collected bucket: BEFORE={gst_before} AFTER={gst_after}")
-
-    # CLEANUP
-    await db.users.delete_one({"id": sponsor_id})
-    await db.transactions.delete_many({"user_id": sponsor_id})
-    await db.transactions.delete_many({"id": gtx["id"]})
-    rolled = await server.debit_admin_bucket("gst_collected", EXPECTED_GST)
-    print(f"[A] cleanup done — sponsor + txns deleted, admin bucket rolled back: {rolled}")
-    return {
-        "gross": GROSS, "net": EXPECTED_NET, "gst": EXPECTED_GST,
-        "gst_before": gst_before, "gst_after": gst_after,
-        "user_txn": {k: utx.get(k) for k in ('id','type','level','amount','gross_amount','gst_amount','gst_pct','description','reference_number')},
-        "admin_txn": {k: gtx.get(k) for k in ('id','type','level','amount','linked_payout_to_user_id','description','reference_number')},
-    }
+def register_user(name: str, email: str, password: str) -> dict:
+    r = requests.post(f"{API}/auth/register", json={
+        "name": name, "email": email, "password": password,
+    }, timeout=20)
+    r.raise_for_status()
+    return r.json()
 
 
-# ---------- SCENARIO C ----------
-def scenario_c_admin_transactions_enrichment(admin_tok: str):
-    print("\n=== SCENARIO C: /admin/transactions enrichment ===")
-    r = requests.get(f"{API}/admin/transactions", headers=_hdrs(admin_tok), timeout=30)
-    assert r.status_code == 200, f"GET /admin/transactions failed: {r.status_code} {r.text[:200]}"
-    rows = r.json()
-    assert isinstance(rows, list) and rows, "Expected non-empty admin transactions list"
-    print(f"[C] Got {len(rows)} txn rows")
-
-    keys_expected = {"user_name", "user_email", "user_referral_code", "reference_number"}
-    for k in keys_expected:
-        assert all(k in r_ for r_ in rows), f"Row missing key {k}"
-
-    not_null_name = [r_ for r_ in rows if r_.get("user_name")]
-    print(f"[C] rows with non-null user_name: {len(not_null_name)}/{len(rows)}")
-    assert not_null_name, "At least some rows must have user_name populated from users map"
-
-    no_ref = [r_ for r_ in rows if not r_.get("reference_number")]
-    print(f"[C] rows missing reference_number after fallback: {len(no_ref)}")
-    assert not no_ref, "reference_number should be auto-filled (UTR or razorpay_payment_id or TXN-<id>)"
-
-    in_app_rows = [
-        r_ for r_ in rows
-        if not (r_.get("razorpay_payment_id"))
-        and (r_.get("reference_number") or "").startswith("TXN-")
-    ]
-    print(f"[C] in-app txns with TXN-<shortid> fallback: {len(in_app_rows)} "
-          f"(sample={in_app_rows[0]['reference_number'] if in_app_rows else None})")
-
-    rzp_rows = [r_ for r_ in rows if r_.get("razorpay_payment_id")]
-    print(f"[C] rows with razorpay_payment_id: {len(rzp_rows)}")
-    for r_ in rzp_rows[:3]:
-        ref = r_.get("reference_number") or ""
-        assert ref, "reference_number should be present"
-
-    for i, r_ in enumerate(rows[:5]):
-        print(f"[C] sample[{i}] type={r_.get('type')} user_name={r_.get('user_name')!r} "
-              f"user_email={r_.get('user_email')!r} ref={r_.get('reference_number')!r} "
-              f"user_referral_code={r_.get('user_referral_code')!r}")
-
-    # Check that user_name populates from the users-map for non-orphan rows
-    # (i.e., rows whose user_id still exists in users collection)
-    rows_with_uid = [r_ for r_ in rows if r_.get("user_id")]
-    enriched = [r_ for r_ in rows_with_uid if r_.get("user_name")]
-    pct = round(100.0 * len(enriched) / max(1, len(rows_with_uid)), 1)
-    print(f"[C] enrichment coverage: {len(enriched)}/{len(rows_with_uid)} ({pct}%)")
-    assert pct >= 50.0, "Expected majority of rows with user_id to be enriched"
-
-    print("[C] ✅ Scenario C PASSED")
+# ---------- counters ----------
+PASS = 0
+FAIL = 0
+FAILURES = []
 
 
-# ---------- SCENARIO D ----------
-def scenario_d_system_wallet_gst_bucket(admin_tok: str):
-    print("\n=== SCENARIO D: /admin/system-wallet exposes gst_collected ===")
-    r = requests.get(f"{API}/admin/system-wallet", headers=_hdrs(admin_tok), timeout=20)
-    assert r.status_code == 200, f"GET /admin/system-wallet failed: {r.status_code} {r.text[:200]}"
-    body = r.json()
-    print(f"[D] system-wallet body: buckets={body.get('buckets')}, total={body.get('total')}")
-    buckets = body.get("buckets") or {}
-    assert "gst_collected" in buckets, f"gst_collected bucket missing — keys={list(buckets.keys())}"
-    val = buckets["gst_collected"]
-    assert isinstance(val, (int, float)), f"gst_collected must be a number, got {type(val).__name__}"
-    expected = {"referral_commission", "direct_added", "service_margin", "shopping_margin", "gst_collected"}
-    assert set(buckets.keys()) >= expected, f"Buckets missing keys: expected superset of {expected}, got {set(buckets.keys())}"
-    print(f"[D] ✅ gst_collected bucket present (value={val}); all 5 buckets exposed")
+def check(cond, label, extra=""):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  ✅ {label}")
+    else:
+        FAIL += 1
+        FAILURES.append(f"{label} :: {extra}")
+        print(f"  ❌ {label}  -- {extra}")
 
+
+# ---------- main ----------
 
 def main():
-    print(f"BASE = {BASE}")
-    admin_tok = _login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    print(f"admin token: {admin_tok[:30]}...")
+    print("=" * 80)
+    print("Service Categories + Applications backend test")
+    print(f"Base: {API}")
+    print("=" * 80)
 
-    scenario_d_system_wallet_gst_bucket(admin_tok)
+    # Login admin
+    print("\n[Setup] Login admin & finance")
+    admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    finance_token = None
+    try:
+        finance_token = login(FINANCE_EMAIL, FINANCE_PASSWORD)
+    except Exception as e:
+        print(f"  ⚠ finance login failed (will skip 13b): {e}")
 
-    res_a = asyncio.run(scenario_a_manual_credit_payout())
+    # ------------------------------------------------------------
+    # 15. GET /admin/service-categories without auth → 401
+    # ------------------------------------------------------------
+    print("\n[15] GET /admin/service-categories without auth → 401")
+    r = requests.get(f"{API}/admin/service-categories", timeout=20)
+    check(r.status_code in (401, 403), f"unauth → 401/403", f"got {r.status_code} {r.text[:120]}")
 
-    scenario_c_admin_transactions_enrichment(admin_tok)
+    # ------------------------------------------------------------
+    # 1. Seeded categories — at least 13 default ones
+    # ------------------------------------------------------------
+    print("\n[1] GET /admin/service-categories → expect ≥13 default categories")
+    r = requests.get(f"{API}/admin/service-categories", headers=H(admin_token), timeout=20)
+    check(r.status_code == 200, "GET /admin/service-categories 200", f"{r.status_code} {r.text[:120]}")
+    cats = r.json().get("categories", [])
+    names = [c["name"] for c in cats]
+    expected_names = [
+        "Plumber", "Electrician", "AC Repair", "Painter", "Carpenter",
+        "CCTV Technician", "Cleaning", "Water Tank Cleaning",
+        "Toilet Cleaner", "Construction Labour", "Internet Installation",
+        "House Construction Labour", "Mobile Repair",
+    ]
+    missing = [n for n in expected_names if n not in names]
+    check(not missing, f"all 13 default categories present (have {len(cats)})", f"missing={missing}")
+    # Each row has provider_count
+    has_pc = all("provider_count" in c for c in cats)
+    check(has_pc, "every category has provider_count field")
 
-    print("\n=== SCENARIO B: admin recipient — no split (code review) ===")
-    print("[B] backend/server.py L655-671: when sponsor.email == ADMIN_EMAIL,")
-    print("[B] _credit_payout writes a single referral_payout txn with amount=gross,")
-    print("[B] credits referral_commission bucket, and DOES NOT create a gst_collected row.")
-    print("[B] ✅ Scenario B PASSED via code review")
+    # Capture a default cat_id for scenario 8
+    plumber = next((c for c in cats if c["name"] == "Plumber"), None)
+    check(plumber is not None, "Plumber category found")
+    plumber_id = plumber["id"] if plumber else None
 
-    print("\n========== SUMMARY ==========")
-    print(json.dumps(res_a, indent=2, default=str))
-    print("\nALL SCENARIOS PASSED ✅")
+    # ------------------------------------------------------------
+    # 2. POST a new category
+    # ------------------------------------------------------------
+    print("\n[2] POST /admin/service-categories — create 'Test Category XYZ'")
+    new_cat_payload = {
+        "name": "Test Category XYZ",
+        "icon": "star",
+        "color": "#FF0000",
+    }
+    r = requests.post(f"{API}/admin/service-categories", headers=H(admin_token),
+                      json=new_cat_payload, timeout=20)
+    check(r.status_code == 200, "POST create 200", f"{r.status_code} {r.text[:200]}")
+    body = r.json()
+    new_cat = body.get("category", {})
+    new_cat_id = new_cat.get("id")
+    check(bool(new_cat_id), "new category has id")
+    check(new_cat.get("slug") == "test-category-xyz", "slug auto-generated",
+          f"slug={new_cat.get('slug')}")
+    check(new_cat.get("icon") == "star", "icon stored")
+    check(new_cat.get("color") == "#FF0000", "color stored")
+    check(new_cat.get("active") is True, "default active=true")
+
+    # ------------------------------------------------------------
+    # 3. Duplicate POST → 400
+    # ------------------------------------------------------------
+    print("\n[3] POST same payload again → 400 (duplicate)")
+    r = requests.post(f"{API}/admin/service-categories", headers=H(admin_token),
+                      json=new_cat_payload, timeout=20)
+    check(r.status_code == 400, "duplicate → 400", f"got {r.status_code}: {r.text[:200]}")
+
+    # ------------------------------------------------------------
+    # 4. PATCH sort_order + active=false
+    # ------------------------------------------------------------
+    print("\n[4] PATCH sort_order=555, active=false")
+    r = requests.patch(f"{API}/admin/service-categories/{new_cat_id}",
+                       headers=H(admin_token),
+                       json={"sort_order": 555, "active": False}, timeout=20)
+    check(r.status_code == 200, "PATCH 200", f"{r.status_code} {r.text[:200]}")
+    upd = r.json().get("category", {})
+    check(upd.get("sort_order") == 555, "sort_order=555")
+    check(upd.get("active") is False, "active=false")
+
+    # ------------------------------------------------------------
+    # 5. /services/categories — inactive should NOT appear
+    # ------------------------------------------------------------
+    print("\n[5] GET /services/categories — 'Test Category XYZ' must NOT appear (inactive)")
+    r = requests.get(f"{API}/services/categories", headers=H(admin_token), timeout=20)
+    check(r.status_code == 200, "GET /services/categories 200")
+    pub_cats = r.json().get("categories", [])
+    pub_names = [c["name"] for c in pub_cats]
+    check("Test Category XYZ" not in pub_names,
+          "inactive category hidden from public listing",
+          f"public names: {pub_names}")
+    has_pc_pub = all("provider_count" in c for c in pub_cats)
+    check(has_pc_pub, "public listing rows include provider_count")
+
+    # ------------------------------------------------------------
+    # 6. PATCH active=true → reappears
+    # ------------------------------------------------------------
+    print("\n[6] PATCH active=true → reappears in /services/categories")
+    r = requests.patch(f"{API}/admin/service-categories/{new_cat_id}",
+                       headers=H(admin_token),
+                       json={"active": True}, timeout=20)
+    check(r.status_code == 200, "PATCH active=true 200")
+    r = requests.get(f"{API}/services/categories", headers=H(admin_token), timeout=20)
+    pub_names_after = [c["name"] for c in r.json().get("categories", [])]
+    check("Test Category XYZ" in pub_names_after, "category re-appears when active",
+          f"names: {pub_names_after}")
+
+    # ------------------------------------------------------------
+    # 7. DELETE → no providers linked → hard-delete 200 deleted=true
+    # ------------------------------------------------------------
+    print("\n[7] DELETE — no providers link → hard delete 200 deleted=true")
+    r = requests.delete(f"{API}/admin/service-categories/{new_cat_id}",
+                        headers=H(admin_token), timeout=20)
+    check(r.status_code == 200, "DELETE 200", f"{r.status_code} {r.text[:200]}")
+    body = r.json()
+    check(body.get("deleted") is True, "deleted: true",
+          f"body={body}")
+    # Verify gone
+    r = requests.get(f"{API}/admin/service-categories", headers=H(admin_token), timeout=20)
+    after_names = [c["name"] for c in r.json().get("categories", [])]
+    check("Test Category XYZ" not in after_names, "category removed from admin list")
+
+    # ------------------------------------------------------------
+    # 13. RBAC POST: super_admin 200, finance 403
+    # ------------------------------------------------------------
+    print("\n[13] RBAC: super_admin 200, finance 403")
+    rbac_payload = {"name": f"RBAC Test {uuid.uuid4().hex[:6]}", "icon": "tag", "color": "#123456"}
+    r = requests.post(f"{API}/admin/service-categories", headers=H(admin_token),
+                      json=rbac_payload, timeout=20)
+    check(r.status_code == 200, "super_admin POST 200", f"{r.status_code} {r.text[:200]}")
+    rbac_cat_id = (r.json() or {}).get("category", {}).get("id")
+
+    if finance_token:
+        r2 = requests.post(f"{API}/admin/service-categories", headers=H(finance_token),
+                           json={"name": f"Finance Try {uuid.uuid4().hex[:6]}"}, timeout=20)
+        check(r2.status_code == 403, "finance POST 403", f"got {r2.status_code} {r2.text[:200]}")
+
+    # Cleanup the RBAC test cat
+    if rbac_cat_id:
+        requests.delete(f"{API}/admin/service-categories/{rbac_cat_id}", headers=H(admin_token), timeout=20)
+
+    # ------------------------------------------------------------
+    # 14. Validation — bad input
+    # ------------------------------------------------------------
+    print("\n[14] POST with name='X' (too short) → 422")
+    r = requests.post(f"{API}/admin/service-categories", headers=H(admin_token),
+                      json={"name": "X"}, timeout=20)
+    check(r.status_code == 422, "name too short → 422", f"got {r.status_code} {r.text[:200]}")
+
+    # ------------------------------------------------------------
+    # 8. /service/apply with category_id + languages
+    # ------------------------------------------------------------
+    print("\n[8] /service/apply with category_id + languages: ['en','te']")
+    # Create a fresh user
+    suffix = uuid.uuid4().hex[:8]
+    user_email = f"svc_apply_{suffix}@example.com"
+    reg = register_user("Ravi Kumar", user_email, "User@1234")
+    user_token = reg["token"]
+    user_id = reg["user"]["id"]
+
+    # Pay registration fee (legacy mock — marks user as paid; commissions don't fire here)
+    rp = requests.post(f"{API}/payment/register-fee", headers=H(user_token), timeout=20)
+    check(rp.status_code == 200, "user registration paid (legacy)",
+          f"{rp.status_code} {rp.text[:200]}")
+
+    apply_payload = {
+        "service_name": "Same-day Plumbing",
+        "service_category": "Plumber",   # required by model min_length=2
+        "category_id": plumber_id,
+        "pincode": "560001",
+        "charge": 750,
+        "languages": ["en", "te"],
+        "description": "Quick response leak fixes",
+    }
+    r = requests.post(f"{API}/service/apply", headers=H(user_token),
+                      json=apply_payload, timeout=20)
+    check(r.status_code == 200, "POST /service/apply 200",
+          f"{r.status_code} {r.text[:300]}")
+    app_doc = r.json().get("application", {})
+    app_id = app_doc.get("id")
+    check(app_doc.get("category_id") == plumber_id, "category_id stored on application")
+    check(app_doc.get("languages") == ["en", "te"], "languages stored on application",
+          f"got={app_doc.get('languages')}")
+
+    # ------------------------------------------------------------
+    # 9. Approve as admin
+    # ------------------------------------------------------------
+    print("\n[9] Approve service-application as admin")
+    r = requests.post(f"{API}/admin/service-applications/{app_id}/approve",
+                      headers=H(admin_token), timeout=20)
+    check(r.status_code == 200, "approve 200",
+          f"{r.status_code} {r.text[:200]}")
+
+    # ------------------------------------------------------------
+    # 10. GET /services as any user → shows the provider w/ category_id + service_languages
+    # ------------------------------------------------------------
+    print("\n[10] GET /services — provider visible with category_id + service_languages")
+    r = requests.get(f"{API}/services", headers=H(user_token), timeout=20)
+    check(r.status_code == 200, "GET /services 200")
+    items = r.json().get("items", [])
+    me_row = next((it for it in items if it.get("id") == user_id), None)
+    check(me_row is not None, "approved provider in /services")
+    if me_row:
+        check(me_row.get("category_id") == plumber_id,
+              "row has category_id == plumber_id",
+              f"got={me_row.get('category_id')}")
+        check(sorted(me_row.get("service_languages") or []) == ["en", "te"],
+              "row has service_languages == ['en','te']",
+              f"got={me_row.get('service_languages')}")
+
+    # ------------------------------------------------------------
+    # 11. GET /services?category_id=<plumber_id>
+    # ------------------------------------------------------------
+    print("\n[11] GET /services?category_id=<plumber_id>")
+    r = requests.get(f"{API}/services", headers=H(user_token),
+                     params={"category_id": plumber_id}, timeout=20)
+    check(r.status_code == 200, "filter category_id 200")
+    items = r.json().get("items", [])
+    check(any(it.get("id") == user_id for it in items),
+          "provider returned in category filter")
+    check(all(it.get("category_id") == plumber_id for it in items),
+          "all returned rows have category_id==plumber_id",
+          f"got={[it.get('category_id') for it in items]}")
+
+    # ------------------------------------------------------------
+    # 12. GET /services?language=te
+    # ------------------------------------------------------------
+    print("\n[12] GET /services?language=te — must include only Telugu speakers")
+    r = requests.get(f"{API}/services", headers=H(user_token),
+                     params={"language": "te"}, timeout=20)
+    check(r.status_code == 200, "filter language=te 200")
+    items = r.json().get("items", [])
+    check(any(it.get("id") == user_id for it in items),
+          "provider returned for language=te")
+    check(all("te" in (it.get("service_languages") or []) for it in items),
+          "all returned rows include 'te' in service_languages")
+
+    # Sanity: language=hi should NOT include this provider (only en+te)
+    r = requests.get(f"{API}/services", headers=H(user_token),
+                     params={"language": "hi"}, timeout=20)
+    items_hi = r.json().get("items", [])
+    check(not any(it.get("id") == user_id for it in items_hi),
+          "provider NOT returned for language=hi (only en+te selected)")
+
+    # ------------------------------------------------------------
+    # Bonus: provider_count on Plumber category should be > 0 now
+    # ------------------------------------------------------------
+    print("\n[bonus] provider_count on Plumber should be ≥ 1 after approval")
+    r = requests.get(f"{API}/admin/service-categories", headers=H(admin_token), timeout=20)
+    cats_after = r.json().get("categories", [])
+    pl = next((c for c in cats_after if c["id"] == plumber_id), None)
+    check(pl and pl.get("provider_count", 0) >= 1,
+          f"Plumber.provider_count >= 1 (got {pl and pl.get('provider_count')})")
+
+    # ------------------------------------------------------------
+    # Edge: DELETE category that has providers → soft-deactivate
+    # ------------------------------------------------------------
+    print("\n[edge] DELETE category with linked provider → soft-deactivate")
+    r = requests.delete(f"{API}/admin/service-categories/{plumber_id}",
+                        headers=H(admin_token), timeout=20)
+    if r.status_code == 200 and r.json().get("deactivated"):
+        check(True, "soft-deactivated when in use")
+        # Restore active
+        requests.patch(f"{API}/admin/service-categories/{plumber_id}",
+                       headers=H(admin_token), json={"active": True}, timeout=20)
+    else:
+        # If somehow deleted (shouldn't happen since we created a provider), restore
+        check(False, "expected soft-deactivate", f"got {r.status_code} {r.text[:200]}")
+
+    # ------------------------------------------------------------
+    # CLEANUP — remove the throwaway user
+    # ------------------------------------------------------------
+    print("\n[cleanup] DELETE throwaway user")
+    r = requests.delete(f"{API}/admin/users/{user_id}", headers=H(admin_token), timeout=20)
+    print(f"  cleanup user: {r.status_code}")
+
+    # Summary
+    print("\n" + "=" * 80)
+    print(f"PASS: {PASS}    FAIL: {FAIL}")
+    if FAILURES:
+        print("\nFailures:")
+        for f in FAILURES:
+            print(f"  - {f}")
+    print("=" * 80)
+    return FAIL == 0
 
 
 if __name__ == "__main__":
-    main()
+    ok = main()
+    raise SystemExit(0 if ok else 1)

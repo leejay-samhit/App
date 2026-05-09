@@ -22,6 +22,16 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 
 type Product = { id: string; name: string; price: number; image_url: string; description?: string };
+type ServiceCategory = {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string;
+  color: string;
+  sort_order: number;
+  active: boolean;
+  provider_count: number;
+};
 type ServiceProvider = {
   id: string;
   name: string;
@@ -30,11 +40,16 @@ type ServiceProvider = {
   referral_code: string;
   service_name: string;
   service_category: string;
+  category_id?: string | null;
+  service_languages?: string[];
   service_pincode: string;
   service_charge: number;
   service_description?: string;
 };
 type Mode = "shop" | "services";
+
+const LANG_LABELS: Record<string, string> = { en: "English", te: "Telugu", hi: "Hindi", ta: "Tamil" };
+const LANG_ORDER = ["en", "te", "hi", "ta"];
 
 export default function ShopScreen() {
   const router = useRouter();
@@ -52,8 +67,9 @@ export default function ShopScreen() {
   const [servicesLoading, setServicesLoading] = useState(false);
   const [searchQ, setSearchQ] = useState("");
   const [pincodeQ, setPincodeQ] = useState("");
-  const [categoryQ, setCategoryQ] = useState("all");
-  const [categories, setCategories] = useState<string[]>([]);
+  const [categoryId, setCategoryId] = useState<string | null>(null); // null = "all"
+  const [languageQ, setLanguageQ] = useState<string | null>(null);
+  const [categories, setCategories] = useState<ServiceCategory[]>([]);
   const [myStatus, setMyStatus] = useState<string | null>(null);
   const [contactOf, setContactOf] = useState<ServiceProvider | null>(null);
   const [bookingId, setBookingId] = useState<string | null>(null);
@@ -78,10 +94,11 @@ export default function ShopScreen() {
       const params: Record<string, string> = {};
       if (searchQ) params.q = searchQ;
       if (pincodeQ) params.pincode = pincodeQ;
-      if (categoryQ && categoryQ !== "all") params.category = categoryQ;
+      if (categoryId) params.category_id = categoryId;
+      if (languageQ) params.language = languageQ;
       const { data } = await api.get<{ items: ServiceProvider[] }>("/services", { params });
       setServices(data.items || []);
-      const cats = await api.get<{ categories: string[] }>("/services/categories");
+      const cats = await api.get<{ categories: ServiceCategory[] }>("/services/categories");
       setCategories(cats.data.categories || []);
       const mine = await api.get<{ service_status: string | null }>("/service/me");
       setMyStatus(mine.data.service_status || null);
@@ -90,7 +107,7 @@ export default function ShopScreen() {
     } finally {
       setServicesLoading(false);
     }
-  }, [searchQ, pincodeQ, categoryQ]);
+  }, [searchQ, pincodeQ, categoryId, languageQ]);
 
   useFocusEffect(useCallback(() => {
     if (mode === "shop") loadShop();
@@ -102,7 +119,7 @@ export default function ShopScreen() {
       const t = setTimeout(loadServices, 300);
       return () => clearTimeout(t);
     }
-  }, [searchQ, pincodeQ, categoryQ, mode, loadServices]);
+  }, [searchQ, pincodeQ, categoryId, languageQ, mode, loadServices]);
 
   const addToCart = async (p: Product) => {
     setAdding(p.id);
@@ -287,17 +304,66 @@ export default function ShopScreen() {
             </View>
 
             {categories.length > 0 && (
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 14 }} contentContainerStyle={{ gap: 8 }}>
-                <TouchableOpacity style={[styles.chip, categoryQ === "all" && styles.chipActive]} onPress={() => setCategoryQ("all")}>
-                  <Text style={[styles.chipText, categoryQ === "all" && styles.chipTextActive]}>All</Text>
-                </TouchableOpacity>
-                {categories.map((c) => (
-                  <TouchableOpacity key={c} style={[styles.chip, categoryQ === c && styles.chipActive]} onPress={() => setCategoryQ(c)}>
-                    <Text style={[styles.chipText, categoryQ === c && styles.chipTextActive]}>{c}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+              <View style={styles.categoryGridSection}>
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.sectionTitle}>Browse by category</Text>
+                  {categoryId ? (
+                    <TouchableOpacity onPress={() => setCategoryId(null)}>
+                      <Text style={styles.clearLink}>Clear</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+                <View style={styles.categoryGrid}>
+                  {categories.map((c) => {
+                    const sel = categoryId === c.id;
+                    return (
+                      <TouchableOpacity
+                        key={c.id}
+                        style={[
+                          styles.catTile,
+                          sel ? { borderColor: c.color, backgroundColor: c.color + "15" } : null,
+                        ]}
+                        onPress={() => setCategoryId(sel ? null : c.id)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={[styles.catIconWrap, { backgroundColor: c.color + "20" }]}>
+                          <Feather name={c.icon as any} size={22} color={c.color} />
+                        </View>
+                        <Text style={styles.catTileText} numberOfLines={2}>{c.name}</Text>
+                        {c.provider_count > 0 ? (
+                          <View style={[styles.catCountPill, { backgroundColor: c.color }]}>
+                            <Text style={styles.catCountText}>{c.provider_count}</Text>
+                          </View>
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
             )}
+
+            {/* Language filter chips */}
+            <View style={styles.langRow}>
+              <Text style={styles.langLabel}>Language:</Text>
+              <TouchableOpacity
+                style={[styles.langChip, !languageQ && styles.langChipActive]}
+                onPress={() => setLanguageQ(null)}
+              >
+                <Text style={[styles.langChipText, !languageQ && styles.langChipTextActive]}>All</Text>
+              </TouchableOpacity>
+              {LANG_ORDER.map((code) => {
+                const active = languageQ === code;
+                return (
+                  <TouchableOpacity
+                    key={code}
+                    style={[styles.langChip, active && styles.langChipActive]}
+                    onPress={() => setLanguageQ(active ? null : code)}
+                  >
+                    <Text style={[styles.langChipText, active && styles.langChipTextActive]}>{LANG_LABELS[code]}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
 
             {/* List */}
             {servicesLoading && services.length === 0 ? (
@@ -319,9 +385,15 @@ export default function ShopScreen() {
                   <View style={{ flex: 1 }}>
                     <Text style={styles.serviceName} numberOfLines={1}>{s.name}</Text>
                     <Text style={styles.serviceTitle} numberOfLines={1}>{s.service_name}</Text>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
                       <View style={styles.tag}><Text style={styles.tagText}>{s.service_category}</Text></View>
                       <View style={styles.tag}><Feather name="map-pin" size={10} color={colors.textMuted} /><Text style={styles.tagText}> {s.service_pincode}</Text></View>
+                      {(s.service_languages || []).map((lc) => (
+                        <View key={lc} style={[styles.tag, { backgroundColor: "#EEF2FF", borderColor: "#C7D2FE" }]}>
+                          <Feather name="globe" size={9} color="#3730A3" />
+                          <Text style={[styles.tagText, { color: "#3730A3" }]}> {LANG_LABELS[lc] || lc}</Text>
+                        </View>
+                      ))}
                     </View>
                   </View>
                   <View style={{ alignItems: "flex-end" }}>
@@ -418,6 +490,54 @@ const styles = StyleSheet.create({
   chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   chipText: { fontSize: 12, fontWeight: "600", color: colors.textMain },
   chipTextActive: { color: colors.primaryFg },
+
+  // Service category grid
+  categoryGridSection: { marginBottom: 14 },
+  sectionHeaderRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  sectionTitle: { fontSize: 13, fontWeight: "800", letterSpacing: 0.3, color: colors.textMain, textTransform: "uppercase" },
+  clearLink: { fontSize: 12, fontWeight: "700", color: colors.primary },
+  categoryGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  catTile: {
+    width: "31.5%",
+    aspectRatio: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+    paddingVertical: 10,
+    position: "relative",
+  },
+  catIconWrap: {
+    width: 44, height: 44, borderRadius: 12,
+    alignItems: "center", justifyContent: "center", marginBottom: 6,
+  },
+  catTileText: {
+    fontSize: 11, fontWeight: "700", color: colors.textMain,
+    textAlign: "center", lineHeight: 14,
+  },
+  catCountPill: {
+    position: "absolute", top: 6, right: 6,
+    minWidth: 20, height: 20, borderRadius: 10,
+    paddingHorizontal: 6, alignItems: "center", justifyContent: "center",
+  },
+  catCountText: { color: "#fff", fontSize: 10, fontWeight: "800" },
+
+  // Language filter row
+  langRow: {
+    flexDirection: "row", alignItems: "center", flexWrap: "wrap",
+    gap: 6, marginBottom: 14,
+  },
+  langLabel: { fontSize: 12, fontWeight: "700", color: colors.textMuted, marginRight: 4 },
+  langChip: {
+    paddingVertical: 5, paddingHorizontal: 10, borderRadius: 999,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+  },
+  langChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  langChipText: { fontSize: 11, fontWeight: "700", color: colors.textMuted },
+  langChipTextActive: { color: colors.primaryFg },
 
   serviceCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 10 },
   serviceAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },

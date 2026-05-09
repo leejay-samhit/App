@@ -297,9 +297,29 @@ class VendorRejectRequest(BaseModel):
 class ServiceApplyRequest(BaseModel):
     service_name: str = Field(min_length=2, max_length=80)
     service_category: str = Field(min_length=2, max_length=40)  # e.g. "Plumber", "Tutor"
+    category_id: Optional[str] = None  # FK → service_categories.id (preferred)
     pincode: str = Field(pattern=r"^\d{6}$")
     charge: float = Field(ge=0, le=1_000_000)
     description: Optional[str] = Field(default=None, max_length=500)
+    languages: Optional[List[str]] = None  # subset of {"en","te","hi","ta"}
+
+
+class ServiceCategoryCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=40)
+    slug: Optional[str] = Field(default=None, max_length=40)
+    icon: Optional[str] = Field(default="briefcase", max_length=40)  # Feather icon name
+    color: Optional[str] = Field(default="#2563EB", max_length=12)
+    sort_order: Optional[int] = 0
+    active: Optional[bool] = True
+
+
+class ServiceCategoryUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=40)
+    slug: Optional[str] = Field(default=None, max_length=40)
+    icon: Optional[str] = Field(default=None, max_length=40)
+    color: Optional[str] = Field(default=None, max_length=12)
+    sort_order: Optional[int] = None
+    active: Optional[bool] = None
 
 
 class ServiceRejectRequest(BaseModel):
