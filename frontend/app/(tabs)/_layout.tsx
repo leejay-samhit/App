@@ -18,7 +18,14 @@ export default function TabsLayout() {
   // We reorder the visible tabs so dashboard sits at the middle index, while
   // keeping the rest in their configured order around it. This works even if
   // the admin re-ordered tabs via branding.
-  const visibleKeys = tabs.filter((t) => t.visible !== false).map((t) => t.key);
+  // Hard-hide certain tabs from the bottom bar regardless of branding (per UX requirement).
+  // The screen route still exists so other in-app navigation (e.g. Withdraw button on
+  // Dashboard pushes to /(tabs)/wallet) keeps working.
+  const HARD_HIDDEN: Set<string> = new Set(["wallet"]);
+
+  const visibleKeys = tabs
+    .filter((t) => t.visible !== false && !HARD_HIDDEN.has(t.key))
+    .map((t) => t.key);
   const others = visibleKeys.filter((k) => k !== "dashboard");
   const hasDashboard = visibleKeys.includes("dashboard");
   const center = Math.floor(others.length / 2);
@@ -26,7 +33,9 @@ export default function TabsLayout() {
     ? [...others.slice(0, center), "dashboard", ...others.slice(center)]
     : visibleKeys;
   // Append hidden tabs at the end so every screen still has a registered route.
-  const hidden = tabs.filter((t) => t.visible === false).map((t) => t.key);
+  const hidden = tabs
+    .filter((t) => t.visible === false || HARD_HIDDEN.has(t.key))
+    .map((t) => t.key);
   const order = [...reordered, ...hidden];
   const byKey = Object.fromEntries(tabs.map((t) => [t.key, t]));
 
@@ -52,13 +61,20 @@ export default function TabsLayout() {
       {order.map((key) => {
         const t = byKey[key];
         const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : "user");
+        const isHidden = t?.visible === false || HARD_HIDDEN.has(key);
         return (
           <Tabs.Screen
             key={key}
             name={key}
-            options={{
+            options={isHidden ? {
               title: t?.label || key,
-              href: t?.visible === false ? null : undefined,
+              // Render an empty button so the tab is registered as a route
+              // (other screens can still navigate to it) but it never appears
+              // in the bottom bar.
+              tabBarButton: () => null,
+              tabBarItemStyle: { display: "none" },
+            } : {
+              title: t?.label || key,
               tabBarIcon: ({ color, size }) => <Feather name={iconName} size={size} color={color} />,
             }}
           />
