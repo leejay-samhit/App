@@ -1,6 +1,6 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { Text, TextInput, View, useWindowDimensions, StyleSheet } from "react-native";
+import { Text, TextInput, View, useWindowDimensions, StyleSheet, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { AuthProvider } from "../src/auth";
@@ -29,14 +29,19 @@ function GlobalFont({ children }: { children: React.ReactNode }) {
 }
 
 // Constrains content to a centered, readable column (~600 px) on tablets / large
-// foldables / desktops. On phones the wrapper is a no-op.
+// foldables / desktops. On phones the wrapper is a no-op. On desktop, renders
+// the mobile app inside a polished phone frame with shadow and rounded corners
+// so the preview looks like an actual Android device.
 function TabletContainer({ children }: { children: React.ReactNode }) {
   const { width } = useWindowDimensions();
   const isTablet = width >= TABLET_MIN_WIDTH;
   if (!isTablet) return <>{children}</>;
   return (
     <View style={styles.tabletOuter}>
-      <View style={styles.tabletInner}>{children}</View>
+      <View style={styles.phoneFrame}>
+        <View style={styles.phoneNotch} />
+        <View style={styles.tabletInner}>{children}</View>
+      </View>
     </View>
   );
 }
@@ -72,13 +77,43 @@ export default function RootLayout() {
 const styles = StyleSheet.create({
   tabletOuter: {
     flex: 1,
-    backgroundColor: colors.surfaceMuted, // soft side-rails behind the readable column
+    // Subtle gradient-ish dark background so the phone "floats"
+    backgroundColor: "#1F2A24",
     alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 24,
+  },
+  // Polished Android phone frame around the readable column
+  phoneFrame: {
+    flex: 1,
+    width: "100%",
+    maxWidth: READABLE_MAX_WIDTH + 24,
+    backgroundColor: "#0B1411",
+    borderRadius: 38,
+    padding: 12,
+    paddingTop: 18,
+    overflow: "hidden",
+    // Cross-platform shadow: iOS shadow* / Android elevation / Web boxShadow
+    ...Platform.select({
+      ios: { shadowColor: "#000", shadowOpacity: 0.45, shadowRadius: 30, shadowOffset: { width: 0, height: 18 } },
+      android: { elevation: 16 },
+      default: { boxShadow: "0 18px 50px rgba(0,0,0,0.45)" } as any,
+    }),
+  },
+  // Subtle status-pill at the top of the frame to mimic Android camera notch
+  phoneNotch: {
+    width: 80,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#2A3A33",
+    alignSelf: "center",
+    marginBottom: 10,
   },
   tabletInner: {
     flex: 1,
     width: "100%",
-    maxWidth: READABLE_MAX_WIDTH,
     backgroundColor: colors.background,
+    borderRadius: 28,
+    overflow: "hidden",
   },
 });
