@@ -60,9 +60,9 @@ const DEFAULT_BRANDING: Branding = {
   colors: { ...defaultColors },
   font: "system",
   tabs: [
-    { key: "dashboard", label: "Dashboard", icon: "home", visible: true },
     { key: "network", label: "Network", icon: "git-branch", visible: true },
     { key: "wallet", label: "Wallet", icon: "credit-card", visible: true },
+    { key: "dashboard", label: "Dashboard", icon: "home", visible: true },
     { key: "shop", label: "Shop", icon: "shopping-bag", visible: true },
     { key: "profile", label: "Profile", icon: "user", visible: true },
   ],

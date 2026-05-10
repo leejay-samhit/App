@@ -60,6 +60,10 @@ export default function DashboardScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  // When the user taps the Total Earnings card body, expand to reveal
+  // all the secondary dashboard sections. Withdraw button stays out of
+  // the toggle area.
+  const [expanded, setExpanded] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -141,12 +145,7 @@ export default function DashboardScreen() {
           </View>
         </Animated.View>
 
-        <Animated.View entering={FadeInDown.duration(400).delay(80)} style={styles.tierPill}>
-          <Feather name={data.tier.icon as any} size={14} color={colors.primary} />
-          <Text style={styles.tierText}>{data.tier.name.toUpperCase()} TIER</Text>
-          <View style={styles.tierDivider} />
-          <Text style={styles.tierTeam}>{data.team_size} in network</Text>
-        </Animated.View>
+        <Animated.View entering={FadeInDown.duration(400).delay(80)} style={{ height: 6 }} />
 
         {/* Approval status banner — only show if not approved */}
         {(user as any)?.approval_status && (user as any).approval_status !== "approved" && (
@@ -174,24 +173,48 @@ export default function DashboardScreen() {
           </TouchableOpacity>
         )}
 
+        {/* === Compact Total Earnings card === */}
+        {/* The card body is tappable: it toggles the expanded sections.
+            The Withdraw button is OUTSIDE the toggle area so taps go to wallet. */}
         <Animated.View entering={FadeInDown.duration(450).delay(120)}>
-          <GradientCard variant="emerald" style={styles.heroCard}>
-            <Text style={styles.heroLabel}>TOTAL EARNINGS</Text>
-            <Text style={styles.heroAmount} testID="dashboard-total-earned">{formatINR(data.total_earned)}</Text>
-            <View style={styles.heroBottom}>
-              <View>
-                <Text style={styles.heroSubLabel}>Wallet balance</Text>
-                <Text style={styles.heroSubValue} testID="dashboard-wallet-balance">{formatINR(data.wallet_balance)}</Text>
-              </View>
-              <TouchableOpacity onPress={() => router.push("/(tabs)/wallet")} style={styles.withdrawBtn} testID="dashboard-withdraw-btn">
+          <GradientCard variant="emerald" style={styles.heroCardCompact}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                style={{ flex: 1 }}
+                onPress={() => setExpanded((e) => !e)}
+                testID="dashboard-earnings-toggle"
+              >
+                <Text style={styles.heroLabelCompact}>TOTAL EARNINGS</Text>
+                <Text style={styles.heroAmountCompact} testID="dashboard-total-earned">
+                  {formatINR(data.total_earned)}
+                </Text>
+                <View style={styles.heroSubRow}>
+                  <Feather name="credit-card" size={11} color="rgba(255,255,255,0.85)" />
+                  <Text style={styles.heroSubText} testID="dashboard-wallet-balance">
+                    Wallet {formatINR(data.wallet_balance)}
+                  </Text>
+                  <View style={styles.expandPill}>
+                    <Feather name={expanded ? "chevron-up" : "chevron-down"} size={11} color="#fff" />
+                    <Text style={styles.expandPillText}>{expanded ? "Hide" : "Details"}</Text>
+                  </View>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => router.push("/(tabs)/wallet")}
+                style={styles.withdrawBtnCompact}
+                testID="dashboard-withdraw-btn"
+              >
+                <Feather name="arrow-up-right" size={14} color={colors.accentFg} />
                 <Text style={styles.withdrawBtnText}>Withdraw</Text>
-                <Feather name="arrow-up-right" size={16} color={colors.accentFg} />
               </TouchableOpacity>
             </View>
           </GradientCard>
         </Animated.View>
 
-        <Animated.View entering={FadeInDown.duration(450).delay(180)} style={styles.progressCard}>
+        {/* === Expanded sections — only when user taps Total Earnings === */}
+        {expanded && (<>
+        <Animated.View entering={FadeInDown.duration(350).delay(40)} style={styles.progressCard}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
             <DonutProgress
               value={data.directs_required - data.next_payout_in}
@@ -315,6 +338,7 @@ export default function DashboardScreen() {
             ))}
           </Animated.View>
         )}
+        </>)}
       </ScrollView>
     </SafeAreaView>
   );
@@ -357,6 +381,26 @@ const styles = StyleSheet.create({
   approvalBannerTitle: { fontSize: 13, fontWeight: "800" },
   approvalBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, lineHeight: 16 },
   heroCard: { marginBottom: 16, padding: 24 },
+  // ---- New compact total earnings card ----
+  heroCardCompact: { marginBottom: 18, padding: 16, borderRadius: 18 },
+  heroLabelCompact: { color: "rgba(255,255,255,0.75)", fontSize: 10, letterSpacing: 1.6, fontWeight: "800" },
+  heroAmountCompact: { color: colors.primaryFg, fontSize: 26, fontWeight: "900", marginTop: 2, letterSpacing: -0.8 },
+  heroSubRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
+  heroSubText: { color: "rgba(255,255,255,0.85)", fontSize: 11, fontWeight: "700" },
+  expandPill: {
+    flexDirection: "row", alignItems: "center", gap: 3,
+    marginLeft: 6,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.18)",
+  },
+  expandPillText: { color: "#fff", fontSize: 9, fontWeight: "800", letterSpacing: 0.4 },
+  withdrawBtnCompact: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    backgroundColor: colors.accent,
+    paddingHorizontal: 12, paddingVertical: 9,
+    borderRadius: 999,
+  },
   heroDecor: { position: "absolute", right: -40, top: -40, width: 160, height: 160, borderRadius: 80, backgroundColor: "rgba(229,122,68,0.18)" },
   heroLabel: { color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: 2, fontWeight: "700" },
   heroAmount: { color: colors.primaryFg, fontSize: 44, fontWeight: "800", marginTop: 6, letterSpacing: -1.5 },

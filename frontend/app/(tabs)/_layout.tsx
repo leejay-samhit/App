@@ -14,7 +14,20 @@ export default function TabsLayout() {
   // Use the configured ordering / labels but render every screen file (Tabs requires every
   // child to map to an actual file in /app/(tabs)). We use `href: null` to hide invisible
   // tabs from the bar without unmounting the route.
-  const order = tabs.map((t) => t.key);
+  // Force Dashboard to the center of the tab bar (per UX requirement).
+  // We reorder the visible tabs so dashboard sits at the middle index, while
+  // keeping the rest in their configured order around it. This works even if
+  // the admin re-ordered tabs via branding.
+  const visibleKeys = tabs.filter((t) => t.visible !== false).map((t) => t.key);
+  const others = visibleKeys.filter((k) => k !== "dashboard");
+  const hasDashboard = visibleKeys.includes("dashboard");
+  const center = Math.floor(others.length / 2);
+  const reordered = hasDashboard
+    ? [...others.slice(0, center), "dashboard", ...others.slice(center)]
+    : visibleKeys;
+  // Append hidden tabs at the end so every screen still has a registered route.
+  const hidden = tabs.filter((t) => t.visible === false).map((t) => t.key);
+  const order = [...reordered, ...hidden];
   const byKey = Object.fromEntries(tabs.map((t) => [t.key, t]));
 
   return (
