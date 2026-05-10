@@ -105,6 +105,8 @@ export default function ShopScreen() {
   const [pincodeQ, setPincodeQ] = useState("");
   const [categoryId, setCategoryId] = useState<string | null>(null); // null = "all"
   const [languageQ, setLanguageQ] = useState<string | null>(null);
+  // Language picker modal (replaces inline chips per UX redesign)
+  const [langModalOpen, setLangModalOpen] = useState(false);
   const [myCoords, setMyCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [locating, setLocating] = useState(false);
   const [categories, setCategories] = useState<ServiceCategory[]>([]);
@@ -563,22 +565,7 @@ export default function ShopScreen() {
         {/* === SERVICES === */}
         {mode === "services" && (
           <>
-            {/* Apply CTA */}
-            <TouchableOpacity
-              style={styles.applyCard}
-              onPress={() => router.push("/services/apply" as any)}
-            >
-              <Feather name={myStatus === "approved" ? "check-circle" : "user-plus"} size={20} color={colors.primaryFg} />
-              <View style={{ flex: 1 }}>
-                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>
-                  {myStatus === "approved" ? "You're a service provider" : myStatus === "pending" ? "Application under review" : myStatus === "rejected" ? "Apply again" : "Earn — list your service"}
-                </Text>
-                <Text style={{ color: "rgba(255,255,255,0.85)", fontSize: 12, marginTop: 2 }}>
-                  {myStatus === "approved" ? "Tap to update or view bookings" : myStatus === "pending" ? "Awaiting admin approval" : "Pincode, charge, category"}
-                </Text>
-              </View>
-              <Feather name="chevron-right" size={20} color="#fff" />
-            </TouchableOpacity>
+            {/* Apply CTA banner removed — entry moved to Profile under "Become a Vendor" */}
 
             {/* Filters */}
             <View style={styles.filterRow}>
@@ -656,32 +643,79 @@ export default function ShopScreen() {
                       </TouchableOpacity>
                     );
                   })}
+                  {/* Language picker tile — opens a modal sheet to choose language */}
+                  <TouchableOpacity
+                    style={[
+                      styles.catTile,
+                      languageQ ? { borderColor: colors.primary, backgroundColor: colors.brand100 } : null,
+                    ]}
+                    onPress={() => setLangModalOpen(true)}
+                    activeOpacity={0.7}
+                    testID="services-language-tile"
+                  >
+                    <View style={[styles.catIconWrap, { backgroundColor: colors.brand100 }]}>
+                      <Feather name="globe" size={22} color={colors.primary} />
+                    </View>
+                    <Text style={styles.catTileText} numberOfLines={2}>
+                      {languageQ ? LANG_LABELS[languageQ] : "Language"}
+                    </Text>
+                    {languageQ ? (
+                      <View style={[styles.catCountPill, { backgroundColor: colors.primary }]}>
+                        <Feather name="check" size={10} color="#fff" />
+                      </View>
+                    ) : null}
+                  </TouchableOpacity>
                 </View>
               </View>
             )}
 
-            {/* Language filter chips */}
-            <View style={styles.langRow}>
-              <Text style={styles.langLabel}>Language:</Text>
-              <TouchableOpacity
-                style={[styles.langChip, !languageQ && styles.langChipActive]}
-                onPress={() => setLanguageQ(null)}
-              >
-                <Text style={[styles.langChipText, !languageQ && styles.langChipTextActive]}>All</Text>
-              </TouchableOpacity>
-              {LANG_ORDER.map((code) => {
-                const active = languageQ === code;
-                return (
+            {/* Language picker modal sheet (opens from Browse-by-category Language tile) */}
+            <Modal visible={langModalOpen} transparent animationType="slide" onRequestClose={() => setLangModalOpen(false)}>
+              <View style={styles.langModalOverlay}>
+                <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setLangModalOpen(false)} />
+                <View style={styles.langModalSheet}>
+                  <View style={styles.langModalHandle} />
+                  <Text style={styles.langModalTitle}>Filter by language</Text>
+                  <Text style={styles.langModalSub}>Show service providers who speak…</Text>
+
                   <TouchableOpacity
-                    key={code}
-                    style={[styles.langChip, active && styles.langChipActive]}
-                    onPress={() => setLanguageQ(active ? null : code)}
+                    style={[styles.langOptionRow, !languageQ && styles.langOptionRowActive]}
+                    onPress={() => { setLanguageQ(null); setLangModalOpen(false); }}
                   >
-                    <Text style={[styles.langChipText, active && styles.langChipTextActive]}>{LANG_LABELS[code]}</Text>
+                    <View style={styles.langOptionIconWrap}><Feather name="globe" size={18} color={colors.primary} /></View>
+                    <Text style={[styles.langOptionText, !languageQ && styles.langOptionTextActive]}>All languages</Text>
+                    {!languageQ && <Feather name="check" size={18} color={colors.primary} />}
                   </TouchableOpacity>
-                );
-              })}
-            </View>
+
+                  {LANG_ORDER.map((code) => {
+                    const active = languageQ === code;
+                    return (
+                      <TouchableOpacity
+                        key={code}
+                        style={[styles.langOptionRow, active && styles.langOptionRowActive]}
+                        onPress={() => { setLanguageQ(code); setLangModalOpen(false); }}
+                        testID={`lang-option-${code}`}
+                      >
+                        <View style={styles.langOptionIconWrap}>
+                          <Text style={{ fontSize: 12, fontWeight: "900", color: colors.primary }}>{code.toUpperCase()}</Text>
+                        </View>
+                        <Text style={[styles.langOptionText, active && styles.langOptionTextActive]}>{LANG_LABELS[code]}</Text>
+                        {active && <Feather name="check" size={18} color={colors.primary} />}
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  <TouchableOpacity
+                    style={styles.langModalClose}
+                    onPress={() => setLangModalOpen(false)}
+                  >
+                    <Text style={styles.langModalCloseText}>Close</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </Modal>
+
+            {/* Language chips removed — now accessed via the "Language" tile in Browse-by-category */}
 
             {/* List */}
             {servicesLoading && services.length === 0 ? (
@@ -813,6 +847,38 @@ const styles = StyleSheet.create({
   },
   topHeaderEyebrow: { fontSize: 10, letterSpacing: 1.6, color: colors.textMuted, fontWeight: "800" },
   topHeaderTitle: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.6, marginTop: 2 },
+  // Language picker modal sheet
+  langModalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
+  langModalSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    paddingHorizontal: 20, paddingTop: 12, paddingBottom: 28,
+  },
+  langModalHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: "center", marginBottom: 14 },
+  langModalTitle: { fontSize: 18, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4 },
+  langModalSub: { fontSize: 12, color: colors.textMuted, marginTop: 4, marginBottom: 14 },
+  langOptionRow: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    paddingVertical: 12, paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.surface,
+    marginBottom: 8,
+  },
+  langOptionRowActive: { backgroundColor: colors.brand100, borderColor: colors.primary },
+  langOptionIconWrap: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: colors.brand100,
+    alignItems: "center", justifyContent: "center",
+  },
+  langOptionText: { flex: 1, fontSize: 14, fontWeight: "700", color: colors.textMain },
+  langOptionTextActive: { color: colors.primary },
+  langModalClose: {
+    marginTop: 8, paddingVertical: 12,
+    borderRadius: 12, alignItems: "center",
+    backgroundColor: colors.surfaceMuted,
+  },
+  langModalCloseText: { color: colors.textMain, fontWeight: "800", fontSize: 14 },
   cartIconBtn: {
     width: 40, height: 40, borderRadius: 20,
     backgroundColor: colors.surface,

@@ -130,6 +130,27 @@ export default function ProfileScreen() {
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
 
+          {/* Service Provider entry — moved here from the Services tab banner. */}
+          <TouchableOpacity
+            onPress={() => router.push("/services/apply" as any)}
+            style={styles.kycCard}
+            testID="profile-service-provider-link"
+          >
+            <View style={[styles.kycDot, { backgroundColor: (user as any)?.service_provider_status === "approved" ? colors.success : (user as any)?.service_provider_status === "pending" ? colors.warning : (user as any)?.service_provider_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.kycTitle}>
+                {(user as any)?.service_provider_status === "approved" ? "You're a Service Provider" : "Become a Service Provider"}
+              </Text>
+              <Text style={styles.kycSub}>
+                {(user as any)?.service_provider_status === "approved" ? "TAP TO UPDATE OR VIEW BOOKINGS"
+                  : (user as any)?.service_provider_status === "pending" ? "APPLICATION UNDER REVIEW"
+                  : (user as any)?.service_provider_status === "rejected" ? "APPLY AGAIN"
+                  : "EARN — LIST YOUR SERVICE"}
+              </Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+
           <TouchableOpacity onPress={() => router.push("/services/location" as any)} style={styles.kycCard} testID="profile-location-link">
             <View style={[styles.kycDot, { backgroundColor: (user as any)?.location_sharing ? colors.success : "#94A3B8" }]} />
             <View style={{ flex: 1 }}>
