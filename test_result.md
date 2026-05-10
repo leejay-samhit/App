@@ -101,6 +101,33 @@ user_problem_statement: |
 # /app/memory/archives/. Below are ONLY tasks that require fresh testing.
 
 backend:
+  - task: "Phase B: Customer Shop UI redesign (search, banner, categories, stock-aware grid, 30s polling)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/(tabs)/shop.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Customer Shop redesign delivered:
+              - Member-only promo banner (cream + green badge)
+              - Product search bar at top
+              - Horizontal category-chip row (built dynamically from products)
+              - 2-col product grid with rounded corners, soft shadow, category
+                eyebrow, name, price + shop-bag CTA
+              - "Only X left" amber pill when stock <= 5
+              - Out-of-stock products: separate section, faded image, SOLD OUT
+                overlay, "I'm interested" CTA that flips to "We'll notify you"
+              - 30-second polling while Shop tab is focused for near-real-time
+                stock sync from vendor edits
+              - addToCart payload fixed: {qty:1} (was {quantity:1})
+              - /products response shape made tolerant (raw array OR {items:[…]})
+            Metro bundles cleanly. Frontend testing has NOT been triggered.
+
+
   - task: "Phase A: Stock-aware checkout + 'I'm interested' tracker"
     implemented: true
     working: true

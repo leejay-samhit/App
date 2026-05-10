@@ -22,7 +22,17 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
 
-type Product = { id: string; name: string; price: number; image_url: string; description?: string };
+type Product = {
+  id: string;
+  name: string;
+  price: number;
+  image_url: string;
+  description?: string;
+  category?: string;
+  stock?: number;
+  is_in_stock?: boolean;
+  interested_count?: number;
+};
 type ServiceCategory = {
   id: string;
   name: string;
@@ -65,6 +75,11 @@ export default function ShopScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState<string | null>(null);
   const [cartCount, setCartCount] = useState(0);
+  // New: search + category filter + remembered interest registrations
+  const [shopSearch, setShopSearch] = useState("");
+  const [shopCategory, setShopCategory] = useState<string | null>(null); // null = "All"
+  const [interestedSet, setInterestedSet] = useState<Set<string>>(new Set());
+  const [registeringInterest, setRegisteringInterest] = useState<string | null>(null);
 
   // ---- Services state ----
   const [services, setServices] = useState<ServiceProvider[]>([]);
@@ -82,10 +97,15 @@ export default function ShopScreen() {
 
   const loadShop = useCallback(async () => {
     try {
-      const { data } = await api.get<{ items: Product[] }>("/products");
-      setItems(data.items || []);
-      const cart = await api.get<{ items: any[] }>("/cart");
-      setCartCount((cart.data.items || []).reduce((s, i: any) => s + (i.quantity || 0), 0));
+      // Backend returns a raw array; older code expected `{items: [...]}`. Handle both.
+      const { data } = await api.get<any>("/products");
+      const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
+      setItems(list);
+      try {
+        const cart = await api.get<any>("/cart");
+        const cItems = Array.isArray(cart.data) ? cart.data : (cart.data?.items || []);
+        setCartCount(cItems.reduce((s: number, i: any) => s + (i.qty || i.quantity || 0), 0));
+      } catch { /* cart may 401 for guests */ }
     } catch (e) {
       console.warn(e);
     } finally {
@@ -93,6 +113,30 @@ export default function ShopScreen() {
       setRefreshing(false);
     }
   }, []);
+
+  // Register interest in an out-of-stock product so vendor knows demand exists.
+  const registerInterest = useCallback(async (p: Product) => {
+    if (interestedSet.has(p.id) || registeringInterest === p.id) return;
+    setRegisteringInterest(p.id);
+    try {
+      const { data } = await api.post<{ ok: boolean; interested_count: number; already_registered: boolean }>(
+        `/products/${p.id}/interested`,
+      );
+      setInterestedSet((s) => new Set([...Array.from(s), p.id]));
+      // Update local count immediately so user sees the bump
+      setItems((prev) => prev.map((it) => (it.id === p.id ? { ...it, interested_count: data.interested_count } : it)));
+      if (!data.already_registered) {
+        Alert.alert(
+          "We hear you!",
+          `Thanks — ${data.interested_count} customer${data.interested_count === 1 ? "" : "s"} now interested. We've notified the seller to restock.`,
+        );
+      }
+    } catch (e) {
+      Alert.alert("Couldn't register", formatApiError(e));
+    } finally {
+      setRegisteringInterest(null);
+    }
+  }, [interestedSet, registeringInterest]);
 
   const loadServices = useCallback(async () => {
     setServicesLoading(true);
@@ -148,6 +192,16 @@ export default function ShopScreen() {
     else loadServices();
   }, [mode, loadShop, loadServices]));
 
+  // Phase E: Real-time-ish stock sync — poll the shop list every 30s while the
+  // tab is focused so vendor stock changes appear without the customer having
+  // to manually refresh. Stops when the user switches away from the Shop tab
+  // or the screen unmounts.
+  useFocusEffect(useCallback(() => {
+    if (mode !== "shop") return;
+    const id = setInterval(() => { loadShop(); }, 30000);
+    return () => clearInterval(id);
+  }, [mode, loadShop]));
+
   useEffect(() => {
     if (mode === "services") {
       const t = setTimeout(loadServices, 300);
@@ -158,7 +212,7 @@ export default function ShopScreen() {
   const addToCart = async (p: Product) => {
     setAdding(p.id);
     try {
-      await api.post("/cart/add", { product_id: p.id, quantity: 1 });
+      await api.post("/cart/add", { product_id: p.id, qty: 1 });
       setCartCount((c) => c + 1);
     } catch (e) {
       Alert.alert("Could not add", formatApiError(e));
@@ -261,35 +315,213 @@ export default function ShopScreen() {
         </View>
 
         {/* === SHOP === */}
-        {mode === "shop" && (
-          <>
-            <View style={styles.grid}>
-              {items.map((p) => (
-                <View key={p.id} style={styles.card} testID={`product-${p.id}`}>
-                  <Image source={{ uri: p.image_url }} style={styles.image} />
-                  <Text style={styles.name} numberOfLines={2}>{p.name}</Text>
-                  <View style={styles.cardFooter}>
-                    <Text style={styles.price}>{formatINR(p.price)}</Text>
-                    <TouchableOpacity
-                      style={[styles.addBtn, adding === p.id && { opacity: 0.5 }]}
-                      onPress={() => addToCart(p)}
-                      disabled={adding === p.id}
-                    >
-                      {adding === p.id ? <ActivityIndicator color={colors.primaryFg} size="small" /> : <Feather name="plus" size={16} color={colors.primaryFg} />}
-                    </TouchableOpacity>
-                  </View>
+        {mode === "shop" && (() => {
+          // Build category list from the products we have. "All" always present.
+          const cats = Array.from(
+            new Set(items.map((p) => (p.category || "").trim()).filter(Boolean)),
+          );
+          const q = shopSearch.trim().toLowerCase();
+          const filtered = items.filter((p) => {
+            if (shopCategory && (p.category || "") !== shopCategory) return false;
+            if (q && !p.name.toLowerCase().includes(q) && !(p.description || "").toLowerCase().includes(q)) return false;
+            return true;
+          });
+          const inStock = filtered.filter((p) => (p.is_in_stock ?? (p.stock || 0) > 0));
+          const outStock = filtered.filter((p) => !(p.is_in_stock ?? (p.stock || 0) > 0));
+          return (
+            <>
+              {/* Search bar */}
+              <View style={styles.shopSearch}>
+                <Feather name="search" size={16} color={colors.textMuted} />
+                <TextInput
+                  style={styles.shopSearchInput}
+                  placeholder="Search products"
+                  placeholderTextColor={colors.textMuted}
+                  value={shopSearch}
+                  onChangeText={setShopSearch}
+                  returnKeyType="search"
+                />
+                {shopSearch.length > 0 && (
+                  <TouchableOpacity onPress={() => setShopSearch("")}>
+                    <Feather name="x-circle" size={16} color={colors.textMuted} />
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {/* Promo banner */}
+              <View style={styles.promoBanner}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.promoEyebrow}>Member-only deals</Text>
+                  <Text style={styles.promoTitle}>Spend wallet earnings, save real cash</Text>
+                  <Text style={styles.promoSubtitle}>Curated picks, free shipping above ₹999</Text>
                 </View>
-              ))}
-            </View>
-            {cartCount > 0 && (
-              <TouchableOpacity onPress={() => router.push("/cart")} style={styles.checkoutBar}>
-                <Feather name="shopping-cart" size={18} color={colors.accentFg} />
-                <Text style={styles.checkoutBarText}>{cartCount} item{cartCount > 1 ? "s" : ""} in cart</Text>
-                <Feather name="arrow-right" size={18} color={colors.accentFg} />
-              </TouchableOpacity>
-            )}
-          </>
-        )}
+                <View style={styles.promoBadge}>
+                  <Text style={styles.promoBadgeText}>UP TO</Text>
+                  <Text style={styles.promoBadgeBig}>30%</Text>
+                  <Text style={styles.promoBadgeText}>OFF</Text>
+                </View>
+              </View>
+
+              {/* Category chips */}
+              {cats.length > 0 && (
+                <View style={styles.shopSectionHeader}>
+                  <Text style={styles.shopSectionTitle}>Browse by category</Text>
+                </View>
+              )}
+              {cats.length > 0 && (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.catChipsRow}
+                >
+                  <TouchableOpacity
+                    style={[styles.catChip, shopCategory === null && styles.catChipActive]}
+                    onPress={() => setShopCategory(null)}
+                  >
+                    <Text style={[styles.catChipText, shopCategory === null && styles.catChipTextActive]}>All</Text>
+                  </TouchableOpacity>
+                  {cats.map((c) => (
+                    <TouchableOpacity
+                      key={c}
+                      style={[styles.catChip, shopCategory === c && styles.catChipActive]}
+                      onPress={() => setShopCategory((cur) => (cur === c ? null : c))}
+                    >
+                      <Text style={[styles.catChipText, shopCategory === c && styles.catChipTextActive]}>{c}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+
+              {/* Section header */}
+              <View style={[styles.shopSectionHeader, { marginTop: 14 }]}>
+                <Text style={styles.shopSectionTitle}>
+                  {shopCategory || "Popular products"}
+                </Text>
+                <Text style={styles.shopSectionCount}>{filtered.length} item{filtered.length === 1 ? "" : "s"}</Text>
+              </View>
+
+              {/* Empty state */}
+              {filtered.length === 0 && (
+                <View style={styles.shopEmpty}>
+                  <Feather name="package" size={32} color={colors.textMuted} />
+                  <Text style={styles.shopEmptyTitle}>No products match</Text>
+                  <Text style={styles.shopEmptySub}>Try clearing the search or category filter.</Text>
+                </View>
+              )}
+
+              {/* In-stock products grid */}
+              <View style={styles.grid}>
+                {inStock.map((p) => {
+                  const lowStock = (p.stock || 0) > 0 && (p.stock || 0) <= 5;
+                  return (
+                    <View key={p.id} style={styles.cardNew} testID={`product-${p.id}`}>
+                      <View style={styles.cardImageWrap}>
+                        <Image source={{ uri: p.image_url }} style={styles.cardImageNew} />
+                        {lowStock && (
+                          <View style={styles.lowStockPill}>
+                            <Text style={styles.lowStockText}>Only {p.stock} left</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.cardBody}>
+                        {p.category ? <Text style={styles.cardCategory} numberOfLines={1}>{p.category}</Text> : null}
+                        <Text style={styles.cardTitle} numberOfLines={2}>{p.name}</Text>
+                        <View style={styles.cardFooterNew}>
+                          <Text style={styles.cardPrice}>{formatINR(p.price)}</Text>
+                          <TouchableOpacity
+                            style={[styles.cardCta, adding === p.id && { opacity: 0.6 }]}
+                            onPress={() => addToCart(p)}
+                            disabled={adding === p.id}
+                            testID={`add-${p.id}`}
+                          >
+                            {adding === p.id
+                              ? <ActivityIndicator color="#fff" size="small" />
+                              : <Feather name="shopping-bag" size={14} color="#fff" />}
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+
+              {/* Out-of-stock section */}
+              {outStock.length > 0 && (
+                <>
+                  <View style={[styles.shopSectionHeader, { marginTop: 24 }]}>
+                    <Text style={styles.shopSectionTitle}>Out of stock</Text>
+                    <Text style={styles.shopSectionCount}>{outStock.length} item{outStock.length === 1 ? "" : "s"}</Text>
+                  </View>
+                  <Text style={styles.outOfStockHint}>
+                    Tap “I'm interested” to let the seller know you'd buy it when it's back.
+                  </Text>
+                  <View style={styles.grid}>
+                    {outStock.map((p) => {
+                      const isInterested = interestedSet.has(p.id);
+                      const count = p.interested_count || 0;
+                      return (
+                        <View key={p.id} style={[styles.cardNew, styles.cardOOS]} testID={`product-${p.id}`}>
+                          <View style={styles.cardImageWrap}>
+                            <Image source={{ uri: p.image_url }} style={[styles.cardImageNew, { opacity: 0.5 }]} />
+                            <View style={styles.oosOverlay} pointerEvents="none">
+                              <Text style={styles.oosOverlayText}>SOLD OUT</Text>
+                            </View>
+                            {count > 0 && (
+                              <View style={styles.interestBadge}>
+                                <Feather name="users" size={10} color="#fff" />
+                                <Text style={styles.interestBadgeText}>{count}</Text>
+                              </View>
+                            )}
+                          </View>
+                          <View style={styles.cardBody}>
+                            {p.category ? <Text style={styles.cardCategory} numberOfLines={1}>{p.category}</Text> : null}
+                            <Text style={styles.cardTitle} numberOfLines={2}>{p.name}</Text>
+                            <View style={styles.cardFooterNew}>
+                              <Text style={styles.cardPrice}>{formatINR(p.price)}</Text>
+                            </View>
+                            <TouchableOpacity
+                              style={[
+                                styles.interestBtn,
+                                isInterested && styles.interestBtnDone,
+                                registeringInterest === p.id && { opacity: 0.6 },
+                              ]}
+                              onPress={() => registerInterest(p)}
+                              disabled={isInterested || registeringInterest === p.id}
+                              testID={`interest-${p.id}`}
+                            >
+                              {registeringInterest === p.id ? (
+                                <ActivityIndicator color={colors.primary} size="small" />
+                              ) : (
+                                <>
+                                  <Feather
+                                    name={isInterested ? "check" : "bell"}
+                                    size={12}
+                                    color={isInterested ? colors.primaryFg : colors.primary}
+                                  />
+                                  <Text style={[styles.interestBtnText, isInterested && { color: colors.primaryFg }]}>
+                                    {isInterested ? "We'll notify you" : "I'm interested"}
+                                  </Text>
+                                </>
+                              )}
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </>
+              )}
+
+              {cartCount > 0 && (
+                <TouchableOpacity onPress={() => router.push("/cart")} style={styles.checkoutBar} testID="goto-cart">
+                  <Feather name="shopping-cart" size={18} color={colors.accentFg} />
+                  <Text style={styles.checkoutBarText}>{cartCount} item{cartCount > 1 ? "s" : ""} in cart</Text>
+                  <Feather name="arrow-right" size={18} color={colors.accentFg} />
+                </TouchableOpacity>
+              )}
+            </>
+          );
+        })()}
 
         {/* === SERVICES === */}
         {mode === "services" && (
@@ -653,4 +885,166 @@ const styles = StyleSheet.create({
   modalBtnPrimary: { backgroundColor: colors.primary },
   modalBtnGhost: { backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
   modalBtnText: { fontSize: 14, fontWeight: "800" },
+
+  // ============================================================
+  //  Phase B — New Customer Shop UI (search, banner, categories,
+  //  product cards with stock-aware states)
+  // ============================================================
+  shopSearch: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+    borderRadius: 14, paddingHorizontal: 14, height: 46,
+    marginBottom: 14,
+  },
+  shopSearchInput: {
+    flex: 1, fontSize: 14, color: colors.textMain, paddingVertical: 0,
+  },
+
+  promoBanner: {
+    flexDirection: "row", alignItems: "center", gap: 14,
+    backgroundColor: "#F4F1EA",
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: "#EAE3D2",
+  },
+  promoEyebrow: {
+    fontSize: 10, fontWeight: "800", letterSpacing: 1.4,
+    color: colors.primary, marginBottom: 6, textTransform: "uppercase",
+  },
+  promoTitle: {
+    fontSize: 16, fontWeight: "800", color: colors.textMain,
+    lineHeight: 21, letterSpacing: -0.3,
+  },
+  promoSubtitle: {
+    fontSize: 12, color: colors.textMuted, marginTop: 4,
+  },
+  promoBadge: {
+    width: 78, height: 78, borderRadius: 16,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+  },
+  promoBadgeText: { fontSize: 9, fontWeight: "800", color: "#fff", letterSpacing: 1.1 },
+  promoBadgeBig: { fontSize: 24, fontWeight: "900", color: "#fff", letterSpacing: -1, lineHeight: 28 },
+
+  shopSectionHeader: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  shopSectionTitle: {
+    fontSize: 15, fontWeight: "800", color: colors.textMain,
+    letterSpacing: -0.2,
+  },
+  shopSectionCount: {
+    fontSize: 11, fontWeight: "700", color: colors.textMuted,
+  },
+
+  catChipsRow: { gap: 8, paddingRight: 4 },
+  catChip: {
+    paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  catChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  catChipText: { fontSize: 12, fontWeight: "700", color: colors.textMain },
+  catChipTextActive: { color: colors.primaryFg },
+
+  cardNew: {
+    flexBasis: "48%", flexGrow: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: colors.border,
+    // Cross-platform soft elevation (iOS shadow, Android elevation, Web boxShadow)
+    ...Platform.select({
+      ios: { shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
+      android: { elevation: 2 },
+      default: {},
+    }),
+  },
+  cardOOS: { borderColor: "#E8E3DC" },
+  cardImageWrap: {
+    position: "relative",
+    aspectRatio: 1,
+    backgroundColor: colors.surfaceMuted,
+  },
+  cardImageNew: { width: "100%", height: "100%" },
+  cardBody: { padding: 12, gap: 6 },
+  cardCategory: {
+    fontSize: 10, fontWeight: "700", color: colors.textMuted,
+    letterSpacing: 0.6, textTransform: "uppercase",
+  },
+  cardTitle: {
+    fontSize: 13, fontWeight: "700", color: colors.textMain,
+    lineHeight: 17, minHeight: 34,
+  },
+  cardFooterNew: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    marginTop: 4,
+  },
+  cardPrice: { fontSize: 16, fontWeight: "800", color: colors.primary, letterSpacing: -0.3 },
+  cardCta: {
+    width: 34, height: 34, borderRadius: 12,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+  },
+
+  lowStockPill: {
+    position: "absolute", top: 8, left: 8,
+    paddingVertical: 4, paddingHorizontal: 8,
+    backgroundColor: "#F59E0B",
+    borderRadius: 999,
+  },
+  lowStockText: { fontSize: 9, fontWeight: "800", color: "#fff", letterSpacing: 0.4 },
+
+  oosOverlay: {
+    position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.4)",
+  },
+  oosOverlayText: {
+    fontSize: 13, fontWeight: "900", color: colors.textMain,
+    letterSpacing: 2,
+    backgroundColor: "rgba(255,255,255,0.85)",
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 4,
+    overflow: "hidden",
+  },
+  interestBadge: {
+    position: "absolute", top: 8, right: 8,
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingVertical: 3, paddingHorizontal: 8,
+    backgroundColor: colors.primary,
+    borderRadius: 999,
+  },
+  interestBadgeText: { fontSize: 10, fontWeight: "800", color: "#fff" },
+
+  interestBtn: {
+    marginTop: 8,
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5,
+    paddingVertical: 8, paddingHorizontal: 6,
+    borderRadius: 10,
+    backgroundColor: "transparent",
+    borderWidth: 1, borderColor: colors.primary,
+  },
+  interestBtnDone: { backgroundColor: colors.primary, borderColor: colors.primary },
+  interestBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary },
+
+  outOfStockHint: {
+    fontSize: 12, color: colors.textMuted,
+    marginBottom: 12, lineHeight: 16,
+  },
+
+  shopEmpty: {
+    paddingVertical: 36, alignItems: "center",
+    gap: 6,
+    backgroundColor: colors.surface,
+    borderRadius: 18, borderWidth: 1, borderColor: colors.border,
+    marginBottom: 12,
+  },
+  shopEmptyTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain, marginTop: 4 },
+  shopEmptySub: { fontSize: 12, color: colors.textMuted, textAlign: "center", paddingHorizontal: 20 },
 });
