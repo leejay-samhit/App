@@ -1,262 +1,175 @@
-"""Backend test for 2 NEW Distributor Area-Mapping admin endpoints.
+"""Phase 2B refactor regression test.
 
-Endpoints:
-  POST /api/admin/distributors/{user_id}/areas/bulk-unassign
-  GET  /api/admin/pincodes/in-region?state=&district=&limit=
+Tests the 6 extracted endpoints + a few sanity checks on unrelated endpoints.
 """
+from __future__ import annotations
+
 import os
 import sys
-import json
-import uuid
+from typing import Dict
+
 import requests
 
-ENV_PATH = "/app/frontend/.env"
-BASE = None
-with open(ENV_PATH) as f:
-    for ln in f:
-        if ln.startswith("EXPO_PUBLIC_BACKEND_URL="):
-            BASE = ln.strip().split("=", 1)[1].strip().strip('"')
-            break
-assert BASE, "EXPO_PUBLIC_BACKEND_URL missing"
-API = BASE.rstrip("/") + "/api"
-print(f"API base: {API}")
-
-results = []
-def rec(name, ok, detail=""):
-    status = "PASS" if ok else "FAIL"
-    print(f"[{status}] {name} :: {detail}")
-    results.append((name, ok, detail))
+BASE = os.environ.get("BACKEND_URL", "https://network-pay-1.preview.emergentagent.com").rstrip("/")
+API = f"{BASE}/api"
 
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASS = "Admin@123"
-FIN_EMAIL = "finance@app.com"
-FIN_PASS = "Finance@123"
+ADMIN_PASSWORD = "Admin@123"
+
+TIMEOUT = 30
+results = []
 
 
-def login(email, password):
-    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=30)
-    if r.status_code != 200:
-        return None, r
-    return r.json().get("token"), r
+def record(name: str, ok: bool, detail: str = "") -> None:
+    results.append((name, ok, detail))
+    icon = "PASS" if ok else "FAIL"
+    print(f"[{icon}] {name}" + (f" — {detail}" if detail else ""))
 
 
-def H(token):
-    return {"Authorization": f"Bearer {token}"}
+def login(email: str, password: str) -> str:
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()["token"]
 
 
-# 1. Login admin
-tokenA, r = login(ADMIN_EMAIL, ADMIN_PASS)
-if not tokenA:
-    rec("admin login", False, f"{r.status_code} {r.text[:200]}")
-    sys.exit(1)
-rec("admin login", True, "tokenA acquired")
+def auth(tok: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {tok}"}
 
-# 2. Login finance else create
-tokenF, r = login(FIN_EMAIL, FIN_PASS)
-if not tokenF:
-    print(f"finance login failed ({r.status_code}); creating finance admin")
-    cr = requests.post(
-        f"{API}/admin/admins",
-        headers=H(tokenA),
-        json={"email": FIN_EMAIL, "password": FIN_PASS, "name": "Finance Admin", "admin_role": "finance"},
-        timeout=30,
-    )
-    if cr.status_code not in (200, 201):
-        rec("create finance admin", False, f"{cr.status_code} {cr.text[:200]}")
-    else:
-        rec("create finance admin", True, "")
-    tokenF, r = login(FIN_EMAIL, FIN_PASS)
-if not tokenF:
-    rec("finance login", False, f"{r.status_code} {r.text[:200]}")
-    sys.exit(1)
-rec("finance login", True, "tokenF acquired")
 
-# 3. Register fresh user
-suffix = uuid.uuid4().hex[:8]
-test_email = f"distrib_{suffix}@example.com"
-reg_payload = {
-    "name": f"Distrib Test {suffix}",
-    "email": test_email,
-    "password": "Test@1234",
-    "phone": "9000000000",
-}
-r = requests.post(f"{API}/auth/register", json=reg_payload, timeout=30)
-if r.status_code != 200:
-    rec("register fresh user", False, f"{r.status_code} {r.text[:300]}")
-    sys.exit(1)
-rj = r.json()
-user_token = rj.get("token") or rj.get("access_token")
-user_id = (rj.get("user") or {}).get("id") or rj.get("id")
-if not user_id and user_token:
-    me = requests.get(f"{API}/auth/me", headers=H(user_token), timeout=30).json()
-    user_id = me.get("id")
-rec("register fresh user", bool(user_id), f"user_id={user_id} email={test_email}")
+def main() -> int:
+    try:
+        admin_tok = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+        record("POST /auth/login (admin)", True, "200 OK")
+    except Exception as e:
+        record("POST /auth/login (admin)", False, f"login failed: {e}")
+        return 1
 
-# 4. Make distributor
-r = requests.post(
-    f"{API}/admin/users/{user_id}/distributor",
-    headers=H(tokenA),
-    json={"is_distributor": True},
-    timeout=30,
-)
-rec("mark user as distributor", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    # ---------- 1) GET /api/branding (public) ----------
+    try:
+        r = requests.get(f"{API}/branding", timeout=TIMEOUT)
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        required_keys = {"app_name", "tagline", "colors", "font", "tabs"}
+        missing = required_keys - set(body.keys())
+        if ok and not missing:
+            record("GET /branding", True, f"keys ok, app_name={body.get('app_name')!r}")
+        else:
+            record("GET /branding", False, f"status={r.status_code} missing={missing} body={r.text[:300]}")
+    except Exception as e:
+        record("GET /branding", False, str(e))
 
-# 5. Assign 3 pincodes
-r = requests.post(
-    f"{API}/admin/distributors/{user_id}/areas",
-    headers=H(tokenA),
-    json={"pincodes": ["500001", "500003", "500004"]},
-    timeout=30,
-)
-rec("assign 3 pincodes", r.status_code == 200, f"{r.status_code} {r.text[:300]}")
-
-# 6. Bulk-unassign 2
-r = requests.post(
-    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
-    headers=H(tokenA),
-    json={"pincodes": ["500001", "500003"]},
-    timeout=30,
-)
-ok = False
-detail = f"{r.status_code} {r.text[:300]}"
-if r.status_code == 200:
-    body = r.json()
-    if body.get("ok") and body.get("removed") == 2 and body.get("requested") == 2:
-        ok = True
-        detail = json.dumps(body)
-rec("bulk-unassign 2 pincodes (super_admin)", ok, detail)
-
-# 7. GET areas — only 500004 should remain
-r = requests.get(f"{API}/admin/distributors/{user_id}/areas", headers=H(tokenA), timeout=30)
-ok = False
-detail = f"{r.status_code} {r.text[:300]}"
-remaining_pins = []
-if r.status_code == 200:
-    body = r.json()
-    if isinstance(body, dict):
-        items = body.get("items") or body.get("areas") or []
-    else:
-        items = body or []
-    remaining_pins = sorted([(it.get("pincode") if isinstance(it, dict) else it) for it in items])
-    ok = remaining_pins == ["500004"]
-    detail = f"remaining={remaining_pins}"
-rec("GET areas after bulk-unassign -> only 500004", ok, detail)
-
-# 8. Empty array -> 400
-r = requests.post(
-    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
-    headers=H(tokenA),
-    json={"pincodes": []},
-    timeout=30,
-)
-rec("bulk-unassign empty -> 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
-
-# 9. Finance token -> 403
-r = requests.post(
-    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
-    headers=H(tokenF),
-    json={"pincodes": ["500004"]},
-    timeout=30,
-)
-rec("bulk-unassign as finance -> 403", r.status_code == 403, f"{r.status_code} {r.text[:200]}")
-
-# 10. GET in-region state+district
-r = requests.get(
-    f"{API}/admin/pincodes/in-region",
-    headers=H(tokenA),
-    params={"state": "Telangana", "district": "Hyderabad"},
-    timeout=60,
-)
-ok = False
-detail = f"{r.status_code} {r.text[:200]}"
-if r.status_code == 200:
-    body = r.json()
-    items = body.get("items") or []
-    total = body.get("total")
-    row_500004 = next((it for it in items if it.get("pincode") == "500004"), None)
-    others_assigned = [it for it in items if it.get("pincode") != "500004" and it.get("assigned_to") is not None]
-    has_fields = (
-        row_500004 is not None
-        and "state" in row_500004
-        and "district" in row_500004
-    )
-    if (
-        len(items) >= 1
-        and total == len(items)
-        and row_500004
-        and isinstance(row_500004.get("assigned_to"), dict)
-        and row_500004["assigned_to"].get("distributor_id") == user_id
-        and row_500004["assigned_to"].get("distributor_email") == test_email
-        and has_fields
-    ):
-        ok = True
-        detail = (
-            f"total={total} 500004.assigned_to={row_500004.get('assigned_to')} "
-            f"other_assigned_count={len(others_assigned)} sample_keys={list(items[0].keys())}"
+    # ---------- 2) PUT /api/admin/branding (super_admin partial update) ----------
+    new_tagline = "refactor regression test"
+    try:
+        r = requests.put(
+            f"{API}/admin/branding",
+            json={"tagline": new_tagline},
+            headers=auth(admin_tok),
+            timeout=TIMEOUT,
         )
-    else:
-        detail = (
-            f"total={total} items_len={len(items)} 500004={row_500004} "
-            f"first={items[0] if items else None}"
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        if ok and body.get("tagline") == new_tagline:
+            record("PUT /admin/branding", True, f"tagline updated to {new_tagline!r}")
+        else:
+            record("PUT /admin/branding", False, f"status={r.status_code} body={r.text[:300]}")
+    except Exception as e:
+        record("PUT /admin/branding", False, str(e))
+
+    # ---------- 3) POST /api/admin/branding/reset ----------
+    try:
+        r = requests.post(
+            f"{API}/admin/branding/reset", headers=auth(admin_tok), timeout=TIMEOUT,
         )
-rec("GET in-region(state=Telangana,district=Hyderabad) -> 500004 has assigned_to", ok, detail)
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        if ok and body.get("tagline") and body.get("tagline") != new_tagline:
+            record("POST /admin/branding/reset", True, f"reset ok, default tagline={body.get('tagline')!r}")
+        else:
+            record("POST /admin/branding/reset", False, f"status={r.status_code} body={r.text[:300]}")
+    except Exception as e:
+        record("POST /admin/branding/reset", False, str(e))
 
-# 11. No params -> 400
-r = requests.get(f"{API}/admin/pincodes/in-region", headers=H(tokenA), timeout=30)
-rec("GET in-region no params -> 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
+    # ---------- 4) GET /api/notifications/me ----------
+    try:
+        r = requests.get(f"{API}/notifications/me", headers=auth(admin_tok), timeout=TIMEOUT)
+        ok = r.status_code == 200 and isinstance(r.json(), list)
+        if ok:
+            record("GET /notifications/me", True, f"array len={len(r.json())}")
+        else:
+            record("GET /notifications/me", False, f"status={r.status_code} body={r.text[:300]}")
+    except Exception as e:
+        record("GET /notifications/me", False, str(e))
 
-# 12. district=NonExistentXyz -> 200 items=[]
-r = requests.get(
-    f"{API}/admin/pincodes/in-region",
-    headers=H(tokenA),
-    params={"district": "NonExistentXyz"},
-    timeout=30,
-)
-ok = False
-detail = f"{r.status_code} {r.text[:200]}"
-if r.status_code == 200:
-    body = r.json()
-    if body.get("items") == [] and body.get("total") == 0:
-        ok = True
-        detail = "empty"
-    else:
-        detail = json.dumps(body)[:300]
-rec("GET in-region district=NonExistentXyz -> items=[]", ok, detail)
+    # ---------- 5) POST /api/notifications/me/read-all ----------
+    try:
+        r = requests.post(f"{API}/notifications/me/read-all", headers=auth(admin_tok), timeout=TIMEOUT)
+        ok = r.status_code == 200 and r.json().get("ok") is True
+        if ok:
+            record("POST /notifications/me/read-all", True, "{ok:true}")
+        else:
+            record("POST /notifications/me/read-all", False, f"status={r.status_code} body={r.text[:300]}")
+    except Exception as e:
+        record("POST /notifications/me/read-all", False, str(e))
 
-# 13. Anon -> 401/403
-r = requests.get(
-    f"{API}/admin/pincodes/in-region",
-    params={"state": "Telangana"},
-    timeout=30,
-)
-rec("GET in-region anonymous -> 401/403", r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
+    # ---------- 6) GET /api/products (public, no auth) ----------
+    try:
+        r = requests.get(f"{API}/products", timeout=TIMEOUT)
+        ok = r.status_code == 200 and isinstance(r.json(), list)
+        if ok:
+            arr = r.json()
+            record("GET /products (public)", True, f"array len={len(arr)}")
+        else:
+            record("GET /products (public)", False, f"status={r.status_code} body={r.text[:300]}")
+    except Exception as e:
+        record("GET /products (public)", False, str(e))
 
-# CLEANUP
-print("\n--- cleanup ---")
-r = requests.post(
-    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
-    headers=H(tokenA),
-    json={"pincodes": ["500004"]},
-    timeout=30,
-)
-print("cleanup bulk-unassign:", r.status_code, r.text[:200])
+    # ---------- Sanity: GET /api/admin/stats ----------
+    try:
+        r = requests.get(f"{API}/admin/stats", headers=auth(admin_tok), timeout=TIMEOUT)
+        ok = r.status_code == 200
+        record("GET /admin/stats", ok, f"status={r.status_code}" + (f" body[:120]={r.text[:120]}" if not ok else ""))
+    except Exception as e:
+        record("GET /admin/stats", False, str(e))
 
-r = requests.post(
-    f"{API}/admin/users/{user_id}/distributor",
-    headers=H(tokenA),
-    json={"is_distributor": False},
-    timeout=30,
-)
-print("cleanup unmark distributor:", r.status_code, r.text[:200])
+    # ---------- Sanity: GET /api/admin/users ----------
+    try:
+        r = requests.get(f"{API}/admin/users", headers=auth(admin_tok), timeout=TIMEOUT)
+        ok = r.status_code == 200 and isinstance(r.json(), list)
+        if ok:
+            record("GET /admin/users", True, f"array len={len(r.json())}")
+        else:
+            record("GET /admin/users", False, f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        record("GET /admin/users", False, str(e))
 
-r = requests.delete(f"{API}/admin/users/{user_id}", headers=H(tokenA), timeout=30)
-print("cleanup delete user:", r.status_code, r.text[:200])
+    # ---------- Sanity: GET /api/admin/pincodes/in-region (route-ordering regression) ----------
+    try:
+        r = requests.get(
+            f"{API}/admin/pincodes/in-region",
+            params={"state": "Telangana", "district": "Hyderabad"},
+            headers=auth(admin_tok),
+            timeout=TIMEOUT,
+        )
+        ok = r.status_code == 200
+        if ok:
+            body = r.json()
+            total = body.get("total")
+            record("GET /admin/pincodes/in-region", True, f"total={total} items_len={len(body.get('items') or [])}")
+        else:
+            record("GET /admin/pincodes/in-region", False, f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        record("GET /admin/pincodes/in-region", False, str(e))
 
-# Summary
-total = len(results)
-passed = sum(1 for _, ok, _ in results if ok)
-print(f"\n==== {passed}/{total} passed ====")
-for n, ok, d in results:
-    print(("PASS" if ok else "FAIL"), "-", n, "::", d)
+    # ---------- summary ----------
+    print("\n========== RESULT SUMMARY ==========")
+    passed = sum(1 for _, ok, _ in results if ok)
+    failed = sum(1 for _, ok, _ in results if not ok)
+    for n, ok, d in results:
+        print(f"  {'PASS' if ok else 'FAIL'} — {n}{(' :: ' + d) if not ok and d else ''}")
+    print(f"\n  Total: {passed}/{len(results)} passed, {failed} failed")
+    return 0 if failed == 0 else 2
 
-sys.exit(0 if passed == total else 1)
+
+if __name__ == "__main__":
+    sys.exit(main())

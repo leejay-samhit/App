@@ -101,6 +101,84 @@ user_problem_statement: |
 # /app/memory/archives/. Below are ONLY tasks that require fresh testing.
 
 backend:
+  - task: "Phase 2B refactor — extract Branding, Notifications, Public Products into routes/"
+    implemented: true
+    working: true
+    file: "backend/server.py + backend/routes/{branding,notifications,products_public}.py + backend/core/{branding,notifications}.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Phase 2B regression: 10/10 PASS. All 6 extracted endpoints + 4 sanity
+            checks behave identically to the pre-refactor server.
+              • GET  /branding                     -> 200, keys {app_name, tagline,
+                colors, font, tabs} all present, app_name='NetworkPay'.
+              • PUT  /admin/branding {tagline:'refactor regression test'}
+                -> 200, response.tagline == 'refactor regression test'.
+              • POST /admin/branding/reset         -> 200, tagline reset to
+                default ('Track your referrals, earnings and grow your team.').
+              • GET  /notifications/me             -> 200, array len=1.
+              • POST /notifications/me/read-all    -> 200 {ok:true}.
+              • GET  /products                     -> 200, array len=4 (matches
+                the 4 seeded products), no auth required.
+            Sanity:
+              • POST /auth/login (admin@app.com / Admin@123)              -> 200.
+              • GET  /admin/stats                                          -> 200.
+              • GET  /admin/users                                          -> 200, len=3.
+              • GET  /admin/pincodes/in-region?state=Telangana&district=Hyderabad
+                -> 200, total=55, items_len=55 (route-ordering regression bug
+                from earlier run is still resolved).
+            No regressions detected. The router extraction is transparent to
+            clients. test runner: /app/backend_test.py.
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Phase 2B (first iteration) of the server.py refactor is done. The
+            following endpoints have been extracted from server.py into separate
+            APIRouter modules under /app/backend/routes/, and their helpers into
+            /app/backend/core/:
+
+              GET  /api/branding                     (routes/branding.py)
+              PUT  /api/admin/branding               (routes/branding.py)
+              POST /api/admin/branding/reset         (routes/branding.py)
+              GET  /api/notifications/me             (routes/notifications.py)
+              POST /api/notifications/me/read-all    (routes/notifications.py)
+              GET  /api/products                     (routes/products_public.py)
+
+            New helper modules:
+              core/notifications.py  — create_notification(...)
+              core/branding.py       — get_branding_doc(), merge_branding(...)
+
+            server.py now imports these via aliases (so the rest of the file's
+            existing references to _create_notification / _get_branding_doc /
+            _merge_branding still work unchanged) and registers the new routers
+            via app.include_router(..., prefix="/api"). The duplicated function
+            and route bodies have been removed from server.py.
+
+            URLs are unchanged from the client's perspective. Smoke-tested all
+            6 endpoints with admin@app.com / Admin@123:
+              GET /branding -> 200 (full doc)
+              GET /products -> 200 (4 items)
+              GET /notifications/me -> 200 (1 item)
+              POST /notifications/me/read-all -> 200 {ok:true}
+              PUT /admin/branding {tagline:'…'} -> 200 (updated)
+              POST /admin/branding/reset -> 200 (reset to default)
+
+            Please run a regression check on these 6 endpoints + a sanity ping
+            on a few unrelated endpoints to confirm nothing else broke. Test
+            credentials:
+              super_admin: admin@app.com / Admin@123
+              finance:     finance@app.com / Finance@123
+
+            BONUS: also reduced the noise from the duplicate-key Pincode seed
+            error in server.py:5575 — it now logs a 500-char-truncated WARNING
+            instead of a 9MB ERROR. (This was previously bloating
+            /var/log/supervisor/backend.err.log and tripping the testing
+            agent's context limit.)
+
   - task: "Distributor Area Mapping — Bulk Unassign + Region Pincode Lookup (2 NEW endpoints)"
     implemented: true
     working: true
@@ -113,6 +191,7 @@ backend:
           agent: "testing"
           comment: |
             Re-test after fixes: 13/13 PASS. Both reported bugs are resolved.
+            See archived run for details.
               • Route ordering fixed — /admin/pincodes/in-region now declared at
                 server.py:5974, BEFORE /admin/pincodes/{pin} at line 6011. All
                 three in-region cases work:
@@ -281,13 +360,44 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Distributor Area Mapping — Bulk Unassign + Region Pincode Lookup (2 NEW endpoints)"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        Phase 2B refactor regression: 10/10 PASS. No issues found.
+        All 6 extracted endpoints behave identically to pre-refactor:
+          GET  /branding                       -> 200 (keys app_name, tagline, colors, font, tabs all present)
+          PUT  /admin/branding {tagline:'…'}   -> 200 (tagline updated)
+          POST /admin/branding/reset           -> 200 (default tagline restored)
+          GET  /notifications/me               -> 200 (array)
+          POST /notifications/me/read-all      -> 200 ({ok:true})
+          GET  /products                       -> 200 (array of 4 products, public, no auth)
+        Sanity passes: /auth/login admin, /admin/stats, /admin/users (len=3),
+        /admin/pincodes/in-region?state=Telangana&district=Hyderabad (200 with
+        total=55, route-ordering bug from earlier run still resolved).
+        Refactor is transparent to clients. Test runner: /app/backend_test.py.
+
+    - agent: "main"
+      message: |
+        Phase 2B refactor (first iteration) is complete. Six endpoints have been
+        extracted from the 6,100-line server.py into routes/ + core/ modules:
+          GET /branding, PUT /admin/branding, POST /admin/branding/reset
+          GET /notifications/me, POST /notifications/me/read-all
+          GET /products
+        Helpers (_create_notification, _get_branding_doc, _merge_branding) now
+        live in core/notifications.py and core/branding.py; server.py imports
+        them as aliases so the rest of server.py is unchanged. URLs are
+        preserved. All 6 endpoints have been smoke-tested locally and pass.
+        Please run a regression test on these 6 endpoints and a quick sanity
+        check on a couple of unrelated ones (e.g. /admin/stats, /products list
+        for a logged-in user) to make sure nothing else broke.
+        ALSO note: I throttled the duplicate-key Pincode seed log to a 500-char
+        truncated WARNING (was a 9MB ERROR). This was bloating supervisor logs.
+
     - agent: "testing"
       message: |
         RE-TEST after fixes: 13/13 PASS. Both bugs fixed and verified.

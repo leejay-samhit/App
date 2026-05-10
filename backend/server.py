@@ -141,6 +141,15 @@ from core.danger import (  # noqa: E402
     get_danger_pin_hash,
     verify_danger_pin,
 )
+# Phase 2B: shared notification + branding helpers + routers
+from core.notifications import create_notification as _create_notification  # noqa: E402,F401
+from core.branding import (  # noqa: E402
+    get_branding_doc as _get_branding_doc,
+    merge_branding as _merge_branding,
+)
+from routes import branding as branding_router  # noqa: E402
+from routes import notifications as notifications_router  # noqa: E402
+from routes import products_public as products_public_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -503,18 +512,6 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
             "linked_payout_to_user_id": sponsor_user["id"],
             "created_at": ts,
         })
-
-
-async def _create_notification(user_id: str, kind: str, title: str, body: str):
-    await db.notifications.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user_id,
-        "kind": kind,
-        "title": title,
-        "body": body,
-        "read": False,
-        "created_at": now_utc().isoformat(),
-    })
 
 
 async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
@@ -1447,137 +1444,16 @@ async def wallet_transfer(payload: WalletTransfer, user: Dict[str, Any] = Depend
 
 
 # ------------------ Products (E-commerce placeholder) ------------------
-@api_router.get("/products")
-async def list_products():
-    items = await db.products.find(
-        {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]},
-        {"_id": 0},
-    ).sort("created_at", -1).to_list(1000)
-    return items
+# Public list endpoint (GET /products) extracted to
+# /app/backend/routes/products_public.py during Phase 2B refactor.
 
 
 # ------------------ Branding (public read, super_admin write) ------------------
-async def _get_branding_doc() -> Dict[str, Any]:
-    doc = await db.settings.find_one({"id": "branding"}, {"_id": 0})
-    if not doc:
-        doc = {"id": "branding", **DEFAULT_BRANDING}
-        await db.settings.insert_one(doc)
-    return doc
-
-
-def _merge_branding(stored: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge stored branding over defaults so partial docs always serve a complete object."""
-    out: Dict[str, Any] = json.loads(json.dumps(DEFAULT_BRANDING))
-    for k, v in stored.items():
-        if k == "_id" or k == "id":
-            continue
-        if k == "colors" and isinstance(v, dict):
-            out["colors"].update(v)
-        elif k == "tabs" and isinstance(v, list) and v:
-            # keep ordering from stored, drop unknown tab keys
-            seen = set()
-            merged: List[Dict[str, Any]] = []
-            for t in v:
-                if not isinstance(t, dict):
-                    continue
-                key = t.get("key")
-                if key in ALLOWED_TAB_KEYS and key not in seen:
-                    default_t = next((d for d in DEFAULT_BRANDING["tabs"] if d["key"] == key), {})
-                    merged.append({
-                        "key": key,
-                        "label": t.get("label") or default_t.get("label", key.title()),
-                        "icon": t.get("icon") or default_t.get("icon", "circle"),
-                        "visible": bool(t.get("visible", True)),
-                    })
-                    seen.add(key)
-            # Append any tabs missing from stored as visible-by-default in their original order
-            for d in DEFAULT_BRANDING["tabs"]:
-                if d["key"] not in seen:
-                    merged.append(dict(d))
-            out["tabs"] = merged
-        else:
-            out[k] = v
-    return out
-
-
-@api_router.get("/branding")
-async def get_branding():
-    """PUBLIC endpoint — returns current branding so the app can theme itself
-    before the user is authenticated."""
-    stored = await _get_branding_doc()
-    return _merge_branding(stored)
-
-
-@api_router.put("/admin/branding")
-async def admin_update_branding(
-    payload: BrandingPayload,
-    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
-):
-    update: Dict[str, Any] = {}
-    if payload.app_name is not None:
-        update["app_name"] = payload.app_name.strip()[:60] or DEFAULT_BRANDING["app_name"]
-    if payload.tagline is not None:
-        update["tagline"] = payload.tagline.strip()[:200]
-    if payload.login_subtitle is not None:
-        update["login_subtitle"] = payload.login_subtitle.strip()[:120]
-    if payload.payment_hero is not None:
-        update["payment_hero"] = payload.payment_hero.strip()[:120]
-    if payload.pending_hero is not None:
-        update["pending_hero"] = payload.pending_hero.strip()[:120]
-    if payload.colors is not None:
-        # Only accept hex-like values for known keys
-        clean: Dict[str, str] = {}
-        for k, v in payload.colors.items():
-            if k in DEFAULT_BRANDING["colors"] and isinstance(v, str):
-                v = v.strip()
-                if re.match(r"^#[0-9A-Fa-f]{3,8}$", v):
-                    clean[k] = v
-        if clean:
-            existing = (await _get_branding_doc()).get("colors") or {}
-            existing.update(clean)
-            update["colors"] = existing
-    if payload.font is not None:
-        if payload.font not in ALLOWED_FONTS:
-            raise HTTPException(status_code=400, detail=f"Font must be one of: {sorted(ALLOWED_FONTS)}")
-        update["font"] = payload.font
-    if payload.tabs is not None:
-        cleaned: List[Dict[str, Any]] = []
-        seen: set = set()
-        for t in payload.tabs:
-            key = t.get("key")
-            if key in ALLOWED_TAB_KEYS and key not in seen:
-                default_t = next((d for d in DEFAULT_BRANDING["tabs"] if d["key"] == key), {})
-                cleaned.append({
-                    "key": key,
-                    "label": (t.get("label") or default_t.get("label", key.title())).strip()[:24],
-                    "icon": t.get("icon") or default_t.get("icon", "circle"),
-                    "visible": bool(t.get("visible", True)),
-                })
-                seen.add(key)
-        # Ensure all known tabs are present (append the missing ones at the end as visible)
-        for d in DEFAULT_BRANDING["tabs"]:
-            if d["key"] not in seen:
-                cleaned.append(dict(d))
-        # Require at least 1 visible tab
-        if not any(t["visible"] for t in cleaned):
-            raise HTTPException(status_code=400, detail="At least one tab must be visible")
-        update["tabs"] = cleaned
-
-    if not update:
-        raise HTTPException(status_code=400, detail="No fields provided")
-
-    await db.settings.update_one({"id": "branding"}, {"$set": update}, upsert=True)
-    await _audit_log(admin, "branding.update", "branding", "global", {"fields": list(update.keys())})
-    stored = await _get_branding_doc()
-    return _merge_branding(stored)
-
-
-@api_router.post("/admin/branding/reset")
-async def admin_reset_branding(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
-    await db.settings.update_one({"id": "branding"}, {"$set": dict(DEFAULT_BRANDING)}, upsert=True)
-    await _audit_log(admin, "branding.reset", "branding", "global")
-    stored = await _get_branding_doc()
-    return _merge_branding(stored)
+# Helpers (_get_branding_doc / _merge_branding) and the three routes
+# (GET /branding, PUT/POST /admin/branding, /admin/branding/reset) have been
+# extracted to /app/backend/core/branding.py and /app/backend/routes/branding.py
+# during the Phase 2B refactor. server.py imports the helpers as aliases at the
+# top of the file so the rest of this module's code keeps working unchanged.
 
 
 # ------------------ Admin Endpoints ------------------
@@ -2812,19 +2688,8 @@ async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 # ------------------ Notifications ------------------
-@api_router.get("/notifications/me")
-async def my_notifications(user: Dict[str, Any] = Depends(get_current_user), unread_only: bool = False):
-    q = {"user_id": user["id"]}
-    if unread_only:
-        q["read"] = False
-    items = await db.notifications.find(q, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
-    return items
-
-
-@api_router.post("/notifications/me/read-all")
-async def read_all_notifications(user: Dict[str, Any] = Depends(get_current_user)):
-    await db.notifications.update_many({"user_id": user["id"], "read": False}, {"$set": {"read": True}})
-    return {"ok": True}
+# Routes (GET /notifications/me, POST /notifications/me/read-all) extracted to
+# /app/backend/routes/notifications.py during Phase 2B refactor.
 
 
 # ------------------ Phase 1: KYC ------------------
@@ -5703,7 +5568,12 @@ async def seed_pincodes():
         await db.pincodes.create_index("district")
         return total
     except Exception as e:
-        logger.error(f"Pincode seed failed: {e}")
+        # Truncate enormous BulkWriteError dicts so they don't bloat supervisor logs.
+        # The duplicate-key noise on pincode reseed is expected when pincodes already exist.
+        msg = str(e)
+        if len(msg) > 500:
+            msg = msg[:500] + f" ... [truncated, total {len(str(e))} chars]"
+        logger.warning(f"Pincode seed skipped/failed: {msg}")
         return 0
 
 
@@ -6085,6 +5955,12 @@ async def my_service_bookings(role: Optional[str] = "all", user: Dict[str, Any] 
 
 # Include router
 app.include_router(api_router)
+
+# Phase 2B refactor: extracted routers, mounted at /api so URLs are unchanged
+# from the client's perspective.
+app.include_router(branding_router.router, prefix="/api")
+app.include_router(notifications_router.router, prefix="/api")
+app.include_router(products_public_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
