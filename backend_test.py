@@ -1,351 +1,262 @@
-"""Backend test for Distributor Network / Area Mapping feature.
+"""Backend test for 2 NEW Distributor Area-Mapping admin endpoints.
 
-Tests 7 endpoints + 19,300 India pincodes seed against:
-  https://network-pay-1.preview.emergentagent.com
+Endpoints:
+  POST /api/admin/distributors/{user_id}/areas/bulk-unassign
+  GET  /api/admin/pincodes/in-region?state=&district=&limit=
 """
+import os
 import sys
+import json
 import uuid
 import requests
 
-BASE = "https://network-pay-1.preview.emergentagent.com/api"
+ENV_PATH = "/app/frontend/.env"
+BASE = None
+with open(ENV_PATH) as f:
+    for ln in f:
+        if ln.startswith("EXPO_PUBLIC_BACKEND_URL="):
+            BASE = ln.strip().split("=", 1)[1].strip().strip('"')
+            break
+assert BASE, "EXPO_PUBLIC_BACKEND_URL missing"
+API = BASE.rstrip("/") + "/api"
+print(f"API base: {API}")
+
+results = []
+def rec(name, ok, detail=""):
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name} :: {detail}")
+    results.append((name, ok, detail))
+
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASSWORD = "Admin@123"
-FINANCE_EMAIL = "finance@app.com"
-FINANCE_PASSWORD = "Finance@123"
-
-PASS = []
-FAIL = []
+ADMIN_PASS = "Admin@123"
+FIN_EMAIL = "finance@app.com"
+FIN_PASS = "Finance@123"
 
 
-def check(label: str, ok: bool, detail: str = ""):
-    if ok:
-        PASS.append(label)
-        print(f"  PASS {label}")
-    else:
-        FAIL.append((label, detail))
-        print(f"  FAIL {label}  ::  {detail}")
+def login(email, password):
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=30)
+    if r.status_code != 200:
+        return None, r
+    return r.json().get("token"), r
 
 
 def H(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def login(email: str, password: str):
-    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": password}, timeout=20)
-    if r.status_code != 200:
-        return None, r
-    j = r.json()
-    return j["token"], r
+# 1. Login admin
+tokenA, r = login(ADMIN_EMAIL, ADMIN_PASS)
+if not tokenA:
+    rec("admin login", False, f"{r.status_code} {r.text[:200]}")
+    sys.exit(1)
+rec("admin login", True, "tokenA acquired")
 
-
-def register(name, email, password, ref_code=None):
-    body = {"name": name, "email": email, "password": password}
-    if ref_code:
-        body["referral_code"] = ref_code
-    r = requests.post(f"{BASE}/auth/register", json=body, timeout=20)
-    return r
-
-
-def main():
-    print("\n=== Login as super_admin ===")
-    admin_tok, r = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    check("admin login -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if not admin_tok:
-        print("FATAL: cannot login admin")
-        return False
-
-    r = requests.get(f"{BASE}/auth/me", headers=H(admin_tok), timeout=20)
-    admin_id = r.json()["id"]
-    print(f"  admin_id={admin_id}")
-
-    # Ensure finance admin exists (seed if needed)
-    fin_tok, r = login(FINANCE_EMAIL, FINANCE_PASSWORD)
-    if not fin_tok:
-        print("  finance login failed, creating finance admin via /admin/admins")
-        rc = requests.post(
-            f"{BASE}/admin/admins",
-            headers=H(admin_tok),
-            json={"name": "Finance Admin", "email": FINANCE_EMAIL,
-                  "password": FINANCE_PASSWORD, "phone": "9999000001",
-                  "admin_role": "finance"},
-            timeout=20,
-        )
-        print(f"  /admin/admins create -> {rc.status_code} {rc.text[:200]}")
-        fin_tok, r = login(FINANCE_EMAIL, FINANCE_PASSWORD)
-    check("finance login -> 200", bool(fin_tok), f"{r.status_code} {r.text[:200]}")
-
-    # ========== SCENARIO 1: search by digit prefix ==========
-    print("\n=== S1: GET /admin/pincodes/search?q=500001 ===")
-    r = requests.get(f"{BASE}/admin/pincodes/search", headers=H(admin_tok),
-                     params={"q": "500001"}, timeout=20)
-    check("S1.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        items = r.json().get("items", [])
-        check("S1.2 at least 1 row", len(items) >= 1, f"got {len(items)}")
-        if items:
-            row = next((x for x in items if x.get("pincode") == "500001"), items[0])
-            check("S1.3 district == Hyderabad",
-                  (row.get("district") or "").lower() == "hyderabad",
-                  f"district={row.get('district')}")
-            check("S1.4 state == Telangana",
-                  (row.get("state") or "").lower() == "telangana",
-                  f"state={row.get('state')}")
-
-    # ========== SCENARIO 2: text search ==========
-    print("\n=== S2: GET /admin/pincodes/search?q=Bangalore ===")
-    r = requests.get(f"{BASE}/admin/pincodes/search", headers=H(admin_tok),
-                     params={"q": "Bangalore"}, timeout=20)
-    check("S2.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        items = r.json().get("items", [])
-        check("S2.2 at least 1 row", len(items) >= 1, f"got {len(items)}")
-        karnataka_rows = [x for x in items if (x.get("state") or "").lower() == "karnataka"]
-        check("S2.3 has rows with state=Karnataka",
-              len(karnataka_rows) >= 1,
-              f"karnataka_count={len(karnataka_rows)}, sample={items[:2]}")
-
-    # ========== SCENARIO 3: 404 on non-existent pincode ==========
-    print("\n=== S3: GET /admin/pincodes/000000 -> 404 ===")
-    r = requests.get(f"{BASE}/admin/pincodes/000000", headers=H(admin_tok), timeout=20)
-    check("S3.1 status 404", r.status_code == 404, f"{r.status_code} {r.text[:200]}")
-
-    # ========== SCENARIO 4: register two non-admin users + promote ==========
-    print("\n=== S4: register two users + promote first ===")
-    rand_a = uuid.uuid4().hex[:8]
-    rand_b = uuid.uuid4().hex[:8]
-    email_a = f"distb1.{rand_a}@mailinator.com"
-    email_b = f"distb2.{rand_b}@mailinator.com"
-
-    ra = register("Ravi Distributor", email_a, "Pass@1234")
-    check("S4.0a register user A", ra.status_code == 200, f"{ra.status_code} {ra.text[:200]}")
-    if ra.status_code != 200:
-        return False
-    user_a_id = ra.json()["user"]["id"]
-
-    rb = register("Sneha Distributor", email_b, "Pass@1234")
-    check("S4.0b register user B", rb.status_code == 200, f"{rb.status_code} {rb.text[:200]}")
-    if rb.status_code != 200:
-        return False
-    user_b_id = rb.json()["user"]["id"]
-
-    r = requests.post(f"{BASE}/admin/users/{user_a_id}/distributor",
-                      headers=H(admin_tok), json={"is_distributor": True}, timeout=20)
-    check("S4.1 promote A -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        check("S4.2 is_distributor=true",
-              r.json().get("is_distributor") is True, f"resp={r.json()}")
-
-    # ========== SCENARIO 5: list distributors ==========
-    print("\n=== S5: GET /admin/distributors ===")
-    r = requests.get(f"{BASE}/admin/distributors", headers=H(admin_tok), timeout=20)
-    check("S5.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        items = r.json().get("items", [])
-        a_row = next((x for x in items if x.get("id") == user_a_id), None)
-        check("S5.2 user A in distributors list", a_row is not None,
-              f"items_emails={[x.get('email') for x in items]}")
-        if a_row:
-            check("S5.3 pincode_count == 0",
-                  a_row.get("pincode_count") == 0, f"count={a_row.get('pincode_count')}")
-
-    # ========== SCENARIO 6: assign with one invalid pincode -> 400 ==========
-    print("\n=== S6: POST areas with bad pincode -> 400 ===")
-    r = requests.post(
-        f"{BASE}/admin/distributors/{user_a_id}/areas",
-        headers=H(admin_tok),
-        json={"pincodes": ["500001", "500003", "999999"]},
-        timeout=20,
+# 2. Login finance else create
+tokenF, r = login(FIN_EMAIL, FIN_PASS)
+if not tokenF:
+    print(f"finance login failed ({r.status_code}); creating finance admin")
+    cr = requests.post(
+        f"{API}/admin/admins",
+        headers=H(tokenA),
+        json={"email": FIN_EMAIL, "password": FIN_PASS, "name": "Finance Admin", "admin_role": "finance"},
+        timeout=30,
     )
-    check("S6.1 status 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 400:
-        detail = r.json().get("detail", "")
-        check("S6.2 detail mentions 999999 / not in master",
-              "999999" in detail or "not in master" in detail.lower(),
-              f"detail={detail}")
-
-    # ========== SCENARIO 7: assign 2 valid pincodes -> 200 ==========
-    print("\n=== S7: POST areas {500001, 500003} ===")
-    r = requests.post(
-        f"{BASE}/admin/distributors/{user_a_id}/areas",
-        headers=H(admin_tok),
-        json={"pincodes": ["500001", "500003"]},
-        timeout=20,
-    )
-    check("S7.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        body = r.json()
-        check("S7.2 new_assignments == 2",
-              body.get("new_assignments") == 2, f"resp={body}")
-
-    # ========== SCENARIO 8: GET areas -> 2 items with district/state ==========
-    print("\n=== S8: GET /admin/distributors/{a}/areas ===")
-    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
-                     headers=H(admin_tok), timeout=20)
-    check("S8.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        body = r.json()
-        items = body.get("items", [])
-        check("S8.2 total=2", body.get("total") == 2 and len(items) == 2,
-              f"total={body.get('total')}, items={items}")
-        for it in items:
-            check(f"S8.3[{it.get('pincode')}] district filled",
-                  bool(it.get("district")), f"row={it}")
-            check(f"S8.4[{it.get('pincode')}] state filled",
-                  bool(it.get("state")), f"row={it}")
-        r1 = next((x for x in items if x.get("pincode") == "500001"), None)
-        if r1:
-            check("S8.5 500001 -> Hyderabad/Telangana",
-                  (r1.get("district") or "").lower() == "hyderabad" and
-                  (r1.get("state") or "").lower() == "telangana",
-                  f"row={r1}")
-
-    # ========== SCENARIO 9: promote B + assign 500001 -> reassigned=1 ==========
-    print("\n=== S9: promote B + assign 500001 -> reassigned=1 ===")
-    r = requests.post(f"{BASE}/admin/users/{user_b_id}/distributor",
-                      headers=H(admin_tok), json={"is_distributor": True}, timeout=20)
-    check("S9.0 promote B -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-
-    r = requests.post(
-        f"{BASE}/admin/distributors/{user_b_id}/areas",
-        headers=H(admin_tok),
-        json={"pincodes": ["500001"]},
-        timeout=20,
-    )
-    check("S9.1 status 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        body = r.json()
-        check("S9.2 reassigned == 1",
-              body.get("reassigned") == 1, f"resp={body}")
-
-    # ========== SCENARIO 10: A no longer has 500001; B has it ==========
-    print("\n=== S10: exclusivity check ===")
-    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
-                     headers=H(admin_tok), timeout=20)
-    if r.status_code == 200:
-        a_pins = [x.get("pincode") for x in r.json().get("items", [])]
-        check("S10.1 A no longer has 500001",
-              "500001" not in a_pins, f"A pins={a_pins}")
-        check("S10.2 A still has 500003",
-              "500003" in a_pins, f"A pins={a_pins}")
-
-    r = requests.get(f"{BASE}/admin/distributors/{user_b_id}/areas",
-                     headers=H(admin_tok), timeout=20)
-    if r.status_code == 200:
-        b_pins = [x.get("pincode") for x in r.json().get("items", [])]
-        check("S10.3 B has 500001",
-              "500001" in b_pins, f"B pins={b_pins}")
-
-    # Verify via single-pincode lookup
-    r = requests.get(f"{BASE}/admin/pincodes/500001", headers=H(admin_tok), timeout=20)
-    if r.status_code == 200:
-        a = r.json().get("assigned_to") or {}
-        check("S10.4 /pincodes/500001 assigned_to.distributor_id == B",
-              a.get("distributor_id") == user_b_id, f"assigned_to={a}")
-
-    # ========== SCENARIO 11: DELETE B's mapping for 500001 ==========
-    print("\n=== S11: DELETE /distributors/B/areas/500001 ===")
-    r = requests.delete(f"{BASE}/admin/distributors/{user_b_id}/areas/500001",
-                        headers=H(admin_tok), timeout=20)
-    check("S11.1 DELETE -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    r = requests.get(f"{BASE}/admin/distributors/{user_b_id}/areas",
-                     headers=H(admin_tok), timeout=20)
-    if r.status_code == 200:
-        items = r.json().get("items", [])
-        check("S11.2 B's areas now empty",
-              len(items) == 0, f"items={items}")
-
-    # ========== SCENARIO 12: cannot promote admin ==========
-    print("\n=== S12: promote admin user -> 400 ===")
-    r = requests.post(f"{BASE}/admin/users/{admin_id}/distributor",
-                      headers=H(admin_tok), json={"is_distributor": True}, timeout=20)
-    check("S12.1 status 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 400:
-        check("S12.2 detail mentions admins",
-              "admin" in r.json().get("detail", "").lower(),
-              f"detail={r.json().get('detail')}")
-
-    # ========== SCENARIO 13: demote A -> mappings dropped ==========
-    print("\n=== S13: demote A -> mappings dropped ===")
-    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
-                     headers=H(admin_tok), timeout=20)
-    pre_count = len(r.json().get("items", [])) if r.status_code == 200 else 0
-    check("S13.0 A had >=1 mapping pre-demote", pre_count >= 1, f"pre_count={pre_count}")
-
-    r = requests.post(f"{BASE}/admin/users/{user_a_id}/distributor",
-                      headers=H(admin_tok), json={"is_distributor": False}, timeout=20)
-    check("S13.1 demote A -> 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-
-    r = requests.get(f"{BASE}/admin/distributors/{user_a_id}/areas",
-                     headers=H(admin_tok), timeout=20)
-    if r.status_code == 200:
-        items = r.json().get("items", [])
-        check("S13.2 A's mappings dropped",
-              len(items) == 0, f"items={items}")
-
-    r = requests.get(f"{BASE}/admin/distributors", headers=H(admin_tok), timeout=20)
-    if r.status_code == 200:
-        ids = [x.get("id") for x in r.json().get("items", [])]
-        check("S13.3 A not in distributors list anymore",
-              user_a_id not in ids, f"A_in_list={user_a_id in ids}")
-
-    # ========== SCENARIO 14: no auth -> 401 ==========
-    print("\n=== S14: anon -> 401 ===")
-    r = requests.get(f"{BASE}/admin/pincodes/search?q=500001", timeout=20)
-    check("S14.1 search anon -> 401",
-          r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
-    r = requests.get(f"{BASE}/admin/distributors", timeout=20)
-    check("S14.2 list anon -> 401",
-          r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
-    r = requests.post(f"{BASE}/admin/distributors/{user_b_id}/areas",
-                      json={"pincodes": ["500001"]}, timeout=20)
-    check("S14.3 assign anon -> 401",
-          r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
-
-    # ========== SCENARIO 15: finance -> 403 on POST/DELETE ==========
-    print("\n=== S15: finance role -> 403 on mutations ===")
-    if fin_tok:
-        r = requests.get(f"{BASE}/admin/pincodes/search?q=500001",
-                         headers=H(fin_tok), timeout=20)
-        check("S15.0 finance GET search -> 200", r.status_code == 200,
-              f"{r.status_code} {r.text[:200]}")
-
-        r = requests.post(f"{BASE}/admin/users/{user_b_id}/distributor",
-                          headers=H(fin_tok),
-                          json={"is_distributor": False}, timeout=20)
-        check("S15.1 finance promote -> 403", r.status_code == 403,
-              f"{r.status_code} {r.text[:200]}")
-
-        r = requests.post(f"{BASE}/admin/distributors/{user_b_id}/areas",
-                          headers=H(fin_tok),
-                          json={"pincodes": ["500001"]}, timeout=20)
-        check("S15.2 finance assign -> 403", r.status_code == 403,
-              f"{r.status_code} {r.text[:200]}")
-
-        r = requests.delete(f"{BASE}/admin/distributors/{user_b_id}/areas/500001",
-                            headers=H(fin_tok), timeout=20)
-        check("S15.3 finance unassign -> 403", r.status_code == 403,
-              f"{r.status_code} {r.text[:200]}")
+    if cr.status_code not in (200, 201):
+        rec("create finance admin", False, f"{cr.status_code} {cr.text[:200]}")
     else:
-        print("  WARNING: skipping finance tests -- login failed")
+        rec("create finance admin", True, "")
+    tokenF, r = login(FIN_EMAIL, FIN_PASS)
+if not tokenF:
+    rec("finance login", False, f"{r.status_code} {r.text[:200]}")
+    sys.exit(1)
+rec("finance login", True, "tokenF acquired")
 
-    # ========== Cleanup ==========
-    print("\n=== Cleanup ===")
-    requests.post(f"{BASE}/admin/users/{user_b_id}/distributor",
-                  headers=H(admin_tok), json={"is_distributor": False}, timeout=20)
-    for uid in (user_a_id, user_b_id):
-        rd = requests.delete(f"{BASE}/admin/users/{uid}", headers=H(admin_tok), timeout=20)
-        print(f"  delete {uid[:8]} -> {rd.status_code}")
+# 3. Register fresh user
+suffix = uuid.uuid4().hex[:8]
+test_email = f"distrib_{suffix}@example.com"
+reg_payload = {
+    "name": f"Distrib Test {suffix}",
+    "email": test_email,
+    "password": "Test@1234",
+    "phone": "9000000000",
+}
+r = requests.post(f"{API}/auth/register", json=reg_payload, timeout=30)
+if r.status_code != 200:
+    rec("register fresh user", False, f"{r.status_code} {r.text[:300]}")
+    sys.exit(1)
+rj = r.json()
+user_token = rj.get("token") or rj.get("access_token")
+user_id = (rj.get("user") or {}).get("id") or rj.get("id")
+if not user_id and user_token:
+    me = requests.get(f"{API}/auth/me", headers=H(user_token), timeout=30).json()
+    user_id = me.get("id")
+rec("register fresh user", bool(user_id), f"user_id={user_id} email={test_email}")
 
-    print("\n" + "=" * 70)
-    print(f"TOTAL: PASS={len(PASS)}  FAIL={len(FAIL)}")
-    if FAIL:
-        print("\nFAILURES:")
-        for label, detail in FAIL:
-            print(f"  FAIL {label} :: {detail}")
-    print("=" * 70)
-    return len(FAIL) == 0
+# 4. Make distributor
+r = requests.post(
+    f"{API}/admin/users/{user_id}/distributor",
+    headers=H(tokenA),
+    json={"is_distributor": True},
+    timeout=30,
+)
+rec("mark user as distributor", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
 
+# 5. Assign 3 pincodes
+r = requests.post(
+    f"{API}/admin/distributors/{user_id}/areas",
+    headers=H(tokenA),
+    json={"pincodes": ["500001", "500003", "500004"]},
+    timeout=30,
+)
+rec("assign 3 pincodes", r.status_code == 200, f"{r.status_code} {r.text[:300]}")
 
-if __name__ == "__main__":
-    ok = main()
-    sys.exit(0 if ok else 1)
+# 6. Bulk-unassign 2
+r = requests.post(
+    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
+    headers=H(tokenA),
+    json={"pincodes": ["500001", "500003"]},
+    timeout=30,
+)
+ok = False
+detail = f"{r.status_code} {r.text[:300]}"
+if r.status_code == 200:
+    body = r.json()
+    if body.get("ok") and body.get("removed") == 2 and body.get("requested") == 2:
+        ok = True
+        detail = json.dumps(body)
+rec("bulk-unassign 2 pincodes (super_admin)", ok, detail)
+
+# 7. GET areas — only 500004 should remain
+r = requests.get(f"{API}/admin/distributors/{user_id}/areas", headers=H(tokenA), timeout=30)
+ok = False
+detail = f"{r.status_code} {r.text[:300]}"
+remaining_pins = []
+if r.status_code == 200:
+    body = r.json()
+    if isinstance(body, dict):
+        items = body.get("items") or body.get("areas") or []
+    else:
+        items = body or []
+    remaining_pins = sorted([(it.get("pincode") if isinstance(it, dict) else it) for it in items])
+    ok = remaining_pins == ["500004"]
+    detail = f"remaining={remaining_pins}"
+rec("GET areas after bulk-unassign -> only 500004", ok, detail)
+
+# 8. Empty array -> 400
+r = requests.post(
+    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
+    headers=H(tokenA),
+    json={"pincodes": []},
+    timeout=30,
+)
+rec("bulk-unassign empty -> 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
+
+# 9. Finance token -> 403
+r = requests.post(
+    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
+    headers=H(tokenF),
+    json={"pincodes": ["500004"]},
+    timeout=30,
+)
+rec("bulk-unassign as finance -> 403", r.status_code == 403, f"{r.status_code} {r.text[:200]}")
+
+# 10. GET in-region state+district
+r = requests.get(
+    f"{API}/admin/pincodes/in-region",
+    headers=H(tokenA),
+    params={"state": "Telangana", "district": "Hyderabad"},
+    timeout=60,
+)
+ok = False
+detail = f"{r.status_code} {r.text[:200]}"
+if r.status_code == 200:
+    body = r.json()
+    items = body.get("items") or []
+    total = body.get("total")
+    row_500004 = next((it for it in items if it.get("pincode") == "500004"), None)
+    others_assigned = [it for it in items if it.get("pincode") != "500004" and it.get("assigned_to") is not None]
+    has_fields = (
+        row_500004 is not None
+        and "state" in row_500004
+        and "district" in row_500004
+    )
+    if (
+        len(items) >= 1
+        and total == len(items)
+        and row_500004
+        and isinstance(row_500004.get("assigned_to"), dict)
+        and row_500004["assigned_to"].get("distributor_id") == user_id
+        and row_500004["assigned_to"].get("distributor_email") == test_email
+        and has_fields
+    ):
+        ok = True
+        detail = (
+            f"total={total} 500004.assigned_to={row_500004.get('assigned_to')} "
+            f"other_assigned_count={len(others_assigned)} sample_keys={list(items[0].keys())}"
+        )
+    else:
+        detail = (
+            f"total={total} items_len={len(items)} 500004={row_500004} "
+            f"first={items[0] if items else None}"
+        )
+rec("GET in-region(state=Telangana,district=Hyderabad) -> 500004 has assigned_to", ok, detail)
+
+# 11. No params -> 400
+r = requests.get(f"{API}/admin/pincodes/in-region", headers=H(tokenA), timeout=30)
+rec("GET in-region no params -> 400", r.status_code == 400, f"{r.status_code} {r.text[:200]}")
+
+# 12. district=NonExistentXyz -> 200 items=[]
+r = requests.get(
+    f"{API}/admin/pincodes/in-region",
+    headers=H(tokenA),
+    params={"district": "NonExistentXyz"},
+    timeout=30,
+)
+ok = False
+detail = f"{r.status_code} {r.text[:200]}"
+if r.status_code == 200:
+    body = r.json()
+    if body.get("items") == [] and body.get("total") == 0:
+        ok = True
+        detail = "empty"
+    else:
+        detail = json.dumps(body)[:300]
+rec("GET in-region district=NonExistentXyz -> items=[]", ok, detail)
+
+# 13. Anon -> 401/403
+r = requests.get(
+    f"{API}/admin/pincodes/in-region",
+    params={"state": "Telangana"},
+    timeout=30,
+)
+rec("GET in-region anonymous -> 401/403", r.status_code in (401, 403), f"{r.status_code} {r.text[:200]}")
+
+# CLEANUP
+print("\n--- cleanup ---")
+r = requests.post(
+    f"{API}/admin/distributors/{user_id}/areas/bulk-unassign",
+    headers=H(tokenA),
+    json={"pincodes": ["500004"]},
+    timeout=30,
+)
+print("cleanup bulk-unassign:", r.status_code, r.text[:200])
+
+r = requests.post(
+    f"{API}/admin/users/{user_id}/distributor",
+    headers=H(tokenA),
+    json={"is_distributor": False},
+    timeout=30,
+)
+print("cleanup unmark distributor:", r.status_code, r.text[:200])
+
+r = requests.delete(f"{API}/admin/users/{user_id}", headers=H(tokenA), timeout=30)
+print("cleanup delete user:", r.status_code, r.text[:200])
+
+# Summary
+total = len(results)
+passed = sum(1 for _, ok, _ in results if ok)
+print(f"\n==== {passed}/{total} passed ====")
+for n, ok, d in results:
+    print(("PASS" if ok else "FAIL"), "-", n, "::", d)
+
+sys.exit(0 if passed == total else 1)

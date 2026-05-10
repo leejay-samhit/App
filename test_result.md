@@ -103,12 +103,67 @@ user_problem_statement: |
 backend:
   - task: "Distributor Area Mapping — Bulk Unassign + Region Pincode Lookup (2 NEW endpoints)"
     implemented: true
-    working: "NA"
+    working: false
     file: "backend/server.py (L6119-6170)"
-    stuck_count: 0
+    stuck_count: 1
     priority: "high"
     needs_retesting: true
     status_history:
+        - working: false
+          agent: "testing"
+          comment: |
+            Backend test run: 9/13 passed. Two real bugs found:
+
+            BUG-1 (CRITICAL — blocks all of ENDPOINT 2):
+              Route-ordering bug. GET /admin/pincodes/{pin} (line 5974) is
+              registered BEFORE GET /admin/pincodes/in-region (line 6137).
+              FastAPI matches routes in declaration order, so requests to
+              /admin/pincodes/in-region are captured by the {pin} route and
+              return 404 "Pincode not found" instead of executing the
+              in-region handler. All three in-region cases failed with this
+              same 404:
+                • ?state=Telangana&district=Hyderabad        -> 404
+                • (no params)                                -> 404 (expected 400)
+                • ?district=NonExistentXyz                   -> 404 (expected 200 [])
+              Anonymous request still returned 401 because auth dep runs
+              before path resolution finds the {pin} handler? Actually FastAPI
+              ran auth on the matched {pin} route, which also requires auth.
+              FIX: move the /admin/pincodes/in-region route definition ABOVE
+              the /admin/pincodes/{pin} route (or constrain {pin} with a regex
+              like {pin:[0-9]{6}}).
+
+            BUG-2 (MEDIUM — spec compliance):
+              POST /admin/distributors/{user_id}/areas/bulk-unassign with
+              {"pincodes": []} returns 422 (Pydantic validation) instead of
+              the documented 400 "No pincodes provided".
+              Cause: DistributorAreaAssign model in /app/backend/models.py
+              line 338 has Field(min_length=1, max_length=10000), so Pydantic
+              rejects the empty list before the handler's explicit
+              `if not pins: raise HTTPException(400, ...)` check runs.
+              FIX: drop min_length=1 from the model (keep max_length), so the
+              handler's own 400 path is reachable; OR catch the validator and
+              return 400.
+
+            What WORKED (7/13 functional cases):
+              • Login admin & finance OK
+              • Register fresh distributor user OK
+              • Mark user as distributor OK
+              • Assign 3 pincodes [500001,500003,500004] -> 200 OK
+              • Bulk-unassign ["500001","500003"] as super_admin
+                -> 200 {ok:true, removed:2, requested:2}     ✓ matches spec
+              • GET /areas after unassign -> only "500004" remains      ✓
+              • Bulk-unassign as finance -> 403 "Requires admin role:
+                super_admin or manager"                                  ✓
+              • Anonymous GET /admin/pincodes/in-region -> 401           ✓
+
+            Cleanup ran clean (bulk-unassign 500004, unmark distributor,
+            DELETE user — all 200).
+
+            Net: ENDPOINT 1 (bulk-unassign) is functionally correct; only the
+            empty-array status code differs from spec (422 vs 400).
+            ENDPOINT 2 (in-region) is COMPLETELY UNREACHABLE due to route
+            ordering — needs main agent to reorder routes.
+
         - working: "NA"
           agent: "main"
           comment: |
@@ -209,6 +264,33 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        Tested the 2 new Distributor Area-Mapping endpoints. 9/13 cases passed.
+
+        ❌ ENDPOINT 2 (GET /admin/pincodes/in-region) IS COMPLETELY UNREACHABLE
+        due to a route-ordering bug:
+          • /admin/pincodes/{pin}      is defined at server.py:5974
+          • /admin/pincodes/in-region  is defined at server.py:6137
+          FastAPI matches in order, so "in-region" is treated as a pincode and
+          returns 404 "Pincode not found" for ALL in-region requests.
+          FIX: move the in-region route ABOVE /admin/pincodes/{pin}, or
+          constrain {pin} with a 6-digit regex (e.g. {pin:[0-9]{6}}).
+
+        ⚠ ENDPOINT 1 (POST .../areas/bulk-unassign) works correctly EXCEPT:
+          empty pincodes array returns 422 (Pydantic) instead of the
+          documented 400. Cause: DistributorAreaAssign in models.py:338 has
+          Field(min_length=1, ...) which makes the handler's explicit 400
+          unreachable. FIX: remove min_length=1 from that Field, or convert
+          the validation error to 400.
+
+        All other behaviour matched spec: assign 3, bulk-unassign 2, only
+        500004 left, 403 for finance, 401 for anon, response shape exactly
+        {ok, removed, requested}.
+
+        Please fix both bugs (route order + model constraint) and request a
+        re-test. No frontend testing performed.
+
     - agent: "main"
       message: |
         Please test ONLY the two new endpoints listed in the current_focus task
