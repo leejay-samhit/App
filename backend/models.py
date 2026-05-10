@@ -335,7 +335,7 @@ class DistributorAreaAssign(BaseModel):
     Each pincode is exclusive: if it's already mapped to another distributor,
     that mapping is silently *overwritten* (the API caller is the source of
     truth)."""
-    pincodes: List[str] = Field(min_length=1, max_length=10000)
+    pincodes: List[str] = Field(default_factory=list, max_length=10000)
 
 
 class DistributorPromote(BaseModel):

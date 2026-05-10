@@ -5971,6 +5971,43 @@ async def admin_pincode_search(
     return {"items": rows, "total": len(rows)}
 
 
+@api_router.get("/admin/pincodes/in-region")
+async def admin_pincodes_in_region(
+    state: Optional[str] = None,
+    district: Optional[str] = None,
+    limit: int = 5000,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """Return all pincodes belonging to a state and/or district. Used by the
+    admin Area-Mapping screen for one-click 'assign whole state/district'.
+    NOTE: This MUST be declared BEFORE /admin/pincodes/{pin} so FastAPI
+    doesn't capture 'in-region' as a path param."""
+    if not state and not district:
+        raise HTTPException(status_code=400, detail="state or district is required")
+    limit = max(1, min(int(limit or 5000), 10000))
+    filt: Dict[str, Any] = {}
+    if state:
+        filt["state"] = {"$regex": f"^{re.escape(state)}$", "$options": "i"}
+    if district:
+        filt["district"] = {"$regex": f"^{re.escape(district)}$", "$options": "i"}
+    rows = await db.pincodes.find(filt, {"_id": 0}).sort("pincode", 1).to_list(limit)
+    pins = [r["pincode"] for r in rows]
+    if pins:
+        assignments = await db.distributor_assignments.find(
+            {"pincode": {"$in": pins}}, {"_id": 0},
+        ).to_list(len(pins))
+        amap = {a["pincode"]: a for a in assignments}
+        for r in rows:
+            a = amap.get(r["pincode"])
+            r["assigned_to"] = (
+                {"distributor_id": a["distributor_id"],
+                 "distributor_name": a.get("distributor_name"),
+                 "distributor_email": a.get("distributor_email")}
+                if a else None
+            )
+    return {"items": rows, "total": len(rows)}
+
+
 @api_router.get("/admin/pincodes/{pin}")
 async def admin_pincode_get(pin: str, _: Dict[str, Any] = Depends(require_admin)):
     p = await db.pincodes.find_one({"pincode": pin}, {"_id": 0})
@@ -6134,40 +6171,7 @@ async def admin_bulk_unassign_distributor_areas(
     return {"ok": True, "removed": res.deleted_count, "requested": len(pins)}
 
 
-@api_router.get("/admin/pincodes/in-region")
-async def admin_pincodes_in_region(
-    state: Optional[str] = None,
-    district: Optional[str] = None,
-    limit: int = 5000,
-    _: Dict[str, Any] = Depends(require_admin),
-):
-    """Return all pincodes belonging to a state and/or district. Used by the
-    admin Area-Mapping screen for one-click 'assign whole state/district'."""
-    if not state and not district:
-        raise HTTPException(status_code=400, detail="state or district is required")
-    limit = max(1, min(int(limit or 5000), 10000))
-    filt: Dict[str, Any] = {}
-    if state:
-        filt["state"] = {"$regex": f"^{re.escape(state)}$", "$options": "i"}
-    if district:
-        filt["district"] = {"$regex": f"^{re.escape(district)}$", "$options": "i"}
-    rows = await db.pincodes.find(filt, {"_id": 0}).sort("pincode", 1).to_list(limit)
-    pins = [r["pincode"] for r in rows]
-    # attach existing assignment info
-    if pins:
-        assignments = await db.distributor_assignments.find(
-            {"pincode": {"$in": pins}}, {"_id": 0},
-        ).to_list(len(pins))
-        amap = {a["pincode"]: a for a in assignments}
-        for r in rows:
-            a = amap.get(r["pincode"])
-            r["assigned_to"] = (
-                {"distributor_id": a["distributor_id"],
-                 "distributor_name": a.get("distributor_name"),
-                 "distributor_email": a.get("distributor_email")}
-                if a else None
-            )
-    return {"items": rows, "total": len(rows)}
+# (admin_pincodes_in_region moved above admin_pincode_get to fix route precedence)
 
 
 @api_router.post("/services/{provider_id}/book")

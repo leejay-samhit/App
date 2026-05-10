@@ -103,12 +103,36 @@ user_problem_statement: |
 backend:
   - task: "Distributor Area Mapping — Bulk Unassign + Region Pincode Lookup (2 NEW endpoints)"
     implemented: true
-    working: false
-    file: "backend/server.py (L6119-6170)"
-    stuck_count: 1
+    working: true
+    file: "backend/server.py (L5974-6170)"
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Re-test after fixes: 13/13 PASS. Both reported bugs are resolved.
+              • Route ordering fixed — /admin/pincodes/in-region now declared at
+                server.py:5974, BEFORE /admin/pincodes/{pin} at line 6011. All
+                three in-region cases work:
+                  - ?state=Telangana&district=Hyderabad -> 200, 55 items, row
+                    for 500004 has assigned_to populated with distributor_id,
+                    distributor_name and distributor_email; all other rows
+                    have assigned_to=null.
+                  - no params -> 400 "state or district is required"
+                  - ?district=NonExistentXyz -> 200 items=[] total=0
+                  - Anon -> 401 Not authenticated
+              • Empty-array now returns 400 "No pincodes provided" (not 422)
+                after removing min_length=1 from DistributorAreaAssign.pincodes
+                in models.py:338.
+              • All other ENDPOINT-1 behaviour still correct: assign 3 ->
+                bulk-unassign 2 -> {ok:true,removed:2,requested:2}; only
+                500004 remains; finance token -> 403 "Requires admin role:
+                super_admin or manager".
+              • Cleanup: bulk-unassign 500004 OK, unmark distributor OK, DELETE
+                user OK.
+            Both endpoints are spec-compliant and ready for production.
         - working: false
           agent: "testing"
           comment: |
@@ -264,6 +288,21 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        RE-TEST after fixes: 13/13 PASS. Both bugs fixed and verified.
+          • Route ordering: /admin/pincodes/in-region (5974) is now before
+            /admin/pincodes/{pin} (6011); all in-region cases reach the
+            handler (200/400/empty/anon-401 all behave per spec).
+          • Empty-array bulk-unassign now returns 400 (min_length=1 dropped
+            from DistributorAreaAssign in models.py:338).
+          • Functional cases unchanged and still passing: assign 3 ->
+            bulk-unassign 2 -> {removed:2,requested:2}, only 500004 remains,
+            500004 row carries assigned_to with distributor_id/name/email,
+            finance -> 403, anon -> 401.
+          • Cleanup ran clean.
+        Both endpoints are spec-compliant. No further backend issues.
+
     - agent: "testing"
       message: |
         Tested the 2 new Distributor Area-Mapping endpoints. 9/13 cases passed.
