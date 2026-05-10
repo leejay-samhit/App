@@ -21,6 +21,7 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { PromoCarousel } from "../../src/promo-carousel";
+import { ShopLayoutRenderer } from "../../src/shop-layout-renderer";
 import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
 
 type Product = {
@@ -480,6 +481,9 @@ export default function ShopScreen() {
                   setShopCategory(null); setShopSearch("");
                 }
               }} />
+
+              {/* Admin-managed shop layout: section headers, free text, content boxes */}
+              <ShopLayoutRenderer onProductPress={(productId) => router.push(`/product/${productId}` as any)} />
 
               {/* Departments — tiled cards (matches reference image 2) */}
               {cats.length > 0 && (

@@ -21,7 +21,6 @@ const ITEMS = [
   { icon: "map", label: "Distributor Network · Area Mapping", route: "/admin/area-mapping" },
   { icon: "dollar-sign", label: "System Wallet (treasury)", route: "/admin/system-wallet" },
   { icon: "users", label: "All vendors", route: "/admin/vendors" },
-  { icon: "package", label: "Products", route: "/admin/products" },
   { icon: "edit-3", label: "Branding & theme", route: "/admin/branding" },
   { icon: "hard-drive", label: "Data backups", route: "/admin/backups" },
   { icon: "map", label: "Product roadmap", route: "/admin/roadmap" },
@@ -30,6 +29,13 @@ const ITEMS = [
   { icon: "list", label: "Transactions", route: "/admin/transactions" },
   { icon: "file-text", label: "Admin audit log", route: "/admin/audit" },
   { icon: "sliders", label: "Payout structure", route: "/admin/settings" },
+];
+
+// Store-related items grouped together so admin can manage products + customer-facing shop UI in one place.
+const STORE_ITEMS = [
+  { icon: "package", label: "Products", route: "/admin/products", hint: "Manage catalog · stock · pricing" },
+  { icon: "image", label: "Promo banners", route: "/admin/promo-banners", hint: "Hero carousel slides on Shop" },
+  { icon: "layout", label: "Shop layout", route: "/admin/shop-layout", hint: "Background, content boxes & sub-category labels" },
 ];
 
 const EXPORTS = [
@@ -140,6 +146,18 @@ export default function More() {
         <Text style={styles.overline}>ADMIN</Text>
         <Text style={styles.h1}>More</Text>
         <Text style={styles.subtitle}>{user?.email} · {(user as any)?.admin_role || "super_admin"}</Text>
+
+        <Text style={styles.sectionLabel}>STORE</Text>
+        {STORE_ITEMS.map((it) => (
+          <TouchableOpacity key={it.route} style={styles.row} onPress={() => router.push(it.route as any)} testID={`more-store-${it.icon}`}>
+            <View style={styles.rowIcon}><Feather name={it.icon as any} size={16} color={colors.primary} /></View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowText}>{it.label}</Text>
+              <Text style={styles.rowHint}>{it.hint}</Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+        ))}
 
         <Text style={styles.sectionLabel}>OPERATIONS</Text>
         {ITEMS.map((it) => (
@@ -338,6 +356,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 8, gap: 12 },
   rowIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
   rowText: { flex: 1, fontSize: 14, color: colors.textMain, fontWeight: "600" },
+  rowHint: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   dangerRow: { flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", borderWidth: 1, borderColor: "#F2B8B5", borderRadius: 14, padding: 14, marginBottom: 8, gap: 12 },
   dangerIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" },
   dangerText: { fontSize: 14, color: "#B3261E", fontWeight: "800" },
