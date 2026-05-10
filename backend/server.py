@@ -2554,32 +2554,64 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
     settings = await get_settings()
     vendor_pct = float(settings.get("vendor_commission_pct") or 70)
     vendor_payouts: Dict[str, float] = {}  # vendor_id -> total credit
-    for it in items:
-        product = await db.products.find_one({"id": it["product_id"]}, {"_id": 0})
-        if not product:
-            continue
-        line_total = product["price"] * it["qty"]
-        total += line_total
-        vendor_id = product.get("vendor_id")
-        vendor_share = 0.0
-        platform_share = line_total
-        if vendor_id:
-            vendor_share = round(line_total * (vendor_pct / 100.0), 2)
-            platform_share = round(line_total - vendor_share, 2)
-            vendor_payouts[vendor_id] = vendor_payouts.get(vendor_id, 0.0) + vendor_share
-        enriched.append({
-            "product_id": product["id"],
-            "name": product["name"],
-            "price": product["price"],
-            "image_url": product["image_url"],
-            "qty": it["qty"],
-            "line_total": line_total,
-            "vendor_id": vendor_id,
-            "vendor_share": vendor_share,
-            "platform_share": platform_share,
-        })
-    if total <= 0:
-        raise HTTPException(status_code=400, detail="Cart total invalid")
+
+    # ---------------- ATOMIC STOCK DECREMENT (multi-product) ----------------
+    # We decrement stock per line BEFORE wallet debit. If any line fails (out of
+    # stock or insufficient stock), we roll back every successful decrement so
+    # nobody is left holding the bag. This prevents overselling under concurrent
+    # checkouts.
+    decremented: List[Dict[str, Any]] = []  # [{product_id, qty}]
+    try:
+        for it in items:
+            product = await db.products.find_one({"id": it["product_id"]}, {"_id": 0})
+            if not product:
+                raise HTTPException(status_code=400, detail=f"Product no longer exists: {it['product_id']}")
+            qty = int(it.get("qty") or 1)
+            # Atomic conditional decrement — only succeeds when stock >= qty.
+            res = await db.products.update_one(
+                {"id": product["id"], "stock": {"$gte": qty}},
+                {"$inc": {"stock": -qty}},
+            )
+            if res.modified_count == 0:
+                # Refresh stock for a friendly error message
+                fresh = await db.products.find_one({"id": product["id"]}, {"_id": 0, "stock": 1, "name": 1})
+                avail = int((fresh or {}).get("stock") or 0)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{product.get('name')}' is out of stock (only {avail} left, you wanted {qty})",
+                )
+            decremented.append({"product_id": product["id"], "qty": qty})
+
+            line_total = product["price"] * qty
+            total += line_total
+            vendor_id = product.get("vendor_id")
+            vendor_share = 0.0
+            platform_share = line_total
+            if vendor_id:
+                vendor_share = round(line_total * (vendor_pct / 100.0), 2)
+                platform_share = round(line_total - vendor_share, 2)
+                vendor_payouts[vendor_id] = vendor_payouts.get(vendor_id, 0.0) + vendor_share
+            enriched.append({
+                "product_id": product["id"],
+                "name": product["name"],
+                "price": product["price"],
+                "image_url": product["image_url"],
+                "qty": qty,
+                "line_total": line_total,
+                "vendor_id": vendor_id,
+                "vendor_share": vendor_share,
+                "platform_share": platform_share,
+            })
+        if total <= 0:
+            raise HTTPException(status_code=400, detail="Cart total invalid")
+    except HTTPException:
+        # Roll back all successful stock decrements before re-raising
+        for d in decremented:
+            await db.products.update_one(
+                {"id": d["product_id"]},
+                {"$inc": {"stock": d["qty"]}},
+            )
+        raise
 
     # ATOMIC wallet debit — guards against rapid double-clicks creating duplicate orders.
     # Only succeeds if balance still >= total at the moment of update.
@@ -2588,6 +2620,12 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         {"$inc": {"wallet_balance": -total}},
     )
     if debit_res.modified_count == 0:
+        # Wallet debit failed AFTER stock was decremented — must restore stock.
+        for d in decremented:
+            await db.products.update_one(
+                {"id": d["product_id"]},
+                {"$inc": {"stock": d["qty"]}},
+            )
         raise HTTPException(status_code=400, detail=f"Insufficient wallet balance. Need ₹{total:.0f}")
 
     order_id = str(uuid.uuid4())
