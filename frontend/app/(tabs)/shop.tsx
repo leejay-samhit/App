@@ -296,6 +296,21 @@ export default function ShopScreen() {
               {mode === "shop" ? "Member store" : "Find local talent"}
             </Text>
           </View>
+          {mode === "services" && (
+            <TouchableOpacity
+              onPress={() => setLangModalOpen(true)}
+              style={[styles.cartIconBtn, languageQ && { backgroundColor: colors.brand100, borderColor: colors.primary }]}
+              testID="services-language-top-btn"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Feather name="globe" size={18} color={languageQ ? colors.primary : colors.textMain} />
+              {languageQ ? (
+                <View style={styles.cartBadgeTop}>
+                  <Text style={styles.cartBadgeTopText}>{languageQ.toUpperCase()}</Text>
+                </View>
+              ) : null}
+            </TouchableOpacity>
+          )}
           {mode === "shop" && (
             <TouchableOpacity
               onPress={() => router.push("/cart")}
@@ -643,28 +658,7 @@ export default function ShopScreen() {
                       </TouchableOpacity>
                     );
                   })}
-                  {/* Language picker tile — opens a modal sheet to choose language */}
-                  <TouchableOpacity
-                    style={[
-                      styles.catTile,
-                      languageQ ? { borderColor: colors.primary, backgroundColor: colors.brand100 } : null,
-                    ]}
-                    onPress={() => setLangModalOpen(true)}
-                    activeOpacity={0.7}
-                    testID="services-language-tile"
-                  >
-                    <View style={[styles.catIconWrap, { backgroundColor: colors.brand100 }]}>
-                      <Feather name="globe" size={22} color={colors.primary} />
-                    </View>
-                    <Text style={styles.catTileText} numberOfLines={2}>
-                      {languageQ ? LANG_LABELS[languageQ] : "Language"}
-                    </Text>
-                    {languageQ ? (
-                      <View style={[styles.catCountPill, { backgroundColor: colors.primary }]}>
-                        <Feather name="check" size={10} color="#fff" />
-                      </View>
-                    ) : null}
-                  </TouchableOpacity>
+                  {/* Language tile removed — moved to small icon button at top-right of services header */}
                 </View>
               </View>
             )}
@@ -715,63 +709,96 @@ export default function ShopScreen() {
               </View>
             </Modal>
 
-            {/* Language chips removed — now accessed via the "Language" tile in Browse-by-category */}
+            {/* Language chips removed — now accessed via the small globe icon in top-right */}
 
-            {/* List */}
-            {servicesLoading && services.length === 0 ? (
-              <View style={[styles.center, { paddingVertical: 40 }]}>
-                <ActivityIndicator color={colors.primary} />
-              </View>
-            ) : services.length === 0 ? (
-              <View style={styles.emptyCard}>
-                <Feather name="briefcase" size={28} color={colors.textMuted} />
-                <Text style={styles.emptyText}>No service providers found.</Text>
-                <Text style={styles.emptySubtext}>Try a different pincode or category — or be the first to list yours!</Text>
-              </View>
-            ) : (
-              services.map((s) => (
-                <TouchableOpacity key={s.id} style={styles.serviceCard} onPress={() => setContactOf(s)}>
-                  <View style={styles.serviceAvatar}>
-                    <Text style={styles.serviceAvatarText}>{(s.name || "?")[0].toUpperCase()}</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                      <Text style={styles.serviceName} numberOfLines={1}>{s.name}</Text>
-                      {s.is_active ? (
-                        <View style={styles.activeDot}>
-                          <View style={styles.activeDotInner} />
-                          <Text style={styles.activeDotText}>LIVE</Text>
-                        </View>
-                      ) : null}
+            {/* Provider list now lives inside a slide-up modal opened by tapping a category. */}
+            <Modal
+              visible={!!categoryId}
+              transparent
+              animationType="slide"
+              onRequestClose={() => setCategoryId(null)}
+            >
+              <View style={styles.providerSheetOverlay}>
+                <View style={styles.providerSheetContainer}>
+                  {/* Sheet header */}
+                  <View style={styles.providerSheetHeader}>
+                    <TouchableOpacity onPress={() => setCategoryId(null)} style={styles.providerSheetBack} testID="provider-sheet-close">
+                      <Feather name="arrow-left" size={20} color={colors.textMain} />
+                    </TouchableOpacity>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.providerSheetEyebrow}>SERVICE PROVIDERS</Text>
+                      <Text style={styles.providerSheetTitle} numberOfLines={1}>
+                        {categories.find((c) => c.id === categoryId)?.name || "Providers"}
+                      </Text>
                     </View>
-                    <Text style={styles.serviceTitle} numberOfLines={1}>{s.service_name}</Text>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-                      <View style={styles.tag}><Text style={styles.tagText}>{s.service_category}</Text></View>
-                      {s.distance_km != null ? (
-                        <View style={[styles.tag, { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" }]}>
-                          <Feather name="navigation" size={10} color="#047857" />
-                          <Text style={[styles.tagText, { color: "#047857" }]}> {formatDistance(s.distance_km)}</Text>
-                        </View>
-                      ) : null}
-                      <View style={styles.tag}><Feather name="map-pin" size={10} color={colors.textMuted} /><Text style={styles.tagText}> {s.service_pincode}</Text></View>
-                      {(s.service_languages || []).map((lc) => (
-                        <View key={lc} style={[styles.tag, { backgroundColor: "#EEF2FF", borderColor: "#C7D2FE" }]}>
-                          <Feather name="globe" size={9} color="#3730A3" />
-                          <Text style={[styles.tagText, { color: "#3730A3" }]}> {LANG_LABELS[lc] || lc}</Text>
-                        </View>
-                      ))}
-                    </View>
-                    {s.is_active && s.location_updated_at ? (
-                      <Text style={styles.activeAgo}>{formatActiveAgo(s.location_updated_at)}</Text>
-                    ) : null}
+                    <TouchableOpacity
+                      onPress={() => setLangModalOpen(true)}
+                      style={[styles.cartIconBtn, languageQ && { backgroundColor: colors.brand100, borderColor: colors.primary }, { width: 36, height: 36, borderRadius: 18 }]}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Feather name="globe" size={16} color={languageQ ? colors.primary : colors.textMain} />
+                    </TouchableOpacity>
                   </View>
-                  <View style={{ alignItems: "flex-end" }}>
-                    <Text style={styles.servicePrice}>{formatINR(s.service_charge || 0)}</Text>
-                    <Feather name="chevron-right" size={18} color={colors.textMuted} />
-                  </View>
-                </TouchableOpacity>
-              ))
-            )}
+
+                  <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 32 }}>
+                    {servicesLoading && services.length === 0 ? (
+                      <View style={[styles.center, { paddingVertical: 40 }]}>
+                        <ActivityIndicator color={colors.primary} />
+                      </View>
+                    ) : services.length === 0 ? (
+                      <View style={styles.emptyCard}>
+                        <Feather name="briefcase" size={28} color={colors.textMuted} />
+                        <Text style={styles.emptyText}>No service providers found.</Text>
+                        <Text style={styles.emptySubtext}>Try a different pincode or language — or be the first to list yours!</Text>
+                      </View>
+                    ) : (
+                      services.map((s) => (
+                        <TouchableOpacity key={s.id} style={styles.serviceCard} onPress={() => setContactOf(s)}>
+                          <View style={styles.serviceAvatar}>
+                            <Text style={styles.serviceAvatarText}>{(s.name || "?")[0].toUpperCase()}</Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                              <Text style={styles.serviceName} numberOfLines={1}>{s.name}</Text>
+                              {s.is_active ? (
+                                <View style={styles.activeDot}>
+                                  <View style={styles.activeDotInner} />
+                                  <Text style={styles.activeDotText}>LIVE</Text>
+                                </View>
+                              ) : null}
+                            </View>
+                            <Text style={styles.serviceTitle} numberOfLines={1}>{s.service_name}</Text>
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                              <View style={styles.tag}><Text style={styles.tagText}>{s.service_category}</Text></View>
+                              {s.distance_km != null ? (
+                                <View style={[styles.tag, { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" }]}>
+                                  <Feather name="navigation" size={10} color="#047857" />
+                                  <Text style={[styles.tagText, { color: "#047857" }]}> {formatDistance(s.distance_km)}</Text>
+                                </View>
+                              ) : null}
+                              <View style={styles.tag}><Feather name="map-pin" size={10} color={colors.textMuted} /><Text style={styles.tagText}> {s.service_pincode}</Text></View>
+                              {(s.service_languages || []).map((lc) => (
+                                <View key={lc} style={[styles.tag, { backgroundColor: "#EEF2FF", borderColor: "#C7D2FE" }]}>
+                                  <Feather name="globe" size={9} color="#3730A3" />
+                                  <Text style={[styles.tagText, { color: "#3730A3" }]}> {LANG_LABELS[lc] || lc}</Text>
+                                </View>
+                              ))}
+                            </View>
+                            {s.is_active && s.location_updated_at ? (
+                              <Text style={styles.activeAgo}>{formatActiveAgo(s.location_updated_at)}</Text>
+                            ) : null}
+                          </View>
+                          <View style={{ alignItems: "flex-end" }}>
+                            <Text style={styles.servicePrice}>{formatINR(s.service_charge || 0)}</Text>
+                            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                          </View>
+                        </TouchableOpacity>
+                      ))
+                    )}
+                  </ScrollView>
+                </View>
+              </View>
+            </Modal>
           </>
         )}
       </ScrollView>
@@ -879,6 +906,27 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceMuted,
   },
   langModalCloseText: { color: colors.textMain, fontWeight: "800", fontSize: 14 },
+  // Provider sheet (slide-up modal for category drill-down)
+  providerSheetOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)" },
+  providerSheetContainer: {
+    flex: 1, marginTop: 60,
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    overflow: "hidden",
+  },
+  providerSheetHeader: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: 16, paddingTop: 16, paddingBottom: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  providerSheetBack: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: colors.surfaceMuted,
+    alignItems: "center", justifyContent: "center",
+  },
+  providerSheetEyebrow: { fontSize: 9, letterSpacing: 1.4, color: colors.textMuted, fontWeight: "800" },
+  providerSheetTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4, marginTop: 1 },
   cartIconBtn: {
     width: 40, height: 40, borderRadius: 20,
     backgroundColor: colors.surface,
