@@ -90,16 +90,24 @@ export default function CartScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} testID="cart-back">
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
-        <Text style={styles.title}>Your cart</Text>
+        <View style={{ alignItems: "center" }}>
+          <Text style={styles.title}>Your bag</Text>
+          {items.length > 0 && (
+            <Text style={styles.titleSub}>{items.length} item{items.length === 1 ? "" : "s"}</Text>
+          )}
+        </View>
         <View style={{ width: 40 }} />
       </View>
 
       {items.length === 0 ? (
         <View style={styles.empty}>
-          <Feather name="shopping-cart" size={36} color={colors.textMuted} />
-          <Text style={styles.emptyTitle}>Cart is empty</Text>
-          <Text style={styles.emptyText}>Add products from the shop tab.</Text>
+          <View style={styles.emptyIconCircle}>
+            <Feather name="shopping-bag" size={28} color={colors.primary} />
+          </View>
+          <Text style={styles.emptyTitle}>Your bag is empty</Text>
+          <Text style={styles.emptyText}>Browse the shop and add a few favourites — wallet earnings cover the bill.</Text>
           <TouchableOpacity onPress={() => router.replace("/(tabs)/shop")} style={styles.emptyBtn} testID="cart-go-shop">
+            <Feather name="shopping-bag" size={16} color={colors.primaryFg} />
             <Text style={styles.emptyBtnText}>Browse shop</Text>
           </TouchableOpacity>
         </View>
@@ -114,29 +122,47 @@ export default function CartScreen() {
                 <Image source={{ uri: it.product.image_url }} style={styles.image} />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.lineName} numberOfLines={2}>{it.product.name}</Text>
-                  <Text style={styles.lineQty}>{formatINR(it.product.price)} × {it.qty}</Text>
+                  <View style={styles.qtyPill}>
+                    <Text style={styles.qtyPillText}>Qty {it.qty}</Text>
+                  </View>
+                  <Text style={styles.lineUnit}>{formatINR(it.product.price)} each</Text>
                 </View>
-                <View style={{ alignItems: "flex-end" }}>
-                  <Text style={styles.lineTotal}>{formatINR(it.line_total)}</Text>
+                <View style={{ alignItems: "flex-end", justifyContent: "space-between" }}>
                   <TouchableOpacity onPress={() => remove(it.product_id)} testID={`cart-remove-${it.product_id}`} style={styles.removeBtn}>
-                    <Feather name="trash-2" size={14} color="#B3261E" />
+                    <Feather name="x" size={14} color={colors.textMuted} />
                   </TouchableOpacity>
+                  <Text style={styles.lineTotal}>{formatINR(it.line_total)}</Text>
                 </View>
               </View>
             ))}
+
+            <View style={styles.summaryCard}>
+              <Text style={styles.summaryHeader}>Bag summary</Text>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Sub-total</Text>
+                <Text style={styles.summaryValue}>{formatINR(total)}</Text>
+              </View>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Shipping</Text>
+                <Text style={[styles.summaryValue, { color: colors.primary }]}>FREE</Text>
+              </View>
+              <View style={[styles.summaryRow, { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, marginTop: 6 }]}>
+                <Text style={styles.totalLabel}>Total</Text>
+                <Text style={styles.totalValue}>{formatINR(total)}</Text>
+              </View>
+            </View>
           </ScrollView>
 
           <View style={styles.footer}>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>Wallet balance</Text>
-              <Text style={styles.rowValue}>{formatINR(balance)}</Text>
-            </View>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>Total</Text>
-              <Text style={styles.totalValue}>{formatINR(total)}</Text>
+            <View style={styles.walletRow}>
+              <Feather name="credit-card" size={16} color={colors.primary} />
+              <Text style={styles.walletLabel}>Wallet balance</Text>
+              <Text style={styles.walletValue}>{formatINR(balance)}</Text>
             </View>
             {!canPay && total > 0 && (
-              <Text style={styles.warning}>Insufficient wallet balance — refer more friends to earn!</Text>
+              <Text style={styles.warning}>
+                Need {formatINR(total - balance)} more — refer friends to top up your wallet.
+              </Text>
             )}
             <TouchableOpacity
               onPress={checkout}
@@ -149,7 +175,7 @@ export default function CartScreen() {
               ) : (
                 <>
                   <Feather name="check-circle" size={18} color={colors.primaryFg} />
-                  <Text style={styles.payBtnText}>Pay with wallet</Text>
+                  <Text style={styles.payBtnText}>Pay {formatINR(total)} with wallet</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -166,23 +192,42 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.screen, paddingBottom: 8 },
   backBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   title: { fontSize: 20, fontWeight: "800", color: colors.textMain, letterSpacing: -0.5 },
+  titleSub: { fontSize: 11, color: colors.textMuted, fontWeight: "700", marginTop: 1 },
+
   empty: { flex: 1, alignItems: "center", justifyContent: "center", padding: 40, gap: 8 },
-  emptyTitle: { fontSize: 16, fontWeight: "700", color: colors.textMain, marginTop: 12 },
-  emptyText: { fontSize: 13, color: colors.textMuted, textAlign: "center" },
-  emptyBtn: { marginTop: 16, backgroundColor: colors.primary, paddingHorizontal: 20, paddingVertical: 12, borderRadius: radii.button },
-  emptyBtnText: { color: colors.primaryFg, fontWeight: "700" },
+  emptyIconCircle: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.primary + "15", alignItems: "center", justifyContent: "center", marginBottom: 8 },
+  emptyTitle: { fontSize: 16, fontWeight: "800", color: colors.textMain, marginTop: 4 },
+  emptyText: { fontSize: 13, color: colors.textMuted, textAlign: "center", maxWidth: 260 },
+  emptyBtn: { marginTop: 16, flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.primary, paddingHorizontal: 22, paddingVertical: 12, borderRadius: radii.button },
+  emptyBtnText: { color: colors.primaryFg, fontWeight: "800" },
+
   line: { flexDirection: "row", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16, padding: 12, marginBottom: 10, gap: 12 },
-  image: { width: 60, height: 60, borderRadius: 10, backgroundColor: colors.surfaceMuted },
-  lineName: { fontSize: 13, fontWeight: "700", color: colors.textMain },
-  lineQty: { fontSize: 12, color: colors.textMuted, marginTop: 4 },
-  lineTotal: { fontSize: 14, fontWeight: "800", color: colors.primary },
-  removeBtn: { padding: 6, marginTop: 4 },
-  footer: { padding: spacing.screen, paddingTop: 16, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border },
-  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginVertical: 4 },
-  rowLabel: { fontSize: 13, color: colors.textMuted },
-  rowValue: { fontSize: 14, color: colors.textMain, fontWeight: "700" },
-  totalValue: { fontSize: 22, fontWeight: "800", color: colors.primary, letterSpacing: -0.5 },
-  warning: { color: "#B3261E", fontSize: 12, marginTop: 8 },
-  payBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 16, borderRadius: radii.button, marginTop: 14 },
-  payBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 15 },
+  image: { width: 72, height: 72, borderRadius: 12, backgroundColor: colors.surfaceMuted },
+  lineName: { fontSize: 13, fontWeight: "700", color: colors.textMain, marginBottom: 6 },
+  qtyPill: { alignSelf: "flex-start", backgroundColor: colors.surfaceMuted, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
+  qtyPillText: { fontSize: 10, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.4 },
+  lineUnit: { fontSize: 11, color: colors.textMuted, marginTop: 6, fontWeight: "600" },
+  lineTotal: { fontSize: 15, fontWeight: "800", color: colors.primary },
+  removeBtn: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted },
+
+  summaryCard: {
+    marginTop: 8,
+    backgroundColor: colors.surface,
+    borderRadius: 18, borderWidth: 1, borderColor: colors.border,
+    padding: 16,
+  },
+  summaryHeader: { fontSize: 13, fontWeight: "800", color: colors.textMain, marginBottom: 10, letterSpacing: -0.2 },
+  summaryRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 4 },
+  summaryLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
+  summaryValue: { fontSize: 13, color: colors.textMain, fontWeight: "700" },
+  totalLabel: { fontSize: 13, color: colors.textMain, fontWeight: "800" },
+  totalValue: { fontSize: 22, fontWeight: "900", color: colors.primary, letterSpacing: -0.6 },
+
+  footer: { padding: spacing.screen, paddingTop: 14, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border },
+  walletRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 10, paddingHorizontal: 12, backgroundColor: colors.primary + "10", borderRadius: 12, marginBottom: 8 },
+  walletLabel: { flex: 1, fontSize: 12, color: colors.textMain, fontWeight: "700" },
+  walletValue: { fontSize: 13, color: colors.primary, fontWeight: "800" },
+  warning: { color: "#B3261E", fontSize: 11, marginTop: 4, marginBottom: 6, fontWeight: "600" },
+  payBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 16, borderRadius: radii.button, marginTop: 6 },
+  payBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14, letterSpacing: -0.2 },
 });

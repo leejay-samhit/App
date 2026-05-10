@@ -113,6 +113,88 @@ backend:
           agent: "main"
           comment: |
             Customer Shop redesign delivered:
+              • Member-only promo banner (cream + green badge "30% OFF")
+              • Product search bar at top
+              • Horizontal category-chip row, dynamically built from products
+              • 2-col rounded card grid with shop-bag CTA, soft shadow,
+                category eyebrow, name, price
+              • "Only X left" amber pill when stock <= 5
+              • Out-of-stock products: separate section, faded image, SOLD OUT
+                overlay, "I'm interested" CTA → "We'll notify you" + live
+                interested_count badge
+              • 30-second polling while Shop tab is focused for near-real-time
+                stock sync from vendor stock edits
+              • addToCart payload bug fixed: {qty:1} (was {quantity:1})
+              • /products response shape made tolerant (raw array OR {items:[…]})
+
+
+  - task: "Phase C+D+E: Admin Products gallery + Vendor Products gallery + Cart polish"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/admin/products.tsx + frontend/app/vendor/dashboard.tsx + frontend/app/cart.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Phases C, D, E delivered. Visual & functional changes:
+
+            ── PHASE C: Admin Products ────────────────────────────────
+            • Replaced 1-col list with 2-col gallery cards (rounded image,
+              category eyebrow, title, price, stock badge, edit/delete row).
+            • New search bar at top.
+            • New stats strip (Total, Live, Out of stock, With interest).
+            • Live merge of GET /admin/products + GET /products to inject
+              `interested_count` per product.
+            • Out-of-stock items show "SOLD OUT" overlay.
+            • Low-stock (<= 5) items show amber "Only X" pill.
+            • NEW: green "👥 N" interest badge in top-right of cards that have
+              waiting customers — tap to open a sliding modal listing the
+              interested users (name + email + phone). Verified visually
+              in screenshot — admin sees badge "1" on the test product.
+            • Admin retains full CRUD via existing ProductModal.
+
+            ── PHASE D: Vendor Dashboard products tab ─────────────────
+            • Same 2-col gallery look as admin/customer for cohesion.
+            • Vendor sees ONLY their own products (existing
+              /vendor/me/products endpoint enforces ownership server-side).
+            • Same SOLD OUT overlay, low-stock pill, interest badge.
+            • Tapping the "👥 N" badge opens a modal listing the interested
+              customers (name, email, phone) using
+              GET /products/{id}/interested (vendor-only auth on backend).
+
+            ── PHASE E: Cart polish ───────────────────────────────────
+            • Item count subtitle in header.
+            • Empty state: circular icon + supportive copy + branded CTA.
+            • Line items: bigger rounded thumb, "Qty N" pill, per-unit
+              price, polished remove-X button.
+            • New "Bag summary" card with sub-total / FREE shipping / TOTAL.
+            • Footer: green-tinted wallet balance row + larger pay button
+              "Pay ₹X with wallet" with check-circle icon.
+            • Existing wallet-balance check + warning copy preserved
+              ("Need ₹X more — refer friends to top up").
+
+            Metro bundles cleanly (only pre-existing app-wide shadow* /
+            pointerEvents deprecation warnings). Visually verified the Admin
+            redesign in a screenshot — it is rendering correctly and the
+            interest badge shows "1" from the earlier Phase A test.
+            Frontend testing has NOT been triggered (per protocol — will ask
+            user before doing so).
+
+
+    implemented: true
+    working: "NA"
+    file: "frontend/app/(tabs)/shop.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Customer Shop redesign delivered:
               - Member-only promo banner (cream + green badge)
               - Product search bar at top
               - Horizontal category-chip row (built dynamically from products)
