@@ -770,13 +770,18 @@ export default function ShopScreen() {
                             <Text style={styles.serviceTitle} numberOfLines={1}>{s.service_name}</Text>
                             <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
                               <View style={styles.tag}><Text style={styles.tagText}>{s.service_category}</Text></View>
-                              {s.distance_km != null ? (
-                                <View style={[styles.tag, { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" }]}>
-                                  <Feather name="navigation" size={10} color="#047857" />
-                                  <Text style={[styles.tagText, { color: "#047857" }]}> {formatDistance(s.distance_km)}</Text>
-                                </View>
-                              ) : null}
-                              <View style={styles.tag}><Feather name="map-pin" size={10} color={colors.textMuted} /><Text style={styles.tagText}> {s.service_pincode}</Text></View>
+                              {/* Pincode + distance shown together (distance only when location is enabled) */}
+                              <View style={styles.tag}>
+                                <Feather name="map-pin" size={10} color={colors.textMuted} />
+                                <Text style={styles.tagText}> {s.service_pincode}</Text>
+                                {s.distance_km != null ? (
+                                  <>
+                                    <Text style={[styles.tagText, { color: colors.textMuted, marginHorizontal: 2 }]}>·</Text>
+                                    <Feather name="navigation" size={10} color="#047857" />
+                                    <Text style={[styles.tagText, { color: "#047857", fontWeight: "800" }]}> {formatDistance(s.distance_km)}</Text>
+                                  </>
+                                ) : null}
+                              </View>
                               {(s.service_languages || []).map((lc) => (
                                 <View key={lc} style={[styles.tag, { backgroundColor: "#EEF2FF", borderColor: "#C7D2FE" }]}>
                                   <Feather name="globe" size={9} color="#3730A3" />

@@ -46,8 +46,15 @@ export async function getCurrentCoords(): Promise<Coords | null> {
 
 export function formatDistance(km: number | null | undefined): string {
   if (km == null) return "";
-  if (km < 1) return `${Math.round(km * 1000)} m`;
-  if (km < 10) return `${km.toFixed(1)} km`;
+  // Sub-1 km: show one decimal in km (e.g., 0.9 km — instead of "900 m")
+  if (km < 1) {
+    const v = Math.round(km * 10) / 10; // round to 1 decimal
+    // If rounding crossed the 1-km boundary (e.g. 0.95 → 1.0), drop the decimal.
+    if (v >= 1) return `${Math.round(km)} km`;
+    // Edge case: 0.04 → 0 → show as "0.1 km" (so we never display "0 km")
+    return `${(v < 0.1 ? 0.1 : v).toFixed(1)} km`;
+  }
+  // 1 km and beyond: round to whole number (e.g., 4 km, 5 km, 12 km)
   return `${Math.round(km)} km`;
 }
 
