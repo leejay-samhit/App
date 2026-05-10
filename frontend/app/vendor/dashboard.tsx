@@ -6,6 +6,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { GradientCard } from "../../src/gradient-card";
 
 type Stats = { total_sales: number; total_earnings: number; today_earnings: number; today_orders: number; all_orders: number; products_count: number; published_count: number; wallet_balance: number };
 type Product = { id: string; name: string; price: number; stock: number; image_url: string; description?: string; category?: string; is_published?: boolean; created_at?: string; interested_count?: number };
@@ -84,6 +85,15 @@ export default function VendorDashboard() {
 
       {tab === "home" && stats && (
         <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
+          <GradientCard variant="emerald" style={{ marginBottom: 14, padding: 18 }}>
+            <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>VENDOR</Text>
+            <Text style={{ fontSize: 24, fontWeight: "900", color: "#fff", marginTop: 4, letterSpacing: -0.6 }}>
+              {formatINR(stats.today_earnings)} today
+            </Text>
+            <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
+              {stats.today_orders} order{stats.today_orders === 1 ? "" : "s"} · {stats.published_count} of {stats.products_count} products live
+            </Text>
+          </GradientCard>
           <View style={styles.statsGrid}>
             <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
             <StatCard icon="package" label="TODAY ORDERS" value={String(stats.today_orders)} color="#1F5E9E" />

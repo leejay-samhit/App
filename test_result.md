@@ -685,5 +685,21 @@ agent_communication:
         fully-fleshed "I'm interested" tracker with vendor/admin-only
         viewer. Please regression-test the four endpoints listed in the
         task above using admin@app.com / Admin@123.
+    - agent: "main"
+      message: |
+        Phase B/C/D Visual Glow-up COMPLETE for Customer Shop, Admin
+        Products and Vendor Dashboard.
+        - shop.tsx: Removed dead duplicate render block (was causing TS
+          syntax error). Hero "Save 70% on premium picks" green banner +
+          Department tiles + Star ratings + Heart icons rendering as per
+          reference images. Verified visually via screenshot tool at
+          localhost:3000.
+        - admin/products.tsx: Added GradientCard primary hero ("CATALOG /
+          N products live") + larger 40px iconBtn with primary "+" button.
+        - vendor/dashboard.tsx: Added GradientCard emerald hero
+          ("VENDOR / ₹X today") on the home tab.
+        - cart.tsx: Reviewed — already polished, no changes needed.
+        Backend untouched in this iteration. No backend retest needed.
+        Frontend testing pending user permission.
 
 

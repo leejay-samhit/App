@@ -7,6 +7,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { GradientCard } from "../../src/gradient-card";
 
 type Product = {
   id: string;
@@ -74,13 +75,13 @@ export default function AdminProducts() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
+      <View style={styles.headerRow}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <Text style={styles.title}>Products</Text>
-        <TouchableOpacity onPress={() => setCreateOpen(true)} style={styles.iconBtn} testID="product-new">
-          <Feather name="plus" size={20} color={colors.textMain} />
+        <TouchableOpacity onPress={() => setCreateOpen(true)} style={[styles.iconBtn, styles.iconBtnPrimary]} testID="product-new">
+          <Feather name="plus" size={20} color={colors.primaryFg} />
         </TouchableOpacity>
       </View>
 
@@ -88,9 +89,20 @@ export default function AdminProducts() {
         <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
       ) : (
         <ScrollView
-          contentContainerStyle={{ padding: spacing.screen, paddingTop: 8, paddingBottom: 80 }}
+          contentContainerStyle={{ padding: spacing.screen, paddingTop: 4, paddingBottom: 80 }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
         >
+          {/* Hero summary card */}
+          <GradientCard variant="primary" style={{ marginBottom: 14, padding: 18 }}>
+            <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>CATALOG</Text>
+            <Text style={{ fontSize: 22, fontWeight: "900", color: "#fff", marginTop: 4, letterSpacing: -0.6 }}>
+              {items.length} product{items.length === 1 ? "" : "s"} live
+            </Text>
+            <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
+              {items.filter(p => (p.stock || 0) === 0).length} sold-out · {items.filter(p => (p.interested_count || 0) > 0).length} with waitlist
+            </Text>
+          </GradientCard>
+
           {/* Search */}
           <View style={styles.search}>
             <Feather name="search" size={16} color={colors.textMuted} />
@@ -409,7 +421,9 @@ function ProductModal({ visible, existing, onClose, onSaved }: { visible: boolea
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.screen, paddingBottom: 8 },
-  iconBtn: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.screen, paddingTop: 4, paddingBottom: 8 },
+  iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  iconBtnPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },
   title: { fontSize: 20, fontWeight: "800", color: colors.textMain },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
