@@ -20,6 +20,7 @@ import { useFocusEffect, useRouter, usePathname } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { PromoCarousel } from "../../src/promo-carousel";
 import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
 
 type Product = {
@@ -287,15 +288,35 @@ export default function ShopScreen() {
           />
         }
         keyboardShouldPersistTaps="handled"
+        stickyHeaderIndices={[0]}
       >
-        {/* Slim top header with title + small cart icon (cart only on shop tab) */}
+        {/* Top header — sticks to the top when scrolling.
+            Shop mode: in-line search bar + cart icon (Member-Store text removed).
+            Services mode: eyebrow + title + globe icon (unchanged). */}
         <View style={styles.topHeader}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.topHeaderEyebrow}>{mode === "shop" ? "SHOP" : "SERVICES"}</Text>
-            <Text style={styles.topHeaderTitle}>
-              {mode === "shop" ? "Member store" : "Find local talent"}
-            </Text>
-          </View>
+          {mode === "shop" ? (
+            <View style={[styles.shopSearch, { flex: 1, marginVertical: 0 }]}>
+              <Feather name="search" size={16} color={colors.textMuted} />
+              <TextInput
+                style={styles.shopSearchInput}
+                placeholder="Search for products"
+                placeholderTextColor={colors.textMuted}
+                value={shopSearch}
+                onChangeText={setShopSearch}
+                returnKeyType="search"
+              />
+              {shopSearch.length > 0 ? (
+                <TouchableOpacity onPress={() => setShopSearch("")}><Feather name="x-circle" size={16} color={colors.textMuted} /></TouchableOpacity>
+              ) : (
+                <View style={styles.searchFilterBtn}><Feather name="sliders" size={14} color={colors.primaryFg} /></View>
+              )}
+            </View>
+          ) : (
+            <View style={{ flex: 1 }}>
+              <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
+              <Text style={styles.topHeaderTitle}>Find local talent</Text>
+            </View>
+          )}
           {mode === "services" && (
             <TouchableOpacity
               onPress={() => setLangModalOpen(true)}
@@ -449,44 +470,16 @@ export default function ShopScreen() {
 
           return (
             <>
-              {/* Search bar with filter icon */}
-              <View style={styles.shopSearch}>
-                <Feather name="search" size={16} color={colors.textMuted} />
-                <TextInput
-                  style={styles.shopSearchInput}
-                  placeholder="Search for products"
-                  placeholderTextColor={colors.textMuted}
-                  value={shopSearch}
-                  onChangeText={setShopSearch}
-                  returnKeyType="search"
-                />
-                {shopSearch.length > 0 ? (
-                  <TouchableOpacity onPress={() => setShopSearch("")}><Feather name="x-circle" size={16} color={colors.textMuted} /></TouchableOpacity>
-                ) : (
-                  <View style={styles.searchFilterBtn}><Feather name="sliders" size={14} color={colors.primaryFg} /></View>
-                )}
-              </View>
+              {/* Search bar moved to the sticky top header — no inline search here */}
 
-              {/* Hero banner — big green savings card */}
-              <View style={styles.heroBanner}>
-                <View style={{ flex: 1, paddingRight: 12 }}>
-                  <Text style={styles.heroEyebrow}>Limited time</Text>
-                  <Text style={styles.heroTitle}>
-                    Save <Text style={styles.heroTitleAccent}>70%</Text>{"\n"}on premium picks
-                  </Text>
-                  <Text style={styles.heroSub}>Member-only deals on hand-picked products</Text>
-                  <TouchableOpacity
-                    style={styles.heroBtn}
-                    onPress={() => { setShopCategory(null); setShopSearch(""); }}
-                  >
-                    <Text style={styles.heroBtnText}>Shop now</Text>
-                    <Feather name="arrow-right" size={14} color={colors.primaryFg} />
-                  </TouchableOpacity>
-                </View>
-                <View style={styles.heroBlob}>
-                  <Feather name="shopping-bag" size={56} color={colors.primary} />
-                </View>
-              </View>
+              {/* Hero banner — swipeable carousel of admin-managed promo slides */}
+              <PromoCarousel onShopNow={(productId) => {
+                if (productId) {
+                  router.push(`/product/${productId}` as any);
+                } else {
+                  setShopCategory(null); setShopSearch("");
+                }
+              }} />
 
               {/* Departments — tiled cards (matches reference image 2) */}
               {cats.length > 0 && (

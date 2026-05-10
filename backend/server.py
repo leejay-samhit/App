@@ -150,6 +150,7 @@ from core.branding import (  # noqa: E402
 from routes import branding as branding_router  # noqa: E402
 from routes import notifications as notifications_router  # noqa: E402
 from routes import products_public as products_public_router  # noqa: E402
+from routes import promo_banners as promo_banners_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -5999,6 +6000,7 @@ app.include_router(api_router)
 app.include_router(branding_router.router, prefix="/api")
 app.include_router(notifications_router.router, prefix="/api")
 app.include_router(products_public_router.router, prefix="/api")
+app.include_router(promo_banners_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
