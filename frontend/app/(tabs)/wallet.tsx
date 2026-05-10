@@ -183,24 +183,39 @@ export default function WalletScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
         <Text style={styles.overline}>WALLET</Text>
-        <Text style={styles.h1}>Your earnings</Text>
+        <Text style={styles.h1Compact}>Your earnings</Text>
 
-        <GradientCard variant="emerald" style={styles.balanceCard}>
-          <Text style={styles.balanceLabel}>AVAILABLE BALANCE</Text>
-          <Text style={styles.balanceAmount} testID="wallet-balance" numberOfLines={1} adjustsFontSizeToFit>{formatINR(user?.wallet_balance || 0)}</Text>
-          <View style={styles.statsRow}>
-            <View style={styles.statCol}>
-              <Text style={styles.statRowLabel}>Total earned</Text>
-              <Text style={styles.statRowValue}>{formatINR(user?.total_earned || 0)}</Text>
+        <GradientCard variant="emerald" style={styles.balanceCardCompact}>
+          {/* Top row — balance + chips on right */}
+          <View style={styles.balanceTopRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.balanceLabel}>AVAILABLE BALANCE</Text>
+              <Text
+                style={styles.balanceAmountCompact}
+                testID="wallet-balance"
+                numberOfLines={1}
+                adjustsFontSizeToFit
+              >
+                {formatINR(user?.wallet_balance || 0)}
+              </Text>
             </View>
-            <View style={styles.statColRight}>
-              <Text style={styles.statRowLabel}>Payouts</Text>
-              <Text style={styles.statRowValue}>{user?.payouts_received || 0}</Text>
+            <View style={styles.miniStatsCol}>
+              <View style={styles.miniStat}>
+                <Text style={styles.miniStatLabel}>EARNED</Text>
+                <Text style={styles.miniStatValue}>{formatINR(user?.total_earned || 0)}</Text>
+              </View>
+              <View style={styles.miniStatDivider} />
+              <View style={styles.miniStat}>
+                <Text style={styles.miniStatLabel}>PAYOUTS</Text>
+                <Text style={styles.miniStatValue}>{user?.payouts_received || 0}</Text>
+              </View>
             </View>
           </View>
-          <View style={styles.actionsRow}>
+
+          {/* Bottom row — Withdraw + Send compact buttons */}
+          <View style={styles.actionsRowCompact}>
             <TouchableOpacity
-              style={[styles.withdrawBtn, { flex: 1 }]}
+              style={styles.withdrawBtnCompact}
               onPress={() => {
                 if (!hasPayoutMethod) {
                   Alert.alert(
@@ -217,30 +232,21 @@ export default function WalletScreen() {
               }}
               testID="wallet-request-withdraw"
             >
-              <Feather name="arrow-up-right" size={16} color={colors.accentFg} />
+              <Feather name="arrow-up-right" size={14} color={colors.accentFg} />
               <Text
-                style={styles.withdrawBtnText}
+                style={styles.withdrawBtnTextCompact}
                 numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.85}
               >
                 {hasPayoutMethod ? "Withdraw" : "Add details"}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.transferBtn, { flex: 1 }]}
+              style={styles.transferBtnCompact}
               onPress={() => setShowTransfer(true)}
               testID="wallet-transfer"
             >
-              <Feather name="send" size={16} color={colors.primary} />
-              <Text
-                style={styles.transferBtnText}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.85}
-              >
-                Send
-              </Text>
+              <Feather name="send" size={14} color={colors.primary} />
+              <Text style={styles.transferBtnTextCompact} numberOfLines={1}>Send</Text>
             </TouchableOpacity>
           </View>
         </GradientCard>
@@ -540,9 +546,18 @@ const styles = StyleSheet.create({
   container: { padding: spacing.screen, paddingBottom: 40 },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 8 },
   h1: { fontSize: 30, fontWeight: "800", color: colors.textMain, letterSpacing: -1, marginBottom: 20 },
+  h1Compact: { fontSize: 22, fontWeight: "800", color: colors.textMain, letterSpacing: -0.6, marginBottom: 14 },
   balanceCard: { padding: 22, marginBottom: 24 },
-  balanceLabel: { color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: 2, fontWeight: "700" },
+  balanceCardCompact: { padding: 16, marginBottom: 20, borderRadius: 18 },
+  balanceTopRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  balanceLabel: { color: "rgba(255,255,255,0.7)", fontSize: 10, letterSpacing: 1.6, fontWeight: "800" },
   balanceAmount: { color: colors.primaryFg, fontSize: 44, fontWeight: "800", marginTop: 6, letterSpacing: -1.5 },
+  balanceAmountCompact: { color: colors.primaryFg, fontSize: 26, fontWeight: "900", marginTop: 2, letterSpacing: -0.8 },
+  miniStatsCol: { backgroundColor: "rgba(255,255,255,0.14)", borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12, alignItems: "center", minWidth: 110 },
+  miniStat: { alignItems: "center" },
+  miniStatLabel: { color: "rgba(255,255,255,0.75)", fontSize: 9, fontWeight: "800", letterSpacing: 1.2 },
+  miniStatValue: { color: "#fff", fontSize: 13, fontWeight: "800", marginTop: 1, letterSpacing: -0.2 },
+  miniStatDivider: { width: 28, height: 1, backgroundColor: "rgba(255,255,255,0.25)", marginVertical: 5 },
   statsRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginTop: 18, paddingTop: 16, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)" },
   statCol: { flex: 1, alignItems: "flex-start" },
   statColRight: { flex: 1, alignItems: "flex-end" },
@@ -551,6 +566,28 @@ const styles = StyleSheet.create({
   withdrawBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.accent, paddingVertical: 12, paddingHorizontal: 10, borderRadius: radii.button, gap: 6, minHeight: 44 },
   withdrawBtnText: { color: colors.accentFg, fontWeight: "700", fontSize: 14 },
   actionsRow: { flexDirection: "row", gap: 10, marginTop: 18 },
+  // Compact action row: smaller padding, compact buttons
+  actionsRowCompact: { flexDirection: "row", gap: 8, marginTop: 14 },
+  withdrawBtnCompact: {
+    flex: 1,
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.accent,
+    paddingVertical: 9, paddingHorizontal: 10,
+    borderRadius: 999,
+    gap: 5,
+    minHeight: 36,
+  },
+  withdrawBtnTextCompact: { color: colors.accentFg, fontWeight: "800", fontSize: 12, letterSpacing: 0.2 },
+  transferBtnCompact: {
+    flex: 1,
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.95)",
+    paddingVertical: 9, paddingHorizontal: 10,
+    borderRadius: 999,
+    gap: 5,
+    minHeight: 36,
+  },
+  transferBtnTextCompact: { color: colors.primary, fontWeight: "800", fontSize: 12, letterSpacing: 0.2 },
   transferBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#fff", paddingVertical: 12, paddingHorizontal: 10, borderRadius: radii.button, gap: 6, minHeight: 44 },
   transferBtnText: { color: colors.primary, fontWeight: "700", fontSize: 14 },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12, marginTop: 8 },
