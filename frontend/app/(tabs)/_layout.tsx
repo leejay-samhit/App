@@ -20,23 +20,20 @@ export default function TabsLayout() {
   // the admin re-ordered tabs via branding.
   // Hard-hide certain tabs from the bottom bar regardless of branding (per UX requirement).
   // The screen route still exists so other in-app navigation (e.g. Withdraw button on
-  // Dashboard pushes to /(tabs)/wallet) keeps working.
-  const HARD_HIDDEN: Set<string> = new Set(["wallet"]);
+  // Dashboard pushes to /(tabs)/wallet, Next L1 Payout card pushes to /(tabs)/network)
+  // keeps working.
+  const HARD_HIDDEN: Set<string> = new Set(["wallet", "network"]);
 
-  const visibleKeys = tabs
-    .filter((t) => t.visible !== false && !HARD_HIDDEN.has(t.key))
-    .map((t) => t.key);
-  const others = visibleKeys.filter((k) => k !== "dashboard");
-  const hasDashboard = visibleKeys.includes("dashboard");
-  const center = Math.floor(others.length / 2);
-  const reordered = hasDashboard
-    ? [...others.slice(0, center), "dashboard", ...others.slice(center)]
-    : visibleKeys;
-  // Append hidden tabs at the end so every screen still has a registered route.
-  const hidden = tabs
-    .filter((t) => t.visible === false || HARD_HIDDEN.has(t.key))
-    .map((t) => t.key);
-  const order = [...reordered, ...hidden];
+  // Hardcoded visible-tab order. Dashboard sits at the center; Shop and
+  // Services sit on either side; Profile is rightmost. We ignore stored
+  // branding order for these so the bar is consistent for every tenant.
+  const HARDCODED_ORDER = ["shop", "dashboard", "services", "profile"];
+
+  // Every screen file under (tabs)/ must still be registered as a route, even
+  // hidden ones. Build the full registration list = visible (in our order) +
+  // hidden (so they're reachable via router.push()).
+  const allKeys = Array.from(new Set([...HARDCODED_ORDER, ...tabs.map((t) => t.key), "wallet", "network"]));
+  const order = allKeys;
   const byKey = Object.fromEntries(tabs.map((t) => [t.key, t]));
 
   return (
@@ -60,21 +57,22 @@ export default function TabsLayout() {
     >
       {order.map((key) => {
         const t = byKey[key];
-        const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : "user");
-        const isHidden = t?.visible === false || HARD_HIDDEN.has(key);
+        const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : key === "services" ? "briefcase" : "user");
+        const label = t?.label || (key === "services" ? "Services" : key === "shop" ? "Shop" : key === "dashboard" ? "Dashboard" : key === "profile" ? "Profile" : key === "network" ? "Network" : key === "wallet" ? "Wallet" : key);
+        const isHidden = HARD_HIDDEN.has(key) || t?.visible === false;
         return (
           <Tabs.Screen
             key={key}
             name={key}
             options={isHidden ? {
-              title: t?.label || key,
+              title: label,
               // Render an empty button so the tab is registered as a route
               // (other screens can still navigate to it) but it never appears
               // in the bottom bar.
               tabBarButton: () => null,
               tabBarItemStyle: { display: "none" },
             } : {
-              title: t?.label || key,
+              title: label,
               tabBarIcon: ({ color, size }) => <Feather name={iconName} size={size} color={color} />,
             }}
           />

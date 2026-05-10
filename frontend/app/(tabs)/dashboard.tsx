@@ -214,30 +214,40 @@ export default function DashboardScreen() {
 
         {/* === Expanded sections — only when user taps Total Earnings === */}
         {expanded && (<>
-        <Animated.View entering={FadeInDown.duration(350).delay(40)} style={styles.progressCard}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
-            <DonutProgress
-              value={data.directs_required - data.next_payout_in}
-              max={data.directs_required}
-              size={104}
-              strokeWidth={12}
-              color={colors.primary}
-              label={`${data.direct_referrals % data.directs_required}/${data.directs_required}`}
-              sublabel="DIRECTS"
-            />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>Next L1 payout</Text>
-              <Text style={styles.bigPrice}>{formatINR(data.level_payouts.l1)}</Text>
-              <Text style={styles.progressInfo}>
-                Refer <Text style={styles.bold}>{data.next_payout_in}</Text> more direct{data.next_payout_in === 1 ? "" : "s"} to unlock.
-              </Text>
+        <Animated.View entering={FadeInDown.duration(350).delay(40)}>
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => router.push("/(tabs)/network" as any)}
+            style={styles.progressCard}
+            testID="dashboard-next-payout-card"
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
+              <DonutProgress
+                value={data.directs_required - data.next_payout_in}
+                max={data.directs_required}
+                size={104}
+                strokeWidth={12}
+                color={colors.primary}
+                label={`${data.direct_referrals % data.directs_required}/${data.directs_required}`}
+                sublabel="DIRECTS"
+              />
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                  <Text style={styles.cardTitle}>Next L1 payout</Text>
+                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                </View>
+                <Text style={styles.bigPrice}>{formatINR(data.level_payouts.l1)}</Text>
+                <Text style={styles.progressInfo}>
+                  Refer <Text style={styles.bold}>{data.next_payout_in}</Text> more direct{data.next_payout_in === 1 ? "" : "s"} to unlock.
+                </Text>
+              </View>
             </View>
-          </View>
-          <View style={styles.levelsRow}>
-            <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L1</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l1)}</Text></View>
-            <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L2</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l2)}</Text></View>
-            <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L3</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l3)}</Text></View>
-          </View>
+            <View style={styles.levelsRow}>
+              <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L1</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l1)}</Text></View>
+              <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L2</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l2)}</Text></View>
+              <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L3</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l3)}</Text></View>
+            </View>
+          </TouchableOpacity>
         </Animated.View>
 
         {/* Sparkline - earnings last 7 days */}

@@ -60,10 +60,11 @@ const DEFAULT_BRANDING: Branding = {
   colors: { ...defaultColors },
   font: "system",
   tabs: [
-    { key: "network", label: "Network", icon: "git-branch", visible: true },
+    { key: "network", label: "Network", icon: "git-branch", visible: false },
     { key: "wallet", label: "Wallet", icon: "credit-card", visible: false },
     { key: "dashboard", label: "Dashboard", icon: "home", visible: true },
     { key: "shop", label: "Shop", icon: "shopping-bag", visible: true },
+    { key: "services", label: "Services", icon: "briefcase", visible: true },
     { key: "profile", label: "Profile", icon: "user", visible: true },
   ],
   business_name: "Network RuPay Solutions Pvt Ltd",

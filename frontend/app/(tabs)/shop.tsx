@@ -16,7 +16,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useRouter, usePathname } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
@@ -67,7 +67,14 @@ const LANG_ORDER = ["en", "te", "hi", "ta"];
 
 export default function ShopScreen() {
   const router = useRouter();
-  const [mode, setMode] = useState<Mode>("shop");
+  // Detect which tab we're rendering for. Both /shop and /services route to
+  // this same component (services.tsx re-exports the default). Pathname tells
+  // us which mode to lock — this also hides the Shop/Services toggle pills.
+  const pathname = usePathname();
+  const lockedMode: Mode = pathname && pathname.includes("/services") ? "services" : "shop";
+  const [mode, setMode] = useState<Mode>(lockedMode);
+  // Keep mode synced if the tab changes while screen is mounted (rare, but safe)
+  useEffect(() => { setMode(lockedMode); }, [lockedMode]);
 
   // ---- Shop state ----
   const [items, setItems] = useState<Product[]>([]);
@@ -279,49 +286,29 @@ export default function ShopScreen() {
         }
         keyboardShouldPersistTaps="handled"
       >
-        {/* Hero header */}
-        <GradientCard variant={mode === "shop" ? "sunset" : "royal"} style={{ marginBottom: 12, padding: 22 }}>
-          <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }}>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>
-                {mode === "shop" ? "SHOP" : "SERVICES"}
-              </Text>
-              <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>
-                {mode === "shop" ? "Member store" : "Find local talent"}
-              </Text>
-              <Text style={{ fontSize: 13, color: "rgba(255,255,255,0.9)", marginTop: 6 }}>
-                {mode === "shop" ? "Pay using your wallet earnings." : "Book a verified provider in your pincode."}
-              </Text>
-            </View>
-            {mode === "shop" && (
-              <TouchableOpacity onPress={() => router.push("/cart")} style={[styles.cartBtn, { backgroundColor: "rgba(255,255,255,0.2)", borderWidth: 0 }]} testID="shop-cart-btn">
-                <Feather name="shopping-cart" size={18} color="#fff" />
-                {cartCount > 0 && (
-                  <View style={[styles.cartBadge, { backgroundColor: "#fff" }]}>
-                    <Text style={[styles.cartBadgeText, { color: "#E57A44" }]}>{cartCount > 9 ? "9+" : cartCount}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            )}
+        {/* Slim top header with title + small cart icon (cart only on shop tab) */}
+        <View style={styles.topHeader}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.topHeaderEyebrow}>{mode === "shop" ? "SHOP" : "SERVICES"}</Text>
+            <Text style={styles.topHeaderTitle}>
+              {mode === "shop" ? "Member store" : "Find local talent"}
+            </Text>
           </View>
-        </GradientCard>
-
-        {/* Mode toggle */}
-        <View style={styles.pillRow}>
-          <TouchableOpacity
-            style={[styles.pill, mode === "shop" && styles.pillActive]}
-            onPress={() => setMode("shop")}
-          >
-            <Feather name="shopping-bag" size={14} color={mode === "shop" ? colors.primaryFg : colors.textMain} />
-            <Text style={[styles.pillText, mode === "shop" && styles.pillTextActive]}>Shop</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.pill, mode === "services" && styles.pillActive]}
-            onPress={() => setMode("services")}
-          >
-            <Feather name="briefcase" size={14} color={mode === "services" ? colors.primaryFg : colors.textMain} />
-            <Text style={[styles.pillText, mode === "services" && styles.pillTextActive]}>Services</Text>
-          </TouchableOpacity>
+          {mode === "shop" && (
+            <TouchableOpacity
+              onPress={() => router.push("/cart")}
+              style={styles.cartIconBtn}
+              testID="shop-cart-btn"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Feather name="shopping-cart" size={20} color={colors.textMain} />
+              {cartCount > 0 && (
+                <View style={styles.cartBadgeTop}>
+                  <Text style={styles.cartBadgeTopText}>{cartCount > 9 ? "9+" : cartCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* === SHOP === */}
@@ -819,6 +806,28 @@ const styles = StyleSheet.create({
   cartBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   cartBadge: { position: "absolute", top: -2, right: -2, minWidth: 20, height: 20, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 5 },
   cartBadgeText: { fontSize: 10, fontWeight: "800" },
+  // Slim top header (replaces the SHOP gradient hero) with a small cart icon at right
+  topHeader: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    paddingTop: 4, paddingBottom: 14,
+  },
+  topHeaderEyebrow: { fontSize: 10, letterSpacing: 1.6, color: colors.textMuted, fontWeight: "800" },
+  topHeaderTitle: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.6, marginTop: 2 },
+  cartIconBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+    alignItems: "center", justifyContent: "center",
+  },
+  cartBadgeTop: {
+    position: "absolute", top: -4, right: -4,
+    minWidth: 18, height: 18, borderRadius: 9,
+    backgroundColor: colors.accent,
+    alignItems: "center", justifyContent: "center",
+    paddingHorizontal: 4,
+    borderWidth: 2, borderColor: colors.background,
+  },
+  cartBadgeTopText: { fontSize: 9, fontWeight: "900", color: colors.accentFg },
 
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   card: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, overflow: "hidden", padding: 10 },
