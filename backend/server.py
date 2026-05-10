@@ -88,277 +88,66 @@ from models import (
 )
 
 
-# ------------------ Config ------------------
-MONGO_URL = os.environ['MONGO_URL']
-DB_NAME = os.environ['DB_NAME']
-JWT_SECRET = os.environ['JWT_SECRET']
-JWT_ALGORITHM = "HS256"
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@app.com')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Admin@123')
-REGISTRATION_FEE = float(os.environ.get('REGISTRATION_FEE', 100))
-PAYOUT_PER_LEVEL = float(os.environ.get('PAYOUT_PER_LEVEL', 400))
-LEVEL_2_PAYOUT = float(os.environ.get('LEVEL_2_PAYOUT', 100))
-LEVEL_3_PAYOUT = float(os.environ.get('LEVEL_3_PAYOUT', 50))
-DIRECTS_REQUIRED = 4
-
-# Default payout amounts per level (10 levels). L1 is paid every Nth direct;
-# L2..L10 are credited per qualifying down-line activation.
-DEFAULT_LEVEL_PAYOUTS = {
-    "payout_l1": PAYOUT_PER_LEVEL,
-    "payout_l2": LEVEL_2_PAYOUT,
-    "payout_l3": LEVEL_3_PAYOUT,
-    "payout_l4": 25.0,
-    "payout_l5": 15.0,
-    "payout_l6": 10.0,
-    "payout_l7": 8.0,
-    "payout_l8": 5.0,
-    "payout_l9": 3.0,
-    "payout_l10": 2.0,
-}
-
-DEFAULT_SETTINGS = {
-    "registration_fee": REGISTRATION_FEE,
-    **DEFAULT_LEVEL_PAYOUTS,
-    "directs_required": DIRECTS_REQUIRED,
-    "vendor_commission_pct": 70,  # vendor's % share of each line-item sale
-    "auto_approve_on_payment": True,  # auto-approve user after Razorpay confirms payment + UTR cross-check
-}
-
-
-async def get_settings() -> Dict[str, Any]:
-    doc = await db.settings.find_one({"id": "global"}, {"_id": 0})
-    if not doc:
-        return {**DEFAULT_SETTINGS, "id": "global"}
-    # Backfill any missing level keys with defaults so older docs still work
-    merged = {**DEFAULT_SETTINGS, **doc}
-    return merged
-
-# Achievement tiers based on team size
-TIERS = [
-    {"name": "Diamond", "min": 200, "color": "#E0F2FF", "icon": "award"},
-    {"name": "Platinum", "min": 60, "color": "#E8E8E8", "icon": "star"},
-    {"name": "Gold", "min": 16, "color": "#FFE9B3", "icon": "star"},
-    {"name": "Silver", "min": 4, "color": "#E5E5E5", "icon": "shield"},
-    {"name": "Bronze", "min": 0, "color": "#F4D9C0", "icon": "shield"},
-]
-
-
-def get_tier(team_size: int) -> Dict[str, Any]:
-    for t in TIERS:
-        if team_size >= t["min"]:
-            return t
-    return TIERS[-1]
-
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+# ------------------ Core imports ------------------
+# Phase 2A refactor: shared utilities live in /app/backend/core/.
+# server.py keeps its existing variable names by re-binding the imports below
+# so the route handlers further down DO NOT need to change.
+from core.db import client, db, MONGO_URL, DB_NAME  # noqa: E402
+from core.config import (  # noqa: E402
+    JWT_SECRET,
+    JWT_ALGORITHM,
+    ADMIN_EMAIL,
+    ADMIN_PASSWORD,
+    REGISTRATION_FEE,
+    PAYOUT_PER_LEVEL,
+    LEVEL_2_PAYOUT,
+    LEVEL_3_PAYOUT,
+    DIRECTS_REQUIRED,
+    DEFAULT_LEVEL_PAYOUTS,
+    DEFAULT_SETTINGS,
+    REFERRAL_GST_PCT,
+    TIERS,
+    get_tier,
+    ADMIN_ROLES_NON_FINANCE,
+    DEFAULT_BRANDING,
+    ALLOWED_FONTS,
+    ALLOWED_TAB_KEYS,
+)
+from core.security import (  # noqa: E402
+    security,
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user,
+    require_admin,
+    require_admin_role,
+    require_admin_not_finance,
+)
+from core.utils import (  # noqa: E402
+    now_utc,
+    serialize_user,
+    gen_referral_code,
+    get_settings,
+    audit_log as _audit_log,
+)
+from core.danger import (  # noqa: E402
+    SUPER_PWD_SYMBOLS,
+    SUPER_PWD_FORMAT_DESC,
+    validate_super_password_format,
+    get_super_password_hash,
+    verify_super_password,
+    DANGER_PIN_FORMAT_DESC,
+    validate_danger_pin_format,
+    get_danger_pin_hash,
+    verify_danger_pin,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-# ------------------ Helpers ------------------
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
-
-
-def create_access_token(user_id: str, email: str, role: str) -> str:
-    payload = {
-        "sub": user_id,
-        "email": email,
-        "role": role,
-        "exp": datetime.now(timezone.utc) + timedelta(days=7),
-        "type": "access",
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-
-def gen_referral_code(prefix: str = "") -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return prefix + ''.join(secrets.choice(alphabet) for _ in range(6))
-
-
-# ------------------ Super Password (Danger-zone gate) ------------------
-SUPER_PWD_SYMBOLS = "!@#$%^&*()_+-=[]{};:'\",.<>/?\\|"
-SUPER_PWD_FORMAT_DESC = (
-    "Must be exactly 10 characters: 1 digit, 3 uppercase letters, "
-    "2 symbols (!@#$%^&*()_+-=[]{};:'\",.<>/?\\|), and 4 lowercase letters."
-)
-
-
-def validate_super_password_format(pwd: str) -> None:
-    """Raises HTTPException(400) if the password does not match the required composition."""
-    if not isinstance(pwd, str) or len(pwd) != 10:
-        raise HTTPException(status_code=400, detail=f"Super password format invalid. {SUPER_PWD_FORMAT_DESC}")
-    digits = sum(1 for c in pwd if c.isdigit())
-    uppers = sum(1 for c in pwd if c.isupper())
-    lowers = sum(1 for c in pwd if c.islower())
-    syms = sum(1 for c in pwd if c in SUPER_PWD_SYMBOLS)
-    other = len(pwd) - (digits + uppers + lowers + syms)
-    if not (digits == 1 and uppers == 3 and lowers == 4 and syms == 2 and other == 0):
-        raise HTTPException(status_code=400, detail=f"Super password format invalid. {SUPER_PWD_FORMAT_DESC}")
-
-
-async def get_super_password_hash() -> Optional[str]:
-    doc = await db.settings.find_one({"id": "global"}, {"_id": 0, "super_password_hash": 1})
-    return (doc or {}).get("super_password_hash")
-
-
-async def verify_super_password(provided: str) -> bool:
-    if not provided:
-        return False
-    h = await get_super_password_hash()
-    if not h:
-        return False
-    try:
-        return verify_password(provided, h)
-    except Exception:
-        return False
-
-
-# ------------------ Danger PIN (Wipe + Restore unified gate) ------------------
-DANGER_PIN_FORMAT_DESC = "PIN must be exactly 6 digits (0–9)."
-
-
-def validate_danger_pin_format(pin: str) -> None:
-    if not isinstance(pin, str) or len(pin) != 6 or not pin.isdigit():
-        raise HTTPException(status_code=400, detail=f"Invalid PIN format. {DANGER_PIN_FORMAT_DESC}")
-
-
-async def get_danger_pin_hash() -> Optional[str]:
-    doc = await db.settings.find_one({"id": "global"}, {"_id": 0, "danger_pin_hash": 1})
-    return (doc or {}).get("danger_pin_hash")
-
-
-async def verify_danger_pin(provided: str) -> bool:
-    if not provided:
-        return False
-    h = await get_danger_pin_hash()
-    if not h:
-        return False
-    try:
-        return verify_password(provided, h)
-    except Exception:
-        return False
-
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def serialize_user(u: Dict[str, Any]) -> Dict[str, Any]:
-    if not u:
-        return u
-    u = dict(u)
-    u.pop("_id", None)
-    u.pop("password_hash", None)
-    return u
-
-
-# ------------------ Auth Dependency ------------------
-security = HTTPBearer(auto_error=False)
-
-
-async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Dict[str, Any]:
-    if not creds or not creds.credentials:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    token = creds.credentials
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if payload.get("type") != "access":
-            raise HTTPException(status_code=401, detail="Invalid token type")
-        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        return user
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-
-async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
-
-
-def require_admin_role(*allowed: str):
-    """Restrict an endpoint to specific admin sub-roles (super_admin, manager, support, finance)."""
-    async def checker(admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
-        sub = admin.get("admin_role") or "super_admin"  # legacy admins default super
-        if sub not in allowed:
-            raise HTTPException(status_code=403, detail=f"Requires admin role: {' or '.join(allowed)}")
-        return admin
-    return checker
-
-
-# Finance is a restricted role — it can ONLY work with withdrawals/transactions read-only.
-# All other admin write endpoints (users, KYC, settings, products, orders, approvals, admin
-# management, system wipe, super-password, audit) explicitly exclude "finance".
-ADMIN_ROLES_NON_FINANCE = ("super_admin", "manager", "support")
-
-
-async def require_admin_not_finance(admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
-    sub = admin.get("admin_role") or "super_admin"
-    if sub == "finance":
-        raise HTTPException(status_code=403, detail="Finance role cannot perform this action — only withdrawals.")
-    return admin
-
-
-async def _audit_log(admin: Dict[str, Any], action: str, target_type: str = "", target_id: str = "", details: Optional[Dict[str, Any]] = None):
-    await db.audit_logs.insert_one({
-        "id": str(uuid.uuid4()),
-        "admin_id": admin["id"],
-        "admin_email": admin.get("email"),
-        "admin_role": admin.get("admin_role") or "super_admin",
-        "action": action,
-        "target_type": target_type,
-        "target_id": target_id,
-        "details": details or {},
-        "created_at": now_utc().isoformat(),
-    })
-
-
 # ------------------ Models ------------------
-
-
-# ------------------ Branding (public-readable, super_admin writable) ------------------
-DEFAULT_BRANDING: Dict[str, Any] = {
-    "app_name": "NetworkPay",
-    "tagline": "Track your referrals, earnings and grow your team.",
-    "login_subtitle": "Sign in to your network",
-    "payment_hero": "Complete your registration",
-    "pending_hero": "Awaiting finance approval",
-    "colors": {
-        "primary": "#143D2E",
-        "primaryFg": "#FFFFFF",
-        "accent": "#E57A44",
-        "accentFg": "#FFFFFF",
-        "background": "#FAF9F6",
-        "surface": "#FFFFFF",
-        "surfaceMuted": "#F3F1EC",
-        "success": "#2E7D52",
-        "warning": "#D9A05B",
-        "textMain": "#1C2520",
-        "textMuted": "#6B7280",
-        "border": "#E5E4E0",
-    },
-    "font": "system",  # one of: system | inter | poppins | jakarta | manrope | dmsans
-    "tabs": [
-        {"key": "dashboard", "label": "Dashboard", "icon": "home", "visible": True},
-        {"key": "network", "label": "Network", "icon": "git-branch", "visible": True},
-        {"key": "wallet", "label": "Wallet", "icon": "credit-card", "visible": True},
-        {"key": "shop", "label": "Shop", "icon": "shopping-bag", "visible": True},
-        {"key": "profile", "label": "Profile", "icon": "user", "visible": True},
-    ],
-}
-
-ALLOWED_FONTS = {"system", "inter", "poppins", "jakarta", "manrope", "dmsans"}
-ALLOWED_TAB_KEYS = {"dashboard", "network", "wallet", "shop", "profile"}
+# (DEFAULT_BRANDING / ALLOWED_FONTS / ALLOWED_TAB_KEYS are imported from core.config above.)
 
 
 # ------------------ FastAPI App ------------------
@@ -625,11 +414,6 @@ async def logout(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 # ------------------ Payment (Mock) ------------------
-REFERRAL_GST_PCT = 18.0  # Indian GST rate. Commission amounts are treated as
-                          # GST-EXCLUSIVE: gst = 18% OF gross → admin; net = gross - gst → user.
-                          # i.e. ₹400 payout → ₹72 GST + ₹328 net.
-
-
 async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = ""):
     """Credit a referral payout to a sponsor at a given level.
 
