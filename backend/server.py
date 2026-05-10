@@ -6116,6 +6116,60 @@ async def admin_unassign_distributor_area(
     return {"ok": True}
 
 
+@api_router.post("/admin/distributors/{user_id}/areas/bulk-unassign")
+async def admin_bulk_unassign_distributor_areas(
+    user_id: str,
+    payload: DistributorAreaAssign,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
+):
+    """Bulk-remove pincode mappings from a distributor in one request."""
+    pins = sorted({p.strip() for p in payload.pincodes if p and p.strip()})
+    if not pins:
+        raise HTTPException(status_code=400, detail="No pincodes provided")
+    res = await db.distributor_assignments.delete_many(
+        {"distributor_id": user_id, "pincode": {"$in": pins}}
+    )
+    await _audit_log(admin, "distributor.areas.bulk_unassign", "user", user_id,
+                     {"removed": res.deleted_count, "requested": len(pins)})
+    return {"ok": True, "removed": res.deleted_count, "requested": len(pins)}
+
+
+@api_router.get("/admin/pincodes/in-region")
+async def admin_pincodes_in_region(
+    state: Optional[str] = None,
+    district: Optional[str] = None,
+    limit: int = 5000,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """Return all pincodes belonging to a state and/or district. Used by the
+    admin Area-Mapping screen for one-click 'assign whole state/district'."""
+    if not state and not district:
+        raise HTTPException(status_code=400, detail="state or district is required")
+    limit = max(1, min(int(limit or 5000), 10000))
+    filt: Dict[str, Any] = {}
+    if state:
+        filt["state"] = {"$regex": f"^{re.escape(state)}$", "$options": "i"}
+    if district:
+        filt["district"] = {"$regex": f"^{re.escape(district)}$", "$options": "i"}
+    rows = await db.pincodes.find(filt, {"_id": 0}).sort("pincode", 1).to_list(limit)
+    pins = [r["pincode"] for r in rows]
+    # attach existing assignment info
+    if pins:
+        assignments = await db.distributor_assignments.find(
+            {"pincode": {"$in": pins}}, {"_id": 0},
+        ).to_list(len(pins))
+        amap = {a["pincode"]: a for a in assignments}
+        for r in rows:
+            a = amap.get(r["pincode"])
+            r["assigned_to"] = (
+                {"distributor_id": a["distributor_id"],
+                 "distributor_name": a.get("distributor_name"),
+                 "distributor_email": a.get("distributor_email")}
+                if a else None
+            )
+    return {"items": rows, "total": len(rows)}
+
+
 @api_router.post("/services/{provider_id}/book")
 async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if provider_id == user["id"]:
