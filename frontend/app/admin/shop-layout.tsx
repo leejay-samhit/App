@@ -18,6 +18,53 @@ import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { ShopLayoutRenderer, LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
 import { DraggableLayoutList } from "../../src/draggable-layout-list";
+import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
+
+// First-visit walkthrough for /admin/shop-layout. The shop-layout editor is
+// powerful so the guide is intentionally generous — 7 short steps.
+const LAYOUT_GUIDE_STEPS: GuideStep[] = [
+  {
+    icon: "layout",
+    title: "Welcome to Shop Layout!",
+    body: "This screen controls EVERYTHING customers see on the Shop tab — banners, product grids, flash sales, category circles. No app update needed.",
+    tip: "Re-open this guide any time via the ? icon above.",
+  },
+  {
+    icon: "navigation",
+    title: "1. Pick a scope first",
+    body: "The chips at the top decide WHERE your blocks appear:\n• HOME = main Shop tab\n• Each CATEGORY tab = a per-category page",
+    highlight: "Tap a chip at the top (Home, Electronics, Fashion, etc.)",
+  },
+  {
+    icon: "plus-circle",
+    title: "2. Add a block",
+    body: "Tap the + at the top-right. Pick from 12 block types: banner slider, product grid, category circles, flash sale, offer cards, and more.",
+    highlight: "Top-right · green + button",
+  },
+  {
+    icon: "image",
+    title: "3. Choose Manual or Auto products",
+    body: "For Product grid / Horizontal slider / Flash sale you can pick:\n• Manual → multi-select your own products\n• Trending / New / Best → auto-fills from data",
+    tip: "Auto sections refresh every time a customer opens the Shop — zero maintenance!",
+  },
+  {
+    icon: "droplet",
+    title: "4. Style it your way",
+    body: "Every block supports color overrides (text, background, button), font size, height, and text alignment — using the palette swatches in the form.",
+  },
+  {
+    icon: "move",
+    title: "5. Reorder by drag or buttons",
+    body: "On the block list, LONG-PRESS a card and drag to reorder. Or use the up/down chevrons. Order saves automatically.",
+    highlight: "Long-press a block card for 0.3s, then drag",
+  },
+  {
+    icon: "smartphone",
+    title: "6. Live preview + Analytics",
+    body: "Scroll down to see the LIVE CUSTOMER PREVIEW — exactly what shoppers see. Each card shows 7-day impressions, clicks, and CTR%. Iterate from data!",
+    tip: "Green CTR badge = ≥5% (great). Amber = below 5% — try a new image or title.",
+  },
+];
 
 type Block = LayoutBlock;
 type Product = { id: string; name: string; price?: number; image_url?: string; category?: string };
@@ -73,6 +120,8 @@ export default function AdminShopLayoutScreen() {
   const [editing, setEditing] = useState<Block | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const { visible: helpVisible, close: helpClose } = useFirstVisitGuide("shop-layout-v1");
   // Per-block analytics: { [block_id]: { impressions, clicks, ctr } }
   const [analytics, setAnalytics] = useState<Record<string, { impressions: number; clicks: number; ctr: number }>>({});
   // Scope state: which layout we're editing
@@ -180,14 +229,27 @@ export default function AdminShopLayoutScreen() {
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <Text style={styles.title}>Shop Layout</Text>
-        <TouchableOpacity
-          onPress={() => { setEditing(null); setShowForm(true); }}
-          style={[styles.iconBtn, styles.iconBtnPrimary]}
-          testID="block-new"
-        >
-          <Feather name="plus" size={20} color={colors.primaryFg} />
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          <HelpButton onPress={() => setHelpOpen(true)} testID="layout-help" />
+          <TouchableOpacity
+            onPress={() => { setEditing(null); setShowForm(true); }}
+            style={[styles.iconBtn, styles.iconBtnPrimary]}
+            testID="block-new"
+          >
+            <Feather name="plus" size={20} color={colors.primaryFg} />
+          </TouchableOpacity>
+        </View>
       </View>
+
+      {/* In-app walkthrough — auto-opens on first visit, re-openable via ? button */}
+      <HelpGuide
+        id="shop-layout-v1"
+        visible={helpVisible || helpOpen}
+        title="How to use Shop Layout"
+        subtitle="A quick 7-step tour. Tap anywhere outside to dismiss."
+        steps={LAYOUT_GUIDE_STEPS}
+        onClose={() => { helpClose(); setHelpOpen(false); }}
+      />
 
       {/* Scope tabs */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scopeTabs}>

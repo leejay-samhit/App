@@ -8,6 +8,53 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
+
+// Walkthrough steps shown on first visit (and via the "?" button) of
+// /admin/products. Keep these in plain language; admins are not engineers.
+const PRODUCT_GUIDE_STEPS: GuideStep[] = [
+  {
+    icon: "package",
+    title: "Welcome! Let's create your first product.",
+    body: "Products are what customers see and buy on the Shop tab. This 6-step guide takes ~1 minute.",
+    tip: "You can re-open this guide any time by tapping the ? icon above.",
+  },
+  {
+    icon: "plus-circle",
+    title: "1. Tap the + button",
+    body: "Tap the green + button at the top-right of this screen to open the New Product sheet.",
+    highlight: "Top-right · the green + (plus) icon",
+  },
+  {
+    icon: "image",
+    title: "2. Upload a product photo",
+    body: "Tap the dashed photo box and pick an image from your gallery. We'll auto-compress it to a fast-loading size.",
+    tip: "Square photos look best in the catalog grid (1:1 ratio).",
+  },
+  {
+    icon: "edit-3",
+    title: "3. Name + Price + Description",
+    body: "• Name: what customers will see (e.g. 'Wireless Earbuds Pro')\n• Price: number only — no ₹ or commas\n• Description: a short paragraph about features",
+  },
+  {
+    icon: "tag",
+    title: "4. Category + Stock",
+    body: "• Category groups products on the Shop (e.g. Electronics, Fashion)\n• Stock is how many units you have — when it hits 0, customers see SOLD OUT",
+    tip: "The category you type becomes filterable on the customer Shop and can have its own custom layout.",
+  },
+  {
+    icon: "eye",
+    title: "5. Turn ON Published",
+    body: "Flip the Published toggle ON. Only published products appear in the customer Shop. Draft products stay hidden until you publish.",
+    highlight: "The Published switch at the bottom of the form",
+  },
+  {
+    icon: "check-circle",
+    title: "6. Save and you're live!",
+    body: "Tap the green ✓ check at the top-right of the form to save. Your product instantly shows in the catalog grid below — and on the customer Shop tab.",
+    tip: "Want to feature it? Go to More → Shop layout to add it to Banner sliders, Flash sales, Trending sections, and more.",
+  },
+];
 
 type Product = {
   id: string;
@@ -31,6 +78,9 @@ export default function AdminProducts() {
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  // Auto-opens on the admin's first visit to /admin/products
+  const { visible: helpVisible, close: helpClose } = useFirstVisitGuide("products-v1");
   const [search, setSearch] = useState("");
   const [interestedFor, setInterestedFor] = useState<Product | null>(null);
 
@@ -80,10 +130,23 @@ export default function AdminProducts() {
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <Text style={styles.title}>Products</Text>
-        <TouchableOpacity onPress={() => setCreateOpen(true)} style={[styles.iconBtn, styles.iconBtnPrimary]} testID="product-new">
-          <Feather name="plus" size={20} color={colors.primaryFg} />
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          <HelpButton onPress={() => setHelpOpen(true)} testID="products-help" />
+          <TouchableOpacity onPress={() => setCreateOpen(true)} style={[styles.iconBtn, styles.iconBtnPrimary]} testID="product-new">
+            <Feather name="plus" size={20} color={colors.primaryFg} />
+          </TouchableOpacity>
+        </View>
       </View>
+
+      {/* In-app walkthrough — auto-opens on first visit, re-openable via ? button */}
+      <HelpGuide
+        id="products-v1"
+        visible={helpVisible || helpOpen}
+        title="How to create a product"
+        subtitle="A quick 6-step tour. Tap anywhere outside to dismiss."
+        steps={PRODUCT_GUIDE_STEPS}
+        onClose={() => { helpClose(); setHelpOpen(false); }}
+      />
 
       {loading ? (
         <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
