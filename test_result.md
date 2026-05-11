@@ -575,7 +575,91 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+backend_recent:
+  - task: "Admin Rich Product Form — backend round-trip (brand, sub_features, images[], styled summaries, attrs, spec_tabs, whats_in_box)"
+    implemented: true
+    working: true
+    file: "backend/server.py (L1938-1976) + backend/models.py (L34-113) + backend/routes/products_public.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Rich-product backend round-trip: 103/103 PASS. Runner: /app/backend_test.py.
+            Verified across 5 endpoints with admin@app.com / Admin@123:
+
+            STEP 1 — POST /api/admin/products (full payload)  → 200
+              All 23 rich fields echoed back intact in the create response:
+                name, price, image_url, description, stock, category, is_published,
+                brand, sub_features (list[str]),
+                images (list[str], 2 items),
+                price_summary / protection_summary / warranty_summary /
+                  delivery_summary (StyledText: text+bold+font_size+align — including
+                  font_size=null variant preserved as null, not dropped),
+                attrs_brand, attrs_os, attrs_ram, attrs_cpu_model,
+                  attrs_cpu_speed, attrs_storage,
+                extra_attrs (Dict[str,str]),
+                spec_tabs (2 tabs × N rows of {label,value}),
+                whats_in_box (2 items {name, image_data_url}, incl empty string for image).
+
+            STEP 2 — GET /api/admin/products → 200
+              Created product appears in admin list. Re-verified all 23 rich fields
+              persist 1:1 in DB on re-fetch (no field stripping by Mongo serializer).
+
+            STEP 3 — PATCH /api/admin/products/{id} (partial 7-field update) → 200
+              Only the 7 patched fields changed: brand → "TestBrand-V2",
+              sub_features → 2-item list, images → 3-item list, price_summary →
+              new StyledText, extra_attrs → {"Material":"Aluminum"}, spec_tabs →
+              new tab, whats_in_box → 1-item list.
+              16 untouched fields preserved exactly (verified: name, price,
+              category, description, stock, is_published, protection_summary,
+              warranty_summary, delivery_summary, attrs_brand, attrs_os,
+              attrs_ram, attrs_cpu_model, attrs_cpu_speed, attrs_storage —
+              all unchanged from STEP 1 values).
+
+            STEP 4 — GET /api/products (public) → 200
+              Published product appears. All 16 rich fields exposed
+              (brand, sub_features, images, 4× *_summary StyledTexts,
+              6× attrs_*, extra_attrs, spec_tabs, whats_in_box). Public list
+              correctly reflects the PATCH from STEP 3 (brand="TestBrand-V2",
+              extra_attrs={"Material":"Aluminum"}, etc.). Computed fields
+              is_in_stock and interested_count are present; raw
+              interested_users is NOT leaked (privacy preserved).
+
+            STEP 5 — DELETE /api/admin/products/{id} → 200 {ok:true}
+              Product removed; subsequent admin list does not contain it.
+
+            No fields dropped, mis-typed, or rejected. Pydantic StyledText /
+            SpecTab / WhatsInBoxItem nested models serialize round-trip
+            cleanly. Backend is production-ready for the rich-product UI.
+
 agent_communication:
+    - agent: "main"
+      message: |
+        P0 task complete: admin/products.tsx now has a rich Amazon/Flipkart-style
+        product creation/edit form with 7 collapsible sections:
+          1. Basics (name, price, stock, category, description, cover image, publish)
+          2. Brand & Sub-features (bullet list)
+          3. Gallery (up to 10 additional base64 images)
+          4. Styled Summaries (price/protection/warranty/delivery, each with
+             text + bold/align/font-size toolbar)
+          5. Key Attributes (brand, OS, RAM, CPU model/speed, storage + extras KV)
+          6. Specification Tabs (named tabs with label/value rows)
+          7. What's in the Box (named items with optional thumbnails)
+        Form submits a single PATCH/POST to /admin/products with all fields.
+        Backend already accepts via ProductCreate/ProductUpdate models in models.py.
+        UI verified via screenshot tool — modal opens, all sections render
+        and expand correctly on http://localhost:3000/admin/products.
+
+        Please test the backend round-trip:
+          • POST /api/admin/products with the full extended payload
+          • PATCH /api/admin/products/{id} updating each rich field
+          • GET /api/products and /api/admin/products to confirm fields are stored
+            and returned as-is (no field stripping).
+        Admin creds: admin@app.com / Admin@123 (from /app/memory/test_credentials.md).
+
     - agent: "testing"
       message: |
         Phase 2B refactor regression: 10/10 PASS. No issues found.
@@ -814,6 +898,33 @@ agent_communication:
             • adds drag-handle stripe (☰) on the left of each card
             • dragging state lifts the card with primary border + brand bg
             • hero hint updated to mention long-press-drag + 7d CTR
+    - agent: "testing"
+      message: |
+        Rich-product backend round-trip: 103/103 PASS. No fields dropped,
+        mis-typed, or rejected by the backend.
+
+        Verified across 5 endpoints with admin@app.com / Admin@123:
+          POST   /api/admin/products       (full extended payload) → 200, all
+                                            23 rich fields echoed intact incl.
+                                            StyledText with font_size=null and
+                                            empty image_data_url.
+          GET    /api/admin/products       → 200, created product appears with
+                                            all rich fields persisted to Mongo.
+          PATCH  /api/admin/products/{id}  (7-field partial update) → 200,
+                                            updates applied AND 16 untouched
+                                            fields preserved exactly.
+          GET    /api/products (public)    → 200, published product visible
+                                            with all 16 rich fields and patched
+                                            values. Computed is_in_stock and
+                                            interested_count present; raw
+                                            interested_users NOT leaked.
+          DELETE /api/admin/products/{id}  → 200 {ok:true}, product gone from
+                                            admin list afterward.
+
+        Nested Pydantic models (StyledText, SpecTab/SpecRow, WhatsInBoxItem)
+        all serialize round-trip 1:1. Rich product backend is production-ready.
+        Test runner: /app/backend_test.py.
+
 
         VERIFIED:
         - curl http://localhost:8001/api/admin/shop-layout returns 401
