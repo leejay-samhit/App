@@ -65,18 +65,8 @@ export default function CartScreen() {
   };
 
   const checkout = async () => {
-    setSubmitting(true);
-    try {
-      await api.post("/orders/checkout");
-      await refresh();
-      Alert.alert("Order placed!", "Your order has been placed and ₹" + total + " deducted from wallet.", [
-        { text: "View orders", onPress: () => router.replace("/orders") },
-      ]);
-    } catch (e) {
-      Alert.alert("Checkout failed", formatApiError(e));
-    } finally {
-      setSubmitting(false);
-    }
+    // Cart -> Checkout screen (address + payment method live there).
+    router.push("/checkout" as any);
   };
 
   if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
@@ -161,21 +151,21 @@ export default function CartScreen() {
             </View>
             {!canPay && total > 0 && (
               <Text style={styles.warning}>
-                Need {formatINR(total - balance)} more — refer friends to top up your wallet.
+                Wallet short by {formatINR(total - balance)} — you can still pay Cash on Delivery at checkout.
               </Text>
             )}
             <TouchableOpacity
               onPress={checkout}
-              disabled={!canPay || submitting}
-              style={[styles.payBtn, (!canPay || submitting) && { opacity: 0.5 }]}
+              disabled={total <= 0 || submitting}
+              style={[styles.payBtn, (total <= 0 || submitting) && { opacity: 0.5 }]}
               testID="cart-checkout"
             >
               {submitting ? (
                 <ActivityIndicator color={colors.primaryFg} />
               ) : (
                 <>
-                  <Feather name="check-circle" size={18} color={colors.primaryFg} />
-                  <Text style={styles.payBtnText}>Pay {formatINR(total)} with wallet</Text>
+                  <Feather name="arrow-right-circle" size={18} color={colors.primaryFg} />
+                  <Text style={styles.payBtnText}>Proceed to Checkout · {formatINR(total)}</Text>
                 </>
               )}
             </TouchableOpacity>

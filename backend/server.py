@@ -18,7 +18,7 @@ from typing import List, Optional, Dict, Any
 import bcrypt
 import httpx
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query, Body
 from fastapi.responses import Response, HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
@@ -2547,9 +2547,48 @@ async def cart_clear(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @api_router.post("/orders/checkout")
-async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
-    if user.get("wallet_frozen"):
-        raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
+async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, Any] = Depends(get_current_user)):
+    """Place an order. Body:
+      {
+        "payment_method": "wallet" | "cod",
+        "shipping_address": {
+            "name": "...",
+            "phone": "...",
+            "line1": "...",
+            "line2": "...",
+            "city": "...",
+            "state": "...",
+            "pincode": "..."
+        }
+      }
+    Wallet flow debits the user's wallet immediately. COD skips wallet debit;
+    the order is marked `paid_via: "cod"` and the platform/vendor commissions
+    are credited only when the delivery is marked complete (out of scope here
+    — captured on order status update). For COD we still atomically decrement
+    stock so we don't oversell.
+    """
+    payment_method = str((payload or {}).get("payment_method") or "wallet").strip().lower()
+    if payment_method not in ("wallet", "cod"):
+        raise HTTPException(status_code=400, detail="Unsupported payment_method. Use 'wallet' or 'cod'.")
+    raw_addr = (payload or {}).get("shipping_address") or {}
+    shipping_address = {
+        "name": str(raw_addr.get("name") or "").strip(),
+        "phone": str(raw_addr.get("phone") or "").strip(),
+        "line1": str(raw_addr.get("line1") or "").strip(),
+        "line2": str(raw_addr.get("line2") or "").strip(),
+        "city": str(raw_addr.get("city") or "").strip(),
+        "state": str(raw_addr.get("state") or "").strip(),
+        "pincode": str(raw_addr.get("pincode") or "").strip(),
+    }
+    # Validate required fields
+    missing = [k for k in ("name", "phone", "line1", "city", "state", "pincode") if not shipping_address[k]]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Shipping address missing: {', '.join(missing)}")
+    if len(shipping_address["pincode"]) < 5:
+        raise HTTPException(status_code=400, detail="Pincode must be at least 5 digits.")
+
+    if user.get("wallet_frozen") and payment_method == "wallet":
+        raise HTTPException(status_code=403, detail="Wallet is frozen. Pick COD or contact support.")
     items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
     if not items:
         raise HTTPException(status_code=400, detail="Cart is empty")
@@ -2619,18 +2658,20 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
 
     # ATOMIC wallet debit — guards against rapid double-clicks creating duplicate orders.
     # Only succeeds if balance still >= total at the moment of update.
-    debit_res = await db.users.update_one(
-        {"id": user["id"], "wallet_balance": {"$gte": total}},
-        {"$inc": {"wallet_balance": -total}},
-    )
-    if debit_res.modified_count == 0:
-        # Wallet debit failed AFTER stock was decremented — must restore stock.
-        for d in decremented:
-            await db.products.update_one(
-                {"id": d["product_id"]},
-                {"$inc": {"stock": d["qty"]}},
-            )
-        raise HTTPException(status_code=400, detail=f"Insufficient wallet balance. Need ₹{total:.0f}")
+    # SKIPPED for cash-on-delivery — the cash is collected by the courier.
+    if payment_method == "wallet":
+        debit_res = await db.users.update_one(
+            {"id": user["id"], "wallet_balance": {"$gte": total}},
+            {"$inc": {"wallet_balance": -total}},
+        )
+        if debit_res.modified_count == 0:
+            # Wallet debit failed AFTER stock was decremented — must restore stock.
+            for d in decremented:
+                await db.products.update_one(
+                    {"id": d["product_id"]},
+                    {"$inc": {"stock": d["qty"]}},
+                )
+            raise HTTPException(status_code=400, detail=f"Insufficient wallet balance. Need ₹{total:.0f}")
 
     order_id = str(uuid.uuid4())
     order = {
@@ -2639,7 +2680,9 @@ async def checkout(user: Dict[str, Any] = Depends(get_current_user)):
         "items": enriched,
         "total": total,
         "status": "placed",
-        "paid_via": "wallet",
+        "paid_via": payment_method,  # "wallet" or "cod"
+        "payment_status": ("paid" if payment_method == "wallet" else "pending_cod"),
+        "shipping_address": shipping_address,
         "created_at": now_utc().isoformat(),
     }
     await db.orders.insert_one(order)
