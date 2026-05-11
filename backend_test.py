@@ -1,275 +1,281 @@
 """
-Backend round-trip test for the new Amazon/Flipkart-style Rich Product fields.
-
-Tests:
-  1. POST /api/admin/products  — create with FULL extended payload
-  2. GET  /api/admin/products  — verify fields persist in admin list
-  3. PATCH /api/admin/products/{id} — partial update preserves untouched fields
-  4. GET  /api/products (public) — published product appears with rich fields
-  5. DELETE /api/admin/products/{id} — clean up
+Backend tests for P1 endpoints in products_extended.py
+- Helpful vote toggle on reviews
+- Reviews list with helpful_count + voted_helpful (no leaked voters)
+- Vendor pending Q&A list (with admin fallback)
+- Wishlist round-trip regression
 """
 import os
 import sys
 import json
 import requests
 
-BASE = os.environ.get("BACKEND_URL", "https://network-pay-1.preview.emergentagent.com").rstrip("/")
-API = f"{BASE}/api"
+BASE = "https://network-pay-1.preview.emergentagent.com/api"
 
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASSWORD = "Admin@123"
+ADMIN_PASS = "Admin@123"
+USER_EMAIL = "testuser@app.com"
+USER_PASS = "Test@123"
+
+results = []  # (name, ok, detail)
 
 
-def jprint(label, data):
-    print(f"\n----- {label} -----")
+def log(name, ok, detail=""):
+    results.append((name, ok, detail))
+    flag = "PASS" if ok else "FAIL"
+    print(f"[{flag}] {name}  {detail}")
+
+
+def login(email, pwd):
+    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": pwd}, timeout=30)
+    r.raise_for_status()
+    j = r.json()
+    return j.get("token") or j.get("access_token") or j["token"]
+
+
+def hdr(tok):
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def main():
+    print("== LOGIN ==")
+    admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
+    user_tok = login(USER_EMAIL, USER_PASS)
+    log("login admin", bool(admin_tok))
+    log("login test user", bool(user_tok))
+
+    # 0. Create product as admin
+    print("\n== SETUP: create product ==")
+    payload = {
+        "name": "P1 Test - Helpful Vote",
+        "price": 100,
+        "image_url": "data:image/jpeg;base64,A==",
+        "stock": 5,
+        "is_published": True,
+        "category": "Test",
+    }
+    r = requests.post(f"{BASE}/admin/products", json=payload, headers=hdr(admin_tok), timeout=30)
+    if r.status_code != 200:
+        print("Product create failed:", r.status_code, r.text[:500])
+        sys.exit(1)
+    prod = r.json()
+    pid = prod.get("id") or prod.get("product", {}).get("id")
+    if not pid:
+        print("No product id in response:", prod)
+        sys.exit(1)
+    log("admin POST /admin/products", True, f"pid={pid}")
+
     try:
-        print(json.dumps(data, indent=2, default=str)[:2000])
-    except Exception:
-        print(str(data)[:2000])
+        # 1. Test user posts a review (their OWN review)
+        print("\n== SETUP: post reviews ==")
+        r = requests.post(f"{BASE}/products/{pid}/reviews",
+                          json={"rating": 5, "title": "Great", "body": "Loved it"},
+                          headers=hdr(user_tok), timeout=30)
+        log("user POST review", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
+        user_review_id = r.json().get("id") if r.status_code == 200 else None
+
+        # Admin posts second review on same product
+        r = requests.post(f"{BASE}/products/{pid}/reviews",
+                          json={"rating": 4, "title": "Decent", "body": "Admin's take"},
+                          headers=hdr(admin_tok), timeout=30)
+        log("admin POST review", r.status_code == 200, f"status={r.status_code}")
+        admin_review_id = r.json().get("id") if r.status_code == 200 else None
+
+        # =============== 1. POST /products/{pid}/reviews/{rid}/helpful ===============
+        print("\n== TEST 1: helpful vote toggle ==")
+
+        # i. Admin votes on Test user's review -> 200 voted_helpful=true count=1
+        r = requests.post(f"{BASE}/products/{pid}/reviews/{user_review_id}/helpful",
+                          headers=hdr(admin_tok), timeout=30)
+        ok = (r.status_code == 200 and r.json().get("voted_helpful") is True
+              and r.json().get("helpful_count") == 1)
+        log("1.i admin toggle helpful (ON)", ok, f"status={r.status_code} resp={r.text[:200]}")
+        sample_vote_on = r.text
+
+        # ii. Admin votes again on same -> toggle off
+        r = requests.post(f"{BASE}/products/{pid}/reviews/{user_review_id}/helpful",
+                          headers=hdr(admin_tok), timeout=30)
+        ok = (r.status_code == 200 and r.json().get("voted_helpful") is False
+              and r.json().get("helpful_count") == 0)
+        log("1.ii admin toggle helpful (OFF)", ok, f"status={r.status_code} resp={r.text[:200]}")
+        sample_vote_off = r.text
+
+        # Re-vote ON for downstream tests
+        r = requests.post(f"{BASE}/products/{pid}/reviews/{user_review_id}/helpful",
+                          headers=hdr(admin_tok), timeout=30)
+        log("1.x re-vote ON for downstream", r.status_code == 200 and r.json().get("helpful_count") == 1,
+            f"status={r.status_code}")
+
+        # iii. Self-vote prevention
+        r = requests.post(f"{BASE}/products/{pid}/reviews/{user_review_id}/helpful",
+                          headers=hdr(user_tok), timeout=30)
+        ok = (r.status_code == 400 and "your own review" in r.text.lower())
+        log("1.iii self-vote prevention (400)", ok, f"status={r.status_code} body={r.text[:200]}")
+
+        # iv. 404 non-existent review
+        r = requests.post(f"{BASE}/products/{pid}/reviews/nonexistent-rid-123/helpful",
+                          headers=hdr(admin_tok), timeout=30)
+        log("1.iv 404 non-existent review", r.status_code == 404, f"status={r.status_code}")
+
+        # v. Unauth 401
+        r = requests.post(f"{BASE}/products/{pid}/reviews/{user_review_id}/helpful", timeout=30)
+        log("1.v unauth 401", r.status_code in (401, 403), f"status={r.status_code}")
+
+        # =============== 2. GET /products/{pid}/reviews ===============
+        print("\n== TEST 2: GET reviews with helpful_count/voted_helpful ==")
+
+        # Test user GETs reviews
+        r = requests.get(f"{BASE}/products/{pid}/reviews", headers=hdr(user_tok), timeout=30)
+        ok = r.status_code == 200
+        log("2.a user GET /reviews", ok, f"status={r.status_code}")
+        leak_found = False
+        user_rev_in_list = None
+        if ok:
+            data = r.json()
+            for rev in data.get("reviews", []):
+                if "helpful_voters" in rev:
+                    leak_found = True
+                if rev.get("id") == user_review_id:
+                    user_rev_in_list = rev
+        ok2 = (user_rev_in_list is not None and user_rev_in_list.get("helpful_count") == 1
+               and user_rev_in_list.get("voted_helpful") is False)
+        log("2.b user sees helpful_count=1 voted=false", ok2,
+            f"rev={user_rev_in_list}")
+        log("2.c helpful_voters NOT leaked (user view)", not leak_found, f"leak={leak_found}")
+
+        # Admin GETs reviews
+        r = requests.get(f"{BASE}/products/{pid}/reviews", headers=hdr(admin_tok), timeout=30)
+        ok = r.status_code == 200
+        admin_rev_view = None
+        leak_admin = False
+        if ok:
+            for rev in r.json().get("reviews", []):
+                if "helpful_voters" in rev:
+                    leak_admin = True
+                if rev.get("id") == user_review_id:
+                    admin_rev_view = rev
+        ok2 = (admin_rev_view is not None and admin_rev_view.get("voted_helpful") is True
+               and admin_rev_view.get("helpful_count") == 1)
+        log("2.d admin sees voted_helpful=true", ok2, f"rev={admin_rev_view}")
+        log("2.e helpful_voters NOT leaked (admin view)", not leak_admin)
+
+        # =============== 3. GET /vendor/me/questions ===============
+        print("\n== TEST 3: vendor pending Q&A ==")
+
+        # Test user posts a question
+        r = requests.post(f"{BASE}/products/{pid}/questions",
+                          json={"text": "Q1 - battery life?"},
+                          headers=hdr(user_tok), timeout=30)
+        ok = r.status_code == 200
+        qid = r.json().get("id") if ok else None
+        log("3.a user POST /questions", ok, f"status={r.status_code} qid={qid}")
+
+        # Admin GETs vendor questions (admin allowed per code, sees ALL questions since qry={})
+        r = requests.get(f"{BASE}/vendor/me/questions", headers=hdr(admin_tok), timeout=30)
+        ok = r.status_code == 200
+        log("3.b admin GET /vendor/me/questions", ok, f"status={r.status_code}")
+        sample_vendor_q = r.text[:500]
+        target_item = None
+        if ok:
+            data = r.json()
+            for it in data.get("items", []):
+                if it.get("id") == qid:
+                    target_item = it
+                    break
+            ok2 = (data.get("pending_count", 0) >= 1
+                   and target_item is not None
+                   and "product_name" in target_item
+                   and "product_image" in target_item
+                   and target_item.get("answered") is False)
+            log("3.c pending_count>=1 and item has product_name/answered:false", ok2,
+                f"pending={data.get('pending_count')} item={target_item}")
+
+        # Admin answers the question
+        r = requests.post(f"{BASE}/products/{pid}/questions/{qid}/answer",
+                          json={"text": "A1 - 5000mAh"},
+                          headers=hdr(admin_tok), timeout=30)
+        log("3.d admin POST answer", r.status_code == 200, f"status={r.status_code} body={r.text[:200]}")
+
+        # GET again - should show answered:true, sorted AFTER pending
+        r = requests.get(f"{BASE}/vendor/me/questions", headers=hdr(admin_tok), timeout=30)
+        ok = r.status_code == 200
+        if ok:
+            data = r.json()
+            # find our item
+            answered_item = None
+            answered_idx = -1
+            for i, it in enumerate(data.get("items", [])):
+                if it.get("id") == qid:
+                    answered_item = it
+                    answered_idx = i
+                    break
+            unanswered_after = data.get("pending_count", 0)
+            # Verify it's now answered and positioned after unanswered ones
+            ok2 = (answered_item is not None and answered_item.get("answered") is True)
+            log("3.e question now answered:true", ok2, f"item={answered_item}")
+            # Position: it should come AFTER unanswered items
+            ok3 = (answered_idx >= unanswered_after)
+            log("3.f answered sorted after pending", ok3,
+                f"idx={answered_idx} pending_count={unanswered_after}")
+
+        # 403: normal user (testuser is approved customer, role=user) hits /vendor/me/questions
+        r = requests.get(f"{BASE}/vendor/me/questions", headers=hdr(user_tok), timeout=30)
+        log("3.g normal user gets 403", r.status_code == 403, f"status={r.status_code} body={r.text[:200]}")
+
+        # =============== 4. Wishlist regression ===============
+        print("\n== TEST 4: wishlist round-trip ==")
+
+        # First save
+        r = requests.post(f"{BASE}/products/{pid}/save", headers=hdr(user_tok), timeout=30)
+        ok = (r.status_code == 200 and r.json().get("saved") is True)
+        log("4.a POST /save -> saved:true", ok, f"status={r.status_code} body={r.text[:200]}")
+
+        # GET wishlist contains pid
+        r = requests.get(f"{BASE}/me/wishlist", headers=hdr(user_tok), timeout=30)
+        contains = False
+        if r.status_code == 200:
+            for it in r.json().get("items", []):
+                if it.get("id") == pid:
+                    contains = True
+                    break
+        log("4.b GET /me/wishlist contains pid", contains, f"status={r.status_code}")
+
+        # Toggle off
+        r = requests.post(f"{BASE}/products/{pid}/save", headers=hdr(user_tok), timeout=30)
+        ok = (r.status_code == 200 and r.json().get("saved") is False)
+        log("4.c POST /save again -> saved:false", ok, f"status={r.status_code} body={r.text[:200]}")
+
+        # GET wishlist does NOT contain pid
+        r = requests.get(f"{BASE}/me/wishlist", headers=hdr(user_tok), timeout=30)
+        contains = False
+        if r.status_code == 200:
+            for it in r.json().get("items", []):
+                if it.get("id") == pid:
+                    contains = True
+                    break
+        log("4.d GET /me/wishlist no longer contains pid", not contains, f"status={r.status_code}")
+
+        # ---- print samples ----
+        print("\n== SAMPLES ==")
+        print("Sample helpful-vote ON:", sample_vote_on)
+        print("Sample helpful-vote OFF:", sample_vote_off)
+        print("Sample /vendor/me/questions:", sample_vendor_q)
+
+    finally:
+        # Cleanup product
+        print("\n== CLEANUP ==")
+        r = requests.delete(f"{BASE}/admin/products/{pid}", headers=hdr(admin_tok), timeout=30)
+        log("cleanup DELETE product", r.status_code == 200, f"status={r.status_code}")
+
+    # Summary
+    print("\n========== SUMMARY ==========")
+    passes = sum(1 for _, ok, _ in results if ok)
+    fails = [(n, d) for n, ok, d in results if not ok]
+    print(f"PASS {passes}/{len(results)}")
+    for n, d in fails:
+        print(f"  FAIL: {n} -> {d}")
+    sys.exit(0 if not fails else 1)
 
 
-passed = 0
-failed = 0
-issues = []
-
-
-def check(cond, msg):
-    global passed, failed
-    if cond:
-        passed += 1
-        print(f"  PASS: {msg}")
-    else:
-        failed += 1
-        issues.append(msg)
-        print(f"  FAIL: {msg}")
-
-
-# ------ 1. Login as admin ------
-print("=" * 60)
-print("STEP 0: Admin login")
-print("=" * 60)
-r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=30)
-print(f"  POST /auth/login -> {r.status_code}")
-if r.status_code != 200:
-    print(r.text)
-    sys.exit(1)
-token = r.json().get("token") or r.json().get("access_token")
-HDR = {"Authorization": f"Bearer {token}"}
-check(bool(token), "Admin login returned token")
-
-# ------ The full payload ------
-FULL_PAYLOAD = {
-    "name": "Test Phone Pro X",
-    "price": 49999.0,
-    "image_url": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
-    "description": "Flagship test phone",
-    "stock": 25,
-    "category": "Electronics",
-    "is_published": True,
-    "brand": "TestBrand",
-    "sub_features": ["Super AMOLED 6.7\"", "5000 mAh battery", "48MP camera"],
-    "images": ["data:image/jpeg;base64,A==", "data:image/jpeg;base64,B=="],
-    "price_summary":      {"text": "Rs 49,999 inclusive of all taxes", "bold": True,  "font_size": 18,   "align": "left"},
-    "protection_summary": {"text": "1-year warranty + extended 2yr",   "bold": False, "font_size": None, "align": "left"},
-    "warranty_summary":   {"text": "Free replacement within 7 days",   "bold": False, "font_size": 14,   "align": "center"},
-    "delivery_summary":   {"text": "Free delivery in 2-4 days",        "bold": True,  "font_size": None, "align": "right"},
-    "attrs_brand": "TestBrand",
-    "attrs_os": "Android 14",
-    "attrs_ram": "8 GB",
-    "attrs_cpu_model": "Snapdragon 8 Gen 3",
-    "attrs_cpu_speed": "3.3 GHz",
-    "attrs_storage": "256 GB",
-    "extra_attrs": {"Screen": "6.7\" AMOLED", "Weight": "190g"},
-    "spec_tabs": [
-        {"name": "General", "rows": [{"label": "Model", "value": "PX-100"}, {"label": "Color", "value": "Onyx"}]},
-        {"name": "Battery", "rows": [{"label": "Capacity", "value": "5000 mAh"}]},
-    ],
-    "whats_in_box": [
-        {"name": "Phone", "image_data_url": "data:image/jpeg;base64,X=="},
-        {"name": "Charger", "image_data_url": ""},
-    ],
-}
-
-# ------ 2. POST /api/admin/products ------
-print("\n" + "=" * 60)
-print("STEP 1: POST /api/admin/products  (full payload)")
-print("=" * 60)
-r = requests.post(f"{API}/admin/products", json=FULL_PAYLOAD, headers=HDR, timeout=30)
-print(f"  -> HTTP {r.status_code}")
-check(r.status_code in (200, 201), f"create returns 200/201 (got {r.status_code})")
-if r.status_code not in (200, 201):
-    print(r.text)
-    sys.exit(1)
-created = r.json()
-jprint("create response", created)
-product_id = created.get("id")
-check(bool(product_id), "Created product has id")
-
-
-def cmp(a, b):
-    return a == b
-
-
-field_specs = [
-    ("name", "Test Phone Pro X"),
-    ("price", 49999.0),
-    ("image_url", FULL_PAYLOAD["image_url"]),
-    ("description", "Flagship test phone"),
-    ("stock", 25),
-    ("category", "Electronics"),
-    ("is_published", True),
-    ("brand", "TestBrand"),
-    ("sub_features", FULL_PAYLOAD["sub_features"]),
-    ("images", FULL_PAYLOAD["images"]),
-    ("price_summary", FULL_PAYLOAD["price_summary"]),
-    ("protection_summary", FULL_PAYLOAD["protection_summary"]),
-    ("warranty_summary", FULL_PAYLOAD["warranty_summary"]),
-    ("delivery_summary", FULL_PAYLOAD["delivery_summary"]),
-    ("attrs_brand", "TestBrand"),
-    ("attrs_os", "Android 14"),
-    ("attrs_ram", "8 GB"),
-    ("attrs_cpu_model", "Snapdragon 8 Gen 3"),
-    ("attrs_cpu_speed", "3.3 GHz"),
-    ("attrs_storage", "256 GB"),
-    ("extra_attrs", FULL_PAYLOAD["extra_attrs"]),
-    ("spec_tabs", FULL_PAYLOAD["spec_tabs"]),
-    ("whats_in_box", FULL_PAYLOAD["whats_in_box"]),
-]
-for field, expected in field_specs:
-    actual = created.get(field)
-    if not cmp(actual, expected):
-        print(f"  DIFF on '{field}':\n    expected: {expected!r}\n    actual:   {actual!r}")
-    check(cmp(actual, expected), f"create echoes '{field}' intact")
-
-# ------ 3. GET /api/admin/products ------
-print("\n" + "=" * 60)
-print("STEP 2: GET /api/admin/products (admin list)")
-print("=" * 60)
-r = requests.get(f"{API}/admin/products", headers=HDR, timeout=30)
-print(f"  -> HTTP {r.status_code}")
-check(r.status_code == 200, "admin list returns 200")
-items = r.json()
-found = next((p for p in items if p.get("id") == product_id), None)
-check(found is not None, "Created product appears in admin list")
-if found:
-    for field, expected in field_specs:
-        actual = found.get(field)
-        if not cmp(actual, expected):
-            print(f"  DIFF on '{field}' in admin list:\n    expected: {expected!r}\n    actual:   {actual!r}")
-        check(cmp(actual, expected), f"admin-list preserves '{field}'")
-
-# ------ 4. PATCH partial update ------
-print("\n" + "=" * 60)
-print("STEP 3: PATCH /api/admin/products/{id} (partial update)")
-print("=" * 60)
-PATCH_PAYLOAD = {
-    "brand": "TestBrand-V2",
-    "sub_features": ["Updated feature 1", "Updated feature 2"],
-    "images": [
-        "data:image/jpeg;base64,UPD1==",
-        "data:image/jpeg;base64,UPD2==",
-        "data:image/jpeg;base64,UPD3==",
-    ],
-    "price_summary": {"text": "Now Rs 39,999 -- limited time", "bold": False, "font_size": 22, "align": "center"},
-    "extra_attrs": {"Material": "Aluminum"},
-    "spec_tabs": [
-        {"name": "Updated", "rows": [{"label": "RefreshRate", "value": "120 Hz"}]},
-    ],
-    "whats_in_box": [
-        {"name": "Phone only", "image_data_url": "data:image/jpeg;base64,UPDONLY=="},
-    ],
-}
-r = requests.patch(f"{API}/admin/products/{product_id}", json=PATCH_PAYLOAD, headers=HDR, timeout=30)
-print(f"  -> HTTP {r.status_code}")
-check(r.status_code == 200, f"PATCH returns 200 (got {r.status_code})")
-if r.status_code != 200:
-    print(r.text)
-patched = r.json() if r.status_code == 200 else {}
-jprint("patch response", patched)
-
-for field, expected in PATCH_PAYLOAD.items():
-    actual = patched.get(field)
-    if not cmp(actual, expected):
-        print(f"  DIFF on patched '{field}':\n    expected: {expected!r}\n    actual:   {actual!r}")
-    check(cmp(actual, expected), f"PATCH updates '{field}' correctly")
-
-preserved = [
-    ("name", "Test Phone Pro X"),
-    ("price", 49999.0),
-    ("category", "Electronics"),
-    ("description", "Flagship test phone"),
-    ("stock", 25),
-    ("is_published", True),
-    ("protection_summary", FULL_PAYLOAD["protection_summary"]),
-    ("warranty_summary", FULL_PAYLOAD["warranty_summary"]),
-    ("delivery_summary", FULL_PAYLOAD["delivery_summary"]),
-    ("attrs_brand", "TestBrand"),
-    ("attrs_os", "Android 14"),
-    ("attrs_ram", "8 GB"),
-    ("attrs_cpu_model", "Snapdragon 8 Gen 3"),
-    ("attrs_cpu_speed", "3.3 GHz"),
-    ("attrs_storage", "256 GB"),
-]
-for field, expected in preserved:
-    actual = patched.get(field)
-    if not cmp(actual, expected):
-        print(f"  DIFF on PRESERVED '{field}':\n    expected: {expected!r}\n    actual:   {actual!r}")
-    check(cmp(actual, expected), f"PATCH preserves untouched '{field}'")
-
-# ------ 5. GET /api/products (public) ------
-print("\n" + "=" * 60)
-print("STEP 4: GET /api/products  (public)")
-print("=" * 60)
-r = requests.get(f"{API}/products", timeout=30)
-print(f"  -> HTTP {r.status_code}")
-check(r.status_code == 200, "public list returns 200")
-pub_items = r.json()
-pub_found = next((p for p in pub_items if p.get("id") == product_id), None)
-check(pub_found is not None, "Published product appears in public list")
-if pub_found:
-    rich_fields_pub = ["brand", "sub_features", "images", "price_summary",
-                       "protection_summary", "warranty_summary", "delivery_summary",
-                       "attrs_brand", "attrs_os", "attrs_ram", "attrs_cpu_model",
-                       "attrs_cpu_speed", "attrs_storage", "extra_attrs",
-                       "spec_tabs", "whats_in_box"]
-    for f in rich_fields_pub:
-        present = f in pub_found
-        check(present, f"public list exposes rich field '{f}'")
-    check(pub_found.get("brand") == "TestBrand-V2", "public list reflects patched brand")
-    check(pub_found.get("sub_features") == PATCH_PAYLOAD["sub_features"], "public list reflects patched sub_features")
-    check(pub_found.get("price_summary") == PATCH_PAYLOAD["price_summary"], "public list reflects patched price_summary")
-    check(pub_found.get("extra_attrs") == {"Material": "Aluminum"}, "public list reflects patched extra_attrs")
-    check(pub_found.get("spec_tabs") == PATCH_PAYLOAD["spec_tabs"], "public list reflects patched spec_tabs")
-    check(pub_found.get("whats_in_box") == PATCH_PAYLOAD["whats_in_box"], "public list reflects patched whats_in_box")
-    check("is_in_stock" in pub_found, "public list adds computed 'is_in_stock'")
-    check("interested_count" in pub_found, "public list adds computed 'interested_count'")
-    check("interested_users" not in pub_found, "public list does NOT leak 'interested_users'")
-
-# ------ 6. DELETE cleanup ------
-print("\n" + "=" * 60)
-print("STEP 5: DELETE /api/admin/products/{id}  (cleanup)")
-print("=" * 60)
-r = requests.delete(f"{API}/admin/products/{product_id}", headers=HDR, timeout=30)
-print(f"  -> HTTP {r.status_code}")
-check(r.status_code == 200, f"DELETE returns 200 (got {r.status_code})")
-try:
-    jprint("delete response", r.json())
-except Exception:
-    pass
-
-r = requests.get(f"{API}/admin/products", headers=HDR, timeout=30)
-items_after = r.json()
-gone = all(p.get("id") != product_id for p in items_after)
-check(gone, "Product is removed after DELETE")
-
-# ------ Summary ------
-print("\n" + "=" * 60)
-print(f"RESULT: {passed} passed, {failed} failed")
-print("=" * 60)
-if failed:
-    print("\nFailures:")
-    for i, msg in enumerate(issues, 1):
-        print(f"  {i}. {msg}")
-    sys.exit(1)
-print("All checks passed.")
-sys.exit(0)
+if __name__ == "__main__":
+    main()

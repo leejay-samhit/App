@@ -32,7 +32,7 @@ type Product = {
   spec_tabs?: { name: string; rows: { label: string; value: string }[] }[];
   whats_in_box?: { name: string; image_data_url: string }[];
 };
-type Review = { id: string; user_id: string; user_name: string; rating: number; title: string; body: string; images: string[]; verified_purchase: boolean; created_at: string };
+type Review = { id: string; user_id: string; user_name: string; rating: number; title: string; body: string; images: string[]; verified_purchase: boolean; created_at: string; helpful_count?: number; voted_helpful?: boolean };
 
 const PROTECTION_DEFAULT = "Service Protection — covered by 1-year manufacturer warranty + 2-year extended option at checkout.";
 const WARRANTY_DEFAULT = "1-year manufacturer warranty against defects. Free replacements within 7 days of delivery.";
@@ -132,6 +132,32 @@ export default function ProductDetailScreen() {
       Alert.alert("Question posted", "Other customers can see this Q&A. Vendor will be notified.");
       setAskText(""); setAskOpen(false);
     } catch (e) { Alert.alert("Failed", formatApiError(e)); }
+  };
+
+  const onToggleHelpful = async (rev: Review) => {
+    if (!product) return;
+    if (rev.user_id === user?.id) {
+      Alert.alert("Not allowed", "You can't mark your own review as helpful.");
+      return;
+    }
+    // Optimistic toggle
+    const prev = [...reviews];
+    setReviews((rs) => rs.map((r) => r.id === rev.id ? {
+      ...r,
+      voted_helpful: !r.voted_helpful,
+      helpful_count: (r.helpful_count || 0) + (r.voted_helpful ? -1 : 1),
+    } : r));
+    try {
+      const res = await api.post<{ voted_helpful: boolean; helpful_count: number }>(`/products/${product.id}/reviews/${rev.id}/helpful`);
+      setReviews((rs) => rs.map((r) => r.id === rev.id ? {
+        ...r,
+        voted_helpful: !!res.data?.voted_helpful,
+        helpful_count: res.data?.helpful_count ?? r.helpful_count,
+      } : r));
+    } catch (e) {
+      setReviews(prev); // rollback
+      Alert.alert("Couldn't update vote", formatApiError(e));
+    }
   };
 
   return (
@@ -341,6 +367,20 @@ export default function ProductDetailScreen() {
                   {r.images!.map((src, i) => <Image key={i} source={{ uri: src }} style={styles.reviewImg} resizeMode="cover" />)}
                 </ScrollView>
               ) : null}
+              {/* Helpful vote */}
+              <View style={styles.helpfulRow}>
+                <TouchableOpacity
+                  onPress={() => onToggleHelpful(r)}
+                  style={[styles.helpfulBtn, r.voted_helpful && styles.helpfulBtnActive]}
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  testID={`helpful-${r.id}`}
+                >
+                  <Feather name="thumbs-up" size={12} color={r.voted_helpful ? colors.primaryFg : colors.primary} />
+                  <Text style={[styles.helpfulText, r.voted_helpful && { color: colors.primaryFg }]}>
+                    {r.voted_helpful ? "Helpful" : "Helpful?"}{(r.helpful_count || 0) > 0 ? `  ·  ${r.helpful_count}` : ""}
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
           ))}
         </View>
@@ -606,6 +646,16 @@ const styles = StyleSheet.create({
   reviewTitle: { fontSize: 13, fontWeight: "800", color: colors.textMain, marginTop: 2 },
   reviewBody: { fontSize: 12, color: colors.textMain, lineHeight: 18, marginTop: 2 },
   reviewImg: { width: 70, height: 70, borderRadius: 8 },
+  helpfulRow: { flexDirection: "row", alignItems: "center", marginTop: 10 },
+  helpfulBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1, borderColor: colors.primary,
+    backgroundColor: colors.primary + "10",
+  },
+  helpfulBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  helpfulText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
   // Sticky CTA
   stickyCta: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: spacing.screen, paddingTop: 10, paddingBottom: 18, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border, flexDirection: "row", gap: 10 },
   cartBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 13, borderRadius: 999, borderWidth: 2, borderColor: colors.primary, backgroundColor: "#fff" },

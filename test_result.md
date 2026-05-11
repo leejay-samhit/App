@@ -575,6 +575,80 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+backend_p1_extended:
+  - task: "P1: Helpful-vote endpoint on customer reviews"
+    implemented: true
+    working: true
+    file: "backend/routes/products_extended.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            P1 review-helpful + reviews-with-vote: 11/11 PASS.
+            Test runner: /app/backend_test.py.
+              i.  Admin POST /products/{pid}/reviews/{rid}/helpful (Test User's review)
+                  -> 200 {voted_helpful:true, helpful_count:1}.
+              ii. Same admin POST again -> 200 {voted_helpful:false, helpful_count:0}.
+              iii. Test User self-vote on OWN review -> 400 "You can't vote on your own review."
+              iv. Vote on non-existent review id -> 404 "Review not found".
+              v.  Unauth POST (no token) -> 401.
+              GET /products/{pid}/reviews (user) -> helpful_count=1, voted_helpful=false on the review.
+              GET /products/{pid}/reviews (admin) -> voted_helpful=true on same review.
+              `helpful_voters` is NOT leaked in either response.
+            Sample ON resp:  {"voted_helpful":true,"helpful_count":1}
+            Sample OFF resp: {"voted_helpful":false,"helpful_count":0}
+
+  - task: "P1: Vendor pending Q&A endpoint (GET /vendor/me/questions)"
+    implemented: true
+    working: true
+    file: "backend/routes/products_extended.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            P1 vendor pending Q&A: 5/5 PASS.
+              • Test User POST /products/{pid}/questions -> 200 with qid.
+              • Admin GET /vendor/me/questions -> 200, pending_count=1, items[0] has
+                product_name="P1 Test - Helpful Vote", product_image (data url),
+                answered:false. (admin fallback path verified — code allows admin/
+                super_admin role.)
+              • Admin POST /products/{pid}/questions/{qid}/answer -> 200 {ok:true,answer:{...}}.
+              • Admin GET /vendor/me/questions after answer -> item now answered:true and
+                sorted AFTER pending (pending_count=0, idx=0 in the merged list since no
+                other pending exists; ordering logic verified — unanswered list comes
+                first then answered list).
+              • Normal user (testuser role=user) GET /vendor/me/questions -> 403
+                "Vendor access required." ✓
+            Sample resp: {"pending_count":1,"items":[{"id":"…","product_id":"…",
+              "vendor_id":null,"asker_id":"…","asker_name":"Test Customer",
+              "text":"Q1 - battery life?","answers":[],"created_at":"…",
+              "product_name":"P1 Test - Helpful Vote",
+              "product_image":"data:image/jpeg;base64,A==","answered":false}]}
+
+  - task: "P1: Wishlist round-trip regression (/products/{id}/save + /me/wishlist)"
+    implemented: true
+    working: true
+    file: "backend/routes/products_extended.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            P1 wishlist regression: 4/4 PASS.
+              • POST /products/{pid}/save (1st) -> 200 {saved:true}.
+              • GET /me/wishlist -> items contains pid. ✓
+              • POST /products/{pid}/save (2nd toggle) -> 200 {saved:false}.
+              • GET /me/wishlist -> items no longer contains pid. ✓
+            No regression after products_extended.py changes.
+
 backend_recent:
   - task: "Admin Rich Product Form — backend round-trip (brand, sub_features, images[], styled summaries, attrs, spec_tabs, whats_in_box)"
     implemented: true
@@ -983,3 +1057,36 @@ agent_communication:
 
         Test creds added to /app/memory/test_credentials.md:
           testuser@app.com / Test@123 (approved customer, ref code 1QRFZX)
+
+    - agent: "testing"
+      message: |
+        P1 endpoints (products_extended.py): 28/28 PASS. Test runner: /app/backend_test.py.
+
+        ✅ POST /products/{pid}/reviews/{rid}/helpful — toggle helpful vote
+          • Admin votes on another user's review -> 200 {voted_helpful:true, helpful_count:1}
+          • Re-vote -> 200 {voted_helpful:false, helpful_count:0} (toggle off)
+          • Self-vote on own review -> 400 "You can't vote on your own review."
+          • Vote on non-existent review id -> 404
+          • Unauth -> 401
+
+        ✅ GET /products/{pid}/reviews — helpful_count + voted_helpful surfaced; helpful_voters
+           is NOT leaked. Admin sees voted_helpful=true on the review they voted on; user sees
+           voted_helpful=false but helpful_count=1.
+
+        ✅ GET /vendor/me/questions — admin fallback path verified (role=admin allowed). After
+           POST /questions, pending_count=1 and item has product_name, product_image,
+           answered:false. After POST /questions/{qid}/answer, the item flips to answered:true
+           and is sorted AFTER any pending ones. Normal user (role=user) -> 403
+           "Vendor access required." (NOTE: tested as admin per code path that allows admin/
+           super_admin; did NOT test against a real vendor account.)
+
+        ✅ Wishlist round-trip — POST /save (saved:true) -> GET /me/wishlist contains pid ->
+           POST /save (saved:false) -> GET /me/wishlist no longer contains pid.
+
+        ⚠ NOTE on test user: testuser@app.com did not exist on the backend at test time
+        (login returned 401 "Invalid credentials"). The test runner re-registered the
+        account with the same credentials documented in /app/memory/test_credentials.md
+        and proceeded. Main agent may want to verify the seed/setup script for testuser
+        runs on backend boot, or document that the account is created on first registration.
+
+        Product was cleaned up via DELETE /api/admin/products/{pid} -> 200 at end of run.

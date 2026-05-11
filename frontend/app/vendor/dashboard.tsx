@@ -12,13 +12,21 @@ type Stats = { total_sales: number; total_earnings: number; today_earnings: numb
 type Product = { id: string; name: string; price: number; stock: number; image_url: string; description?: string; category?: string; is_published?: boolean; created_at?: string; interested_count?: number };
 type Sale = { id: string; order_id: string; product_id: string; product_name: string; qty: number; line_total: number; vendor_share: number; commission_pct: number; created_at: string };
 type InterestedUser = { id: string; name: string; email: string; phone?: string };
+type QuestionAnswer = { id: string; by_id: string; by_name: string; by_role: string; text: string; created_at: string };
+type VendorQuestion = {
+  id: string; product_id: string; product_name: string; product_image: string;
+  asker_id: string; asker_name: string; text: string;
+  answers: QuestionAnswer[]; answered: boolean; created_at: string;
+};
 
 export default function VendorDashboard() {
   const router = useRouter();
-  const [tab, setTab] = useState<"home" | "products" | "sales">("home");
+  const [tab, setTab] = useState<"home" | "products" | "sales" | "qa">("home");
   const [stats, setStats] = useState<Stats | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
+  const [questions, setQuestions] = useState<VendorQuestion[]>([]);
+  const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -26,14 +34,18 @@ export default function VendorDashboard() {
   const [interestedFor, setInterestedFor] = useState<Product | null>(null);
   const [interestedUsers, setInterestedUsers] = useState<InterestedUser[]>([]);
   const [interestedLoading, setInterestedLoading] = useState(false);
+  const [answeringQid, setAnsweringQid] = useState<string | null>(null);
+  const [answerText, setAnswerText] = useState("");
+  const [submittingAnswer, setSubmittingAnswer] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [s, p, sl, pubResp] = await Promise.all([
+      const [s, p, sl, pubResp, qa] = await Promise.all([
         api.get<Stats>("/vendor/me/stats"),
         api.get<Product[]>("/vendor/me/products"),
         api.get<{ items: Sale[] }>("/vendor/me/sales"),
         api.get<any>("/products").catch(() => ({ data: [] })),
+        api.get<{ items: VendorQuestion[]; pending_count: number }>("/vendor/me/questions").catch(() => ({ data: { items: [], pending_count: 0 } as any })),
       ]);
       const pubList: any[] = Array.isArray(pubResp.data) ? pubResp.data : (pubResp.data?.items || []);
       const cMap = new Map<string, number>();
@@ -41,6 +53,8 @@ export default function VendorDashboard() {
       setStats(s.data);
       setProducts(p.data.map((it) => ({ ...it, interested_count: cMap.get(it.id) || 0 })));
       setSales(sl.data.items || []);
+      setQuestions(qa.data?.items || []);
+      setPendingCount(qa.data?.pending_count || 0);
     } catch (e) {
       // If 403 (not approved), redirect to apply
       const msg = formatApiError(e);
@@ -65,6 +79,20 @@ export default function VendorDashboard() {
     ]);
   };
 
+  const onSubmitAnswer = async (q: VendorQuestion) => {
+    const t = answerText.trim();
+    if (!t) return;
+    setSubmittingAnswer(true);
+    try {
+      await api.post(`/products/${q.product_id}/questions/${q.id}/answer`, { text: t });
+      setAnswerText("");
+      setAnsweringQid(null);
+      await load();
+    } catch (e) {
+      Alert.alert("Couldn't post answer", formatApiError(e));
+    } finally { setSubmittingAnswer(false); }
+  };
+
   if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator size="large" color={colors.primary} /></View></SafeAreaView>;
 
   return (
@@ -76,9 +104,19 @@ export default function VendorDashboard() {
       </View>
 
       <View style={styles.tabsRow}>
-        {[{ k: "home", l: "Overview" }, { k: "products", l: "Products" }, { k: "sales", l: "Sales" }].map((t) => (
+        {[
+          { k: "home", l: "Overview", icon: "home" as const },
+          { k: "products", l: "Products", icon: "package" as const },
+          { k: "sales", l: "Sales", icon: "trending-up" as const },
+          { k: "qa", l: "Q&A", icon: "message-circle" as const, badge: pendingCount },
+        ].map((t) => (
           <TouchableOpacity key={t.k} onPress={() => setTab(t.k as any)} style={[styles.tab, tab === t.k && styles.tabActive]} testID={`vendor-tab-${t.k}`}>
-            <Text style={[styles.tabText, tab === t.k && { color: colors.primary }]}>{t.l}</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <Text style={[styles.tabText, tab === t.k && { color: colors.primary }]}>{t.l}</Text>
+              {t.badge && t.badge > 0 ? (
+                <View style={styles.tabBadge}><Text style={styles.tabBadgeText}>{t.badge}</Text></View>
+              ) : null}
+            </View>
           </TouchableOpacity>
         ))}
       </View>
@@ -216,6 +254,116 @@ export default function VendorDashboard() {
             ItemSeparatorComponent={() => <View style={styles.sep} />}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
           />
+        )
+      )}
+
+      {tab === "qa" && (
+        questions.length === 0 ? (
+          <View style={styles.center}>
+            <Feather name="message-circle" size={48} color={colors.textMuted} />
+            <Text style={styles.emptyTitle}>No customer questions yet</Text>
+            <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 8, textAlign: "center", maxWidth: 280 }}>
+              When customers tap "Ask vendor" on your product pages, their questions show up here.
+            </Text>
+          </View>
+        ) : (
+          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+            <ScrollView
+              contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }}
+              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
+              keyboardShouldPersistTaps="handled"
+            >
+              <GradientCard variant={pendingCount > 0 ? "primary" : "emerald"} style={{ marginBottom: 14, padding: 18 }}>
+                <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>QUESTIONS TO ANSWER</Text>
+                <Text style={{ fontSize: 26, fontWeight: "900", color: "#fff", marginTop: 4, letterSpacing: -0.6 }}>
+                  {pendingCount} pending
+                </Text>
+                <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
+                  {questions.length - pendingCount} answered · responding quickly builds buyer trust
+                </Text>
+              </GradientCard>
+              {questions.map((q) => (
+                <View key={q.id} style={[styles.qaCard, q.answered ? styles.qaCardAnswered : styles.qaCardPending]}>
+                  {/* Product header */}
+                  <View style={styles.qaProduct}>
+                    {q.product_image ? <Image source={{ uri: q.product_image }} style={styles.qaProductImg} /> : <View style={[styles.qaProductImg, { backgroundColor: colors.surfaceMuted }]} />}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.qaProductName} numberOfLines={1}>{q.product_name}</Text>
+                      <Text style={styles.qaMeta}>
+                        Asked by {q.asker_name} · {new Date(q.created_at).toLocaleDateString()}
+                      </Text>
+                    </View>
+                    {q.answered ? (
+                      <View style={styles.qaPillDone}><Text style={styles.qaPillDoneText}>ANSWERED</Text></View>
+                    ) : (
+                      <View style={styles.qaPillPending}><Text style={styles.qaPillPendingText}>NEW</Text></View>
+                    )}
+                  </View>
+
+                  {/* Question text */}
+                  <View style={styles.qaQuestion}>
+                    <Feather name="help-circle" size={14} color={colors.primary} />
+                    <Text style={styles.qaQuestionText}>{q.text}</Text>
+                  </View>
+
+                  {/* Existing answers */}
+                  {(q.answers || []).map((a) => (
+                    <View key={a.id} style={styles.qaAnswer}>
+                      <Feather name="corner-down-right" size={13} color={colors.textMuted} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.qaAnswerMeta}>{a.by_name} · {a.by_role.toUpperCase()}</Text>
+                        <Text style={styles.qaAnswerText}>{a.text}</Text>
+                      </View>
+                    </View>
+                  ))}
+
+                  {/* Answer input */}
+                  {answeringQid === q.id ? (
+                    <View style={{ marginTop: 10 }}>
+                      <TextInput
+                        value={answerText}
+                        onChangeText={setAnswerText}
+                        placeholder="Write your reply (will be public)…"
+                        placeholderTextColor={colors.textMuted}
+                        multiline
+                        style={[styles.input, styles.area, { minHeight: 80, marginTop: 0 }]}
+                        testID={`vendor-answer-input-${q.id}`}
+                      />
+                      <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                        <TouchableOpacity onPress={() => { setAnsweringQid(null); setAnswerText(""); }} style={[styles.primaryBtn, { flex: 1, backgroundColor: colors.surfaceMuted, marginTop: 0 }]}>
+                          <Text style={[styles.primaryBtnText, { color: colors.textMain }]}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={() => onSubmitAnswer(q)}
+                          disabled={submittingAnswer || !answerText.trim()}
+                          style={[styles.primaryBtn, { flex: 1.4, marginTop: 0 }, (submittingAnswer || !answerText.trim()) && { opacity: 0.6 }]}
+                          testID={`vendor-answer-send-${q.id}`}
+                        >
+                          {submittingAnswer ? <ActivityIndicator color={colors.primaryFg} /> : (
+                            <>
+                              <Feather name="send" size={14} color={colors.primaryFg} />
+                              <Text style={styles.primaryBtnText}>  Post reply</Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ) : (
+                    <TouchableOpacity
+                      onPress={() => { setAnsweringQid(q.id); setAnswerText(""); }}
+                      style={styles.qaAnswerBtn}
+                      testID={`vendor-answer-${q.id}`}
+                    >
+                      <Feather name={q.answered ? "plus-circle" : "edit-3"} size={14} color={colors.primary} />
+                      <Text style={styles.qaAnswerBtnText}>
+                        {q.answered ? "Add another reply" : "Write reply"}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+          </KeyboardAvoidingView>
         )
       )}
 
@@ -448,4 +596,47 @@ const styles = StyleSheet.create({
   vendorUserAvatarText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
   vendorUserName: { fontSize: 13, fontWeight: "700", color: colors.textMain },
   vendorUserMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+
+  // ─── Tab badge (Q&A pending count) ───
+  tabBadge: {
+    minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 5,
+    backgroundColor: "#E11D48",
+    alignItems: "center", justifyContent: "center",
+  },
+  tabBadgeText: { fontSize: 9, fontWeight: "900", color: "#fff", letterSpacing: 0.3 },
+
+  // ─── Q&A cards ───
+  qaCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 16, padding: 14, marginBottom: 12,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  qaCardPending: { borderLeftWidth: 4, borderLeftColor: "#E11D48" },
+  qaCardAnswered: { borderLeftWidth: 4, borderLeftColor: "#16A34A" },
+  qaProduct: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 10 },
+  qaProductImg: { width: 44, height: 44, borderRadius: 10 },
+  qaProductName: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  qaMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  qaPillPending: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: "#E11D48" },
+  qaPillPendingText: { fontSize: 9, fontWeight: "900", color: "#fff", letterSpacing: 0.7 },
+  qaPillDone: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: "#DCFCE7" },
+  qaPillDoneText: { fontSize: 9, fontWeight: "900", color: "#166534", letterSpacing: 0.7 },
+  qaQuestion: {
+    flexDirection: "row", alignItems: "flex-start", gap: 8,
+    padding: 12, borderRadius: 12, backgroundColor: colors.surfaceMuted,
+  },
+  qaQuestionText: { flex: 1, fontSize: 13, color: colors.textMain, lineHeight: 18, fontWeight: "600" },
+  qaAnswer: {
+    flexDirection: "row", alignItems: "flex-start", gap: 8,
+    marginTop: 10, paddingLeft: 6,
+  },
+  qaAnswerMeta: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.5 },
+  qaAnswerText: { fontSize: 13, color: colors.textMain, lineHeight: 18, marginTop: 2 },
+  qaAnswerBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    marginTop: 10, paddingVertical: 10, borderRadius: 10,
+    borderWidth: 1, borderColor: colors.primary,
+    backgroundColor: colors.primary + "10",
+  },
+  qaAnswerBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
 });

@@ -327,6 +327,12 @@ export default function DashboardScreen() {
             <Text style={styles.quickText}>My orders</Text>
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
+
+          <TouchableOpacity style={styles.quickRow} onPress={() => router.push("/wishlist" as any)} testID="dashboard-wishlist">
+            <View style={styles.quickIcon}><Feather name="heart" size={16} color={colors.primary} /></View>
+            <Text style={styles.quickText}>My wishlist</Text>
+            <Feather name="chevron-right" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
         </Animated.View>
 
         {recentNotifs.length > 0 && (

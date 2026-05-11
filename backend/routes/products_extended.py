@@ -192,9 +192,17 @@ async def post_review(pid: str, body: ReviewIn, user: Dict[str, Any] = Depends(g
 
 
 @router.get("/products/{pid}/reviews")
-async def list_reviews(pid: str, _: Dict[str, Any] = Depends(get_current_user)):
+async def list_reviews(pid: str, user: Dict[str, Any] = Depends(get_current_user)):
     cur = db.product_reviews.find({"product_id": pid}, {"_id": 0}).sort("created_at", -1).limit(200)
     items = await cur.to_list(200)
+    uid = user.get("id")
+    # Mark whether the current viewer already up-voted each review
+    for r in items:
+        voters = r.get("helpful_voters") or []
+        r["helpful_count"] = int(r.get("helpful_count") or len(voters))
+        r["voted_helpful"] = uid in voters
+        # Don't leak voter ids to the client
+        r.pop("helpful_voters", None)
     # Aggregate stats
     counts = [0, 0, 0, 0, 0, 0]  # idx 1..5 used
     total = 0; sum_r = 0
@@ -210,4 +218,63 @@ async def list_reviews(pid: str, _: Dict[str, Any] = Depends(get_current_user)):
             "total": total,
             "breakdown": {str(i): counts[i] for i in range(1, 6)},
         },
+    }
+
+
+# ───────────── Helpful Votes ─────────────
+
+@router.post("/products/{pid}/reviews/{rid}/helpful")
+async def toggle_helpful(pid: str, rid: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Idempotent helpful-vote toggle.  Each user can up-vote a review once;
+    tapping again removes the vote.  Returns the fresh count + voted flag."""
+    rev = await db.product_reviews.find_one({"id": rid, "product_id": pid})
+    if not rev:
+        raise HTTPException(status_code=404, detail="Review not found")
+    uid = user["id"]
+    if uid == rev.get("user_id"):
+        raise HTTPException(status_code=400, detail="You can't vote on your own review.")
+    voters: List[str] = list(rev.get("helpful_voters") or [])
+    if uid in voters:
+        voters.remove(uid)
+        voted = False
+    else:
+        voters.append(uid)
+        voted = True
+    await db.product_reviews.update_one(
+        {"id": rid},
+        {"$set": {"helpful_voters": voters, "helpful_count": len(voters)}},
+    )
+    return {"voted_helpful": voted, "helpful_count": len(voters)}
+
+
+# ───────────── Vendor: pending Q&A ─────────────
+
+@router.get("/vendor/me/questions")
+async def vendor_pending_questions(user: Dict[str, Any] = Depends(get_current_user)):
+    """Questions on this vendor's products. Returns unanswered first, then
+    answered (most recent), capped at 100."""
+    if user.get("role") != "vendor" and user.get("role") not in ("admin", "super_admin"):
+        # Allow approved vendors only.  Admins can also use this for support.
+        raise HTTPException(status_code=403, detail="Vendor access required.")
+    qry: Dict[str, Any] = {"vendor_id": user["id"]} if user.get("role") == "vendor" else {}
+    cur = db.product_questions.find(qry, {"_id": 0}).sort("created_at", -1).limit(100)
+    items = await cur.to_list(100)
+    # Attach product name for context
+    pids = list({q["product_id"] for q in items})
+    prods = await db.products.find({"id": {"$in": pids}}, {"_id": 0, "id": 1, "name": 1, "image_url": 1}).to_list(500)
+    pmap = {p["id"]: p for p in prods}
+    for q in items:
+        p = pmap.get(q["product_id"]) or {}
+        q["product_name"] = p.get("name") or "Product"
+        q["product_image"] = p.get("image_url") or ""
+        q["answered"] = bool(q.get("answers"))
+    items.sort(key=lambda q: (q.get("answered"), -1 * (1 if q.get("answered") else 0)))
+    # Two-bucket sort: unanswered (False) first, then by newest
+    items.sort(key=lambda q: (q.get("answered"), q.get("created_at") or ""), reverse=False)
+    unanswered = [q for q in items if not q.get("answered")]
+    answered = [q for q in items if q.get("answered")]
+    answered.sort(key=lambda q: q.get("created_at") or "", reverse=True)
+    return {
+        "pending_count": len(unanswered),
+        "items": unanswered + answered,
     }
