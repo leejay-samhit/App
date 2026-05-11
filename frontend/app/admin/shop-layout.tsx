@@ -73,24 +73,27 @@ export default function AdminShopLayoutScreen() {
 
   useEffect(() => { load(); }, [load]);
 
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // Track a pending timeout so re-tapping resets it.
+  const confirmTimerRef = React.useRef<any>(null);
+
   const onDelete = async (b: Block) => {
-    // Cross-platform confirmation: Alert.alert renders no-op on Expo web's
-    // unauthenticated context, so we fall back to window.confirm there.
-    const label = b.title || TYPE_META[b.block_type].label;
-    const doDelete = async () => {
-      try {
-        await api.delete(`/admin/shop-layout/${b.id}`);
-        setItems((prev) => prev.filter((x) => x.id !== b.id));
-      } catch (e) { Alert.alert("Delete failed", formatApiError(e)); }
-    };
-    if (typeof window !== "undefined" && typeof (window as any).confirm === "function") {
-      if ((window as any).confirm(`Delete block "${label}"?`)) await doDelete();
+    // Two-tap confirmation pattern (works on web AND native, no Alert needed):
+    //   First tap  → button transforms to "Tap again to delete" for 4s
+    //   Second tap → actually deletes
+    //   Idle 4s    → resets back to "Delete"
+    if (confirmDeleteId !== b.id) {
+      setConfirmDeleteId(b.id);
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = setTimeout(() => setConfirmDeleteId(null), 4000);
       return;
     }
-    Alert.alert("Delete block?", `"${label}" will be removed.`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: doDelete },
-    ]);
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    setConfirmDeleteId(null);
+    try {
+      await api.delete(`/admin/shop-layout/${b.id}`);
+      setItems((prev) => prev.filter((x) => x.id !== b.id));
+    } catch (e) { Alert.alert("Delete failed", formatApiError(e)); }
   };
 
   const onToggleActive = async (b: Block) => {
