@@ -45,6 +45,56 @@ async def list_products():
     return [_shape_product(p) for p in items]
 
 
+@router.get("/products/by-source")
+async def list_products_by_source(
+    source: str = "trending",
+    limit: int = 10,
+    category: str | None = None,
+):
+    """Return products for a Shop Layout section based on a logical source:
+
+      source=trending  → top N by `interested_count` then orders volume
+      source=new       → newest by `created_at`
+      source=best      → most-sold (uses `sales_count` if tracked, else `interested_count`)
+      source=category  → filtered by `category` field
+
+    Optional `category` filter narrows ALL sources to a department/category.
+    Always returns a flat ARRAY of shaped products (same shape as /products),
+    so the mobile renderer can drop them straight into a product grid.
+    """
+    limit = max(1, min(50, int(limit or 10)))
+    src = (source or "trending").strip().lower()
+    if src not in ("trending", "new", "best", "category", "manual"):
+        src = "trending"
+
+    q: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
+    if category:
+        q["category"] = category
+
+    if src == "new":
+        cursor = db.products.find(q, {"_id": 0}).sort("created_at", -1).limit(limit)
+    elif src == "category":
+        cursor = db.products.find(q, {"_id": 0}).sort("created_at", -1).limit(limit)
+    else:
+        # trending / best → pull a larger window, then sort in-process by a
+        # composite "popularity" score so MongoDB doesn't need a custom index.
+        cursor = db.products.find(q, {"_id": 0}).sort("created_at", -1).limit(max(limit * 4, 40))
+
+    items = await cursor.to_list(limit * 4 if src in ("trending", "best") else limit)
+    if src in ("trending", "best"):
+        def score(p: Dict[str, Any]) -> int:
+            interested = p.get("interested_users") or []
+            interested_n = len(interested) if isinstance(interested, list) else 0
+            sales = int(p.get("sales_count") or 0)
+            # `best` weights actual sales heavier; `trending` weights interest
+            if src == "best":
+                return sales * 10 + interested_n
+            return interested_n * 5 + sales
+        items.sort(key=score, reverse=True)
+        items = items[:limit]
+    return [_shape_product(p) for p in items]
+
+
 @router.post("/products/{product_id}/interested")
 async def register_interest(
     product_id: str,

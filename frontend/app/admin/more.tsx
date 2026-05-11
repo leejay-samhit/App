@@ -34,8 +34,8 @@ const ITEMS = [
 // Store-related items grouped together so admin can manage products + customer-facing shop UI in one place.
 const STORE_ITEMS = [
   { icon: "package", label: "Products", route: "/admin/products", hint: "Manage catalog · stock · pricing" },
-  { icon: "image", label: "Promo banners", route: "/admin/promo-banners", hint: "Hero carousel slides on Shop" },
-  { icon: "layout", label: "Shop layout", route: "/admin/shop-layout", hint: "Background, content boxes & sub-category labels" },
+  { icon: "layout", label: "Shop layout", route: "/admin/shop-layout", hint: "12 block types · per-category layouts · live preview" },
+  { icon: "image", label: "Promo banners (legacy)", route: "/admin/promo-banners", hint: "Migrated into Shop layout → Banner slider" },
 ];
 
 const EXPORTS = [

@@ -20,7 +20,6 @@ import { useFocusEffect, useRouter, usePathname } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
-import { PromoCarousel } from "../../src/promo-carousel";
 import { ShopLayoutRenderer } from "../../src/shop-layout-renderer";
 import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
 
@@ -473,17 +472,20 @@ export default function ShopScreen() {
             <>
               {/* Search bar moved to the sticky top header — no inline search here */}
 
-              {/* Hero banner — swipeable carousel of admin-managed promo slides */}
-              <PromoCarousel onShopNow={(productId) => {
-                if (productId) {
-                  router.push(`/product/${productId}` as any);
-                } else {
-                  setShopCategory(null); setShopSearch("");
-                }
-              }} />
+              {/* Hero banner — the renderer's banner_slider block now owns the
+                  swipeable carousel (replaces the legacy <PromoCarousel/>).
+                  Admin curates slides via Admin → Store → Shop layout. */}
 
-              {/* Admin-managed shop layout: section headers, free text, content boxes */}
-              <ShopLayoutRenderer onProductPress={(productId) => router.push(`/product/${productId}` as any)} />
+              {/* Admin-managed shop layout: 12 dynamic block types */}
+              <ShopLayoutRenderer
+                scope="home"
+                onProductPress={(productId) => router.push(`/product/${productId}` as any)}
+                onCategoryPress={(c) => router.push(`/shop-category/${encodeURIComponent(c)}` as any)}
+                onAddToCart={(productId) => {
+                  const p = items.find((x) => x.id === productId);
+                  if (p) addToCart(p);
+                }}
+              />
 
               {/* Departments — tiled cards (matches reference image 2) */}
               {cats.length > 0 && (
@@ -508,7 +510,8 @@ export default function ShopScreen() {
                       <TouchableOpacity
                         key={c}
                         style={[styles.deptTile, active && styles.deptTileActive]}
-                        onPress={() => setShopCategory((cur) => (cur === c ? null : c))}
+                        onPress={() => router.push(`/shop-category/${encodeURIComponent(c)}` as any)}
+                        onLongPress={() => setShopCategory((cur) => (cur === c ? null : c))}
                         testID={`dept-${c}`}
                       >
                         <View style={[styles.deptIconCircle, { backgroundColor: deptColours[i % deptColours.length] }, active && { backgroundColor: colors.primary + "20" }]}>

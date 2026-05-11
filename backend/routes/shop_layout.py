@@ -1,28 +1,34 @@
 """
 Shop Layout — admin-managed content blocks rendered on the customer Shop tab
-between the promo carousel and the products grid.
+and on category pages. JSON-driven; mobile app does NOT hardcode home layout.
 
-Block types:
-  background      — Full-bleed background image for the Shop screen
-  section_header  — A bold sub-category / section title (e.g. "ELECTRONICS")
-  text            — A paragraph of free text
-  content_box     — A card with title, optional subtitle, optional image,
-                    and optional product link (CTA "View")
+BLOCK TYPES (12):
+  Hero / Banners:  banner_slider, background (single banner), announcement_strip
+  Navigation:      category_circles, brand_slider
+  Products:        product_grid, horizontal_slider, content_box, flash_sale
+  Promo:           offer_cards
+  Typography:      section_header, text
 
-Endpoints:
-  GET    /api/shop-layout                — public, returns active blocks (sorted)
-  GET    /api/admin/shop-layout          — admin, returns all blocks
-  POST   /api/admin/shop-layout          — admin, create
-  PATCH  /api/admin/shop-layout/{id}     — admin, partial update
-  DELETE /api/admin/shop-layout/{id}     — admin, delete
+SCOPE:
+  scope="home"      → rendered on /(tabs)/shop
+  scope="category"  → rendered on /shop-category/{scope_category}
+
+ENDPOINTS:
+  GET    /api/shop-layout                       (public; ?scope=&category=)
+  GET    /api/admin/shop-layout                 (admin; ?scope=&category=)
+  POST   /api/admin/shop-layout                 (admin; extended payload)
+  PATCH  /api/admin/shop-layout/{id}            (admin; partial update)
+  DELETE /api/admin/shop-layout/{id}            (admin)
+  POST   /api/admin/shop-layout/reorder         (admin; bulk reorder)
+  POST   /api/admin/shop-layout/migrate-banners (admin; one-time migration)
 """
 from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from core.db import db
@@ -31,39 +37,127 @@ from core.security import require_admin, get_current_user
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-ALLOWED_TYPES = {"background", "section_header", "text", "content_box"}
+ALLOWED_TYPES = {
+    # legacy / existing
+    "background", "section_header", "text", "content_box",
+    # new
+    "banner_slider", "product_grid", "horizontal_slider",
+    "category_circles", "flash_sale", "offer_cards",
+    "brand_slider", "announcement_strip",
+}
+ALLOWED_SCOPES = {"home", "category"}
+ALLOWED_DATA_SOURCES = {"manual", "trending", "new", "best", "category"}
+ALLOWED_LAYOUT_STYLES = {"grid", "list", "horizontal"}
+ALLOWED_ALIGN = {"left", "center", "right"}
+
+
+# ---------- Models ----------
+
+class LayoutItem(BaseModel):
+    """Generic item used for category_circles, brand_slider, offer_cards,
+    banner_slider slides etc."""
+    label: Optional[str] = ""
+    subtitle: Optional[str] = ""
+    image_data_url: Optional[str] = Field(default="", max_length=4_000_000)
+    link_type: Optional[str] = None  # "product" | "category" | None
+    link_value: Optional[str] = ""
+    color: Optional[str] = ""
 
 
 class ShopLayoutBlockIn(BaseModel):
     block_type: str = Field(..., min_length=1, max_length=32)
+    # scope routing
+    scope: Optional[str] = "home"
+    scope_category: Optional[str] = ""
+    # core
     title: Optional[str] = ""
     subtitle: Optional[str] = ""
     body: Optional[str] = ""
-    image_data_url: Optional[str] = Field(None, max_length=4_000_000)
-    product_id: Optional[str] = None
     cta_label: Optional[str] = ""
     sort_order: int = 0
     active: bool = True
-    size: Optional[str] = "medium"  # small | medium | large (for content_box/background resize)
+    size: Optional[str] = "medium"
+    image_data_url: Optional[str] = Field(default="", max_length=4_000_000)
+    product_id: Optional[str] = None
+    # styling overrides
+    text_color: Optional[str] = ""
+    bg_color: Optional[str] = ""
+    font_size: Optional[int] = None
+    text_align: Optional[str] = ""
+    button_color: Optional[str] = ""
+    button_text_color: Optional[str] = ""
+    height: Optional[int] = None
+    # data binding
+    product_ids: Optional[List[str]] = None
+    data_source: Optional[str] = "manual"
+    product_count: Optional[int] = 10
+    layout_style: Optional[str] = "grid"
+    category_filter: Optional[str] = ""
+    items: Optional[List[LayoutItem]] = None
+    flash_sale_ends_at: Optional[str] = ""
 
 
 class ShopLayoutBlockPatch(BaseModel):
     block_type: Optional[str] = None
+    scope: Optional[str] = None
+    scope_category: Optional[str] = None
     title: Optional[str] = None
     subtitle: Optional[str] = None
     body: Optional[str] = None
-    image_data_url: Optional[str] = None
-    product_id: Optional[str] = None
     cta_label: Optional[str] = None
     sort_order: Optional[int] = None
     active: Optional[bool] = None
     size: Optional[str] = None
+    image_data_url: Optional[str] = None
+    product_id: Optional[str] = None
+    text_color: Optional[str] = None
+    bg_color: Optional[str] = None
+    font_size: Optional[int] = None
+    text_align: Optional[str] = None
+    button_color: Optional[str] = None
+    button_text_color: Optional[str] = None
+    height: Optional[int] = None
+    product_ids: Optional[List[str]] = None
+    data_source: Optional[str] = None
+    product_count: Optional[int] = None
+    layout_style: Optional[str] = None
+    category_filter: Optional[str] = None
+    items: Optional[List[LayoutItem]] = None
+    flash_sale_ends_at: Optional[str] = None
 
+
+class ReorderItem(BaseModel):
+    id: str
+    sort_order: int
+
+
+class ReorderRequest(BaseModel):
+    items: List[ReorderItem]
+
+
+# ---------- Helpers ----------
 
 def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
     if not doc:
         return {}
     doc.pop("_id", None)
+    # Backfill new fields on legacy docs so the client sees a consistent shape.
+    doc.setdefault("scope", "home")
+    doc.setdefault("scope_category", "")
+    doc.setdefault("text_color", "")
+    doc.setdefault("bg_color", "")
+    doc.setdefault("font_size", None)
+    doc.setdefault("text_align", "")
+    doc.setdefault("button_color", "")
+    doc.setdefault("button_text_color", "")
+    doc.setdefault("height", None)
+    doc.setdefault("product_ids", [])
+    doc.setdefault("data_source", "manual")
+    doc.setdefault("product_count", 10)
+    doc.setdefault("layout_style", "grid")
+    doc.setdefault("category_filter", "")
+    doc.setdefault("items", [])
+    doc.setdefault("flash_sale_ends_at", "")
     return doc
 
 
@@ -79,56 +173,67 @@ def _validate_type(t: Optional[str]) -> str:
     return t
 
 
-# ---------- Public ----------
-
-@router.get("/shop-layout")
-async def list_active_shop_layout(_: Dict[str, Any] = Depends(get_current_user)):
-    cursor = db.shop_layout_blocks.find({"active": True}).sort([("sort_order", 1), ("created_at", 1)])
-    items = [_serialize(d) for d in await cursor.to_list(100)]
-    return {"items": items}
-
-
-# ---------- Admin ----------
-
-@router.get("/admin/shop-layout")
-async def list_all_shop_layout(_: Dict[str, Any] = Depends(require_admin)):
-    cursor = db.shop_layout_blocks.find({}).sort([("sort_order", 1), ("created_at", 1)])
-    items = [_serialize(d) for d in await cursor.to_list(500)]
-    return {"items": items}
+def _scope_filter(scope: Optional[str], category: Optional[str]) -> Dict[str, Any]:
+    q: Dict[str, Any] = {}
+    if scope:
+        if scope not in ALLOWED_SCOPES:
+            raise HTTPException(status_code=400, detail=f"scope must be one of {sorted(ALLOWED_SCOPES)}")
+        # treat missing scope as "home" for backward compat
+        if scope == "home":
+            q["$or"] = [{"scope": "home"}, {"scope": {"$exists": False}}, {"scope": None}, {"scope": ""}]
+        else:
+            q["scope"] = "category"
+            if category:
+                q["scope_category"] = category
+    return q
 
 
-@router.post("/admin/shop-layout")
-async def create_shop_layout_block(body: ShopLayoutBlockIn, _: Dict[str, Any] = Depends(require_admin)):
-    _validate_type(body.block_type)
-    doc = {
+def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
+    return {
         "id": str(uuid.uuid4()),
         "block_type": body.block_type,
+        "scope": (body.scope if body.scope in ALLOWED_SCOPES else "home"),
+        "scope_category": (body.scope_category or "").strip(),
         "title": (body.title or "").strip(),
         "subtitle": (body.subtitle or "").strip(),
         "body": (body.body or "").strip(),
-        "image_data_url": body.image_data_url or "",
-        "product_id": (body.product_id or "").strip() or None,
         "cta_label": (body.cta_label or "").strip(),
         "sort_order": int(body.sort_order or 0),
         "active": bool(body.active),
         "size": (body.size if body.size in ("small", "medium", "large") else "medium"),
+        "image_data_url": body.image_data_url or "",
+        "product_id": (body.product_id or "").strip() or None,
+        "text_color": (body.text_color or "").strip(),
+        "bg_color": (body.bg_color or "").strip(),
+        "font_size": body.font_size if isinstance(body.font_size, int) else None,
+        "text_align": (body.text_align if body.text_align in ALLOWED_ALIGN else ""),
+        "button_color": (body.button_color or "").strip(),
+        "button_text_color": (body.button_text_color or "").strip(),
+        "height": body.height if isinstance(body.height, int) else None,
+        "product_ids": [str(p) for p in (body.product_ids or [])][:50],
+        "data_source": (body.data_source if body.data_source in ALLOWED_DATA_SOURCES else "manual"),
+        "product_count": max(1, min(50, int(body.product_count or 10))),
+        "layout_style": (body.layout_style if body.layout_style in ALLOWED_LAYOUT_STYLES else "grid"),
+        "category_filter": (body.category_filter or "").strip(),
+        "items": [i.dict() for i in (body.items or [])][:30],
+        "flash_sale_ends_at": (body.flash_sale_ends_at or "").strip(),
         "created_at": _now(),
         "updated_at": _now(),
     }
-    await db.shop_layout_blocks.insert_one(doc.copy())
-    return _serialize(doc)
 
 
-@router.patch("/admin/shop-layout/{block_id}")
-async def update_shop_layout_block(block_id: str, body: ShopLayoutBlockPatch, _: Dict[str, Any] = Depends(require_admin)):
-    existing = await db.shop_layout_blocks.find_one({"id": block_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Block not found")
+def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
     updates: Dict[str, Any] = {}
-    payload = body.dict(exclude_unset=True)
     if "block_type" in payload and payload["block_type"] is not None:
         updates["block_type"] = _validate_type(payload["block_type"])
-    for f in ("title", "subtitle", "body", "cta_label"):
+    if "scope" in payload and payload["scope"] is not None:
+        s = str(payload["scope"]).strip().lower()
+        if s and s not in ALLOWED_SCOPES:
+            raise HTTPException(status_code=400, detail=f"scope must be one of {sorted(ALLOWED_SCOPES)}")
+        updates["scope"] = s or "home"
+    for f in ("scope_category", "title", "subtitle", "body", "cta_label",
+              "text_color", "bg_color", "button_color", "button_text_color",
+              "category_filter", "flash_sale_ends_at"):
         if f in payload and payload[f] is not None:
             updates[f] = str(payload[f]).strip()
     if "image_data_url" in payload and payload["image_data_url"] is not None:
@@ -144,6 +249,97 @@ async def update_shop_layout_block(block_id: str, body: ShopLayoutBlockPatch, _:
         s = str(payload["size"]).lower()
         if s in ("small", "medium", "large"):
             updates["size"] = s
+    if "font_size" in payload and payload["font_size"] is not None:
+        try:
+            updates["font_size"] = int(payload["font_size"])
+        except (TypeError, ValueError):
+            pass
+    if "text_align" in payload and payload["text_align"] is not None:
+        a = str(payload["text_align"]).lower()
+        if a in ALLOWED_ALIGN or a == "":
+            updates["text_align"] = a
+    if "height" in payload and payload["height"] is not None:
+        try:
+            updates["height"] = int(payload["height"])
+        except (TypeError, ValueError):
+            pass
+    if "product_ids" in payload and payload["product_ids"] is not None:
+        updates["product_ids"] = [str(p) for p in payload["product_ids"]][:50]
+    if "data_source" in payload and payload["data_source"] is not None:
+        ds = str(payload["data_source"]).strip().lower()
+        if ds in ALLOWED_DATA_SOURCES:
+            updates["data_source"] = ds
+    if "product_count" in payload and payload["product_count"] is not None:
+        try:
+            updates["product_count"] = max(1, min(50, int(payload["product_count"])))
+        except (TypeError, ValueError):
+            pass
+    if "layout_style" in payload and payload["layout_style"] is not None:
+        ls = str(payload["layout_style"]).strip().lower()
+        if ls in ALLOWED_LAYOUT_STYLES:
+            updates["layout_style"] = ls
+    if "items" in payload and payload["items"] is not None:
+        cleaned: List[Dict[str, Any]] = []
+        for it in payload["items"][:30]:
+            if isinstance(it, dict):
+                cleaned.append({
+                    "label": str(it.get("label") or "").strip(),
+                    "subtitle": str(it.get("subtitle") or "").strip(),
+                    "image_data_url": it.get("image_data_url") or "",
+                    "link_type": (str(it.get("link_type") or "").strip() or None),
+                    "link_value": str(it.get("link_value") or "").strip(),
+                    "color": str(it.get("color") or "").strip(),
+                })
+        updates["items"] = cleaned
+    return updates
+
+
+# ---------- Public ----------
+
+@router.get("/shop-layout")
+async def list_active_shop_layout(
+    scope: Optional[str] = Query("home"),
+    category: Optional[str] = Query(None),
+    _: Dict[str, Any] = Depends(get_current_user),
+):
+    """Public read for the mobile app. Returns active blocks for the requested
+    scope (default 'home'). For scope='category', filter by `scope_category`."""
+    q = _scope_filter(scope, category)
+    q["active"] = True
+    cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])
+    items = [_serialize(d) for d in await cursor.to_list(200)]
+    return {"items": items, "scope": scope or "home", "category": category or ""}
+
+
+# ---------- Admin ----------
+
+@router.get("/admin/shop-layout")
+async def list_all_shop_layout(
+    scope: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    q = _scope_filter(scope, category) if scope else {}
+    cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])
+    items = [_serialize(d) for d in await cursor.to_list(1000)]
+    return {"items": items}
+
+
+@router.post("/admin/shop-layout")
+async def create_shop_layout_block(body: ShopLayoutBlockIn, _: Dict[str, Any] = Depends(require_admin)):
+    _validate_type(body.block_type)
+    doc = _build_doc_from_in(body)
+    await db.shop_layout_blocks.insert_one(doc.copy())
+    return _serialize(doc)
+
+
+@router.patch("/admin/shop-layout/{block_id}")
+async def update_shop_layout_block(block_id: str, body: ShopLayoutBlockPatch, _: Dict[str, Any] = Depends(require_admin)):
+    existing = await db.shop_layout_blocks.find_one({"id": block_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Block not found")
+    payload = body.dict(exclude_unset=True)
+    updates = _build_updates(payload)
     if updates:
         updates["updated_at"] = _now()
         await db.shop_layout_blocks.update_one({"id": block_id}, {"$set": updates})
@@ -157,3 +353,79 @@ async def delete_shop_layout_block(block_id: str, _: Dict[str, Any] = Depends(re
     if not res.deleted_count:
         raise HTTPException(status_code=404, detail="Block not found")
     return {"ok": True}
+
+
+@router.post("/admin/shop-layout/reorder")
+async def reorder_shop_layout_blocks(body: ReorderRequest, _: Dict[str, Any] = Depends(require_admin)):
+    """Bulk reorder. Pass [{id, sort_order}, ...]. Used by drag-to-reorder UI."""
+    n = 0
+    for it in body.items:
+        res = await db.shop_layout_blocks.update_one(
+            {"id": it.id},
+            {"$set": {"sort_order": int(it.sort_order), "updated_at": _now()}},
+        )
+        if res.matched_count:
+            n += 1
+    return {"ok": True, "updated": n}
+
+
+@router.post("/admin/shop-layout/migrate-banners")
+async def migrate_promo_banners(_: Dict[str, Any] = Depends(require_admin)):
+    """One-time migration: collapse all `promo_banners` into a single
+    `banner_slider` block on the home scope. Each banner becomes a slide
+    item. Safe to run multiple times — only creates the block once."""
+    existing = await db.shop_layout_blocks.find_one({"block_type": "banner_slider", "scope": "home"})
+    cursor = db.promo_banners.find({}).sort([("sort_order", 1), ("created_at", 1)])
+    promos = await cursor.to_list(50)
+    if not promos:
+        return {"ok": True, "migrated": 0, "message": "no promo banners to migrate"}
+    items = [
+        {
+            "label": (p.get("title") or "").strip(),
+            "subtitle": (p.get("subtitle") or "").strip(),
+            "image_data_url": p.get("image_data_url") or "",
+            "link_type": "product" if p.get("product_id") else None,
+            "link_value": p.get("product_id") or "",
+            "color": "",
+        }
+        for p in promos
+    ]
+    if existing:
+        await db.shop_layout_blocks.update_one(
+            {"id": existing["id"]},
+            {"$set": {"items": items, "updated_at": _now()}},
+        )
+        return {"ok": True, "migrated": len(items), "block_id": existing["id"], "updated": True}
+    doc = {
+        "id": str(uuid.uuid4()),
+        "block_type": "banner_slider",
+        "scope": "home",
+        "scope_category": "",
+        "title": "Featured",
+        "subtitle": "",
+        "body": "",
+        "cta_label": "Shop now",
+        "sort_order": -100,  # put it at the very top
+        "active": True,
+        "size": "medium",
+        "image_data_url": "",
+        "product_id": None,
+        "text_color": "",
+        "bg_color": "",
+        "font_size": None,
+        "text_align": "",
+        "button_color": "",
+        "button_text_color": "",
+        "height": 180,
+        "product_ids": [],
+        "data_source": "manual",
+        "product_count": 10,
+        "layout_style": "horizontal",
+        "category_filter": "",
+        "items": items,
+        "flash_sale_ends_at": "",
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    await db.shop_layout_blocks.insert_one(doc.copy())
+    return {"ok": True, "migrated": len(items), "block_id": doc["id"], "updated": False}

@@ -718,4 +718,68 @@ agent_communication:
         File: /app/frontend/app/admin/shop-layout.tsx
         Backend untouched. No retest needed.
 
+    - agent: "main"
+      message: |
+        Shipped Shopify/Meesho-style Dynamic Shop Layout System.
+        Goal: zero app updates required for any home/category UI change.
+
+        BACKEND
+        - routes/shop_layout.py: extended schema with scope, scope_category,
+          12 block_types, 7 style overrides (text_color, bg_color, font_size,
+          text_align, button_color, button_text_color, height), data binding
+          (product_ids, data_source, product_count, layout_style,
+          category_filter), items[] array, flash_sale_ends_at.
+          New endpoints: POST /admin/shop-layout/reorder, POST /admin/shop-layout/migrate-banners.
+          Public GET /shop-layout now accepts ?scope=home|category&category=X.
+        - routes/products_public.py: added GET /products/by-source?source=trending|new|best|category&limit=&category=
+          for product-driven blocks (trending = composite interest*5+sales,
+          best = sales*10+interest, new = creation date).
+
+        FRONTEND
+        - src/shop-layout-renderer.tsx: full rewrite as 12-block dispatcher
+          (banner_slider, background, announcement_strip, category_circles,
+          brand_slider, product_grid, horizontal_slider, content_box,
+          flash_sale, offer_cards, section_header, text). Skeleton loaders
+          while loading. Auto-fetches product data for non-manual sources.
+          Flash sale has live countdown timer. Banner slider auto-advances.
+        - app/admin/shop-layout.tsx: full rewrite. Scope tabs (Home + per-
+          category) at top, 12 block-type chips in form, scope picker,
+          color palette swatches + hex input for 4 colors, font size,
+          height, alignment buttons, items[] editor with image upload +
+          link selector (product/category/none), multi-product picker for
+          manual data source, data-source chips, category filter chips,
+          live customer preview uses the SAME renderer as the mobile app.
+          Two-tap delete preserved.
+        - app/shop-category/[name].tsx: NEW dynamic category page. Renders
+          admin-managed layout for scope="category"&category=X. Falls back
+          to product grid if no custom layout.
+        - app/(tabs)/shop.tsx: removed standalone <PromoCarousel/> (replaced
+          by banner_slider block). Department tile now navigates to the new
+          dynamic category page. Renderer wired with scope="home".
+        - app/admin/more.tsx: relabeled "Promo banners" -> "Promo banners
+          (legacy)" with hint pointing to Shop layout.
+
+        MIGRATION: One-time POST /admin/shop-layout/migrate-banners folds
+        all promo_banners docs into a single banner_slider block (items[]
+        = each promo as a slide). Idempotent — running twice updates the
+        same block.
+
+        VERIFICATION:
+        - Admin scope tabs render (Home visible; categories appear as
+          products are categorized).
+        - New block form opens with all 12 types, scope selector, 4 color
+          rows with palette + hex, font size, height, alignment, items[]
+          editor, sort, active.
+        - Backend logs confirm GET /api/shop-layout?scope=home 200 OK and
+          POST /api/admin/shop-layout/migrate-banners reached.
+        - Customer shop renders empty state correctly when no blocks (was
+          the test condition); when blocks exist, all 12 renderers fire.
+
+        NEXT (optional polish): long-press drag-to-reorder via
+        react-native-reanimated (currently chevron buttons + bulk-reorder
+        API ready), and per-block analytics (impressions/clicks).
+        Files: routes/shop_layout.py, routes/products_public.py,
+        src/shop-layout-renderer.tsx, app/admin/shop-layout.tsx,
+        app/shop-category/[name].tsx, app/(tabs)/shop.tsx, app/admin/more.tsx
+
 
