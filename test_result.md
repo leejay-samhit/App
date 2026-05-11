@@ -830,3 +830,45 @@ agent_communication:
         src/draggable-layout-list.tsx, src/shop-layout-renderer.tsx,
         app/admin/shop-layout.tsx
 
+
+    - agent: "main"
+      message: |
+        Shipped Chat Feature end-to-end:
+        - Tab order: SHOP · SERVICES · DASHBOARD · CHAT · PROFILE
+        - WebSocket real-time delivery (token via ?token=, JWT-validated)
+        - Referral-code-gated chat-request flow with approve/reject
+        - 1:1 text + image (1200px JPEG base64) messaging
+        - Soft-delete (anytime) + edit (15 min, blocked once other replies)
+        - Downline users pinned to top of threads with green DOWNLINE badge
+        - Unread counters; last-message preview; long-press own message → edit/delete sheet
+
+        BACKEND: routes/chat.py
+          POST   /api/chat/search?code=
+          POST   /api/chat/request
+          GET    /api/chat/requests
+          POST   /api/chat/request/{id}/accept|reject
+          GET    /api/chat/threads
+          GET    /api/chat/{thread}/messages
+          POST   /api/chat/{thread}/messages
+          PATCH  /api/chat/messages/{id}
+          DELETE /api/chat/messages/{id}
+          WS     /api/ws/chat?token=<jwt>
+        Collections: chat_requests, chat_threads, chat_messages
+
+        FRONTEND:
+          (tabs)/_layout.tsx       — reordered + chat icon
+          (tabs)/chat.tsx          — thread list + search + requests inbox
+          chat/[id].tsx            — conversation screen
+          src/use-chat-socket.ts   — WS hook with exp-backoff reconnect
+
+        VERIFIED via curl + screenshot:
+          - Test user search → admin: 200 OK
+          - Send request: 200 OK
+          - Accept request: thread_id returned
+          - Send message: 200 OK
+          - Thread list: shows preview + unread + downline flag
+          - UI: Chat tab visible in new bottom bar; conversation bubble
+            with timestamp; image picker + send button working
+
+        Test creds added to /app/memory/test_credentials.md:
+          testuser@app.com / Test@123 (approved customer, ref code 1QRFZX)

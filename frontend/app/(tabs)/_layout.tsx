@@ -24,10 +24,10 @@ export default function TabsLayout() {
   // keeps working.
   const HARD_HIDDEN: Set<string> = new Set(["wallet", "network"]);
 
-  // Hardcoded visible-tab order. Dashboard sits at the center; Shop and
-  // Services sit on either side; Profile is rightmost. We ignore stored
-  // branding order for these so the bar is consistent for every tenant.
-  const HARDCODED_ORDER = ["shop", "dashboard", "services", "profile"];
+  // Hardcoded visible-tab order per current UX spec:
+  // SHOP · SERVICES · DASHBOARD · CHAT · PROFILE
+  // Dashboard sits dead-center as the visual anchor.
+  const HARDCODED_ORDER = ["shop", "services", "dashboard", "chat", "profile"];
 
   // Every screen file under (tabs)/ must still be registered as a route, even
   // hidden ones. Build the full registration list = visible (in our order) +
@@ -57,8 +57,8 @@ export default function TabsLayout() {
     >
       {order.map((key) => {
         const t = byKey[key];
-        const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : key === "services" ? "briefcase" : "user");
-        const label = t?.label || (key === "services" ? "Services" : key === "shop" ? "Shop" : key === "dashboard" ? "Dashboard" : key === "profile" ? "Profile" : key === "network" ? "Network" : key === "wallet" ? "Wallet" : key);
+        const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : key === "services" ? "briefcase" : key === "chat" ? "message-circle" : "user");
+        const label = t?.label || (key === "services" ? "Services" : key === "shop" ? "Shop" : key === "dashboard" ? "Dashboard" : key === "profile" ? "Profile" : key === "chat" ? "Chat" : key === "network" ? "Network" : key === "wallet" ? "Wallet" : key);
         const isHidden = HARD_HIDDEN.has(key) || t?.visible === false;
         return (
           <Tabs.Screen
