@@ -2,7 +2,7 @@
 // blocks where scope="category" and scope_category=<name>. Falls back to a
 // plain product grid filtered by category if no admin layout exists.
 import { useEffect, useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Image, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Image, ActivityIndicator, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -20,6 +20,7 @@ export default function ShopCategoryScreen() {
   const [hasLayout, setHasLayout] = useState<boolean | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
+  const [addingId, setAddingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -38,6 +39,19 @@ export default function ShopCategoryScreen() {
   }, [category]);
 
   useEffect(() => { load(); }, [load]);
+
+  const onAddToCart = async (p: Product) => {
+    if (addingId) return;
+    setAddingId(p.id);
+    try {
+      await api.post("/cart/add", { product_id: p.id, qty: 1 });
+      Alert.alert("Added to cart", `${p.name} added.`, [
+        { text: "Keep shopping", style: "cancel" },
+        { text: "View cart", onPress: () => router.push("/cart" as any) },
+      ]);
+    } catch (e) { Alert.alert("Failed", formatApiError(e)); }
+    finally { setAddingId(null); }
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -82,13 +96,40 @@ export default function ShopCategoryScreen() {
             {products.map((p) => {
               const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
               return (
-                <TouchableOpacity key={p.id} style={[styles.gridCard, !inStock && { opacity: 0.55 }]} activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>
-                  <Image source={{ uri: p.image_url }} style={styles.gridImg} resizeMode="cover" />
+                <View key={p.id} style={[styles.gridCard, !inStock && { opacity: 0.55 }]}>
+                  <TouchableOpacity activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>
+                    <Image source={{ uri: p.image_url }} style={styles.gridImg} resizeMode="cover" />
+                  </TouchableOpacity>
                   <View style={{ padding: 10 }}>
-                    <Text style={styles.gridName} numberOfLines={2}>{p.name}</Text>
-                    <Text style={styles.gridPrice}>{formatINR(p.price)}</Text>
+                    <TouchableOpacity activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>
+                      <Text style={styles.gridName} numberOfLines={2}>{p.name}</Text>
+                    </TouchableOpacity>
+                    <View style={styles.gridFooter}>
+                      <Text style={styles.gridPrice}>{formatINR(p.price)}</Text>
+                      {inStock ? (
+                        <TouchableOpacity
+                          style={[styles.addBtn, addingId === p.id && { opacity: 0.6 }]}
+                          onPress={() => onAddToCart(p)}
+                          disabled={addingId === p.id}
+                          testID={`add-${p.id}`}
+                        >
+                          {addingId === p.id
+                            ? <ActivityIndicator color="#fff" size="small" />
+                            : (
+                              <>
+                                <Feather name="shopping-bag" size={12} color="#fff" />
+                                <Text style={styles.addBtnText}>Add</Text>
+                              </>
+                            )}
+                        </TouchableOpacity>
+                      ) : (
+                        <View style={[styles.addBtn, { backgroundColor: "#B91C1C" }]}>
+                          <Text style={styles.addBtnText}>SOLD OUT</Text>
+                        </View>
+                      )}
+                    </View>
                   </View>
-                </TouchableOpacity>
+                </View>
               );
             })}
           </View>
@@ -112,5 +153,8 @@ const styles = StyleSheet.create({
   gridCard: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   gridImg: { width: "100%", aspectRatio: 1.1, backgroundColor: colors.surfaceMuted },
   gridName: { fontSize: 12, fontWeight: "700", color: colors.textMain, minHeight: 30, lineHeight: 15 },
-  gridPrice: { fontSize: 14, fontWeight: "900", color: colors.primary, marginTop: 4 },
+  gridPrice: { fontSize: 14, fontWeight: "900", color: colors.primary },
+  gridFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
+  addBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary, minHeight: 28 },
+  addBtnText: { fontSize: 11, fontWeight: "800", color: "#fff", letterSpacing: 0.3 },
 });

@@ -459,7 +459,12 @@ export default function ShopScreen() {
                       >
                         {adding === p.id
                           ? <ActivityIndicator color="#fff" size="small" />
-                          : <Feather name="shopping-bag" size={14} color="#fff" />}
+                          : (
+                            <>
+                              <Feather name="shopping-bag" size={13} color="#fff" />
+                              <Text style={styles.cardCtaText}>Add</Text>
+                            </>
+                          )}
                       </TouchableOpacity>
                     )}
                   </View>
@@ -1150,10 +1155,11 @@ const styles = StyleSheet.create({
   },
   cardPrice: { fontSize: 15, fontWeight: "800", color: colors.primary, letterSpacing: -0.3 },
   cardCta: {
-    width: 36, height: 36, borderRadius: 12,
-    backgroundColor: colors.primary,
-    alignItems: "center", justifyContent: "center",
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 4,
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999,
+    backgroundColor: colors.primary, minWidth: 64,
   },
+  cardCtaText: { fontSize: 12, fontWeight: "800", color: "#fff", letterSpacing: -0.2 },
 
   // ---- Heart button (matches reference) ----
   heartBtn: {
