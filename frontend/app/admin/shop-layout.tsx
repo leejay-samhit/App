@@ -17,6 +17,7 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { ShopLayoutRenderer, LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
+import { DraggableLayoutList } from "../../src/draggable-layout-list";
 
 type Block = LayoutBlock;
 type Product = { id: string; name: string; price?: number; image_url?: string; category?: string };
@@ -72,6 +73,8 @@ export default function AdminShopLayoutScreen() {
   const [editing, setEditing] = useState<Block | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  // Per-block analytics: { [block_id]: { impressions, clicks, ctr } }
+  const [analytics, setAnalytics] = useState<Record<string, { impressions: number; clicks: number; ctr: number }>>({});
   // Scope state: which layout we're editing
   const [scope, setScope] = useState<"home" | "category">("home");
   const [scopeCategory, setScopeCategory] = useState<string>("");
@@ -85,14 +88,16 @@ export default function AdminShopLayoutScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [bRes, pRes] = await Promise.all([
+      const [bRes, pRes, aRes] = await Promise.all([
         api.get<{ items: Block[] }>("/admin/shop-layout"),
         api.get<any>("/admin/products"),
+        api.get<{ blocks: Record<string, { impressions: number; clicks: number; ctr: number }> }>("/admin/shop-layout/analytics", { params: { days: 7 } }).catch(() => ({ data: { blocks: {} } as any })),
       ]);
       setItems(bRes.data?.items || []);
       const pData = pRes.data;
       const list: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
       setProducts(list);
+      setAnalytics(aRes.data?.blocks || {});
     } catch (e) { Alert.alert("Failed to load", formatApiError(e)); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
@@ -153,6 +158,21 @@ export default function AdminShopLayoutScreen() {
     finally { setMigrating(false); }
   };
 
+  // Drag-to-reorder: receives the new ordered list of block IDs (within
+  // the current scope) and POSTs to the bulk-reorder endpoint. Re-numbers
+  // sort_order = 0..N-1 so blocks always stay tight after operations.
+  const onReorder = async (newIds: string[]) => {
+    const payload = { items: newIds.map((id, i) => ({ id, sort_order: i })) };
+    // Optimistic update
+    setItems((prev) => prev.map((b) => {
+      const idx = newIds.indexOf(b.id);
+      return idx >= 0 ? { ...b, sort_order: idx } : b;
+    }));
+    try {
+      await api.post("/admin/shop-layout/reorder", payload);
+    } catch (e) { Alert.alert("Reorder failed", formatApiError(e)); load(); }
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.headerRow}>
@@ -208,7 +228,7 @@ export default function AdminShopLayoutScreen() {
               {filteredItems.length} block{filteredItems.length === 1 ? "" : "s"}
             </Text>
             <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
-              Tap S/M/L on a block to resize · Use up/down arrows to reorder · Switch the scope tabs above to manage per-category layouts.
+              Long-press & drag a block to reorder · Tap S/M/L to resize · Switch the scope tabs above to manage per-category layouts · CTR data updates over 7 days.
             </Text>
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
               <TouchableOpacity onPress={onMigratePromoBanners} disabled={migrating} style={[styles.heroBtn, migrating && { opacity: 0.6 }]} testID="migrate-banners">
@@ -244,15 +264,29 @@ export default function AdminShopLayoutScreen() {
               <Text style={styles.emptySub}>Tap + to add a banner slider, category circles, product grid, flash sale, or any other block.</Text>
             </View>
           ) : (
-            filteredItems.map((b) => <BlockCard key={b.id} block={b} products={products} confirmDeleteId={confirmDeleteId}
-              onMove={onMove} onToggle={onToggleActive} onEdit={() => { setEditing(b); setShowForm(true); }}
-              onDelete={() => onDelete(b)} onSetSize={async (size) => {
-                try {
-                  await api.patch(`/admin/shop-layout/${b.id}`, { size });
-                  setItems((prev) => prev.map((x) => x.id === b.id ? { ...x, size } : x));
-                } catch (e) { Alert.alert("Resize failed", formatApiError(e)); }
-              }}
-            />)
+            <DraggableLayoutList
+              items={filteredItems}
+              onReorder={onReorder}
+              renderItem={(b: Block, isDragging: boolean) => (
+                <BlockCard
+                  block={b}
+                  products={products}
+                  analytics={analytics[b.id]}
+                  confirmDeleteId={confirmDeleteId}
+                  isDragging={isDragging}
+                  onMove={onMove}
+                  onToggle={onToggleActive}
+                  onEdit={() => { setEditing(b); setShowForm(true); }}
+                  onDelete={() => onDelete(b)}
+                  onSetSize={async (size) => {
+                    try {
+                      await api.patch(`/admin/shop-layout/${b.id}`, { size });
+                      setItems((prev) => prev.map((x) => x.id === b.id ? { ...x, size } : x));
+                    } catch (e) { Alert.alert("Resize failed", formatApiError(e)); }
+                  }}
+                />
+              )}
+            />
           )}
         </ScrollView>
       )}
@@ -274,9 +308,11 @@ export default function AdminShopLayoutScreen() {
 /* ─────────────────────────── Block card (list row) ─────────────────────────── */
 
 function BlockCard({
-  block: b, products, confirmDeleteId, onMove, onToggle, onEdit, onDelete, onSetSize,
+  block: b, products, analytics, confirmDeleteId, isDragging, onMove, onToggle, onEdit, onDelete, onSetSize,
 }: {
-  block: Block; products: Product[]; confirmDeleteId: string | null;
+  block: Block; products: Product[];
+  analytics?: { impressions: number; clicks: number; ctr: number };
+  confirmDeleteId: string | null; isDragging?: boolean;
   onMove: (b: Block, d: -1 | 1) => void; onToggle: (b: Block) => void;
   onEdit: () => void; onDelete: () => void; onSetSize: (s: "small" | "medium" | "large") => void;
 }) {
@@ -286,7 +322,11 @@ function BlockCard({
   const thumbUrl = b.image_data_url || (b.items && b.items[0]?.image_data_url) || "";
 
   return (
-    <View style={styles.card} testID={`block-${b.id}`}>
+    <View style={[styles.card, isDragging && styles.cardDragging]} testID={`block-${b.id}`}>
+      {/* Drag-handle hint stripe — long-press anywhere on the card to drag */}
+      <View style={styles.dragHandle}>
+        <Feather name="menu" size={14} color={colors.textMuted} />
+      </View>
       <View>
         {thumbUrl ? (
           <Image source={{ uri: thumbUrl }} style={styles.thumb} resizeMode="cover" />
@@ -316,6 +356,23 @@ function BlockCard({
           {b.items && b.items.length ? ` · ${b.items.length} slide${b.items.length === 1 ? "" : "s"}` : ""}
           {b.product_ids && b.product_ids.length ? ` · ${b.product_ids.length} products` : ""}
         </Text>
+        {analytics ? (
+          <View style={styles.analyticsRow}>
+            <View style={styles.analyticsChip}>
+              <Feather name="eye" size={10} color="#3730A3" />
+              <Text style={styles.analyticsText}>{analytics.impressions}</Text>
+            </View>
+            <View style={styles.analyticsChip}>
+              <Feather name="mouse-pointer" size={10} color="#065F46" />
+              <Text style={[styles.analyticsText, { color: "#065F46" }]}>{analytics.clicks}</Text>
+            </View>
+            <View style={[styles.analyticsChip, { backgroundColor: analytics.ctr >= 5 ? "#DCFCE7" : "#FEF3C7" }]}>
+              <Feather name="trending-up" size={10} color={analytics.ctr >= 5 ? "#065F46" : "#92400E"} />
+              <Text style={[styles.analyticsText, { color: analytics.ctr >= 5 ? "#065F46" : "#92400E" }]}>{analytics.ctr}% CTR</Text>
+            </View>
+            <Text style={styles.analyticsHint}>7d</Text>
+          </View>
+        ) : null}
         <View style={{ flexDirection: "row", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
           <TouchableOpacity onPress={() => onMove(b, -1)} style={styles.actionMicro}><Feather name="chevron-up" size={12} color={colors.textMain} /></TouchableOpacity>
           <TouchableOpacity onPress={() => onMove(b, 1)} style={styles.actionMicro}><Feather name="chevron-down" size={12} color={colors.textMain} /></TouchableOpacity>
@@ -897,6 +954,12 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 14, fontWeight: "800", color: colors.textMain, marginTop: 6 },
   emptySub: { fontSize: 12, color: colors.textMuted, textAlign: "center" },
   card: { flexDirection: "row", backgroundColor: colors.surface, borderRadius: radii.card, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: colors.border },
+  cardDragging: { borderColor: colors.primary, borderWidth: 2, backgroundColor: colors.brand100, shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 8 },
+  dragHandle: { width: 18, alignItems: "center", justifyContent: "center", marginRight: 4, opacity: 0.5 },
+  analyticsRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6, flexWrap: "wrap" },
+  analyticsChip: { flexDirection: "row", alignItems: "center", gap: 3, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, backgroundColor: "#EEF2FF" },
+  analyticsText: { fontSize: 10, fontWeight: "800", color: "#3730A3" },
+  analyticsHint: { fontSize: 9, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.6, marginLeft: 2 },
   thumb: { width: 64, height: 64, borderRadius: 12, backgroundColor: colors.surfaceMuted },
   cardTitle: { fontSize: 14, fontWeight: "900", color: colors.textMain, marginTop: 4, letterSpacing: -0.2 },
   cardSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },

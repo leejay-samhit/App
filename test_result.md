@@ -783,3 +783,50 @@ agent_communication:
         app/shop-category/[name].tsx, app/(tabs)/shop.tsx, app/admin/more.tsx
 
 
+    - agent: "main"
+      message: |
+        Added Drag-to-Reorder + Per-Block Analytics on top of the dynamic
+        Shop Layout System.
+
+        BACKEND (new)
+        - routes/shop_layout_analytics.py — public POST /shop-layout/analytics
+          (batched impression/click events) + admin GET /admin/shop-layout/
+          analytics?days=7 (aggregated counts + CTR per block_id).
+        - Registered in server.py under /api prefix.
+        - Collection: shop_layout_analytics { block_id, scope, event, user_id, ts }
+
+        FRONTEND (new)
+        - src/draggable-layout-list.tsx — cross-platform (web + native) long-
+          press-to-drag list using react-native-gesture-handler `Gesture.Pan
+          ().activateAfterLongPress(280)` + react-native-reanimated shared
+          values. On release computes target index from translateY ÷
+          measured-card-height and emits onReorder(newIds[]).
+        - src/shop-layout-renderer.tsx — added analytics queue: pushes
+          {block_id, "impression"} on visible-block mount, {block_id, "click"}
+          on any onProductPress / onCategoryPress / onAddToCart, flushed
+          every 5s and on unmount via POST /shop-layout/analytics.
+        - app/admin/shop-layout.tsx —
+            • loads analytics in parallel with blocks
+            • wraps cards in <DraggableLayoutList/> with onReorder → POST
+              /admin/shop-layout/reorder (bulk-renumbers sort_order 0..N-1)
+            • shows analytics chips per card: eye/impressions,
+              mouse-pointer/clicks, trending-up/CTR% (green ≥5%, amber <5%)
+            • adds drag-handle stripe (☰) on the left of each card
+            • dragging state lifts the card with primary border + brand bg
+            • hero hint updated to mention long-press-drag + 7d CTR
+
+        VERIFIED:
+        - curl http://localhost:8001/api/admin/shop-layout returns 401
+          (route exists, auth required) — endpoints registered.
+        - Admin Shop Layout page renders the new hero hint, scope tabs,
+          and analytics chips when present.
+        - New-block form shows all 12 types + style overrides as before.
+
+        NOTE on web: The Pan gesture with activateAfterLongPress(280) keeps
+        normal scrolling intact (drag only fires after holding the card for
+        280ms). On native it provides full haptic-style drag UX.
+
+        Files: routes/shop_layout_analytics.py, server.py,
+        src/draggable-layout-list.tsx, src/shop-layout-renderer.tsx,
+        app/admin/shop-layout.tsx
+

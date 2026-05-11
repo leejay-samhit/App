@@ -671,6 +671,55 @@ export function ShopLayoutRenderer({
     [blocks],
   );
 
+  // Analytics: batch impressions + clicks and flush every 5s / on unmount
+  const eventQueueRef = useRef<{ block_id: string; event: "impression" | "click"; scope: string }[]>([]);
+  const lastFlushRef = useRef<number>(Date.now());
+
+  const flush = React.useCallback(async () => {
+    const queue = eventQueueRef.current;
+    if (queue.length === 0) return;
+    eventQueueRef.current = [];
+    try {
+      await api.post("/shop-layout/analytics", { events: queue });
+    } catch { /* swallow analytics errors */ }
+  }, []);
+
+  useEffect(() => {
+    if (visible.length === 0) return;
+    // Log impression for each visible block once per renderer mount
+    const seen = new Set<string>();
+    visible.forEach((b) => {
+      if (!seen.has(b.id)) {
+        seen.add(b.id);
+        eventQueueRef.current.push({ block_id: b.id, event: "impression", scope: scope || "home" });
+      }
+    });
+    const t = setInterval(() => {
+      if (Date.now() - lastFlushRef.current > 4500 && eventQueueRef.current.length) {
+        flush();
+        lastFlushRef.current = Date.now();
+      }
+    }, 5000);
+    return () => { clearInterval(t); flush(); };
+  }, [visible, scope, flush]);
+
+  const trackClick = React.useCallback((blockId: string) => {
+    eventQueueRef.current.push({ block_id: blockId, event: "click", scope: scope || "home" });
+  }, [scope]);
+
+  const wrapProductPress = (blockId: string) => (productId: string) => {
+    trackClick(blockId);
+    onProductPress?.(productId);
+  };
+  const wrapCategoryPress = (blockId: string) => (c: string) => {
+    trackClick(blockId);
+    onCategoryPress?.(c);
+  };
+  const wrapAddToCart = (blockId: string) => (productId: string) => {
+    trackClick(blockId);
+    onAddToCart?.(productId);
+  };
+
   if (blocks === null) {
     // Loading skeletons
     return (
@@ -695,29 +744,29 @@ export function ShopLayoutRenderer({
         }
         switch (b.block_type) {
           case "banner_slider":
-            return <BannerSliderBlock key={b.id} block={b} onProductPress={onProductPress} onCategoryPress={onCategoryPress} />;
+            return <BannerSliderBlock key={b.id} block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />;
           case "category_circles":
-            return <CategoryCirclesBlock key={b.id} block={b} onCategoryPress={onCategoryPress} />;
+            return <CategoryCirclesBlock key={b.id} block={b} onCategoryPress={wrapCategoryPress(b.id)} />;
           case "brand_slider":
             return <BrandSliderBlock key={b.id} block={b} />;
           case "offer_cards":
-            return <OfferCardsBlock key={b.id} block={b} onProductPress={onProductPress} onCategoryPress={onCategoryPress} />;
+            return <OfferCardsBlock key={b.id} block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />;
           case "announcement_strip":
             return <AnnouncementStripBlock key={b.id} block={b} />;
           case "flash_sale":
-            return <FlashSaleBlock key={b.id} block={b} products={prods} onProductPress={onProductPress} onAddToCart={onAddToCart} />;
+            return <FlashSaleBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
           case "product_grid":
-            return <ProductGridBlock key={b.id} block={b} products={prods} onProductPress={onProductPress} onAddToCart={onAddToCart} />;
+            return <ProductGridBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
           case "horizontal_slider":
-            return <HorizontalSliderBlock key={b.id} block={b} products={prods} onProductPress={onProductPress} onAddToCart={onAddToCart} />;
+            return <HorizontalSliderBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
           case "section_header":
             return <SectionHeaderBlock key={b.id} block={b} />;
           case "text":
             return <TextBlock key={b.id} block={b} />;
           case "background":
-            return <BackgroundBlock key={b.id} block={b} onProductPress={onProductPress} />;
+            return <BackgroundBlock key={b.id} block={b} onProductPress={wrapProductPress(b.id)} />;
           case "content_box":
-            return <ContentBoxBlock key={b.id} block={b} products={productsById} onProductPress={onProductPress} />;
+            return <ContentBoxBlock key={b.id} block={b} products={productsById} onProductPress={wrapProductPress(b.id)} />;
           default:
             return null;
         }
