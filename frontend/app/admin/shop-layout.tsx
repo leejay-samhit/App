@@ -73,18 +73,23 @@ export default function AdminShopLayoutScreen() {
 
   useEffect(() => { load(); }, [load]);
 
-  const onDelete = (b: Block) => {
-    Alert.alert("Delete block?", `"${b.title || TYPE_META[b.block_type].label}" will be removed.`, [
+  const onDelete = async (b: Block) => {
+    // Cross-platform confirmation: Alert.alert renders no-op on Expo web's
+    // unauthenticated context, so we fall back to window.confirm there.
+    const label = b.title || TYPE_META[b.block_type].label;
+    const doDelete = async () => {
+      try {
+        await api.delete(`/admin/shop-layout/${b.id}`);
+        setItems((prev) => prev.filter((x) => x.id !== b.id));
+      } catch (e) { Alert.alert("Delete failed", formatApiError(e)); }
+    };
+    if (typeof window !== "undefined" && typeof (window as any).confirm === "function") {
+      if ((window as any).confirm(`Delete block "${label}"?`)) await doDelete();
+      return;
+    }
+    Alert.alert("Delete block?", `"${label}" will be removed.`, [
       { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete", style: "destructive",
-        onPress: async () => {
-          try {
-            await api.delete(`/admin/shop-layout/${b.id}`);
-            setItems((prev) => prev.filter((x) => x.id !== b.id));
-          } catch (e) { Alert.alert("Delete failed", formatApiError(e)); }
-        },
-      },
+      { text: "Delete", style: "destructive", onPress: doDelete },
     ]);
   };
 
@@ -353,8 +358,12 @@ function BlockFormModal({ visible, block, products, onClose, onSaved }: {
   };
 
   const onSave = async () => {
-    if (type === "background" && !imageDataUrl) { Alert.alert("Image required", "Background blocks need an image."); return; }
-    if (type !== "background" && !title.trim() && !body.trim()) { Alert.alert("Empty block", "Please add a title or body."); return; }
+    if (type === "background" && !imageDataUrl) { Alert.alert("Image required", "Banner blocks need an image."); return; }
+    if (type === "content_box" && !productId) { Alert.alert("Product required", "Pick a product to feature in this content box."); return; }
+    if ((type === "section_header" || type === "text") && !title.trim() && !body.trim()) {
+      Alert.alert("Empty block", "Please add a title or body.");
+      return;
+    }
     setSaving(true);
     try {
       const payload = {
@@ -406,10 +415,10 @@ function BlockFormModal({ visible, block, products, onClose, onSaved }: {
             </View>
             <Text style={styles.hint}>{TYPE_META[type].hint}</Text>
 
-            {/* Image (for background, content_box) */}
-            {(type === "background" || type === "content_box") && (
+            {/* Image — only for "new banner" type. Content boxes auto-render the linked product's image. */}
+            {type === "background" && (
               <>
-                <Text style={styles.label}>Image{type === "background" ? " (required)" : ""}</Text>
+                <Text style={styles.label}>Image{" (required)"}</Text>
                 <TouchableOpacity onPress={pickImage} style={styles.imagePicker}>
                   {imageDataUrl ? (
                     <Image source={{ uri: imageDataUrl }} style={styles.imagePreview} resizeMode="cover" />
@@ -425,32 +434,39 @@ function BlockFormModal({ visible, block, products, onClose, onSaved }: {
               </>
             )}
 
-            {/* Title (for everything except background) */}
-            {type !== "background" && (
+            {/* Title — for everything except content_box (auto-uses product name) */}
+            {type !== "background" && type !== "content_box" && (
               <>
                 <Text style={styles.label}>Title{type === "section_header" ? " (sub-category label)" : ""}</Text>
                 <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder={type === "section_header" ? "FEATURED ELECTRONICS" : "Block title"} placeholderTextColor={colors.textMuted} maxLength={80} />
               </>
             )}
 
-            {(type === "content_box") && (
+            {/* Banner title/subtitle */}
+            {type === "background" && (
               <>
-                <Text style={styles.label}>Subtitle</Text>
-                <TextInput style={styles.input} value={subtitle} onChangeText={setSubtitle} placeholder="Optional supporting line" placeholderTextColor={colors.textMuted} maxLength={120} />
+                <Text style={styles.label}>Banner title (optional)</Text>
+                <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Festive sale" placeholderTextColor={colors.textMuted} maxLength={80} />
+                <Text style={styles.label}>Eyebrow text (optional)</Text>
+                <TextInput style={styles.input} value={subtitle} onChangeText={setSubtitle} placeholder="LIMITED TIME" placeholderTextColor={colors.textMuted} maxLength={60} />
               </>
             )}
 
-            {(type === "text" || type === "content_box") && (
+            {/* Free text body */}
+            {type === "text" && (
               <>
                 <Text style={styles.label}>Body text</Text>
                 <TextInput style={[styles.input, { minHeight: 80, textAlignVertical: "top" }]} value={body} onChangeText={setBody} placeholder="Free-text paragraph" placeholderTextColor={colors.textMuted} multiline maxLength={500} />
               </>
             )}
 
+            {/* Content box: ONLY product picker + CTA label.
+                The actual rendering pulls image/name/price/desc from the linked product. */}
             {type === "content_box" && (
               <>
-                <Text style={styles.label}>Linked product (optional)</Text>
-                <TouchableOpacity style={styles.input} onPress={() => setShowProductPicker(true)}>
+                <Text style={styles.label}>Linked product (required)</Text>
+                <Text style={styles.hint}>The content box will auto-show this product's image, name, price and description on the customer Shop screen.</Text>
+                <TouchableOpacity style={styles.input} onPress={() => setShowProductPicker(true)} testID="content-box-product-picker">
                   <Text style={{ color: linkedProduct ? colors.textMain : colors.textMuted }}>
                     {linkedProduct ? linkedProduct.name : "Tap to pick a product"}
                   </Text>
@@ -460,8 +476,7 @@ function BlockFormModal({ visible, block, products, onClose, onSaved }: {
                     <Text style={{ color: "#B91C1C", fontSize: 12, fontWeight: "700" }}>Clear link</Text>
                   </TouchableOpacity>
                 ) : null}
-
-                <Text style={styles.label}>CTA button label</Text>
+                <Text style={styles.label}>CTA button label (optional)</Text>
                 <TextInput style={styles.input} value={ctaLabel} onChangeText={setCtaLabel} placeholder="View" placeholderTextColor={colors.textMuted} maxLength={24} />
               </>
             )}

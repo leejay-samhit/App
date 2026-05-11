@@ -522,46 +522,8 @@ export default function ShopScreen() {
                 </ScrollView>
               )}
 
-              {/* Trending products header */}
-              <View style={[styles.shopSectionHeader, { marginTop: 18 }]}>
-                <Text style={styles.shopSectionTitle}>
-                  {shopCategory || "Trending products"}
-                </Text>
-                <Text style={styles.shopSectionCount}>{filtered.length} item{filtered.length === 1 ? "" : "s"}</Text>
-              </View>
-
-              {/* Empty state */}
-              {filtered.length === 0 && (
-                <View style={styles.shopEmpty}>
-                  <Feather name="package" size={32} color={colors.textMuted} />
-                  <Text style={styles.shopEmptyTitle}>No products match</Text>
-                  <Text style={styles.shopEmptySub}>Try clearing the search or department filter.</Text>
-                </View>
-              )}
-
-              {/* In-stock grid */}
-              <View style={styles.grid}>
-                {inStock.map((p) => {
-                  const lowStock = (p.stock || 0) > 0 && (p.stock || 0) <= 5;
-                  return renderProductCard(p, { oos: false, lowStock });
-                })}
-              </View>
-
-              {/* Out-of-stock section */}
-              {outStock.length > 0 && (
-                <>
-                  <View style={[styles.shopSectionHeader, { marginTop: 24 }]}>
-                    <Text style={styles.shopSectionTitle}>Out of stock</Text>
-                    <Text style={styles.shopSectionCount}>{outStock.length} item{outStock.length === 1 ? "" : "s"}</Text>
-                  </View>
-                  <Text style={styles.outOfStockHint}>
-                    Tap the bell to let the seller know you'd buy it when it's back.
-                  </Text>
-                  <View style={styles.grid}>
-                    {outStock.map((p) => renderProductCard(p, { oos: true }))}
-                  </View>
-                </>
-              )}
+              {/* Auto product grid removed — admin curates products via Shop Layout content boxes.
+                  Vendor products are still managed in /admin/products and shown in their own dashboards. */}
 
               {cartCount > 0 && (
                 <TouchableOpacity onPress={() => router.push("/cart")} style={styles.checkoutBar} testID="goto-cart">
