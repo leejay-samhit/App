@@ -1,7 +1,7 @@
 // Admin Shop Layout — admin can add/edit/delete content blocks rendered on
 // the customer Shop tab between the promo carousel and the products grid.
 // Block types: background, section_header, text, content_box.
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
   Alert, RefreshControl, TextInput, Image, Modal, Switch,
@@ -75,7 +75,7 @@ export default function AdminShopLayoutScreen() {
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   // Track a pending timeout so re-tapping resets it.
-  const confirmTimerRef = React.useRef<any>(null);
+  const confirmTimerRef = useRef<any>(null);
 
   const onDelete = async (b: Block) => {
     // Two-tap confirmation pattern (works on web AND native, no Alert needed):
@@ -219,9 +219,24 @@ export default function AdminShopLayoutScreen() {
                         <Feather name={b.active ? "eye-off" : "eye"} size={12} color={colors.textMain} />
                         <Text style={styles.actionText}>{b.active ? "Hide" : "Publish"}</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity onPress={() => onDelete(b)} style={[styles.actionBtn, { borderColor: "#FCA5A5" }]}>
-                        <Feather name="trash-2" size={12} color="#B91C1C" />
-                        <Text style={[styles.actionText, { color: "#B91C1C" }]}>Delete</Text>
+                      <TouchableOpacity
+                        onPress={() => onDelete(b)}
+                        style={[
+                          styles.actionBtn,
+                          confirmDeleteId === b.id
+                            ? { borderColor: "#B91C1C", backgroundColor: "#FEE2E2" }
+                            : { borderColor: "#FCA5A5" },
+                        ]}
+                        testID={`block-delete-${b.id}`}
+                      >
+                        <Feather
+                          name={confirmDeleteId === b.id ? "alert-triangle" : "trash-2"}
+                          size={12}
+                          color="#B91C1C"
+                        />
+                        <Text style={[styles.actionText, { color: "#B91C1C" }]}>
+                          {confirmDeleteId === b.id ? "Tap again to delete" : "Delete"}
+                        </Text>
                       </TouchableOpacity>
                     </View>
                   </View>

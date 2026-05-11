@@ -702,4 +702,20 @@ agent_communication:
         Backend untouched in this iteration. No backend retest needed.
         Frontend testing pending user permission.
 
+    - agent: "main"
+      message: |
+        Fixed P0 bug: Admin Shop Layout delete was broken because the
+        previous agent referenced `React.useRef` without importing React.
+        - Added `useRef` to the hooks import line.
+        - Replaced `React.useRef(...)` with `useRef(...)`.
+        - Wired the existing two-tap confirm state into the Delete button:
+          first tap turns it red and changes label to "Tap again to delete"
+          with an alert-triangle icon, second tap commits the DELETE call.
+          Idle 4s timeout resets the button.
+        - Verified visually on /admin/shop-layout via screenshot tool:
+          6 Delete buttons -> first tap shows 1 "Tap again" pill ->
+          second tap reduces count to 5 (block removed).
+        File: /app/frontend/app/admin/shop-layout.tsx
+        Backend untouched. No retest needed.
+
 
