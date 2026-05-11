@@ -31,6 +31,28 @@ class WithdrawalRequest(BaseModel):
     amount: float = Field(gt=0)
 
 
+class StyledText(BaseModel):
+    text: Optional[str] = ""
+    bold: Optional[bool] = False
+    font_size: Optional[int] = None       # px; None = use default
+    align: Optional[str] = "left"         # "left" | "center" | "right"
+
+
+class WhatsInBoxItem(BaseModel):
+    name: Optional[str] = ""
+    image_data_url: Optional[str] = ""    # base64 thumbnail
+
+
+class SpecRow(BaseModel):
+    label: Optional[str] = ""
+    value: Optional[str] = ""
+
+
+class SpecTab(BaseModel):
+    name: Optional[str] = ""              # e.g. "General", "Display", "Battery"
+    rows: List[SpecRow] = Field(default_factory=list)
+
+
 class ProductCreate(BaseModel):
     name: str
     price: float
@@ -40,6 +62,28 @@ class ProductCreate(BaseModel):
     category: Optional[str] = None
     is_published: bool = True
     vendor_id: Optional[str] = None  # admin can assign to a vendor
+
+    # ── Rich detail-page fields (all optional for backward compat) ──
+    brand: Optional[str] = ""
+    sub_features: Optional[List[str]] = Field(default_factory=list)
+    images: Optional[List[str]] = Field(default_factory=list)  # up to 10 base64 / urls
+    # Styled marketing copy (each block has text + bold/size/align)
+    price_summary: Optional[StyledText] = None
+    protection_summary: Optional[StyledText] = None
+    warranty_summary: Optional[StyledText] = None
+    delivery_summary: Optional[StyledText] = None
+    # Structured attributes
+    attrs_brand: Optional[str] = ""
+    attrs_os: Optional[str] = ""
+    attrs_ram: Optional[str] = ""
+    attrs_cpu_model: Optional[str] = ""
+    attrs_cpu_speed: Optional[str] = ""
+    attrs_storage: Optional[str] = ""
+    extra_attrs: Optional[Dict[str, str]] = Field(default_factory=dict)  # admin-added KV pairs
+    # Spec tables (each tab has rows of label/value)
+    spec_tabs: Optional[List[SpecTab]] = Field(default_factory=list)
+    # What's in the Box
+    whats_in_box: Optional[List[WhatsInBoxItem]] = Field(default_factory=list)
 
 
 class ProductUpdate(BaseModel):
@@ -51,6 +95,22 @@ class ProductUpdate(BaseModel):
     category: Optional[str] = None
     is_published: Optional[bool] = None
     vendor_id: Optional[str] = None
+    brand: Optional[str] = None
+    sub_features: Optional[List[str]] = None
+    images: Optional[List[str]] = None
+    price_summary: Optional[StyledText] = None
+    protection_summary: Optional[StyledText] = None
+    warranty_summary: Optional[StyledText] = None
+    delivery_summary: Optional[StyledText] = None
+    attrs_brand: Optional[str] = None
+    attrs_os: Optional[str] = None
+    attrs_ram: Optional[str] = None
+    attrs_cpu_model: Optional[str] = None
+    attrs_cpu_speed: Optional[str] = None
+    attrs_storage: Optional[str] = None
+    extra_attrs: Optional[Dict[str, str]] = None
+    spec_tabs: Optional[List[SpecTab]] = None
+    whats_in_box: Optional[List[WhatsInBoxItem]] = None
 
 
 class BrandingPayload(BaseModel):
