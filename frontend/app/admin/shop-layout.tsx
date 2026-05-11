@@ -26,15 +26,23 @@ type Block = {
   cta_label: string;
   sort_order: number;
   active: boolean;
+  size?: "small" | "medium" | "large";
 };
 
 type Product = { id: string; name: string };
 
 const TYPE_META: Record<Block["block_type"], { label: string; icon: any; hint: string }> = {
-  background:     { label: "Background image",      icon: "image",        hint: "Full-bleed backdrop for the Shop screen" },
-  section_header: { label: "Section header / Sub-category", icon: "type",  hint: "Bold sub-category title (e.g. ELECTRONICS)" },
-  text:           { label: "Free text",              icon: "align-left",   hint: "A paragraph of supporting text" },
-  content_box:    { label: "Content box",            icon: "square",       hint: "Card with title, image, optional product link" },
+  background:     { label: "New banner",         icon: "image",      hint: "Full-width banner card on the Shop screen" },
+  section_header: { label: "Sub-category label", icon: "type",       hint: "Bold sub-category title (e.g. ELECTRONICS)" },
+  text:           { label: "Free text",           icon: "align-left", hint: "A paragraph of supporting text" },
+  content_box:    { label: "Content box",         icon: "square",     hint: "Card with title, image, optional product link · resizable" },
+};
+
+// Visual height multipliers for the "resize" feature (admin can tap S/M/L on
+// content boxes and banners). The same value is applied to live preview AND
+// to the customer Shop rendering.
+const SIZE_HEIGHT: Record<"small" | "medium" | "large", number> = {
+  small: 110, medium: 160, large: 220,
 };
 
 export default function AdminShopLayoutScreen() {
@@ -50,10 +58,15 @@ export default function AdminShopLayoutScreen() {
     try {
       const [bRes, pRes] = await Promise.all([
         api.get<{ items: Block[] }>("/admin/shop-layout"),
-        api.get<{ items?: Product[]; products?: Product[] }>("/admin/products"),
+        // /admin/products returns a plain ARRAY of admin+vendor products.
+        // Some deployments wrap it in {items} — handle both shapes here.
+        api.get<any>("/admin/products"),
       ]);
       setItems(bRes.data?.items || []);
-      setProducts(pRes.data?.items || pRes.data?.products || []);
+      const pData = pRes.data;
+      const products: Product[] = Array.isArray(pData) ? pData
+        : (pData?.items || pData?.products || []);
+      setProducts(products);
     } catch (e) { Alert.alert("Failed to load", formatApiError(e)); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
@@ -90,6 +103,13 @@ export default function AdminShopLayoutScreen() {
     } catch (e) { Alert.alert("Move failed", formatApiError(e)); }
   };
 
+  const onSetSize = async (b: Block, size: "small" | "medium" | "large") => {
+    try {
+      await api.patch(`/admin/shop-layout/${b.id}`, { size });
+      setItems((prev) => prev.map((x) => x.id === b.id ? { ...x, size } : x));
+    } catch (e) { Alert.alert("Resize failed", formatApiError(e)); }
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.headerRow}>
@@ -115,9 +135,25 @@ export default function AdminShopLayoutScreen() {
               {items.length} block{items.length === 1 ? "" : "s"}
             </Text>
             <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
-              Background, sub-category labels, content boxes & free text. Sorted by order on the customer Shop screen.
+              Tap S / M / L on a block to resize · Use up/down arrows to reorder · Toggle live preview to see how customers will see it.
             </Text>
           </GradientCard>
+
+          {/* === Live customer preview === */}
+          {items.filter((b) => b.active).length > 0 ? (
+            <View style={styles.previewWrap}>
+              <View style={styles.previewHeader}>
+                <Feather name="smartphone" size={14} color={colors.primary} />
+                <Text style={styles.previewLabel}>LIVE CUSTOMER PREVIEW</Text>
+                <Text style={styles.previewHint}>What buyers will see</Text>
+              </View>
+              <View style={styles.previewFrame}>
+                {items.filter((b) => b.active).sort((a, b) => a.sort_order - b.sort_order).map((b) => (
+                  <PreviewBlock key={b.id} block={b} products={products} />
+                ))}
+              </View>
+            </View>
+          ) : null}
 
           {items.length === 0 ? (
             <View style={styles.emptyCard}>
@@ -152,6 +188,21 @@ export default function AdminShopLayoutScreen() {
                     <View style={{ flexDirection: "row", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
                       <TouchableOpacity onPress={() => onMove(b, -1)} style={styles.actionMicro}><Feather name="chevron-up" size={12} color={colors.textMain} /></TouchableOpacity>
                       <TouchableOpacity onPress={() => onMove(b, 1)} style={styles.actionMicro}><Feather name="chevron-down" size={12} color={colors.textMain} /></TouchableOpacity>
+                      {/* Size selector — only shows for blocks that have a visible height */}
+                      {(b.block_type === "background" || b.block_type === "content_box") ? (
+                        <View style={styles.sizeChips}>
+                          {(["small","medium","large"] as const).map((s) => (
+                            <TouchableOpacity
+                              key={s}
+                              onPress={() => onSetSize(b, s)}
+                              style={[styles.sizeChip, (b.size || "medium") === s && styles.sizeChipActive]}
+                              testID={`block-size-${b.id}-${s}`}
+                            >
+                              <Text style={[styles.sizeChipText, (b.size || "medium") === s && styles.sizeChipTextActive]}>{s[0].toUpperCase()}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      ) : null}
                       <TouchableOpacity onPress={() => { setEditing(b); setShowForm(true); }} style={styles.actionBtn}>
                         <Feather name="edit-2" size={12} color={colors.primary} />
                         <Text style={styles.actionText}>Edit</Text>
@@ -184,7 +235,69 @@ export default function AdminShopLayoutScreen() {
   );
 }
 
-// ---------- Form Modal ----------
+// ---------- Live customer preview block ----------
+// Renders a block the way customers will see it on the Shop screen, using
+// the block's `size` to control height.
+function PreviewBlock({ block, products }: { block: Block; products: Product[] }) {
+  const size = (block.size as "small" | "medium" | "large") || "medium";
+  const height = SIZE_HEIGHT[size];
+  if (block.block_type === "section_header") {
+    return (
+      <View style={previewStyles.sectionHeaderWrap}>
+        <Text style={previewStyles.sectionHeaderText}>{block.title}</Text>
+        {block.subtitle ? <Text style={previewStyles.sectionHeaderSub}>{block.subtitle}</Text> : null}
+      </View>
+    );
+  }
+  if (block.block_type === "text") {
+    return (
+      <View style={previewStyles.textBlock}>
+        {block.title ? <Text style={previewStyles.textBlockTitle}>{block.title}</Text> : null}
+        {block.body ? <Text style={previewStyles.textBlockBody}>{block.body}</Text> : null}
+      </View>
+    );
+  }
+  // background (now "new banner") + content_box both use a sized image card
+  const linkedProduct = block.product_id ? products.find((p) => p.id === block.product_id) : null;
+  return (
+    <View style={[previewStyles.contentBox, { minHeight: height }]}>
+      {block.image_data_url ? (
+        <Image source={{ uri: block.image_data_url }} style={[previewStyles.contentImage, { height: height - 30 }]} resizeMode="cover" />
+      ) : (
+        <View style={[previewStyles.contentImage, { height: height - 30, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted }]}>
+          <Feather name="image" size={24} color={colors.textMuted} />
+        </View>
+      )}
+      <View style={{ padding: 12 }}>
+        {block.title ? <Text style={previewStyles.contentTitle} numberOfLines={1}>{block.title}</Text> : null}
+        {block.subtitle ? <Text style={previewStyles.contentSub} numberOfLines={1}>{block.subtitle}</Text> : null}
+        {block.body ? <Text style={previewStyles.contentBody} numberOfLines={2}>{block.body}</Text> : null}
+        {linkedProduct ? (
+          <View style={previewStyles.contentCta}>
+            <Text style={previewStyles.contentCtaText}>{block.cta_label || "View"} · {linkedProduct.name}</Text>
+            <Feather name="arrow-right" size={11} color={colors.primaryFg} />
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+const previewStyles = StyleSheet.create({
+  sectionHeaderWrap: { marginTop: 4, marginBottom: 10 },
+  sectionHeaderText: { fontSize: 14, fontWeight: "900", color: colors.textMain, letterSpacing: 0.6, textTransform: "uppercase" },
+  sectionHeaderSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  textBlock: { backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, padding: 12, marginBottom: 10 },
+  textBlockTitle: { fontSize: 13, fontWeight: "900", color: colors.textMain, marginBottom: 3 },
+  textBlockBody: { fontSize: 12, color: colors.textMuted, lineHeight: 18 },
+  contentBox: { backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden", marginBottom: 10 },
+  contentImage: { width: "100%" },
+  contentTitle: { fontSize: 14, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
+  contentSub: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+  contentBody: { fontSize: 12, color: colors.textMain, lineHeight: 17, marginTop: 4 },
+  contentCta: { flexDirection: "row", alignItems: "center", gap: 5, alignSelf: "flex-start", backgroundColor: colors.primary, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, marginTop: 6 },
+  contentCtaText: { color: colors.primaryFg, fontWeight: "800", fontSize: 11 },
+});
 function BlockFormModal({ visible, block, products, onClose, onSaved }: {
   visible: boolean; block: Block | null; products: Product[];
   onClose: () => void; onSaved: () => void;
@@ -198,6 +311,7 @@ function BlockFormModal({ visible, block, products, onClose, onSaved }: {
   const [productId, setProductId] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState("0");
   const [active, setActive] = useState(true);
+  const [size, setSize] = useState<"small" | "medium" | "large">("medium");
   const [saving, setSaving] = useState(false);
   const [picking, setPicking] = useState(false);
   const [showProductPicker, setShowProductPicker] = useState(false);
@@ -213,6 +327,7 @@ function BlockFormModal({ visible, block, products, onClose, onSaved }: {
       setProductId(block?.product_id || null);
       setSortOrder(String(block?.sort_order ?? 0));
       setActive(block?.active ?? true);
+      setSize((block?.size as any) || "medium");
     }
   }, [visible, block]);
 
@@ -252,6 +367,7 @@ function BlockFormModal({ visible, block, products, onClose, onSaved }: {
         product_id: productId,
         sort_order: parseInt(sortOrder, 10) || 0,
         active,
+        size,
       };
       if (block) await api.patch(`/admin/shop-layout/${block.id}`, payload);
       else await api.post("/admin/shop-layout", payload);
@@ -431,4 +547,16 @@ const styles = StyleSheet.create({
   typeChoiceText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
   productRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 14, borderRadius: 12, borderWidth: 1, borderColor: colors.border, marginBottom: 8, backgroundColor: colors.surface },
   productRowText: { fontSize: 14, fontWeight: "700", color: colors.textMain },
+  // Live customer preview wrapper
+  previewWrap: { marginBottom: 16, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceMuted, overflow: "hidden" },
+  previewHeader: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: colors.brand100 },
+  previewLabel: { fontSize: 10, fontWeight: "900", letterSpacing: 1.4, color: colors.primary, marginLeft: 2 },
+  previewHint: { fontSize: 10, color: colors.textMuted, marginLeft: "auto", fontStyle: "italic" },
+  previewFrame: { padding: 12, backgroundColor: colors.background },
+  // Size selector chips (S/M/L)
+  sizeChips: { flexDirection: "row", borderWidth: 1, borderColor: colors.border, borderRadius: 999, overflow: "hidden", backgroundColor: colors.surface },
+  sizeChip: { paddingHorizontal: 8, paddingVertical: 4, minWidth: 22, alignItems: "center", justifyContent: "center" },
+  sizeChipActive: { backgroundColor: colors.primary },
+  sizeChipText: { fontSize: 10, fontWeight: "900", color: colors.textMuted, letterSpacing: 0.4 },
+  sizeChipTextActive: { color: colors.primaryFg },
 });

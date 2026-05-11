@@ -39,11 +39,14 @@ export default function AdminPromoBannersScreen() {
     try {
       const [bRes, pRes] = await Promise.all([
         api.get<{ items: Banner[] }>("/admin/promo-banners"),
-        api.get<{ items?: Product[]; products?: Product[] }>("/admin/products"),
+        // /admin/products returns a plain ARRAY — handle both shapes.
+        api.get<any>("/admin/products"),
       ]);
       setItems(bRes.data?.items || []);
       const pData = pRes.data;
-      setProducts(pData?.items || pData?.products || []);
+      const products: Product[] = Array.isArray(pData) ? pData
+        : (pData?.items || pData?.products || []);
+      setProducts(products);
     } catch (e) {
       Alert.alert("Failed to load", formatApiError(e));
     } finally {

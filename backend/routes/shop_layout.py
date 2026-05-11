@@ -44,6 +44,7 @@ class ShopLayoutBlockIn(BaseModel):
     cta_label: Optional[str] = ""
     sort_order: int = 0
     active: bool = True
+    size: Optional[str] = "medium"  # small | medium | large (for content_box/background resize)
 
 
 class ShopLayoutBlockPatch(BaseModel):
@@ -56,6 +57,7 @@ class ShopLayoutBlockPatch(BaseModel):
     cta_label: Optional[str] = None
     sort_order: Optional[int] = None
     active: Optional[bool] = None
+    size: Optional[str] = None
 
 
 def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -109,6 +111,7 @@ async def create_shop_layout_block(body: ShopLayoutBlockIn, _: Dict[str, Any] = 
         "cta_label": (body.cta_label or "").strip(),
         "sort_order": int(body.sort_order or 0),
         "active": bool(body.active),
+        "size": (body.size if body.size in ("small", "medium", "large") else "medium"),
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -137,6 +140,10 @@ async def update_shop_layout_block(block_id: str, body: ShopLayoutBlockPatch, _:
         updates["sort_order"] = int(payload["sort_order"])
     if "active" in payload and payload["active"] is not None:
         updates["active"] = bool(payload["active"])
+    if "size" in payload and payload["size"] is not None:
+        s = str(payload["size"]).lower()
+        if s in ("small", "medium", "large"):
+            updates["size"] = s
     if updates:
         updates["updated_at"] = _now()
         await db.shop_layout_blocks.update_one({"id": block_id}, {"$set": updates})
