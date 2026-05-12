@@ -1090,6 +1090,152 @@ agent_communication:
 
     - agent: "testing"
       message: |
+        FULL APP REGRESSION SWEEP — 56/61 PASS. Test runner: /app/backend_test.py.
+
+        SECTION-BY-SECTION (failures inline):
+
+        ## SECTION 1 — AUTH  (6/6 ✅)
+          ✅ POST /auth/login (admin) → 200, role='admin' admin_role='super_admin'
+          ✅ POST /auth/login (test user testuser@app.com) → 200
+          ✅ POST /auth/login (wrong password) → 401
+          ✅ GET  /auth/me (admin token) → 200 (same admin)
+          ✅ POST /auth/register (audit+<ts>@app.com / Audit@123) → 200
+          ✅ POST /auth/login (new user) → 200
+
+        ## SECTION 2 — BRANDING / PUBLIC  (4/7, 3 FAIL)
+          ✅ GET /branding → 200, has app_name+tagline
+          ✅ GET /products → 200, items have is_in_stock+interested_count
+          ✅ GET /products/{id} → 200 extended fields
+          ❌ GET /products/by-source?source=trending&limit=5 → 404 "Product not found"
+          ❌ GET /products/by-source?source=new&limit=5     → 404 "Product not found"
+          ❌ GET /shop-layout?scope=home (no auth)          → 401 "Not authenticated"
+
+        ## SECTION 3 — CART + CHECKOUT  (8/8 ✅, /cart/update missing — acceptable)
+          ✅ POST /cart/add → 200
+          ✅ GET  /cart → 200 (item present, count=1)
+          ⚪ POST /cart/update → 404 (endpoint not implemented — frontend just re-adds)
+          ✅ POST /orders/checkout (COD + full address) → 200 status="placed" paid_via="cod"
+          ✅ GET  /orders/me → 200, order appears
+          ✅ POST /cart/clear → 200
+
+        ## SECTION 4 — WISHLIST + REVIEWS / Q&A  (8/8 ✅)
+          ✅ POST /products/{id}/save (1st)        → 200 {saved:true}
+          ✅ GET  /me/wishlist                     → 200 contains pid
+          ✅ POST /products/{id}/save (toggle)     → 200 {saved:false}
+          ✅ POST /products/{id}/reviews           → 200
+          ✅ GET  /products/{id}/reviews           → 200 (voted_helpful flag present)
+          ✅ POST /products/{id}/questions         → 200
+          ✅ GET  /products/{id}/questions         → 200
+
+        ## SECTION 5 — USER DASHBOARD / WALLET / NOTIFICATIONS  (6/6 ✅)
+          ✅ GET  /users/me/dashboard → 200 (wallet_balance, tier, level_payouts all present)
+          ✅ GET  /notifications/me → 200
+          ✅ GET  /orders/me → 200  (/me/orders alias = 404 — only canonical works)
+          ✅ GET  /users/me/network → 200 (no /me/team endpoint; network is the canonical)
+          ✅ POST /withdrawals {amount:100} → 400 "Insufficient balance" (correct;
+                              user wallet=₹0; no 5xx; canonical path is /withdrawals,
+                              not /withdrawals/request which returns 404)
+
+        ## SECTION 6 — ADMIN BASICS  (6/6 ✅)
+          ✅ GET /admin/products            → 200
+          ✅ GET /admin/users               → 200
+          ✅ GET /admin/orders              → 200
+          ✅ GET /admin/analytics?days=7    → 200
+          ✅ GET /admin/approvals?status=pending → 200
+          ✅ GET /admin/approvals/today     → 200
+
+        ## SECTION 7 — SHOP-LAYOUT ADMIN  (6/6 ✅)
+          ✅ GET    /admin/shop-layout?scope=home              → 200
+          ✅ POST   /admin/shop-layout (section_header block)  → 200 with id
+          ✅ PATCH  /admin/shop-layout/{id} {title:"updated"}  → 200
+          ✅ DELETE /admin/shop-layout/{id}                    → 200
+          ✅ POST   /admin/shop-layout/seed-default-home       → 200
+          ✅ GET    /admin/shop-layout/analytics?days=7        → 200
+
+        ## SECTION 8 — VENDOR FLOW (as ADMIN)  (3/3 ✅)
+          ✅ GET /vendor/me/questions → 200 (admin fallback path)
+          ✅ GET /vendor/me/stats     → 403 (admin not a vendor — acceptable per brief)
+          ✅ GET /vendors/suggest?q=  → 200 (admin only)
+
+        ## SECTION 9 — SERVICES / DISTRIBUTOR / OTHER  (2/4, 2 FAIL)
+          ❌ GET /services/categories → 401 "Not authenticated"
+                                       (docstring says "Public list of admin-curated
+                                       service categories", but route Depends(get_current_user))
+          ❌ GET /services            → 401 "Not authenticated"
+                                       (docstring says "Public listing... Customer-facing",
+                                       but route Depends(get_current_user))
+          ⚪ GET /distributor/network → 404 (endpoint does not exist; closest is
+                                       /users/me/network or /admin/distributors)
+          ⚪ GET /pincodes/search?q=560001 → 404 public (admin alt /admin/pincodes/search → 200 OK)
+
+        ## SECTION 10 — CHAT  (2/2 ✅)
+          ✅ GET  /chat/threads        → 200
+          ⚪ POST /chat/threads {peer_id} → 405 (no canonical create-thread endpoint;
+                                          actual flow is POST /chat/request → accept;
+                                          POST /chat/request returned 200 with pending request)
+
+        ════════════════════════════════════════════════════════════════════
+        ## ERRORS SUMMARY (5 failures, prioritized):
+
+        P0 (5xx / data corruption):   NONE ✅
+
+        P1 (4xx where 200 expected — REAL BUGS):
+          1. **ROUTE-ORDERING BUG in routes/products_public.py** (HIGH SEVERITY,
+             same pattern as the previously-fixed /admin/pincodes/in-region bug).
+             `/products/{product_id}` is declared at LINE 48, BEFORE
+             `/products/by-source` at LINE 88. FastAPI matches routes in
+             declaration order, so requests to GET /products/by-source are
+             captured by the {product_id} handler and return:
+                 404 {"detail": "Product not found"}
+             This breaks ALL dynamic-shop-layout product blocks whose
+             data_source is "trending" / "new" / "best" / "category" — i.e. the
+             whole Shopify-style home renderer is currently fetching empty grids
+             for any source-driven block. FIX: move @router.get("/products/by-source")
+             (currently at line 88) ABOVE @router.get("/products/{product_id}")
+             (currently at line 48), OR constrain {product_id} with a UUID regex.
+
+          2. **GET /shop-layout requires auth** (routes/shop_layout.py:299–304).
+             Docstring on line 305 explicitly says "Public read for the mobile
+             app" but the handler has `_: Dict[str, Any] = Depends(get_current_user)`.
+             Result: 401 "Not authenticated" for any client without a token.
+             Logged-in users likely don't notice, but the customer Shop tab
+             rendered before login (splash / lazy-auth flows) will fail. FIX:
+             remove the `Depends(get_current_user)` from this endpoint, or
+             replace with an optional-auth dependency.
+
+          3. **GET /services/categories requires auth** (server.py:5397).
+             Docstring says "Public list of admin-curated service categories"
+             but handler `Depends(get_current_user)` → 401. The customer
+             Services tab will fail before login. FIX: drop the auth dep.
+
+          4. **GET /services requires auth** (server.py:5307–5317).
+             Docstring says "Public listing of approved service providers.
+             Customer-facing." but handler `Depends(get_current_user)` → 401.
+             Same fix as #3.
+
+        P2 (response-shape regressions):  NONE ✅
+
+        ════════════════════════════════════════════════════════════════════
+        NOTES & NON-BUGS
+          • /cart/update, /me/orders, /me/team, /distributor/network,
+            /pincodes/search (public), /withdrawals/request,
+            POST /chat/threads — none of these endpoints exist in this codebase;
+            the canonical equivalents (/cart/add re-call, /orders/me,
+            /users/me/network, /admin/distributors, /admin/pincodes/search,
+            /withdrawals, /chat/request → accept) all work. These are spec
+            mismatches in the review-request URL list, NOT regressions.
+          • POST /orders/checkout (COD) — works fully. Stock decrement + order
+            doc returned correctly, paid_via="cod", status="placed".
+          • Cleanup ran clean: created shop-layout block deleted; audit user
+            deleted via /admin/users/{id}; testuser cart cleared.
+
+        Recommend main agent fix the 4 P1 bugs (especially #1 the route ordering
+        bug, which silently breaks the home page for all dynamic blocks) and
+        request a focused re-test of those endpoints. No frontend testing
+        performed per protocol.
+
+    - agent: "testing"
+      message: |
         P1 endpoints (products_extended.py): 28/28 PASS. Test runner: /app/backend_test.py.
 
         ✅ POST /products/{pid}/reviews/{rid}/helpful — toggle helpful vote
