@@ -1060,6 +1060,36 @@ agent_communication:
 
     - agent: "testing"
       message: |
+        Public single-product endpoint regression: 12/12 PASS. Runner: /app/backend_test.py.
+
+        ✅ CASE 1 — GET /api/products/{valid id} → 200 with all required fields:
+           id, name, price, image_url, brand (str), sub_features (list),
+           images (list), price_summary/protection_summary/warranty_summary/
+           delivery_summary (each dict with text/bold/font_size/align),
+           attrs_brand/attrs_os/attrs_ram/attrs_cpu_model/attrs_cpu_speed/
+           attrs_storage (all strings), extra_attrs (dict), spec_tabs (list),
+           whats_in_box (list), is_in_stock (bool), interested_count (int).
+           `interested_users` NOT leaked.
+
+        ✅ CASE 2 — GET /api/products/{unpublished id} → 404 (created with
+           is_published:false via POST /admin/products, then verified hidden;
+           cleanup DELETE returned 200).
+
+        ✅ CASE 3 — GET /api/products/{non-existent id} → 404.
+
+        ✅ CASE 4 — GET /api/products (list) still works; returns 9 items with
+           is_in_stock + interested_count present, interested_users NOT leaked.
+
+        ✅ CASE 5 — Wishlist round-trip:
+             POST /products/{id}/save → {saved:true}
+             GET /me/wishlist → items contains pid
+             POST /products/{id}/save → {saved:false} (toggle off).
+
+        No regressions. Endpoint is production-ready for the customer Product
+        Detail page.
+
+    - agent: "testing"
+      message: |
         P1 endpoints (products_extended.py): 28/28 PASS. Test runner: /app/backend_test.py.
 
         ✅ POST /products/{pid}/reviews/{rid}/helpful — toggle helpful vote

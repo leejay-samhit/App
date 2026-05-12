@@ -61,13 +61,15 @@ export default function ProductDetailScreen() {
   const load = useCallback(async () => {
     if (!id) return;
     try {
+      // Fetch the single product directly — the new public /products/{id}
+      // endpoint returns the FULL doc (incl. extended fields with safe
+      // defaults for legacy products). Reviews + wishlist are best-effort.
       const [pRes, rRes, wRes] = await Promise.all([
-        api.get<any>("/products"),
+        api.get<any>(`/products/${id}`),
         api.get<{ reviews: Review[]; stats: any }>(`/products/${id}/reviews`).catch(() => ({ data: { reviews: [], stats: { average: 0, total: 0, breakdown: {} } } as any })),
         api.get<{ items: any[] }>("/me/wishlist").catch(() => ({ data: { items: [] } })),
       ]);
-      const list: Product[] = Array.isArray(pRes.data) ? pRes.data : (pRes.data?.items || []);
-      const p = list.find((x) => x.id === id) || null;
+      const p: Product | null = (pRes.data && pRes.data.id) ? (pRes.data as Product) : null;
       setProduct(p);
       setReviews(rRes.data?.reviews || []);
       setReviewStats(rRes.data?.stats || { average: 0, total: 0, breakdown: {} });
@@ -261,19 +263,28 @@ export default function ProductDetailScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Product Details panel */}
-          <Text style={styles.sectionTitle}>Product Details</Text>
-          <View style={styles.detailsCard}>
-            <DetailRow label="Brand" value={product.attrs_brand || product.brand} />
-            <DetailRow label="Operating System" value={product.attrs_os} />
-            <DetailRow label="RAM" value={product.attrs_ram} />
-            <DetailRow label="CPU Model" value={product.attrs_cpu_model} />
-            <DetailRow label="CPU Speed" value={product.attrs_cpu_speed} />
-            <DetailRow label="Storage" value={product.attrs_storage} />
-            {Object.entries(product.extra_attrs || {}).map(([k, v]) => (
-              <DetailRow key={k} label={k} value={v} />
-            ))}
-          </View>
+          {/* Product Details panel — only render if there's data */}
+          {(() => {
+            const detailRows: [string, string | undefined][] = [
+              ["Brand", product.attrs_brand || product.brand],
+              ["Operating System", product.attrs_os],
+              ["RAM", product.attrs_ram],
+              ["CPU Model", product.attrs_cpu_model],
+              ["CPU Speed", product.attrs_cpu_speed],
+              ["Storage", product.attrs_storage],
+              ...Object.entries(product.extra_attrs || {}).map(([k, v]) => [k, v] as [string, string]),
+            ];
+            const visible = detailRows.filter(([, v]) => !!v && String(v).trim() !== "");
+            if (visible.length === 0) return null;
+            return (
+              <>
+                <Text style={styles.sectionTitle}>Product Details</Text>
+                <View style={styles.detailsCard}>
+                  {visible.map(([k, v]) => <DetailRow key={k} label={k} value={v} />)}
+                </View>
+              </>
+            );
+          })()}
 
           {/* Description */}
           {product.description ? (

@@ -45,6 +45,46 @@ async def list_products():
     return [_shape_product(p) for p in items]
 
 
+@router.get("/products/{product_id}")
+async def get_product(product_id: str):
+    """Public single-product detail endpoint.
+
+    Returns the FULL product document (all extended fields included) plus the
+    computed `is_in_stock` and `interested_count`.  Used by the customer
+    Product Detail page so we don't have to fetch the entire catalog just to
+    render one product.
+
+    Legacy products (created before the extended schema landed) are still
+    returned cleanly with safe defaults for any missing rich field, so the UI
+    never explodes on `undefined` accesses.
+    """
+    p = await db.products.find_one({"id": product_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Product not found")
+    # Hide unpublished products from the public endpoint (admins use a
+    # different route).
+    if p.get("is_published") is False:
+        raise HTTPException(status_code=404, detail="Product not available")
+    # ── Back-fill safe defaults for legacy products ──
+    p.setdefault("brand", "")
+    p.setdefault("sub_features", [])
+    p.setdefault("images", [])
+    p.setdefault("price_summary", {"text": "", "bold": False, "font_size": None, "align": "left"})
+    p.setdefault("protection_summary", {"text": "", "bold": False, "font_size": None, "align": "left"})
+    p.setdefault("warranty_summary", {"text": "", "bold": False, "font_size": None, "align": "left"})
+    p.setdefault("delivery_summary", {"text": "", "bold": False, "font_size": None, "align": "left"})
+    p.setdefault("attrs_brand", "")
+    p.setdefault("attrs_os", "")
+    p.setdefault("attrs_ram", "")
+    p.setdefault("attrs_cpu_model", "")
+    p.setdefault("attrs_cpu_speed", "")
+    p.setdefault("attrs_storage", "")
+    p.setdefault("extra_attrs", {})
+    p.setdefault("spec_tabs", [])
+    p.setdefault("whats_in_box", [])
+    return _shape_product(p)
+
+
 @router.get("/products/by-source")
 async def list_products_by_source(
     source: str = "trending",
