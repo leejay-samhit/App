@@ -64,6 +64,12 @@ export default function DashboardScreen() {
   // all the secondary dashboard sections. Withdraw button stays out of
   // the toggle area.
   const [expanded, setExpanded] = useState(false);
+  // Vendor-only stats — populated only when current user is an approved vendor
+  const [vendorStats, setVendorStats] = useState<{
+    today_earnings: number; today_orders: number; total_earnings: number;
+    products_count: number; published_count: number;
+  } | null>(null);
+  const [pendingQA, setPendingQA] = useState<number>(0);
 
   const load = useCallback(async () => {
     try {
@@ -77,6 +83,20 @@ export default function DashboardScreen() {
     finally {
       setLoading(false);
       setRefreshing(false);
+    }
+    // Vendor stats fetched separately so a non-vendor 403 doesn't disrupt
+    // the main dashboard load. Silent on error.
+    try {
+      const [vs, vq] = await Promise.all([
+        api.get<any>("/vendor/me/stats"),
+        api.get<{ pending_count: number }>("/vendor/me/questions").catch(() => ({ data: { pending_count: 0 } as any })),
+      ]);
+      setVendorStats(vs.data || null);
+      setPendingQA(vq.data?.pending_count || 0);
+    } catch {
+      // not an approved vendor — hide the card entirely
+      setVendorStats(null);
+      setPendingQA(0);
     }
   }, []);
 
@@ -211,6 +231,48 @@ export default function DashboardScreen() {
             </View>
           </GradientCard>
         </Animated.View>
+
+        {/* === Vendor Panel preview — only visible for approved vendors === */}
+        {vendorStats ? (
+          <Animated.View entering={FadeInDown.duration(380).delay(30)}>
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onPress={() => router.push("/vendor/dashboard" as any)}
+              style={styles.vendorPreview}
+              testID="dashboard-vendor-preview"
+            >
+              <View style={styles.vendorPreviewHead}>
+                <View style={styles.vendorPreviewIcon}>
+                  <Feather name="briefcase" size={16} color={colors.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.vendorPreviewEyebrow}>VENDOR PANEL</Text>
+                  <Text style={styles.vendorPreviewTitle}>Today {formatINR(vendorStats.today_earnings)}</Text>
+                </View>
+                {pendingQA > 0 ? (
+                  <View style={styles.vendorPreviewBadge}>
+                    <Feather name="message-circle" size={11} color="#fff" />
+                    <Text style={styles.vendorPreviewBadgeText}>{pendingQA}</Text>
+                  </View>
+                ) : null}
+                <Feather name="chevron-right" size={18} color={colors.textMuted} />
+              </View>
+              <View style={styles.vendorPreviewStats}>
+                <VendorMini icon="package" label="Today orders" value={String(vendorStats.today_orders)} />
+                <VendorMini icon="trending-up" label="Lifetime" value={formatINR(vendorStats.total_earnings)} />
+                <VendorMini icon="box" label="Products" value={`${vendorStats.published_count}/${vendorStats.products_count}`} />
+              </View>
+              {pendingQA > 0 ? (
+                <View style={styles.vendorPreviewAlert}>
+                  <Feather name="alert-circle" size={11} color="#B45309" />
+                  <Text style={styles.vendorPreviewAlertText}>
+                    {pendingQA} customer question{pendingQA === 1 ? "" : "s"} awaiting reply
+                  </Text>
+                </View>
+              ) : null}
+            </TouchableOpacity>
+          </Animated.View>
+        ) : null}
 
         {/* === Expanded sections — only when user taps Total Earnings === */}
         {expanded && (<>
@@ -376,6 +438,18 @@ function StatCard({ icon, label, value, testID, onPress }: { icon: any; label: s
   );
 }
 
+function VendorMini({ icon, label, value }: { icon: any; label: string; value: string }) {
+  return (
+    <View style={styles.vendorMini}>
+      <Feather name={icon} size={12} color={colors.primary} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.vendorMiniLabel} numberOfLines={1}>{label}</Text>
+        <Text style={styles.vendorMiniValue} numberOfLines={1}>{value}</Text>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
@@ -464,4 +538,47 @@ const styles = StyleSheet.create({
   feedDot: { width: 8, height: 8, borderRadius: 4, marginTop: 6 },
   feedTitle: { fontSize: 13, fontWeight: "700", color: colors.textMain },
   feedBody: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+
+  // ─── Vendor Panel preview (only for approved vendors) ───
+  vendorPreview: {
+    marginTop: 14,
+    backgroundColor: colors.surface,
+    borderRadius: 18, padding: 14,
+    borderWidth: 1, borderColor: colors.primary + "33",
+    overflow: "hidden",
+  },
+  vendorPreviewHead: { flexDirection: "row", alignItems: "center", gap: 10 },
+  vendorPreviewIcon: {
+    width: 36, height: 36, borderRadius: 12,
+    backgroundColor: colors.primary + "14",
+    alignItems: "center", justifyContent: "center",
+  },
+  vendorPreviewEyebrow: { fontSize: 9, letterSpacing: 1.5, fontWeight: "800", color: colors.primary },
+  vendorPreviewTitle: { fontSize: 16, fontWeight: "800", color: colors.textMain, marginTop: 1, letterSpacing: -0.3 },
+  vendorPreviewBadge: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    backgroundColor: "#E11D48",
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999,
+  },
+  vendorPreviewBadgeText: { fontSize: 11, fontWeight: "800", color: "#fff" },
+
+  vendorPreviewStats: {
+    flexDirection: "row", gap: 8,
+    marginTop: 12,
+  },
+  vendorMini: {
+    flex: 1, flexDirection: "row", gap: 6, alignItems: "center",
+    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: 10, paddingVertical: 9,
+    borderRadius: 10,
+  },
+  vendorMiniLabel: { fontSize: 9, color: colors.textMuted, fontWeight: "700", letterSpacing: 0.4, textTransform: "uppercase" },
+  vendorMiniValue: { fontSize: 12, fontWeight: "800", color: colors.textMain, marginTop: 1 },
+
+  vendorPreviewAlert: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    marginTop: 10, paddingVertical: 8, paddingHorizontal: 10,
+    backgroundColor: "#FEF3C7", borderRadius: 10,
+  },
+  vendorPreviewAlertText: { fontSize: 11, fontWeight: "700", color: "#92400E", flex: 1 },
 });

@@ -19,7 +19,9 @@ export default function Index() {
     } else if (((user as any).approval_status || "approved") !== "approved") {
       router.replace("/pending-approval" as any);
     } else {
-      router.replace("/(tabs)/dashboard");
+      // Approved users land directly on the Shop tab so they can start
+      // browsing immediately. Dashboard is one tap away via bottom nav.
+      router.replace("/(tabs)/shop");
     }
   }, [user]);
 

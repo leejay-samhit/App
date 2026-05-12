@@ -252,7 +252,12 @@ export default function AdminShopLayoutScreen() {
       />
 
       {/* Scope tabs */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scopeTabs}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.scopeTabs}
+        style={styles.scopeTabsWrap}
+      >
         <TouchableOpacity
           onPress={() => { setScope("home"); setScopeCategory(""); }}
           style={[styles.scopeTab, scope === "home" && styles.scopeTabActive]}
@@ -1074,8 +1079,9 @@ const styles = StyleSheet.create({
   sizeChipActive: { backgroundColor: colors.primary },
   sizeChipText: { fontSize: 10, fontWeight: "900", color: colors.textMuted, letterSpacing: 0.4 },
   sizeChipTextActive: { color: colors.primaryFg },
-  scopeTabs: { paddingHorizontal: spacing.screen, gap: 6, paddingBottom: 8 },
-  scopeTab: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  scopeTabsWrap: { flexGrow: 0, flexShrink: 0, maxHeight: 50, marginTop: 4 },
+  scopeTabs: { paddingHorizontal: spacing.screen, gap: 8, paddingBottom: 8, alignItems: "center" },
+  scopeTab: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, height: 34 },
   scopeTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   scopeTabText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
   scopeTabTextActive: { color: colors.primaryFg },

@@ -841,8 +841,10 @@ const styles = StyleSheet.create({
   cartBadgeText: { fontSize: 10, fontWeight: "800" },
   // Slim top header (replaces the SHOP gradient hero) with a small cart icon at right
   topHeader: {
-    flexDirection: "row", alignItems: "center", gap: 12,
-    paddingTop: 4, paddingBottom: 14,
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: spacing.screen,
+    paddingTop: 6, paddingBottom: 12,
+    backgroundColor: colors.background,
   },
   topHeaderEyebrow: { fontSize: 10, letterSpacing: 1.6, color: colors.textMuted, fontWeight: "800" },
   topHeaderTitle: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.6, marginTop: 2 },
@@ -900,7 +902,7 @@ const styles = StyleSheet.create({
   providerSheetEyebrow: { fontSize: 9, letterSpacing: 1.4, color: colors.textMuted, fontWeight: "800" },
   providerSheetTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4, marginTop: 1 },
   cartIconBtn: {
-    width: 40, height: 40, borderRadius: 20,
+    width: 46, height: 46, borderRadius: 14,
     backgroundColor: colors.surface,
     borderWidth: 1, borderColor: colors.border,
     alignItems: "center", justifyContent: "center",
@@ -1040,7 +1042,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1, borderColor: colors.border,
     borderRadius: 14, paddingHorizontal: 14, height: 46,
-    marginBottom: 14,
   },
   shopSearchInput: {
     flex: 1, fontSize: 14, color: colors.textMain, paddingVertical: 0,
