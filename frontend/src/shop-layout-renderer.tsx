@@ -200,7 +200,7 @@ function CategoryCirclesBlock({
   return (
     <View style={{ marginBottom: 14 }}>
       {block.title ? <SectionTitle block={block} /> : null}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 14, paddingVertical: 4 }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
         {items.map((it, i) => (
           <TouchableOpacity
             key={`cc-${i}`}
@@ -823,7 +823,7 @@ const styles = StyleSheet.create({
   flashCardName: { fontSize: 11, fontWeight: "700", color: colors.textMain, padding: 6, paddingBottom: 0 },
   flashCardPrice: { fontSize: 13, fontWeight: "900", color: "#DC2626", paddingHorizontal: 6, paddingBottom: 6 },
   // Product grid
-  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   gridCard: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   gridImgWrap: { width: "100%", aspectRatio: 1.1, backgroundColor: colors.surfaceMuted, position: "relative" },
   gridImg: { width: "100%", height: "100%" },

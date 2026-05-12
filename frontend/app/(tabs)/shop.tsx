@@ -917,7 +917,7 @@ const styles = StyleSheet.create({
   },
   cartBadgeTopText: { fontSize: 9, fontWeight: "900", color: colors.accentFg },
 
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   card: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, overflow: "hidden", padding: 10 },
   image: { width: "100%", height: 130, borderRadius: 12, backgroundColor: colors.surfaceMuted },
   name: { fontSize: 13, fontWeight: "700", color: colors.textMain, marginTop: 10, minHeight: 34 },

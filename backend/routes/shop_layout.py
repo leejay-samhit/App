@@ -25,7 +25,7 @@ ENDPOINTS:
 from __future__ import annotations
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -429,3 +429,216 @@ async def migrate_promo_banners(_: Dict[str, Any] = Depends(require_admin)):
     }
     await db.shop_layout_blocks.insert_one(doc.copy())
     return {"ok": True, "migrated": len(items), "block_id": doc["id"], "updated": False}
+
+
+# ────────────────────────────────────────────────────────────
+# Quick-start: seed a sensible default Home layout
+# ────────────────────────────────────────────────────────────
+
+DEFAULT_HOME_PALETTE = {
+    "primary": "#0F766E",         # emerald-700 (matches app theme)
+    "primary_dark": "#064E3B",
+    "accent": "#FDE68A",
+    "white": "#FFFFFF",
+    "ink": "#0F172A",
+    "muted": "#6B7280",
+    "red": "#DC2626",
+    "amber": "#F59E0B",
+}
+
+
+def _seed_doc(
+    *,
+    block_type: str,
+    sort_order: int,
+    title: str = "",
+    subtitle: str = "",
+    body: str = "",
+    cta_label: str = "",
+    size: str = "medium",
+    bg_color: str = "",
+    text_color: str = "",
+    button_color: str = "",
+    button_text_color: str = "",
+    height: Optional[int] = None,
+    data_source: str = "manual",
+    product_count: int = 8,
+    layout_style: str = "grid",
+    category_filter: str = "",
+    items: Optional[List[Dict[str, Any]]] = None,
+    flash_sale_ends_at: str = "",
+) -> Dict[str, Any]:
+    return {
+        "id": str(uuid.uuid4()),
+        "block_type": block_type,
+        "scope": "home",
+        "scope_category": "",
+        "title": title,
+        "subtitle": subtitle,
+        "body": body,
+        "cta_label": cta_label,
+        "sort_order": sort_order,
+        "active": True,
+        "size": size,
+        "image_data_url": "",
+        "product_id": None,
+        "text_color": text_color,
+        "bg_color": bg_color,
+        "font_size": None,
+        "text_align": "",
+        "button_color": button_color,
+        "button_text_color": button_text_color,
+        "height": height,
+        "product_ids": [],
+        "data_source": data_source,
+        "product_count": product_count,
+        "layout_style": layout_style,
+        "category_filter": category_filter,
+        "items": items or [],
+        "flash_sale_ends_at": flash_sale_ends_at,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+
+
+@router.post("/admin/shop-layout/seed-default-home")
+async def seed_default_home(_: Dict[str, Any] = Depends(require_admin)):
+    """One-tap default Home layout for fresh installs / demos.
+
+    Idempotent-ish: skips if any block already exists in scope=home so we
+    don't double-seed. Caller must pass ?force=1 to overwrite, OR the admin
+    can delete the existing blocks first. Inserts a curated set of 7 blocks:
+      1. announcement_strip — welcome banner
+      2. banner_slider      — promo banners (2 slides)
+      3. category_circles   — dynamic from real categories
+      4. flash_sale         — auto from newest products (24h timer)
+      5. section_header     — "Trending now"
+      6. product_grid       — top published products (auto, 8 items)
+      7. offer_cards        — 3 lifestyle promo tiles
+    """
+    P = DEFAULT_HOME_PALETTE
+    existing = await db.shop_layout_blocks.count_documents({"scope": "home"})
+    if existing > 0:
+        return {
+            "ok": False,
+            "skipped": True,
+            "existing": existing,
+            "message": (
+                f"You already have {existing} block(s) in Home scope. "
+                "Delete them first if you want a fresh seed."
+            ),
+        }
+
+    # 24h flash sale end timestamp
+    flash_end = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+
+    docs: List[Dict[str, Any]] = []
+
+    # 1. Announcement strip
+    docs.append(_seed_doc(
+        block_type="announcement_strip",
+        sort_order=0,
+        title="Free delivery on orders above ₹499 · COD available",
+        bg_color=P["primary"],
+        text_color=P["white"],
+    ))
+
+    # 2. Banner slider (2 slides)
+    docs.append(_seed_doc(
+        block_type="banner_slider",
+        sort_order=1,
+        size="medium",
+        items=[
+            {
+                "label": "Big Days are here",
+                "subtitle": "Up to 60% off across all categories",
+                "image_data_url": "",
+                "link_type": "category",
+                "link_value": "",
+                "color": P["primary"],
+            },
+            {
+                "label": "New Arrivals",
+                "subtitle": "Fresh styles every week",
+                "image_data_url": "",
+                "link_type": "category",
+                "link_value": "",
+                "color": P["primary_dark"],
+            },
+        ],
+    ))
+
+    # 3. Category circles (auto, from real categories)
+    docs.append(_seed_doc(
+        block_type="category_circles",
+        sort_order=2,
+        title="Shop by category",
+        data_source="auto_categories",
+        product_count=12,
+        layout_style="circle",
+    ))
+
+    # 4. Flash sale strip (auto from newest products, 24h)
+    docs.append(_seed_doc(
+        block_type="flash_sale",
+        sort_order=3,
+        title="Flash Sale",
+        subtitle="Hurry — deals end soon",
+        data_source="auto_newest",
+        product_count=10,
+        layout_style="horizontal",
+        flash_sale_ends_at=flash_end,
+        bg_color="#FEF2F2",
+    ))
+
+    # 5. Section header
+    docs.append(_seed_doc(
+        block_type="section_header",
+        sort_order=4,
+        title="Trending now",
+        subtitle="Most-loved by our customers",
+        text_color=P["ink"],
+    ))
+
+    # 6. Product grid (auto, 8 items)
+    docs.append(_seed_doc(
+        block_type="product_grid",
+        sort_order=5,
+        data_source="auto_top_selling",
+        product_count=8,
+        layout_style="grid",
+    ))
+
+    # 7. Offer cards (3 lifestyle tiles)
+    docs.append(_seed_doc(
+        block_type="offer_cards",
+        sort_order=6,
+        title="Don't miss out",
+        items=[
+            {
+                "label": "Cash on Delivery",
+                "subtitle": "Pay when you receive",
+                "color": P["primary"],
+                "link_type": None,
+            },
+            {
+                "label": "Easy 7-day returns",
+                "subtitle": "Quick refund, no questions",
+                "color": P["amber"],
+                "link_type": None,
+            },
+            {
+                "label": "Refer & Earn ₹400",
+                "subtitle": "Invite friends, build your team",
+                "color": P["primary_dark"],
+                "link_type": None,
+            },
+        ],
+    ))
+
+    await db.shop_layout_blocks.insert_many([d.copy() for d in docs])
+    return {
+        "ok": True,
+        "inserted": len(docs),
+        "block_ids": [d["id"] for d in docs],
+    }

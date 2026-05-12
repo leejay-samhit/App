@@ -120,6 +120,7 @@ export default function AdminShopLayoutScreen() {
   const [editing, setEditing] = useState<Block | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const { visible: helpVisible, close: helpClose } = useFirstVisitGuide("shop-layout-v1");
   // Per-block analytics: { [block_id]: { impressions, clicks, ctr } }
@@ -205,6 +206,28 @@ export default function AdminShopLayoutScreen() {
       await load();
     } catch (e) { Alert.alert("Migration failed", formatApiError(e)); }
     finally { setMigrating(false); }
+  };
+
+  const onSeedDefaultHome = async () => {
+    if (seeding) return;
+    if (scope !== "home") {
+      Alert.alert("Switch to Home scope", "Tap the 'Home' tab above first — default seed only applies to the Home scope.");
+      return;
+    }
+    setSeeding(true);
+    try {
+      const r = await api.post<any>("/admin/shop-layout/seed-default-home");
+      if (r.data?.skipped) {
+        Alert.alert("Home already has blocks", r.data?.message || "Delete existing Home blocks first.");
+      } else {
+        Alert.alert(
+          "Default Home seeded",
+          `${r.data?.inserted || 0} starter blocks added: announcement strip, banner slider, category circles, flash sale (24h), trending grid, and offer cards. Customize them now or leave as-is.`,
+        );
+        await load();
+      }
+    } catch (e) { Alert.alert("Seed failed", formatApiError(e)); }
+    finally { setSeeding(false); }
   };
 
   // Drag-to-reorder: receives the new ordered list of block IDs (within
@@ -297,7 +320,18 @@ export default function AdminShopLayoutScreen() {
             <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
               Long-press & drag a block to reorder · Tap S/M/L to resize · Switch the scope tabs above to manage per-category layouts · CTR data updates over 7 days.
             </Text>
-            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              {scope === "home" && filteredItems.length === 0 ? (
+                <TouchableOpacity
+                  onPress={onSeedDefaultHome}
+                  disabled={seeding}
+                  style={[styles.heroBtn, { backgroundColor: "#fff" }, seeding && { opacity: 0.6 }]}
+                  testID="seed-default-home"
+                >
+                  {seeding ? <ActivityIndicator size="small" color={colors.primary} /> : <Feather name="zap" size={12} color={colors.primary} />}
+                  <Text style={styles.heroBtnText}>Seed default Home</Text>
+                </TouchableOpacity>
+              ) : null}
               <TouchableOpacity onPress={onMigratePromoBanners} disabled={migrating} style={[styles.heroBtn, migrating && { opacity: 0.6 }]} testID="migrate-banners">
                 {migrating ? <ActivityIndicator size="small" color={colors.primary} /> : <Feather name="download" size={12} color={colors.primary} />}
                 <Text style={styles.heroBtnText}>Migrate old banners</Text>
