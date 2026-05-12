@@ -829,7 +829,7 @@ export default function ShopScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  container: { padding: spacing.screen, paddingBottom: 60 },
+  container: { paddingHorizontal: 12, paddingTop: spacing.screen, paddingBottom: 60 },
   pillRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
   pill: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   pillActive: { backgroundColor: colors.primary, borderColor: colors.primary },
@@ -842,7 +842,7 @@ const styles = StyleSheet.create({
   // Slim top header (replaces the SHOP gradient hero) with a small cart icon at right
   topHeader: {
     flexDirection: "row", alignItems: "center", gap: 10,
-    paddingHorizontal: spacing.screen,
+    paddingHorizontal: 12,
     paddingTop: 6, paddingBottom: 12,
     backgroundColor: colors.background,
   },
