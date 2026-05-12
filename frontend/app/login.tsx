@@ -32,7 +32,9 @@ export default function Login() {
   const navigateAfter = (u: any) => {
     if (u.role === "admin") router.replace("/admin/home");
     else if (!u.registration_paid) router.replace("/payment");
-    else router.replace("/(tabs)/dashboard");
+    // Approved customers land directly on the Shop tab so they can start
+    // browsing immediately. Dashboard is one tap away via the bottom nav.
+    else router.replace("/(tabs)/shop");
   };
 
   const onSubmit = async () => {

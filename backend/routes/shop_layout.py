@@ -300,10 +300,11 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
 async def list_active_shop_layout(
     scope: Optional[str] = Query("home"),
     category: Optional[str] = Query(None),
-    _: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Public read for the mobile app. Returns active blocks for the requested
-    scope (default 'home'). For scope='category', filter by `scope_category`."""
+    """Public read for the mobile app — NO AUTH REQUIRED so unauthenticated
+    customers (e.g. on a marketing landing or pre-login browse) can still see
+    the merchandised home. Returns active blocks for the requested scope
+    (default 'home'). For scope='category', filter by `scope_category`."""
     q = _scope_filter(scope, category)
     q["active"] = True
     cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])

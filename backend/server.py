@@ -5314,9 +5314,9 @@ async def list_services(
     lat: Optional[float] = None,
     lng: Optional[float] = None,
     radius_km: Optional[float] = None,
-    user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Public listing of approved service providers. Customer-facing.
+    """Public listing of approved service providers. Customer-facing — NO AUTH
+    REQUIRED so anonymous browsers can discover services before they sign up.
 
     When `lat` and `lng` are supplied, results are sorted by distance using a
     Mongo `$geoNear` aggregation. Optional `radius_km` clamps to a max distance.
@@ -5395,8 +5395,10 @@ async def list_services(
 
 
 @api_router.get("/services/categories")
-async def list_service_categories(_: Dict[str, Any] = Depends(get_current_user)):
-    """Public list of admin-curated service categories (active only) sorted by sort_order."""
+async def list_service_categories():
+    """Public list of admin-curated service categories (active only) sorted by
+    sort_order — NO AUTH REQUIRED so anonymous browsers see categories on
+    the landing/discovery page."""
     cats = await db.service_categories.find(
         {"active": True}, {"_id": 0},
     ).sort([("sort_order", 1), ("name", 1)]).to_list(200)

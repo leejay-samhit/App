@@ -575,6 +575,63 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+bug_fix_retest_2026_05_12:
+  - task: "Public-access / route-ordering fixes (4 bugs)"
+    implemented: true
+    working: true
+    file: "backend/routes/products_public.py + backend/routes/shop_layout.py + backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Focused re-test of 4 fixes from previous full-app sweep: 15/15 PASS.
+            Runner: /app/focused_retest.py.
+
+            ✅ RE-TEST 1 — /products/by-source route ordering (was 404)
+              i.   ?source=trending&limit=5  → 200, list len=5
+              ii.  ?source=new&limit=5       → 200, len=5, sorted by created_at desc
+              iii. ?source=best&limit=5      → 200, len=5
+              iv.  ?source=category&category=Electronics&limit=10 → 200, len=0
+                   (no Electronics products in DB; all returned rows match cat)
+              v.   no args                   → 200, default trending, len=9
+              vi.  GET /products/{real id}   → 200, returned_id matches (not
+                   mistaken for "by-source")
+              vii. GET /products             → 200, count=9
+              Fix verified: @router.get("/products/by-source") is declared at
+              routes/products_public.py:52, BEFORE /products/{product_id} at L102.
+
+            ✅ RE-TEST 2 — Public /shop-layout (was 401)
+              i.   GET /shop-layout?scope=home (no auth)        → 200, items_len=7
+              ii.  GET /shop-layout?scope=category&category=Electronics → 200, items_len=0
+              iii. Admin GET /admin/shop-layout (token)         → 200 (still protected)
+              iv.  Non-admin user GET /admin/shop-layout         → 403 "Admin access required"
+              Fix verified: Depends(get_current_user) removed from the public
+              GET /shop-layout endpoint in routes/shop_layout.py:299–303.
+
+            ✅ RE-TEST 3 — Public /services (was 401)
+              i.   GET /services (no auth)                       → 200 {items, total=1}
+              ii.  GET /services?category=Plumber (no auth)      → 200 {items, total=0}
+              iii. GET /services?lat=12.97&lng=77.59&radius_km=10 (no auth)
+                                                                  → 200 geo=true
+              Fix verified: get_current_user removed from /services in
+              server.py:5307–5317.
+
+            ✅ RE-TEST 4 — Public /services/categories (was 401)
+              i.   GET /services/categories (no auth)            → 200
+                   categories[] with provider_count on every item (n=13, all
+                   have provider_count field).
+              Fix verified: get_current_user removed from /services/categories
+              in server.py:5397.
+
+            All 4 reported public-access / route-ordering fixes are confirmed
+            working end-to-end. No regressions in adjacent endpoints (admin
+            /admin/shop-layout still 200 for admin / 403 for non-admin;
+            GET /products/{id} still resolves to product detail and is not
+            shadowed by /products/by-source).
+
 backend_p1_extended:
   - task: "P1: Helpful-vote endpoint on customer reviews"
     implemented: true
