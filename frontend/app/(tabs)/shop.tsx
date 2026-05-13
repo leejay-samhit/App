@@ -315,9 +315,9 @@ export default function ShopScreen() {
                 returnKeyType="search"
               />
               {shopSearch.length > 0 ? (
-                <TouchableOpacity onPress={() => setShopSearch("")}><Feather name="x-circle" size={16} color={colors.textMuted} /></TouchableOpacity>
+                <TouchableOpacity onPress={() => setShopSearch("")}><Feather name="x-circle" size={18} color={colors.textMuted} /></TouchableOpacity>
               ) : (
-                <View style={styles.searchFilterBtn}><Feather name="sliders" size={14} color={colors.primaryFg} /></View>
+                <View style={styles.searchFilterBtn}><Feather name="sliders" size={15} color={colors.primary} /></View>
               )}
             </View>
           ) : (
@@ -841,11 +841,11 @@ const styles = StyleSheet.create({
   // never wrap below the search bar on any device (Android Expo Go quirk).
   topHeader: {
     position: "relative",
-    paddingHorizontal: 12,
-    paddingTop: 6,
-    paddingBottom: 12,
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 14,
     backgroundColor: colors.background,
-    minHeight: 64, // search 46 + paddingTop 6 + paddingBottom 12
+    minHeight: 72,
   },
   topHeaderEyebrow: { fontSize: 10, letterSpacing: 1.6, color: colors.textMuted, fontWeight: "800" },
   topHeaderTitle: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.6, marginTop: 2 },
@@ -910,26 +910,36 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     alignItems: "center", justifyContent: "center",
   },
-  // Absolute-positioned variant used inside `topHeader` so the cart icon
-  // can never wrap below the search bar on any device.
+  // Absolute-positioned, premium-styled cart/language button. Same height as
+  // the search bar (50px) so they read as one unified row.
   cartIconBtnAbs: {
     position: "absolute",
-    right: 12,
-    top: 6, // matches topHeader.paddingTop so it aligns with the search bar
-    width: 46, height: 46, borderRadius: 14,
+    right: 14,
+    top: 10, // = topHeader.paddingTop so it aligns with the search bar
+    width: 50, height: 50, borderRadius: 16,
     backgroundColor: colors.primary,
     alignItems: "center", justifyContent: "center",
     zIndex: 2,
+    ...Platform.select({
+      ios: {
+        shadowColor: colors.primary,
+        shadowOpacity: 0.25,
+        shadowRadius: 10,
+        shadowOffset: { width: 0, height: 4 },
+      },
+      android: { elevation: 3 },
+      default: { boxShadow: "0px 4px 10px rgba(15,42,29,0.18)" as any },
+    }),
   },
   cartBadgeTop: {
-    position: "absolute", top: -4, right: -4,
-    minWidth: 18, height: 18, borderRadius: 9,
+    position: "absolute", top: -5, right: -5,
+    minWidth: 20, height: 20, borderRadius: 10,
     backgroundColor: colors.accent,
     alignItems: "center", justifyContent: "center",
-    paddingHorizontal: 4,
+    paddingHorizontal: 5,
     borderWidth: 2, borderColor: colors.background,
   },
-  cartBadgeTopText: { fontSize: 9, fontWeight: "900", color: colors.accentFg },
+  cartBadgeTopText: { fontSize: 10, fontWeight: "900", color: colors.accentFg, letterSpacing: -0.3 },
 
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   card: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, overflow: "hidden", padding: 10 },
@@ -1053,21 +1063,36 @@ const styles = StyleSheet.create({
   // ============================================================
   shopSearch: {
     // The cart icon is absolutely positioned (see `cartIconBtnAbs`) so the
-    // search bar reserves 60px on the right (46px button + 14px breathing
-    // room) via marginRight. This guarantees the cart never overlaps and
-    // the search bar text never disappears behind it.
-    flexDirection: "row", alignItems: "center", gap: 8,
+    // search bar reserves space on the right (52px button + 12px gap = 64px)
+    // via marginRight. This guarantees the cart never overlaps and the
+    // search bar text never disappears behind it.
+    flexDirection: "row", alignItems: "center", gap: 10,
     backgroundColor: colors.surface,
     borderWidth: 1, borderColor: colors.border,
-    borderRadius: 14, paddingHorizontal: 14, height: 46,
-    marginRight: 60,
+    borderRadius: 16, paddingHorizontal: 14, height: 50,
+    marginRight: 64,
+    // Subtle elevation — gives the search bar a "premium" feel and helps
+    // distinguish it from the background. Uses `boxShadow` (new RN prop).
+    ...Platform.select({
+      ios: {
+        shadowColor: "#0F2A1D",
+        shadowOpacity: 0.06,
+        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 2 },
+      },
+      android: { elevation: 1 },
+      default: { boxShadow: "0px 2px 8px rgba(15,42,29,0.06)" as any },
+    }),
   },
   shopSearchInput: {
-    flex: 1, fontSize: 14, color: colors.textMain, paddingVertical: 0,
+    flex: 1, fontSize: 14.5, color: colors.textMain, paddingVertical: 0,
+    fontWeight: "500",
   },
   searchFilterBtn: {
-    width: 30, height: 30, borderRadius: 10,
-    backgroundColor: colors.primary,
+    // Clean, subtle filter chip — neutral background by default, green when
+    // active. Pairs visually with the cart button without being garish.
+    width: 32, height: 32, borderRadius: 10,
+    backgroundColor: colors.brand100,
     alignItems: "center", justifyContent: "center",
   },
 
