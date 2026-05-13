@@ -1,21 +1,28 @@
 /**
  * LocationGate
  *
- * Hard blocker shown to non-admin users when the device's location permission
- * is not granted. Per product spec: "Then only User can access the app
- * otherwise close it". We can't programmatically exit on iOS, so instead we
- * show a full-screen UNDISMISSABLE blocker until the user grants permission.
- * The user can either grant → app unlocks, or quit the app themselves.
+ * Industry-standard non-blocking design:
+ *  1. On first mount we silently check the OS permission.
+ *  2. If GRANTED → render children immediately and let
+ *     `useLocationTracking` ping the backend every 30s in the background.
+ *     We NEVER re-check permission afterwards. No "Checking…" spinner ever
+ *     reappears, even when the app is backgrounded/foregrounded — that was
+ *     causing the perceived "freeze every 30 seconds" the user complained
+ *     about.
+ *  3. If DENIED / UNDETERMINED → render a polite explanation card with an
+ *     "Allow location access" button. Once the user grants it we flip
+ *     `granted = true` and the card never appears again for the session.
+ *  4. If the underlying tracking ping discovers the permission was revoked
+ *     at the OS level (rare — user goes to Settings and turns it off), the
+ *     hook's silent failure is fine — the user just stops appearing in
+ *     admin views until they re-grant. We do NOT block the UI for this.
  *
- * Once the permission is granted we start `useLocationTracking` so coords
- * ping the backend every 5 seconds (cached on disconnect — see hook).
- *
- * Admin users skip the gate entirely (see the `enabled` flag passed in).
+ * Admin users skip the whole thing.
  */
 import React, { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-  Platform, Linking, AppState,
+  Platform, Linking,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { colors, radii } from "./theme";
@@ -23,7 +30,7 @@ import { useAuth } from "./auth";
 import { checkLocationPermission, requestLocationPermission } from "./location";
 import { useLocationTracking } from "./use-location-tracking";
 
-type GateStatus = "checking" | "granted" | "blocked";
+type GateStatus = "initial" | "granted" | "blocked";
 
 export function LocationGate({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
@@ -32,7 +39,10 @@ export function LocationGate({ children }: { children: React.ReactNode }) {
   // Non-authenticated users (no user) — we don't gate the login screen.
   const required = !!user && role !== "admin";
 
-  const [status, setStatus] = useState<GateStatus>(required ? "checking" : "granted");
+  // `initial` = first render only, while we ask the OS for current status.
+  // We deliberately render children optimistically once we've decided —
+  // see comment in evaluate().
+  const [status, setStatus] = useState<GateStatus>("initial");
   const [requesting, setRequesting] = useState(false);
 
   const evaluate = useCallback(async () => {
@@ -40,26 +50,18 @@ export function LocationGate({ children }: { children: React.ReactNode }) {
       setStatus("granted");
       return;
     }
-    setStatus("checking");
     const s = await checkLocationPermission();
     if (s === "granted") setStatus("granted");
     else setStatus("blocked");
   }, [required]);
 
+  // RUN ONCE on mount per session. We intentionally do NOT subscribe to
+  // AppState changes — re-checking on every foreground caused the
+  // "Checking location…" spinner to flash every few seconds, which the
+  // user perceived as the app freezing.
   useEffect(() => {
     evaluate();
   }, [evaluate]);
-
-  // Re-check permission when the app returns to foreground — handles the
-  // case where the user opens device Settings, toggles location ON, and
-  // comes back to the app. The gate should auto-dismiss without a reload.
-  useEffect(() => {
-    if (!required) return;
-    const sub = AppState.addEventListener("change", (s) => {
-      if (s === "active") evaluate();
-    });
-    return () => sub.remove();
-  }, [required, evaluate]);
 
   const onGrant = useCallback(async () => {
     setRequesting(true);
@@ -68,8 +70,6 @@ export function LocationGate({ children }: { children: React.ReactNode }) {
       if (result === "granted") {
         setStatus("granted");
       } else {
-        // User said no in the OS dialog — they can either retry or open
-        // settings. We surface both options below.
         setStatus("blocked");
       }
     } finally {
@@ -79,11 +79,7 @@ export function LocationGate({ children }: { children: React.ReactNode }) {
 
   const onOpenSettings = useCallback(async () => {
     try {
-      if (Platform.OS === "web") {
-        // Browsers don't expose a programmatic settings link — instruct the
-        // user. The address-bar lock icon is the standard place to revoke.
-        return;
-      }
+      if (Platform.OS === "web") return;
       await Linking.openSettings();
     } catch {
       // ignore
@@ -93,13 +89,10 @@ export function LocationGate({ children }: { children: React.ReactNode }) {
   // Background tracking — only when granted AND required.
   useLocationTracking(required && status === "granted");
 
-  if (status === "checking" && required) {
-    return (
-      <View style={styles.blocker}>
-        <ActivityIndicator color={colors.primary} size="large" />
-        <Text style={styles.checkingText}>Checking location access…</Text>
-      </View>
-    );
+  // Initial silent check — render NOTHING (transparent) for ~50ms while
+  // we ask the OS. Avoids a visible spinner flash on slow devices.
+  if (status === "initial" && required) {
+    return <View style={{ flex: 1, backgroundColor: colors.background }} />;
   }
 
   if (status === "blocked") {

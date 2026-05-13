@@ -624,7 +624,6 @@ export function ShopLayoutRenderer({
         ]);
         if (cancelled) return;
         const blocks: LayoutBlock[] = bRes.data?.items || [];
-        setBlocks(blocks);
         const pData = pRes.data;
         const pList: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
         const map: Record<string, Product> = {};
@@ -643,7 +642,6 @@ export function ShopLayoutRenderer({
             const arr = ids.map((id) => map[id]).filter(Boolean) as Product[];
             cacheUpdates[b.id] = arr;
           } else {
-            const key = `${ds}__${b.category_filter || category || ""}__${b.product_count || 10}`;
             dataPromises.push((async () => {
               try {
                 const r = await api.get<any>("/products/by-source", {
@@ -663,7 +661,14 @@ export function ShopLayoutRenderer({
           }
         }
         await Promise.all(dataPromises);
-        if (!cancelled) setSourceCache(cacheUpdates);
+        if (cancelled) return;
+        // Critical: commit BOTH the layout AND the product cache in the same
+        // render tick. This avoids the "empty blocks flash" the user saw —
+        // previously blocks rendered first (empty product lists), then the
+        // by-source calls filled them in over the next 500-1500ms which
+        // looked like the layout was missing or broken.
+        setSourceCache(cacheUpdates);
+        setBlocks(blocks);
       } catch {
         if (!cancelled) setBlocks([]);
       }

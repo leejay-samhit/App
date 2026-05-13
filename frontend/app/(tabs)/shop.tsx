@@ -908,33 +908,35 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     alignItems: "center", justifyContent: "center",
   },
-  // Absolute-positioned, premium-styled cart/language button. Same height as
-  // the search bar (50px) so they read as one unified row.
+  // Compact, balanced absolute-positioned cart/language button.
+  // 44×44 = iOS minimum tap target; pairs cleanly with a 46px search bar
+  // (subtle vertical centering via top: 8 → search-bar bottom is 56,
+  // cart bottom is 52, both visually aligned).
   cartIconBtnAbs: {
     position: "absolute",
     right: 14,
-    top: 10, // = topHeader.paddingTop so it aligns with the search bar
-    width: 50, height: 50, borderRadius: 16,
+    top: 12, // matches topHeader.paddingTop + 2px so cart centers on search-bar mid-line
+    width: 44, height: 44, borderRadius: 12,
     backgroundColor: colors.primary,
     alignItems: "center", justifyContent: "center",
     zIndex: 2,
     ...Platform.select({
       ios: {
         shadowColor: colors.primary,
-        shadowOpacity: 0.25,
-        shadowRadius: 10,
-        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.18,
+        shadowRadius: 6,
+        shadowOffset: { width: 0, height: 2 },
       },
-      android: { elevation: 3 },
-      default: { boxShadow: "0px 4px 10px rgba(15,42,29,0.18)" as any },
+      android: { elevation: 2 },
+      default: { boxShadow: "0px 2px 6px rgba(15,42,29,0.12)" as any },
     }),
   },
   cartBadgeTop: {
     position: "absolute", top: -5, right: -5,
-    minWidth: 20, height: 20, borderRadius: 10,
+    minWidth: 18, height: 18, borderRadius: 9,
     backgroundColor: colors.accent,
     alignItems: "center", justifyContent: "center",
-    paddingHorizontal: 5,
+    paddingHorizontal: 4,
     borderWidth: 2, borderColor: colors.background,
   },
   cartBadgeTopText: { fontSize: 10, fontWeight: "900", color: colors.accentFg, letterSpacing: -0.3 },
@@ -1060,36 +1062,30 @@ const styles = StyleSheet.create({
   //  product cards with stock-aware states)
   // ============================================================
   shopSearch: {
-    // The cart icon is absolutely positioned (see `cartIconBtnAbs`) so the
-    // search bar reserves space on the right (52px button + 12px gap = 64px)
-    // via marginRight. This guarantees the cart never overlaps and the
-    // search bar text never disappears behind it.
+    // Cart is absolute-positioned (see `cartIconBtnAbs`). We reserve 54px
+    // on the right (44px button + 10px gap) so the input never overlaps it.
     flexDirection: "row", alignItems: "center", gap: 10,
     backgroundColor: colors.surface,
     borderWidth: 1, borderColor: colors.border,
-    borderRadius: 16, paddingHorizontal: 14, height: 50,
-    marginRight: 64,
-    // Subtle elevation — gives the search bar a "premium" feel and helps
-    // distinguish it from the background. Uses `boxShadow` (new RN prop).
+    borderRadius: 14, paddingHorizontal: 14, height: 46,
+    marginRight: 54,
     ...Platform.select({
       ios: {
         shadowColor: "#0F2A1D",
-        shadowOpacity: 0.06,
-        shadowRadius: 8,
-        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.05,
+        shadowRadius: 6,
+        shadowOffset: { width: 0, height: 1 },
       },
       android: { elevation: 1 },
-      default: { boxShadow: "0px 2px 8px rgba(15,42,29,0.06)" as any },
+      default: { boxShadow: "0px 1px 6px rgba(15,42,29,0.05)" as any },
     }),
   },
   shopSearchInput: {
-    flex: 1, fontSize: 14.5, color: colors.textMain, paddingVertical: 0,
+    flex: 1, fontSize: 14, color: colors.textMain, paddingVertical: 0,
     fontWeight: "500",
   },
   searchFilterBtn: {
-    // Clean, subtle filter chip — neutral background by default, green when
-    // active. Pairs visually with the cart button without being garish.
-    width: 32, height: 32, borderRadius: 10,
+    width: 30, height: 30, borderRadius: 8,
     backgroundColor: colors.brand100,
     alignItems: "center", justifyContent: "center",
   },
