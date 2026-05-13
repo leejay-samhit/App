@@ -13,7 +13,7 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Capture KYC documents and selfie for verification",
         "NSPhotoLibraryUsageDescription": "Upload KYC documents from your photos",
-        "NSLocationWhenInUseUsageDescription": "Show nearby workers and share your live location with customers."
+        "NSLocationWhenInUseUsageDescription": "Show nearby providers and accurate delivery estimates."
       }
     },
     "android": {

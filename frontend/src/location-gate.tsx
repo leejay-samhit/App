@@ -108,14 +108,14 @@ export function LocationGate({ children }: { children: React.ReactNode }) {
         <View style={styles.iconCircle}>
           <Feather name="map-pin" size={36} color={colors.primary} />
         </View>
-        <Text style={styles.title}>Location permission required</Text>
+        <Text style={styles.title}>Turn on location</Text>
         <Text style={styles.body}>
-          This app needs your location to work. Please tap the button below
-          and allow location access to continue.
+          Allow location access for the best experience — we'll match you with
+          nearby providers and keep prices accurate for your area.
         </Text>
         <Text style={styles.bodySmall}>
-          Your coordinates are shared with admins to keep the service
-          marketplace accurate and to help match you with nearby providers.
+          Your coordinates are used only to show nearby services and improve
+          delivery estimates. You can change this anytime in your device settings.
         </Text>
         <TouchableOpacity
           onPress={onGrant}
@@ -128,7 +128,7 @@ export function LocationGate({ children }: { children: React.ReactNode }) {
           ) : (
             <>
               <Feather name="navigation" size={16} color={colors.primaryFg} />
-              <Text style={styles.primaryBtnText}>Grant location access</Text>
+              <Text style={styles.primaryBtnText}>Allow location access</Text>
             </>
           )}
         </TouchableOpacity>

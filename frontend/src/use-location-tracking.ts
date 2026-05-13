@@ -24,7 +24,11 @@ import { AppState, AppStateStatus } from "react-native";
 import { api } from "./api";
 import { getCurrentCoords } from "./location";
 
-const PING_INTERVAL_MS = 5_000;                  // 5-second cadence per spec
+const PING_INTERVAL_MS = 30_000;                 // 30 s — industry-standard cadence
+                                                  // for foreground location updates. Balances
+                                                  // freshness with battery life. Background
+                                                  // updates rely on the OS "significant
+                                                  // change" trigger via expo-location.
 const LAST_KNOWN_KEY = "@app/lastKnownLocation"; // persisted between runs
 
 export function useLocationTracking(enabled: boolean) {
