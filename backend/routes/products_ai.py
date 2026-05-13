@@ -101,12 +101,17 @@ def _prompt_for(gender: str, size: Optional[str], variation: int) -> str:
     )
 
 
-async def _generate_one(api_key: str, model_id: str, image_b64: str, prompt: str, idx: int) -> Optional[str]:
-    """Generate one image variation; return data URL or None on failure."""
+async def _generate_one(api_key: str, model_id: str, image_b64: str, prompt: str, idx: int, per_call_timeout: float = 50.0) -> Optional[str]:
+    """Generate one image variation; return data URL or None on failure.
+
+    The per-call timeout protects against rare slow Gemini calls that would
+    otherwise push the total wall-time past the 60-second Kubernetes ingress
+    limit and cause the client to see a 502.
+    """
     # Import lazily so the rest of the app boots even if lib has issues
     from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 
-    try:
+    async def _do() -> Optional[str]:
         chat = LlmChat(
             api_key=api_key,
             session_id=f"ai-image-{uuid.uuid4()}",
@@ -123,6 +128,12 @@ async def _generate_one(api_key: str, model_id: str, image_b64: str, prompt: str
             data = img.get("data") or ""
             if data:
                 return f"data:{mime};base64,{data}"
+        return None
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=per_call_timeout)
+    except asyncio.TimeoutError:
+        logger.warning("ai-image variation #%s timed out after %ss", idx, per_call_timeout)
     except Exception as exc:
         logger.exception("ai-image variation #%s failed: %s", idx, exc)
     return None

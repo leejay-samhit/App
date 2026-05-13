@@ -9,6 +9,7 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
+import { RichProductEditor } from "../../src/rich-product-editor";
 
 // Walkthrough steps shown on first visit (and via the "?" button) of
 // /admin/products. Keep these in plain language; admins are not engineers.
@@ -261,11 +262,15 @@ export default function AdminProducts() {
         </ScrollView>
       )}
 
-      <ProductModal
+      <RichProductEditor
         visible={createOpen || !!editing}
-        existing={editing}
+        existing={editing as any}
         onClose={() => { setEditing(null); setCreateOpen(false); }}
         onSaved={async () => { setEditing(null); setCreateOpen(false); await load(); }}
+        endpoints={{
+          create: "/admin/products",
+          update: (id: string) => `/admin/products/${id}`,
+        }}
       />
 
       <InterestedModal product={interestedFor} onClose={() => setInterestedFor(null)} />

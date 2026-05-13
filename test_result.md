@@ -573,6 +573,7 @@ test_plan:
   current_focus:
     - "AI Image Generation endpoint (POST /api/products/ai-image) for Clothes catalog"
     - "Rich Product Editor Category dropdown + Clothes sub-category + Size + AI button (frontend)"
+    - "Admin /admin/products migrated from inline ProductModal to shared RichProductEditor"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -712,6 +713,24 @@ ai_image_generation_2026_05_13:
             both ProductCreate and ProductUpdate so admins/vendors can save
             these along with a Clothes product (backwards compatible — both
             optional, default None).
+
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Frontend follow-up after backend tests passed:
+              • Rich Product Editor now has chip-based Category selector
+                (Electronics, Mobiles, Laptop, Clothes, Shoes, Accessories, Other).
+              • When "Clothes" is picked, Sub-category chips appear
+                (Male / Female / Boys / Girls) plus Size chips (S/M/L/XL/XXL)
+                and a "Generate 5 AI Model Photos" button.
+              • Tapping the button confirms with the user, POSTs to
+                /api/products/ai-image, then REPLACES the gallery (cap 10).
+              • Cover image is preserved as-is per user requirement.
+              • Migrated /admin/products from its inline ProductModal to the
+                shared RichProductEditor so admin matches vendor exactly.
+              • Per-call asyncio.wait_for(50s) timeout added in the backend so
+                the total response always returns within the K8s 60s window
+                (avoids the previously observed client-side 502 for count=5).
 
 metadata:
 
