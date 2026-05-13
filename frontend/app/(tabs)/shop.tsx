@@ -316,9 +316,7 @@ export default function ShopScreen() {
               />
               {shopSearch.length > 0 ? (
                 <TouchableOpacity onPress={() => setShopSearch("")}><Feather name="x-circle" size={18} color={colors.textMuted} /></TouchableOpacity>
-              ) : (
-                <View style={styles.searchFilterBtn}><Feather name="sliders" size={15} color={colors.primary} /></View>
-              )}
+              ) : null}
             </View>
           ) : (
             <View style={{ flex: 1, paddingRight: 60 }}>

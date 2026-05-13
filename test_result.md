@@ -571,9 +571,11 @@ metadata:
 
 test_plan:
   current_focus:
-    - "AI Image Generation endpoint (POST /api/products/ai-image) for Clothes catalog"
-    - "Rich Product Editor Category dropdown + Clothes sub-category + Size + AI button (frontend)"
-    - "Admin /admin/products migrated from inline ProductModal to shared RichProductEditor"
+    - "AI Image Generation endpoint with style parameter (Plain/Highlight/Outdoor/Activity/Accessory)"
+    - "Rich Product Editor: AI style chips + separate reference image + Regenerate button"
+    - "Product detail page: swipeable hero gallery + hide empty spec sections"
+    - "Shop header: filter icon removed; cart inline via absolute positioning"
+    - "Shop category page: removed 'no custom layout' hint message"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"

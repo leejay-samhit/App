@@ -5,10 +5,11 @@
 // delivery), qty + Add-to-Cart + Buy-Now + Save + Ask-Vendor,
 // product details panel (Brand/OS/RAM/CPU/Storage + extras), description,
 // spec tabs, What's-in-the-Box, customer reviews with rating + photos.
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, ActivityIndicator,
   Alert, RefreshControl, TextInput, Modal, Pressable, KeyboardAvoidingView, Platform,
+  useWindowDimensions, NativeSyntheticEvent, NativeScrollEvent,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -34,9 +35,11 @@ type Product = {
 };
 type Review = { id: string; user_id: string; user_name: string; rating: number; title: string; body: string; images: string[]; verified_purchase: boolean; created_at: string; helpful_count?: number; voted_helpful?: boolean };
 
-const PROTECTION_DEFAULT = "Service Protection — covered by 1-year manufacturer warranty + 2-year extended option at checkout.";
-const WARRANTY_DEFAULT = "1-year manufacturer warranty against defects. Free replacements within 7 days of delivery.";
-const DELIVERY_DEFAULT = "Free delivery in 2-4 business days. Same-day delivery available in select pincodes.";
+// Note: previously this file had default-text fallbacks for the styled
+// summary sections (PRICE INFO / SERVICE PROTECTION / WARRANTY / DELIVERY).
+// These were removed per product requirement: sections must only appear in
+// the customer-facing product view if the admin/vendor explicitly filled
+// them in. Empty sections are now hidden entirely.
 
 export default function ProductDetailScreen() {
   const router = useRouter();
@@ -49,6 +52,8 @@ export default function ProductDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeImageIdx, setActiveImageIdx] = useState(0);
+  const heroScrollRef = useRef<ScrollView>(null);
+  const { width: windowWidth } = useWindowDimensions();
   const [qty, setQty] = useState(1);
   const [adding, setAdding] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -102,7 +107,6 @@ export default function ProductDetailScreen() {
     ...(product.image_data_url ? [product.image_data_url] : []),
     ...(product.image_url ? [product.image_url] : []),
   ].slice(0, 10);
-  const heroImage = gallery[activeImageIdx] || gallery[0];
   const breadcrumb = [product.category, product.brand || product.attrs_brand, vendor?.name].filter(Boolean) as string[];
 
   const onAddToCart = async (alsoBuy: boolean = false) => {
@@ -183,21 +187,69 @@ export default function ProductDetailScreen() {
           </View>
         ) : null}
 
-        {/* Hero image */}
+        {/* Hero image — horizontal swipeable gallery with paging dots.
+            Tapping a thumbnail also scrolls the page. */}
         <View style={styles.heroWrap}>
-          {heroImage ? <Image source={{ uri: heroImage }} style={styles.heroImg} resizeMode="cover" /> :
-            <View style={[styles.heroImg, { alignItems: "center", justifyContent: "center" }]}><Feather name="image" size={40} color={colors.textMuted} /></View>}
+          {gallery.length ? (
+            <ScrollView
+              ref={heroScrollRef}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              onMomentumScrollEnd={(e: NativeSyntheticEvent<NativeScrollEvent>) => {
+                const w = e.nativeEvent.layoutMeasurement.width || windowWidth;
+                const idx = Math.round(e.nativeEvent.contentOffset.x / w);
+                if (idx !== activeImageIdx) setActiveImageIdx(idx);
+              }}
+              scrollEventThrottle={16}
+              style={StyleSheet.absoluteFill}
+            >
+              {gallery.map((src, i) => (
+                <Image
+                  key={`hero-${i}`}
+                  source={{ uri: src }}
+                  style={{ width: windowWidth, height: "100%" }}
+                  resizeMode="cover"
+                />
+              ))}
+            </ScrollView>
+          ) : (
+            <View style={[styles.heroImg, { alignItems: "center", justifyContent: "center" }]}>
+              <Feather name="image" size={40} color={colors.textMuted} />
+            </View>
+          )}
           {!inStock ? <View style={styles.heroOOSBadge}><Text style={styles.heroOOSText}>SOLD OUT</Text></View> : null}
           <TouchableOpacity onPress={onToggleSave} style={styles.heartBtn} testID="save-btn">
             <Feather name={saved ? "heart" : "heart"} size={18} color={saved ? "#DC2626" : colors.textMain} fill={saved ? "#DC2626" : "none" as any} />
           </TouchableOpacity>
+          {/* Page indicator dots */}
+          {gallery.length > 1 ? (
+            <View style={styles.heroDots}>
+              {gallery.map((_, i) => (
+                <View key={`dot-${i}`} style={[styles.heroDot, i === activeImageIdx && styles.heroDotActive]} />
+              ))}
+            </View>
+          ) : null}
+          {/* Page counter chip */}
+          {gallery.length > 1 ? (
+            <View style={styles.heroCounter}>
+              <Text style={styles.heroCounterText}>{activeImageIdx + 1}/{gallery.length}</Text>
+            </View>
+          ) : null}
         </View>
 
-        {/* Thumbnail strip */}
+        {/* Thumbnail strip — synced with paged scroll */}
         {gallery.length > 1 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.thumbsRow}>
             {gallery.map((src, i) => (
-              <TouchableOpacity key={`thumb-${i}`} onPress={() => setActiveImageIdx(i)} style={[styles.thumb, i === activeImageIdx && styles.thumbActive]}>
+              <TouchableOpacity
+                key={`thumb-${i}`}
+                onPress={() => {
+                  setActiveImageIdx(i);
+                  heroScrollRef.current?.scrollTo({ x: i * windowWidth, animated: true });
+                }}
+                style={[styles.thumb, i === activeImageIdx && styles.thumbActive]}
+              >
                 <Image source={{ uri: src }} style={styles.thumbImg} resizeMode="cover" />
               </TouchableOpacity>
             ))}
@@ -230,11 +282,11 @@ export default function ProductDetailScreen() {
             ) : null}
           </View>
 
-          {/* Styled summary blocks */}
-          <StyledBlock icon="dollar-sign" label="PRICE INFO" defaultText={`MRP ${formatINR(product.price * 1.25)} · You save ${Math.round(20)}%`} block={product.price_summary} />
-          <StyledBlock icon="shield" label="SERVICE PROTECTION" defaultText={PROTECTION_DEFAULT} block={product.protection_summary} />
-          <StyledBlock icon="award" label="WARRANTY" defaultText={WARRANTY_DEFAULT} block={product.warranty_summary} />
-          <StyledBlock icon="truck" label="ESTIMATED DELIVERY" defaultText={DELIVERY_DEFAULT} block={product.delivery_summary} />
+          {/* Styled summary blocks — only show those the admin/vendor filled in */}
+          <StyledBlock icon="dollar-sign" label="PRICE INFO" block={product.price_summary} />
+          <StyledBlock icon="shield" label="SERVICE PROTECTION" block={product.protection_summary} />
+          <StyledBlock icon="award" label="WARRANTY" block={product.warranty_summary} />
+          <StyledBlock icon="truck" label="ESTIMATED DELIVERY" block={product.delivery_summary} />
 
           {/* Qty stepper */}
           {inStock ? (
@@ -446,8 +498,11 @@ export default function ProductDetailScreen() {
 
 /* ─── Sub-components ─── */
 
-function StyledBlock({ icon, label, defaultText, block }: { icon: any; label: string; defaultText: string; block?: StyledText }) {
-  const text = (block?.text || "").trim() || defaultText;
+function StyledBlock({ icon, label, block }: { icon: any; label: string; block?: StyledText }) {
+  const text = (block?.text || "").trim();
+  // Per user requirement: only render this section if the admin/vendor
+  // explicitly provided text. Empty blocks must NOT appear with a default
+  // placeholder in the user-facing product view.
   if (!text) return null;
   return (
     <View style={styles.summaryBlock}>
@@ -590,8 +645,27 @@ const styles = StyleSheet.create({
   title: { flex: 1, fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
   breadcrumb: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 4, paddingHorizontal: spacing.screen, paddingTop: 10, paddingBottom: 4 },
   crumbText: { fontSize: 11, color: colors.textMuted, fontWeight: "700" },
-  heroWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative" },
+  heroWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative", overflow: "hidden" },
   heroImg: { width: "100%", height: "100%" },
+  heroDots: {
+    position: "absolute", left: 0, right: 0, bottom: 12,
+    flexDirection: "row", justifyContent: "center", alignItems: "center", gap: 6,
+  },
+  heroDot: {
+    width: 6, height: 6, borderRadius: 3,
+    backgroundColor: "rgba(255,255,255,0.55)",
+  },
+  heroDotActive: {
+    width: 18, height: 6, borderRadius: 3,
+    backgroundColor: "#FFFFFF",
+  },
+  heroCounter: {
+    position: "absolute", right: 12, bottom: 12,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,0,0,0.55)",
+  },
+  heroCounterText: { color: "#FFFFFF", fontSize: 11, fontWeight: "800", letterSpacing: 0.3 },
   heroOOSBadge: { position: "absolute", top: 16, left: 16, backgroundColor: "#B91C1C", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
   heroOOSText: { fontSize: 10, fontWeight: "900", color: "#fff", letterSpacing: 1.2 },
   heartBtn: { position: "absolute", top: 14, right: 14, width: 38, height: 38, borderRadius: 19, backgroundColor: "rgba(255,255,255,0.95)", alignItems: "center", justifyContent: "center" },

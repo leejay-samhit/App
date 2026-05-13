@@ -81,9 +81,6 @@ export default function ShopCategoryScreen() {
         />
 
         {/* Fallback / supplementary product grid */}
-        {hasLayout === false ? (
-          <Text style={styles.hint}>No custom layout for this category yet. Showing all products in this category.</Text>
-        ) : null}
         {loadingProducts ? (
           <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
         ) : products.length === 0 ? (

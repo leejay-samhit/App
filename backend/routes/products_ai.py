@@ -40,6 +40,10 @@ class AIImageRequest(BaseModel):
     category: Optional[str] = Field("Clothes", description="Category (default Clothes)")
     size: Optional[str] = Field(None, description="Optional garment size hint (S/M/L/XL/XXL)")
     count: Optional[int] = Field(5, ge=1, le=5, description="Number of variations to produce (max 5)")
+    # Optional style for THIS single call. Frontend issues sequential count=1
+    # calls and rotates the style across selected ones.
+    # One of: plain | highlight | outdoor | activity | accessory
+    style: Optional[str] = Field(None, description="Optional style hint: plain|highlight|outdoor|activity|accessory")
 
 
 class AIImageResponse(BaseModel):
@@ -67,8 +71,8 @@ def _short(s: str, n: int = 20) -> str:
     return s[:n] + ("…" if len(s) > n else "")
 
 
-def _prompt_for(gender: str, size: Optional[str], variation: int) -> str:
-    """Build a tailored prompt for the requested model demographic."""
+def _prompt_for(gender: str, size: Optional[str], variation: int, style: Optional[str] = None) -> str:
+    """Build a tailored prompt for the requested model demographic and STYLE."""
     gender = (gender or "").strip().lower()
     if gender in ("male", "men", "man"):
         subject = "an adult Indian male model (early-to-mid 20s, athletic build, warm Indian complexion, short well-groomed hair)"
@@ -81,23 +85,49 @@ def _prompt_for(gender: str, size: Optional[str], variation: int) -> str:
     else:
         subject = "an adult Indian model wearing the garment"
 
-    # 5 distinct backdrops / poses so the 5 variations look different
-    scenes = [
-        "standing in a bright neutral studio with a soft seamless light-grey backdrop, front-facing pose, soft diffused softbox lighting, full-body shot",
-        "outdoors in an urban Indian street setting with bokeh background, three-quarter pose, golden-hour natural light, full-body shot",
-        "in a modern minimalist white room with daylight from a side window, candid pose looking slightly off-camera, full-body shot",
-        "in a lifestyle setting near a contemporary cafe, walking pose, soft daylight, full-body shot",
-        "in a clean fashion-catalog studio with a warm beige backdrop, hands-in-pockets confident pose, three-point studio lighting, full-body shot",
-    ]
+    # Style-driven scene library. Each style has several distinct prompts so
+    # multiple variations of the same style still look different.
+    style_key = (style or "").strip().lower()
+    scenes_by_style: Dict[str, List[str]] = {
+        "plain": [
+            "in a clean catalog studio with a soft seamless light-grey backdrop, front-facing pose, three-point softbox lighting, full-body shot, accurate human size proportions",
+            "in a minimalist white-cyc studio, three-quarter pose, even diffused lighting, full-body shot with realistic human size and proportions",
+            "in a neutral beige studio backdrop, confident hands-at-sides pose, soft natural-feeling lighting, full-body fashion-catalog shot",
+        ],
+        "highlight": [
+            "as the central figure in a small group of 3-4 stylish Indian friends in casual attire, the main model clearly stands out wearing the garment, candid lifestyle moment in a softly-blurred urban background, full-body shot",
+            "walking confidently in front of a group of admiring people at a trendy Indian street market, the garment is the visual highlight, three-quarter pose, full-body shot",
+            "centered amongst a small friend-group at a cafe, focal model wearing the garment is sharp while the group is softly out of focus, full-body shot",
+        ],
+        "outdoor": [
+            "outdoors against a scenic Indian landscape (mountain or coastline) at golden hour, soft warm natural light, full-body shot",
+            "in a lush green park with sun-dappled background bokeh, three-quarter pose, soft afternoon light, full-body shot",
+            "on a charming heritage street in an Indian city, soft daylight, candid pose, full-body shot",
+        ],
+        "activity": [
+            "in athletic-wear styling captured mid-action at a modern gym, dumbbell rack background, dynamic but elegant pose, full-body shot",
+            "cycling on a tree-lined urban street, motion-blurred background, balanced composition, full-body shot",
+            "dancing energetically at a stylish indoor party with soft string-light bokeh, joyful expression, full-body shot",
+            "walking briskly down a busy modern city sidewalk, candid stride pose, full-body shot",
+        ],
+        "accessory": [
+            "in a high-fashion editorial shot with carefully matched accessories (sunglasses, premium wrist-watch, leather handbag or backpack, statement footwear) that complement the garment, soft studio lighting, full-body shot",
+            "styled with complementary outerwear and accessories suited to the garment's vibe, magazine cover-quality lighting, full-body shot",
+            "presented with curated matching gadgets and accessories laid out subtly around the model, premium product styling, full-body shot",
+        ],
+    }
+    # Fallback scenes for unknown styles (treated as "plain").
+    scenes = scenes_by_style.get(style_key) or scenes_by_style["plain"]
     scene = scenes[variation % len(scenes)]
     size_hint = f" The garment is in size {size}." if size else ""
 
     return (
-        f"Create a photorealistic e-commerce catalog photograph of {subject} wearing the exact "
+        f"Create a photorealistic e-commerce catalog photograph of {subject} wearing the EXACT "
         f"clothing item from the reference image. Preserve the garment's design, color, pattern, "
         f"fabric texture and proportions accurately — only the model and scene change.{size_hint} "
         f"The model is {scene}. Sharp focus on the garment, realistic skin tones, photorealistic, "
-        f"high resolution, professional fashion-catalog quality, no text or watermarks."
+        f"high resolution, professional fashion-catalog quality, no text or watermarks. The garment "
+        f"size on the model must reflect realistic human proportions."
     )
 
 
@@ -178,13 +208,13 @@ async def generate_ai_images(
     count = max(1, min(5, int(req.count or 5)))
 
     logger.info(
-        "AI image gen — user=%s role=%s gender=%s size=%s count=%s src=%s",
-        user.get("id"), role, req.gender, req.size, count, _short(b64),
+        "AI image gen — user=%s role=%s gender=%s size=%s style=%s count=%s src=%s",
+        user.get("id"), role, req.gender, req.size, req.style, count, _short(b64),
     )
 
     # Generate variations concurrently
     tasks = [
-        _generate_one(api_key, model_id, b64, _prompt_for(req.gender, req.size, i), i)
+        _generate_one(api_key, model_id, b64, _prompt_for(req.gender, req.size, i, req.style), i)
         for i in range(count)
     ]
     results = await asyncio.gather(*tasks, return_exceptions=False)

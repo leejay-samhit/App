@@ -195,6 +195,15 @@ export function RichProductEditor({
   // ── Clothes-specific ──
   const [subCategory, setSubCategory] = useState<string>(""); // male|female|boys|girls
   const [clothingSize, setClothingSize] = useState<string>("");
+  // ── AI Reference image (NOT shown in product gallery — used only to
+  // prompt the AI). Kept separate from cover/gallery so the original
+  // reference can be re-used by the "Regenerate" button.
+  const [aiReference, setAiReference] = useState<string>("");
+  // Selected AI style chips: plain | highlight | outdoor | activity | accessory
+  const [aiStyles, setAiStyles] = useState<string[]>(["plain"]);
+  // Whether the current cover/gallery were last produced by the AI.
+  // When true we show the "Regenerate" CTA.
+  const [aiProduced, setAiProduced] = useState<boolean>(false);
   // Track whether the user picked a preset category or chose "Other"
   const isPresetCat = (c: string) => (CATEGORY_OPTIONS as readonly string[]).includes(c) && c !== "Other";
   const [customCategory, setCustomCategory] = useState<boolean>(false);
@@ -233,6 +242,10 @@ export function RichProductEditor({
     setNewSubFeature("");
     setSubCategory(e.sub_category || "");
     setClothingSize(e.clothing_size || "");
+    // Reset AI state — reference image is never persisted on the product.
+    setAiReference("");
+    setAiProduced(false);
+    setAiStyles(["plain"]);
     // If editing an existing product with a custom (non-preset) category,
     // open the free-text input automatically.
     setCustomCategory(!!e.category && !isPresetCat(e.category));
@@ -289,79 +302,166 @@ export function RichProductEditor({
   const isClothes = (category || "").trim().toLowerCase() === "clothes";
   const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
 
+  const AI_STYLES = [
+    { key: "plain",     label: "Plain",     hint: "Catalog studio" },
+    { key: "highlight", label: "Highlight", hint: "In a group" },
+    { key: "outdoor",   label: "Outdoor",   hint: "Scenic backdrop" },
+    { key: "activity",  label: "Activity",  hint: "Gym / cycling / dancing" },
+    { key: "accessory", label: "Accessory", hint: "Styled with gadgets" },
+  ] as const;
+
+  const toggleStyle = (key: string) => {
+    setAiStyles((prev) => {
+      const has = prev.includes(key);
+      if (has) {
+        // don't allow zero selected — keep at least Plain
+        const next = prev.filter((k) => k !== key);
+        return next.length ? next : ["plain"];
+      }
+      return [...prev, key];
+    });
+  };
+
+  // Distribute TARGET (=5) images across selected styles as evenly as possible.
+  // Examples:
+  //  1 style  → [5]
+  //  2 styles → [3, 2]
+  //  3 styles → [2, 2, 1]
+  //  4 styles → [2, 1, 1, 1]
+  //  5 styles → [1, 1, 1, 1, 1]
+  const distributeStyles = (total: number, styleKeys: string[]): string[] => {
+    if (!styleKeys.length) return new Array(total).fill("plain");
+    const n = styleKeys.length;
+    const base = Math.floor(total / n);
+    const remainder = total % n;
+    const seq: string[] = [];
+    styleKeys.forEach((k, i) => {
+      const slots = base + (i < remainder ? 1 : 0);
+      for (let j = 0; j < slots; j++) seq.push(k);
+    });
+    return seq;
+  };
+
+  const runAIGeneration = async (sourceB64: string) => {
+    setAiBusy(true);
+    const TARGET = 5;
+    const styleSeq = distributeStyles(TARGET, aiStyles);
+    setAiProgress({ done: 0, total: TARGET });
+    const collected: string[] = [];
+    try {
+      for (let i = 0; i < TARGET; i++) {
+        const style = styleSeq[i] || "plain";
+        try {
+          const res: any = await api.post(
+            "/products/ai-image",
+            {
+              image_data_url: sourceB64,
+              gender: subCategory,
+              category: "Clothes",
+              size: clothingSize || undefined,
+              count: 1,
+              style,
+            },
+            { timeout: 90000 },
+          );
+          const imgs: string[] = Array.isArray(res?.data?.images) ? res.data.images : [];
+          if (imgs.length) {
+            collected.push(imgs[0]);
+            // Live-update — first image becomes cover, rest become gallery.
+            // The original reference image is NOT shown in the product gallery.
+            if (collected.length === 1) {
+              setImageUrl(imgs[0]);
+              setGalleryImages([]);
+            } else {
+              setGalleryImages(collected.slice(1, 10));
+            }
+          }
+        } catch (innerErr) {
+          // eslint-disable-next-line no-console
+          console.warn("AI image #" + i + " failed:", formatApiError(innerErr));
+        }
+        setAiProgress({ done: i + 1, total: TARGET });
+      }
+      if (!collected.length) {
+        Alert.alert(
+          "AI generation failed",
+          "No images could be generated. Please try a clearer reference photo or check your network and try again.",
+        );
+        return;
+      }
+      setAiProduced(true);
+      Alert.alert(
+        "Done",
+        `Generated ${collected.length} of ${TARGET} AI image${collected.length === 1 ? "" : "s"}. Cover + gallery have been replaced.`,
+      );
+    } finally {
+      setAiBusy(false);
+      setAiProgress(null);
+    }
+  };
+
   const onGenerateAI = async () => {
     if (!isClothes) return;
     if (!subCategory) {
       Alert.alert("Pick a sub-category", "Please select Male, Female, Boys or Girls first.");
       return;
     }
-    if (!imageUrl) {
-      Alert.alert("Reference image required", "Please upload a basic photo of the clothes first (Cover image).");
+    if (!aiStyles.length) {
+      Alert.alert("Pick at least one style", "Tap one or more style chips (Plain, Outdoor, Activity, etc).");
       return;
+    }
+    // Pick a reference photo if we don't have one yet — separate from cover.
+    let ref = aiReference;
+    if (!ref) {
+      try {
+        const data = await pickAndCompressImage({ aspect: [3, 4], width: 900 });
+        if (!data) return;
+        ref = data;
+        setAiReference(data);
+      } catch (e) {
+        Alert.alert("Image pick failed", formatApiError(e));
+        return;
+      }
     }
     Alert.alert(
       "Generate AI catalog photos?",
-      "This will REPLACE all current gallery images with 5 AI-generated photos of an Indian model wearing the garment. The cover image is preserved.\n\nThis may take 1–2 minutes total — please keep the screen open.",
+      `This will REPLACE both cover and gallery images with 5 AI photos of an Indian model wearing the garment, distributed across the ${aiStyles.length} selected style${aiStyles.length === 1 ? "" : "s"}. Your uploaded reference photo is kept SEPARATELY (not shown in the product gallery).\n\nThis takes 1-2 minutes — please keep the screen open.`,
       [
         { text: "Cancel", style: "cancel" },
-        {
-          text: "Generate",
-          style: "default",
-          onPress: async () => {
-            setAiBusy(true);
-            const TARGET = 5;
-            setAiProgress({ done: 0, total: TARGET });
-            // Sequential single-image requests — each completes in ~20-30s
-            // (well under the 60s K8s ingress timeout). We progressively
-            // collect images and update the gallery as they arrive so the
-            // user sees real-time feedback.
-            const collected: string[] = [];
-            try {
-              for (let i = 0; i < TARGET; i++) {
-                try {
-                  const res: any = await api.post(
-                    "/products/ai-image",
-                    {
-                      image_data_url: imageUrl,
-                      gender: subCategory,
-                      category: "Clothes",
-                      size: clothingSize || undefined,
-                      count: 1,
-                    },
-                    { timeout: 90000 },
-                  );
-                  const imgs: string[] = Array.isArray(res?.data?.images) ? res.data.images : [];
-                  if (imgs.length) {
-                    collected.push(imgs[0]);
-                    // Live-update the gallery so the user sees progress
-                    setGalleryImages([...collected].slice(0, 10));
-                  }
-                } catch (innerErr) {
-                  // Don't abort the whole batch on one failure; continue.
-                  // eslint-disable-next-line no-console
-                  console.warn("AI image #" + i + " failed:", formatApiError(innerErr));
-                }
-                setAiProgress({ done: i + 1, total: TARGET });
-              }
-              if (!collected.length) {
-                Alert.alert(
-                  "AI generation failed",
-                  "No images could be generated. Please try a clearer reference photo or check your network and try again.",
-                );
-                return;
-              }
-              Alert.alert(
-                "Done",
-                `Generated ${collected.length} of ${TARGET} AI image${collected.length === 1 ? "" : "s"} and replaced the gallery.`,
-              );
-            } finally {
-              setAiBusy(false);
-              setAiProgress(null);
-            }
-          },
-        },
+        { text: "Generate", style: "default", onPress: () => runAIGeneration(ref) },
       ],
     );
+  };
+
+  const onRegenerateAI = async () => {
+    if (!aiReference) {
+      Alert.alert("No reference image", "Please upload a reference photo first using the Generate button.");
+      return;
+    }
+    if (!subCategory) {
+      Alert.alert("Pick a sub-category", "Please select Male, Female, Boys or Girls first.");
+      return;
+    }
+    Alert.alert(
+      "Regenerate AI photos?",
+      `This will REPLACE the current cover + gallery with 5 fresh AI photos using the same reference image, distributed across the ${aiStyles.length} selected style${aiStyles.length === 1 ? "" : "s"}.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Regenerate", style: "default", onPress: () => runAIGeneration(aiReference) },
+      ],
+    );
+  };
+
+  const onChangeReference = async () => {
+    try {
+      const data = await pickAndCompressImage({ aspect: [3, 4], width: 900 });
+      if (data) {
+        setAiReference(data);
+        Alert.alert("Reference updated", "Tap Generate (or Regenerate) to create photos with this new reference.");
+      }
+    } catch (e) {
+      Alert.alert("Image pick failed", formatApiError(e));
+    }
   };
 
   const onSubmit = async () => {
@@ -529,7 +629,46 @@ export function RichProductEditor({
                     ))}
                   </View>
 
-                  {/* AI Image Generator */}
+                  {/* ── AI Style picker (multi-select). Tap to toggle.
+                       Distribution algorithm in `distributeStyles` decides how
+                       the 5 images map to the selected styles. ── */}
+                  <Text style={modalStyles.fieldLabel}>AI photo styles</Text>
+                  <View style={sectionStyles.chipRow}>
+                    {AI_STYLES.map((s) => {
+                      const active = aiStyles.includes(s.key);
+                      return (
+                        <TouchableOpacity
+                          key={s.key}
+                          onPress={() => toggleStyle(s.key)}
+                          style={[sectionStyles.chip, active && sectionStyles.chipActive]}
+                          testID={`product-ai-style-${s.key}`}
+                        >
+                          <Text style={[sectionStyles.chipText, active && sectionStyles.chipTextActive]}>{s.label}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  <Text style={[sectionStyles.aiHint, { marginTop: 4 }]}>
+                    Pick one or more styles. 5 images will be split across them automatically
+                    (1→5, 2→3+2, 3→2+2+1, 4→2+1+1+1, 5→1 each).
+                  </Text>
+
+                  {/* ── Reference image preview (kept SEPARATE from cover/gallery) ── */}
+                  {aiReference ? (
+                    <View style={sectionStyles.aiRefRow}>
+                      <Image source={{ uri: aiReference }} style={sectionStyles.aiRefThumb} resizeMode="cover" />
+                      <View style={{ flex: 1 }}>
+                        <Text style={sectionStyles.aiRefLabel}>AI Reference</Text>
+                        <Text style={sectionStyles.aiRefSub}>Used only as a guide — won't appear in the product gallery.</Text>
+                      </View>
+                      <TouchableOpacity onPress={onChangeReference} style={sectionStyles.aiRefBtn} testID="product-ai-ref-change">
+                        <Feather name="refresh-cw" size={14} color={colors.primary} />
+                        <Text style={sectionStyles.aiRefBtnText}>Change</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
+
+                  {/* AI Image Generator + Regenerate */}
                   <TouchableOpacity
                     onPress={onGenerateAI}
                     disabled={aiBusy}
@@ -546,14 +685,27 @@ export function RichProductEditor({
                     ) : (
                       <>
                         <Feather name="zap" size={16} color="#fff" />
-                        <Text style={sectionStyles.aiBtnText}>Generate 5 AI Model Photos</Text>
+                        <Text style={sectionStyles.aiBtnText}>
+                          {aiReference ? "Generate 5 AI Photos" : "Pick reference & Generate"}
+                        </Text>
                       </>
                     )}
                   </TouchableOpacity>
+                  {aiProduced && aiReference ? (
+                    <TouchableOpacity
+                      onPress={onRegenerateAI}
+                      disabled={aiBusy}
+                      style={[sectionStyles.aiBtnSecondary, aiBusy && { opacity: 0.7 }]}
+                      testID="product-ai-regenerate"
+                    >
+                      <Feather name="refresh-cw" size={14} color={colors.primary} />
+                      <Text style={sectionStyles.aiBtnSecondaryText}>Regenerate (Realign)</Text>
+                    </TouchableOpacity>
+                  ) : null}
                   <Text style={sectionStyles.aiHint}>
-                    Uses Gemini Nano Banana to create 5 photorealistic Indian model photos wearing your clothes.
-                    Each photo takes ~25 seconds — the gallery updates live as each one finishes. Replaces all
-                    existing gallery images. Cover image is kept as-is.
+                    AI replaces both cover and gallery with 5 photorealistic Indian model photos.
+                    Each photo takes ~25s. The reference image is kept separately and never shown
+                    to customers.
                   </Text>
                 </View>
               ) : null}
@@ -873,5 +1025,29 @@ const sectionStyles = StyleSheet.create({
   // AI button
   aiBtn: { marginTop: 12, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 12, borderRadius: 12, backgroundColor: "#7C3AED" },
   aiBtnText: { color: "#fff", fontSize: 13, fontWeight: "800", letterSpacing: 0.2 },
+  aiBtnSecondary: {
+    marginTop: 8, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    paddingVertical: 10, borderRadius: 12,
+    backgroundColor: "transparent", borderWidth: 1, borderColor: colors.primary,
+  },
+  aiBtnSecondaryText: { color: colors.primary, fontSize: 12.5, fontWeight: "800", letterSpacing: 0.2 },
   aiHint: { fontSize: 11, color: colors.textMuted, marginTop: 8, lineHeight: 15 },
+
+  // AI reference image row
+  aiRefRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    marginTop: 12, padding: 10,
+    backgroundColor: colors.surface, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  aiRefThumb: { width: 48, height: 60, borderRadius: 8, overflow: "hidden", backgroundColor: colors.surfaceMuted },
+  aiRefLabel: { fontSize: 12, fontWeight: "800", color: colors.textMain, letterSpacing: 0.2 },
+  aiRefSub: { fontSize: 10.5, color: colors.textMuted, marginTop: 1, lineHeight: 14 },
+  aiRefBtn: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 999, borderWidth: 1, borderColor: colors.primary,
+    backgroundColor: colors.brand100,
+  },
+  aiRefBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
 });
