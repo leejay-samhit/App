@@ -182,8 +182,13 @@ async def generate_ai_images(
     Auth: any authenticated admin or vendor.
     """
     role = (user.get("role") or "").lower()
-    if role not in ("admin", "vendor"):
-        raise HTTPException(status_code=403, detail="Only admins and vendors can use AI image generation.")
+    # ADMIN ONLY. Vendors are intentionally blocked from the AI image
+    # generator because all calls share one Emergent LLM Key budget — opening
+    # this up to vendors would drain the balance instantly with many users.
+    # To re-enable per-vendor AI later, swap this check for a paid-credit
+    # check (e.g., debit from a vendor wallet).
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="AI image generation is restricted to super admins.")
 
     try:
         b64 = _strip_data_url(req.image_data_url)

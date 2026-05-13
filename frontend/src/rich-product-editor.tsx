@@ -20,6 +20,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "./api";
 import { colors, radii } from "./theme";
+import { useAuth } from "./auth";
 
 // ── Types ──
 export type StyledText = { text?: string; bold?: boolean; font_size?: number | null; align?: "left" | "center" | "right" };
@@ -161,6 +162,12 @@ export function RichProductEditor({
   onSaved: () => void;
   endpoints: RichProductEndpoints;
 }) {
+  // Role-gate the AI image generator. Only SUPER ADMIN sees the AI block.
+  // Vendors must post product images manually. This protects the single
+  // shared Emergent LLM Key budget from being drained by many vendors.
+  const { user } = useAuth();
+  const canUseAI = (user?.role || "").toLowerCase() === "admin";
+
   // ── Basics ──
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
@@ -629,10 +636,16 @@ export function RichProductEditor({
                     ))}
                   </View>
 
-                  {/* ── AI Style picker (multi-select). Tap to toggle.
-                       Distribution algorithm in `distributeStyles` decides how
-                       the 5 images map to the selected styles. ── */}
-                  <Text style={modalStyles.fieldLabel}>AI photo styles</Text>
+                  {/* ── AI image generator — ADMIN ONLY.
+                       Vendors must upload product photos manually (the regular
+                       cover + gallery upload above). This is intentional: the
+                       app shares one Emergent LLM Key budget across all users,
+                       and unrestricted vendor AI access would drain it
+                       instantly. To enable AI per-vendor in the future, add a
+                       paid credit wallet and re-enable this block. ── */}
+                  {canUseAI ? (
+                    <>
+                      <Text style={modalStyles.fieldLabel}>AI photo styles</Text>
                   <View style={sectionStyles.chipRow}>
                     {AI_STYLES.map((s) => {
                       const active = aiStyles.includes(s.key);
@@ -707,6 +720,8 @@ export function RichProductEditor({
                     Each photo takes ~25s. The reference image is kept separately and never shown
                     to customers.
                   </Text>
+                    </>
+                  ) : null}
                 </View>
               ) : null}
 
