@@ -124,6 +124,11 @@ function BannerSliderBlock({
   const [idx, setIdx] = useState(0);
   const items = block.items || [];
   const height = resolveBlockHeight(block);
+  // Slide width must exactly match the visible carousel width. The shop tab
+  // uses 12px horizontal padding on each side (24px total), so the carousel
+  // takes up `screenWidth - 24`. Mismatched widths cause the next slide to
+  // peek from the right edge — the exact bug a customer reported.
+  const slideWidth = screenWidth - 24;
   // Auto-advance every 4s
   useEffect(() => {
     if (items.length <= 1) return;
@@ -137,14 +142,16 @@ function BannerSliderBlock({
         horizontal
         pagingEnabled
         showsHorizontalScrollIndicator={false}
+        snapToInterval={slideWidth}
+        snapToAlignment="start"
+        decelerationRate="fast"
         data={items}
         keyExtractor={(_, i) => `slide-${i}`}
-        renderItem={({ item, index }) => {
-          const isLastWidth = screenWidth - 32; // account for screen padding
+        renderItem={({ item }) => {
           return (
             <TouchableOpacity
               activeOpacity={0.9}
-              style={[styles.slide, { width: isLastWidth, height, backgroundColor: item.color || block.bg_color || colors.brand100 }]}
+              style={[styles.slide, { width: slideWidth, height, backgroundColor: item.color || block.bg_color || colors.brand100 }]}
               onPress={() => {
                 if (item.link_type === "product" && item.link_value) onProductPress?.(item.link_value);
                 else if (item.link_type === "category" && item.link_value) onCategoryPress?.(item.link_value);
@@ -174,9 +181,9 @@ function BannerSliderBlock({
         }}
         onMomentumScrollEnd={(e) => {
           const x = e.nativeEvent.contentOffset.x;
-          setIdx(Math.round(x / (screenWidth - 32)));
+          setIdx(Math.round(x / slideWidth));
         }}
-        getItemLayout={(_, index) => ({ length: screenWidth - 32, offset: (screenWidth - 32) * index, index })}
+        getItemLayout={(_, index) => ({ length: slideWidth, offset: slideWidth * index, index })}
         ItemSeparatorComponent={() => <View style={{ width: 0 }} />}
       />
       {items.length > 1 ? (
