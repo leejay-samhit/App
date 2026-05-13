@@ -292,10 +292,20 @@ export default function ShopScreen() {
       >
         {/* Top header — sticks to the top when scrolling.
             Shop mode: in-line search bar + cart icon (Member-Store text removed).
-            Services mode: eyebrow + title + globe icon (unchanged). */}
+            Services mode: eyebrow + title + globe icon (unchanged).
+
+            IMPORTANT — keep this row literal:
+              <View flexDirection="row"> <Search flex:1 /> <Button width:46 /> </View>
+            We do NOT use `gap` here because the user reported the cart icon
+            wrapping below the search bar on real devices.  Some Android
+            versions / older Expo runtimes don't honour `gap` on plain Views
+            and fall back to ZERO spacing, but the issue we hit was different:
+            the cart was being pushed to a NEW LINE on narrower devices.
+            Using an explicit `marginLeft: 10` on the trailing button
+            guarantees the gap is honoured and the cart NEVER wraps. */}
         <View style={styles.topHeader}>
           {mode === "shop" ? (
-            <View style={[styles.shopSearch, { flex: 1, marginVertical: 0 }]}>
+            <View style={[styles.shopSearch, { flex: 1, flexShrink: 1, minWidth: 0, marginVertical: 0 }]}>
               <Feather name="search" size={16} color={colors.textMuted} />
               <TextInput
                 style={styles.shopSearchInput}
@@ -312,7 +322,7 @@ export default function ShopScreen() {
               )}
             </View>
           ) : (
-            <View style={{ flex: 1 }}>
+            <View style={{ flex: 1, flexShrink: 1, minWidth: 0 }}>
               <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
               <Text style={styles.topHeaderTitle}>Find local talent</Text>
             </View>
@@ -320,7 +330,7 @@ export default function ShopScreen() {
           {mode === "services" && (
             <TouchableOpacity
               onPress={() => setLangModalOpen(true)}
-              style={[styles.cartIconBtn, languageQ && { backgroundColor: colors.brand100, borderColor: colors.primary }]}
+              style={[styles.cartIconBtn, { marginLeft: 10, flexShrink: 0 }, languageQ && { backgroundColor: colors.brand100, borderColor: colors.primary }]}
               testID="services-language-top-btn"
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
@@ -335,7 +345,7 @@ export default function ShopScreen() {
           {mode === "shop" && (
             <TouchableOpacity
               onPress={() => router.push("/cart")}
-              style={styles.cartIconBtn}
+              style={[styles.cartIconBtn, { marginLeft: 10, flexShrink: 0 }]}
               testID="shop-cart-btn"
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
@@ -830,7 +840,11 @@ const styles = StyleSheet.create({
   cartBadgeText: { fontSize: 10, fontWeight: "800" },
   // Slim top header (replaces the SHOP gradient hero) with a small cart icon at right
   topHeader: {
-    flexDirection: "row", alignItems: "center", gap: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    // NOTE: intentionally NO `gap` here.  Some Android/Expo runtimes the user
+    // is on don't honour `gap` on Views and the cart icon was wrapping below
+    // the search bar.  We use `marginLeft: 10` on the trailing button instead.
     paddingHorizontal: 12,
     paddingTop: 6, paddingBottom: 12,
     backgroundColor: colors.background,

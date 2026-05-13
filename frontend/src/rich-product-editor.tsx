@@ -37,7 +37,23 @@ export type RichProduct = {
   attrs_cpu_model?: string; attrs_cpu_speed?: string; attrs_storage?: string;
   extra_attrs?: Record<string, string>;
   spec_tabs?: SpecTab[]; whats_in_box?: BoxItem[];
+  // Clothes-specific
+  sub_category?: string; // male | female | boys | girls
+  clothing_size?: string; // S | M | L | XL | XXL
 };
+
+// Predefined category options. The last value ("Other") lets the user
+// type any custom category.
+const CATEGORY_OPTIONS = [
+  "Electronics", "Mobiles", "Laptop", "Clothes", "Shoes", "Accessories", "Other",
+] as const;
+const CLOTHES_SUB_OPTIONS = [
+  { key: "male", label: "Male (Men)" },
+  { key: "female", label: "Female (Women)" },
+  { key: "boys", label: "Boys (Kids)" },
+  { key: "girls", label: "Girls (Kids)" },
+] as const;
+const CLOTHES_SIZE_OPTIONS = ["S", "M", "L", "XL", "XXL"] as const;
 
 export type RichProductEndpoints = {
   /** Endpoint to POST the JSON payload for CREATE (e.g. "/admin/products"). */
@@ -176,9 +192,16 @@ export function RichProductEditor({
   const [specTabs, setSpecTabs] = useState<SpecTab[]>([]);
   // ── What's in the box ──
   const [whatsInBox, setWhatsInBox] = useState<BoxItem[]>([]);
+  // ── Clothes-specific ──
+  const [subCategory, setSubCategory] = useState<string>(""); // male|female|boys|girls
+  const [clothingSize, setClothingSize] = useState<string>("");
+  // Track whether the user picked a preset category or chose "Other"
+  const isPresetCat = (c: string) => (CATEGORY_OPTIONS as readonly string[]).includes(c) && c !== "Other";
+  const [customCategory, setCustomCategory] = useState<boolean>(false);
 
   const [saving, setSaving] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
 
   // Hydrate when modal opens (or when switching to a different product)
   useEffect(() => {
@@ -208,6 +231,11 @@ export function RichProductEditor({
     setSpecTabs(Array.isArray(e.spec_tabs) ? e.spec_tabs.map((t: any) => ({ name: t.name || "", rows: Array.isArray(t.rows) ? t.rows : [] })) : []);
     setWhatsInBox(Array.isArray(e.whats_in_box) ? e.whats_in_box : []);
     setNewSubFeature("");
+    setSubCategory(e.sub_category || "");
+    setClothingSize(e.clothing_size || "");
+    // If editing an existing product with a custom (non-preset) category,
+    // open the free-text input automatically.
+    setCustomCategory(!!e.category && !isPresetCat(e.category));
   }, [visible, existing?.id]);
 
   const onPickCover = async () => {
@@ -257,6 +285,56 @@ export function RichProductEditor({
     }
   };
 
+  // ── AI Image Generation (Clothes only) ──
+  const isClothes = (category || "").trim().toLowerCase() === "clothes";
+
+  const onGenerateAI = async () => {
+    if (!isClothes) return;
+    if (!subCategory) {
+      Alert.alert("Pick a sub-category", "Please select Male, Female, Boys or Girls first.");
+      return;
+    }
+    if (!imageUrl) {
+      Alert.alert("Reference image required", "Please upload a basic photo of the clothes first (Cover image).");
+      return;
+    }
+    Alert.alert(
+      "Generate AI catalog photos?",
+      "This will REPLACE all current gallery images with 5 AI-generated photos of an Indian model wearing the garment. The cover image is preserved. Continue?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Generate",
+          style: "default",
+          onPress: async () => {
+            setAiBusy(true);
+            try {
+              const res: any = await api.post("/products/ai-image", {
+                image_data_url: imageUrl,
+                gender: subCategory,
+                category: "Clothes",
+                size: clothingSize || undefined,
+                count: 5,
+              });
+              const imgs: string[] = Array.isArray(res?.data?.images) ? res.data.images : [];
+              if (!imgs.length) {
+                Alert.alert("No images", "AI did not return any images. Please try again with a clearer reference photo.");
+                return;
+              }
+              // Replace gallery completely (cap to 10)
+              setGalleryImages(imgs.slice(0, 10));
+              Alert.alert("Done", `Generated ${imgs.length} AI image${imgs.length === 1 ? "" : "s"} and replaced the gallery.`);
+            } catch (e) {
+              Alert.alert("AI generation failed", formatApiError(e));
+            } finally {
+              setAiBusy(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const onSubmit = async () => {
     const priceN = Number(price);
     const stockN = Number(stock);
@@ -299,6 +377,8 @@ export function RichProductEditor({
           .map((t) => ({ name: t.name.trim(), rows: t.rows.filter((r) => r.label.trim() || r.value.trim()) }))
           .filter((t) => t.name || t.rows.length),
         whats_in_box: whatsInBox.filter((b) => b.name.trim() || b.image_data_url),
+        sub_category: isClothes ? (subCategory || undefined) : undefined,
+        clothing_size: isClothes ? (clothingSize || undefined) : undefined,
       };
       if (existing?.id) {
         await api.patch(endpoints.update(existing.id), payload);
@@ -349,7 +429,103 @@ export function RichProductEditor({
               <Text style={modalStyles.fieldLabel}>Stock</Text>
               <TextInput value={stock} onChangeText={setStock} keyboardType="number-pad" style={modalStyles.input} testID="product-stock" />
               <Text style={modalStyles.fieldLabel}>Category</Text>
-              <TextInput value={category} onChangeText={setCategory} placeholder="e.g. Electronics, Fashion" placeholderTextColor={colors.textMuted} style={modalStyles.input} testID="product-category" />
+              <View style={sectionStyles.chipRow}>
+                {CATEGORY_OPTIONS.map((opt) => {
+                  const selected = opt === "Other"
+                    ? customCategory
+                    : !customCategory && category === opt;
+                  return (
+                    <TouchableOpacity
+                      key={opt}
+                      onPress={() => {
+                        if (opt === "Other") {
+                          setCustomCategory(true);
+                          // keep current text if present
+                        } else {
+                          setCustomCategory(false);
+                          setCategory(opt);
+                          // Reset clothes-only fields when switching away
+                          if (opt !== "Clothes") {
+                            setSubCategory("");
+                            setClothingSize("");
+                          }
+                        }
+                      }}
+                      style={[sectionStyles.chip, selected && sectionStyles.chipActive]}
+                      testID={`product-category-${opt.toLowerCase()}`}
+                    >
+                      <Text style={[sectionStyles.chipText, selected && sectionStyles.chipTextActive]}>{opt}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              {customCategory ? (
+                <TextInput
+                  value={category}
+                  onChangeText={setCategory}
+                  placeholder="Type a custom category"
+                  placeholderTextColor={colors.textMuted}
+                  style={[modalStyles.input, { marginTop: 8 }]}
+                  testID="product-category-custom"
+                />
+              ) : null}
+
+              {/* Clothes-specific sub-category + size */}
+              {isClothes ? (
+                <View style={sectionStyles.clothesBlock}>
+                  <Text style={[modalStyles.fieldLabel, { marginTop: 0 }]}>Sub-category</Text>
+                  <View style={sectionStyles.chipRow}>
+                    {CLOTHES_SUB_OPTIONS.map((s) => (
+                      <TouchableOpacity
+                        key={s.key}
+                        onPress={() => setSubCategory(s.key)}
+                        style={[sectionStyles.chip, subCategory === s.key && sectionStyles.chipActive]}
+                        testID={`product-subcat-${s.key}`}
+                      >
+                        <Text style={[sectionStyles.chipText, subCategory === s.key && sectionStyles.chipTextActive]}>{s.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <Text style={modalStyles.fieldLabel}>Size</Text>
+                  <View style={sectionStyles.chipRow}>
+                    {CLOTHES_SIZE_OPTIONS.map((sz) => (
+                      <TouchableOpacity
+                        key={sz}
+                        onPress={() => setClothingSize(clothingSize === sz ? "" : sz)}
+                        style={[sectionStyles.chip, clothingSize === sz && sectionStyles.chipActive, { minWidth: 50 }]}
+                        testID={`product-size-${sz}`}
+                      >
+                        <Text style={[sectionStyles.chipText, clothingSize === sz && sectionStyles.chipTextActive]}>{sz}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {/* AI Image Generator */}
+                  <TouchableOpacity
+                    onPress={onGenerateAI}
+                    disabled={aiBusy}
+                    style={[sectionStyles.aiBtn, aiBusy && { opacity: 0.7 }]}
+                    testID="product-ai-generate"
+                  >
+                    {aiBusy ? (
+                      <>
+                        <ActivityIndicator color="#fff" />
+                        <Text style={sectionStyles.aiBtnText}>Generating 5 AI photos…</Text>
+                      </>
+                    ) : (
+                      <>
+                        <Feather name="zap" size={16} color="#fff" />
+                        <Text style={sectionStyles.aiBtnText}>Generate 5 AI Model Photos</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                  <Text style={sectionStyles.aiHint}>
+                    Uses Gemini Nano Banana to create 5 photorealistic Indian model photos wearing your clothes.
+                    Replaces all existing gallery images. Cover image is kept as-is.
+                  </Text>
+                </View>
+              ) : null}
+
               <Text style={modalStyles.fieldLabel}>Description</Text>
               <TextInput value={description} onChangeText={setDescription} multiline style={[modalStyles.input, { minHeight: 70, paddingTop: 12 }]} testID="product-description" />
               <View style={modalStyles.switchRow}>
@@ -651,4 +827,19 @@ const sectionStyles = StyleSheet.create({
 
   boxItemRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
   boxThumb: { width: 44, height: 44, borderRadius: 10, overflow: "hidden" },
+
+  // Category & sub-category chips
+  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 4 },
+  chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { fontSize: 12, fontWeight: "700", color: colors.textMain },
+  chipTextActive: { color: colors.primaryFg },
+
+  // Clothes-only block
+  clothesBlock: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: colors.primary + "08", borderWidth: 1, borderColor: colors.primary + "30" },
+
+  // AI button
+  aiBtn: { marginTop: 12, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 12, borderRadius: 12, backgroundColor: "#7C3AED" },
+  aiBtnText: { color: "#fff", fontSize: 13, fontWeight: "800", letterSpacing: 0.2 },
+  aiHint: { fontSize: 11, color: colors.textMuted, marginTop: 8, lineHeight: 15 },
 });

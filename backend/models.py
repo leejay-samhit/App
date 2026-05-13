@@ -84,6 +84,9 @@ class ProductCreate(BaseModel):
     spec_tabs: Optional[List[SpecTab]] = Field(default_factory=list)
     # What's in the Box
     whats_in_box: Optional[List[WhatsInBoxItem]] = Field(default_factory=list)
+    # Clothes-specific (only meaningful when category == "Clothes")
+    sub_category: Optional[str] = None      # male | female | boys | girls
+    clothing_size: Optional[str] = None     # S | M | L | XL | XXL
 
 
 class ProductUpdate(BaseModel):
@@ -111,6 +114,8 @@ class ProductUpdate(BaseModel):
     extra_attrs: Optional[Dict[str, str]] = None
     spec_tabs: Optional[List[SpecTab]] = None
     whats_in_box: Optional[List[WhatsInBoxItem]] = None
+    sub_category: Optional[str] = None
+    clothing_size: Optional[str] = None
 
 
 class BrandingPayload(BaseModel):
