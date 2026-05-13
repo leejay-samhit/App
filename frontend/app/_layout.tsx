@@ -5,6 +5,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { AuthProvider } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
+import { LocationGate } from "../src/location-gate";
 import { colors } from "../src/theme";
 import { TABLET_MIN_WIDTH, READABLE_MAX_WIDTH } from "../src/theme";
 
@@ -58,13 +59,21 @@ export default function RootLayout() {
                   renders pages on the user's phone. */}
               <StatusBar style="dark" />
               <TabletContainer>
-                <Stack
-                  screenOptions={{
-                    headerShown: false,
-                    contentStyle: { backgroundColor: colors.background },
-                    animation: "fade",
-                  }}
-                />
+                {/* LocationGate: blocks all non-admin authenticated users
+                    until location permission is granted. Once granted it
+                    silently pings the backend with coords every 5s while
+                    online and caches the last position before disconnect.
+                    Admin users and the unauthenticated /login screen pass
+                    through the gate untouched. */}
+                <LocationGate>
+                  <Stack
+                    screenOptions={{
+                      headerShown: false,
+                      contentStyle: { backgroundColor: colors.background },
+                      animation: "fade",
+                    }}
+                  />
+                </LocationGate>
               </TabletContainer>
             </GlobalFont>
           </AuthProvider>

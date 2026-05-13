@@ -1,0 +1,183 @@
+/**
+ * LocationGate
+ *
+ * Hard blocker shown to non-admin users when the device's location permission
+ * is not granted. Per product spec: "Then only User can access the app
+ * otherwise close it". We can't programmatically exit on iOS, so instead we
+ * show a full-screen UNDISMISSABLE blocker until the user grants permission.
+ * The user can either grant → app unlocks, or quit the app themselves.
+ *
+ * Once the permission is granted we start `useLocationTracking` so coords
+ * ping the backend every 5 seconds (cached on disconnect — see hook).
+ *
+ * Admin users skip the gate entirely (see the `enabled` flag passed in).
+ */
+import React, { useCallback, useEffect, useState } from "react";
+import {
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
+  Platform, Linking, AppState,
+} from "react-native";
+import { Feather } from "@expo/vector-icons";
+import { colors, radii } from "./theme";
+import { useAuth } from "./auth";
+import { checkLocationPermission, requestLocationPermission } from "./location";
+import { useLocationTracking } from "./use-location-tracking";
+
+type GateStatus = "checking" | "granted" | "blocked";
+
+export function LocationGate({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  const role = (user?.role || "").toLowerCase();
+  // Per spec (1c): all users EXCEPT admin require location tracking.
+  // Non-authenticated users (no user) — we don't gate the login screen.
+  const required = !!user && role !== "admin";
+
+  const [status, setStatus] = useState<GateStatus>(required ? "checking" : "granted");
+  const [requesting, setRequesting] = useState(false);
+
+  const evaluate = useCallback(async () => {
+    if (!required) {
+      setStatus("granted");
+      return;
+    }
+    setStatus("checking");
+    const s = await checkLocationPermission();
+    if (s === "granted") setStatus("granted");
+    else setStatus("blocked");
+  }, [required]);
+
+  useEffect(() => {
+    evaluate();
+  }, [evaluate]);
+
+  // Re-check permission when the app returns to foreground — handles the
+  // case where the user opens device Settings, toggles location ON, and
+  // comes back to the app. The gate should auto-dismiss without a reload.
+  useEffect(() => {
+    if (!required) return;
+    const sub = AppState.addEventListener("change", (s) => {
+      if (s === "active") evaluate();
+    });
+    return () => sub.remove();
+  }, [required, evaluate]);
+
+  const onGrant = useCallback(async () => {
+    setRequesting(true);
+    try {
+      const result = await requestLocationPermission();
+      if (result === "granted") {
+        setStatus("granted");
+      } else {
+        // User said no in the OS dialog — they can either retry or open
+        // settings. We surface both options below.
+        setStatus("blocked");
+      }
+    } finally {
+      setRequesting(false);
+    }
+  }, []);
+
+  const onOpenSettings = useCallback(async () => {
+    try {
+      if (Platform.OS === "web") {
+        // Browsers don't expose a programmatic settings link — instruct the
+        // user. The address-bar lock icon is the standard place to revoke.
+        return;
+      }
+      await Linking.openSettings();
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Background tracking — only when granted AND required.
+  useLocationTracking(required && status === "granted");
+
+  if (status === "checking" && required) {
+    return (
+      <View style={styles.blocker}>
+        <ActivityIndicator color={colors.primary} size="large" />
+        <Text style={styles.checkingText}>Checking location access…</Text>
+      </View>
+    );
+  }
+
+  if (status === "blocked") {
+    return (
+      <View style={styles.blocker}>
+        <View style={styles.iconCircle}>
+          <Feather name="map-pin" size={36} color={colors.primary} />
+        </View>
+        <Text style={styles.title}>Location permission required</Text>
+        <Text style={styles.body}>
+          This app needs your location to work. Please tap the button below
+          and allow location access to continue.
+        </Text>
+        <Text style={styles.bodySmall}>
+          Your coordinates are shared with admins to keep the service
+          marketplace accurate and to help match you with nearby providers.
+        </Text>
+        <TouchableOpacity
+          onPress={onGrant}
+          disabled={requesting}
+          style={[styles.primaryBtn, requesting && { opacity: 0.7 }]}
+          testID="location-gate-grant"
+        >
+          {requesting ? (
+            <ActivityIndicator color={colors.primaryFg} />
+          ) : (
+            <>
+              <Feather name="navigation" size={16} color={colors.primaryFg} />
+              <Text style={styles.primaryBtnText}>Grant location access</Text>
+            </>
+          )}
+        </TouchableOpacity>
+        {Platform.OS !== "web" ? (
+          <TouchableOpacity onPress={onOpenSettings} style={styles.secondaryBtn} testID="location-gate-settings">
+            <Feather name="settings" size={14} color={colors.primary} />
+            <Text style={styles.secondaryBtnText}>Open device settings</Text>
+          </TouchableOpacity>
+        ) : (
+          <Text style={styles.hintWeb}>
+            On web: click the lock / location icon in your browser address bar to allow access.
+          </Text>
+        )}
+      </View>
+    );
+  }
+
+  return <>{children}</>;
+}
+
+const styles = StyleSheet.create({
+  blocker: {
+    flex: 1, alignItems: "center", justifyContent: "center",
+    padding: 28, gap: 14,
+    backgroundColor: colors.background,
+  },
+  iconCircle: {
+    width: 86, height: 86, borderRadius: 43,
+    backgroundColor: colors.primary + "15",
+    alignItems: "center", justifyContent: "center",
+    marginBottom: 4,
+  },
+  title: { fontSize: 20, fontWeight: "900", color: colors.textMain, textAlign: "center" },
+  body: { fontSize: 14, color: colors.textMain, textAlign: "center", lineHeight: 20, maxWidth: 320 },
+  bodySmall: { fontSize: 12, color: colors.textMuted, textAlign: "center", lineHeight: 17, maxWidth: 320 },
+  checkingText: { color: colors.textMuted, fontSize: 12, marginTop: 12 },
+  primaryBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    backgroundColor: colors.primary,
+    paddingVertical: 14, paddingHorizontal: 28,
+    borderRadius: radii.button,
+    marginTop: 8,
+    minWidth: 240,
+  },
+  primaryBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14, letterSpacing: 0.2 },
+  secondaryBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingVertical: 8, paddingHorizontal: 16,
+  },
+  secondaryBtnText: { color: colors.primary, fontWeight: "700", fontSize: 13 },
+  hintWeb: { color: colors.textMuted, fontSize: 11, textAlign: "center", maxWidth: 280, marginTop: 6 },
+});

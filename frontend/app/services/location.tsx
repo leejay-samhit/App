@@ -10,7 +10,7 @@
  * the toggle OFF clears the stored coordinates immediately and removes the
  * provider from nearby search results.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   View,
   Text,
@@ -20,7 +20,6 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
-  Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -29,18 +28,19 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
 import { getCurrentCoords, formatActiveAgo, type Coords } from "../../src/location";
 
-const BROADCAST_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes — balance between freshness and battery
-
 export default function ProviderLocation() {
   const router = useRouter();
   const [meStatus, setMeStatus] = useState<string | null>(null);
-  const [sharing, setSharing] = useState(false);
+  // `sharing` is now ALWAYS true for non-admin users — the toggle was
+  // removed (2026-06) and the global LocationGate/useLocationTracking hook
+  // handles the 5-second background pings. We keep the `sharing` state only
+  // so existing JSX/styles render without changes.
+  const [sharing] = useState(true);
   const [coords, setCoords] = useState<Coords | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [lastError, setLastError] = useState<string | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Initial load: fetch /service/me to know status + current sharing flag
   const loadMe = useCallback(async () => {
@@ -49,8 +49,6 @@ export default function ProviderLocation() {
       setMeStatus(r.data?.service_status || null);
       // /auth/me returns the user object directly (no wrapper)
       const u = await api.get<any>("/auth/me");
-      const sharingNow = !!u.data?.location_sharing;
-      setSharing(sharingNow);
       setUpdatedAt(u.data?.location_updated_at || null);
     } catch {}
     finally { setLoading(false); }
@@ -86,46 +84,11 @@ export default function ProviderLocation() {
     } finally { setBusy(false); }
   }, []);
 
-  const stopBroadcast = useCallback(async () => {
-    setBusy(true);
-    try {
-      await api.post("/service/me/location", { lat: 0, lng: 0, sharing: false });
-      setSharing(false);
-      setCoords(null);
-      setUpdatedAt(null);
-    } catch (e) {
-      Alert.alert("Could not stop sharing", formatApiError(e));
-    } finally { setBusy(false); }
-  }, []);
-
-  // Auto-rebroadcast while sharing is ON & screen is focused
-  useEffect(() => {
-    if (!sharing) {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      return;
-    }
-    intervalRef.current = setInterval(() => {
-      broadcastNow();
-    }, BROADCAST_INTERVAL_MS);
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [sharing, broadcastNow]);
-
-  const onToggle = async (next: boolean) => {
-    if (next) {
-      const ok = await broadcastNow();
-      if (ok) setSharing(true);
-    } else {
-      await stopBroadcast();
-    }
-  };
+  // The previous 5-minute broadcast interval on this screen has been REMOVED.
+  // The global useLocationTracking hook now pings the backend every 5
+  // seconds for all non-admin users, so a per-screen timer would only cause
+  // duplicate pings. The "Refresh now" button still does an immediate push
+  // on demand via `broadcastNow`.
 
   if (loading) {
     return (
@@ -155,31 +118,28 @@ export default function ProviderLocation() {
 
         <Text style={styles.helper}>
           {isProvider
-            ? `When ON, customers nearby see you in their "nearby workers" feed with a live distance and an active indicator. We refresh your location every ${Math.round(BROADCAST_INTERVAL_MS / 60000)} minutes while this screen is open.`
-            : `When ON, your approximate location is shared with admin so they can see where you're connecting from. Refreshes every ${Math.round(BROADCAST_INTERVAL_MS / 60000)} minutes while this screen is open. You can turn it OFF anytime.`}
+            ? "Customers see you in their \"nearby workers\" feed with a live distance. Your location updates automatically every few seconds in the background while the app is open."
+            : "Your approximate location is shared with admin to help match you with nearby providers. Updates automatically every few seconds while the app is open."}
         </Text>
 
-        {/* Toggle card */}
+        {/* Toggle card — toggle hidden per product spec (2026-06).
+            Location is now ALWAYS-ON for all non-admin users (enforced by the
+            global LocationGate + useLocationTracking hook). This card now
+            simply shows the user the current sharing status — read-only. */}
         <View style={styles.toggleCard}>
-          <View style={[styles.iconCircle, { backgroundColor: sharing ? "#ECFDF5" : colors.surfaceMuted }]}>
-            <Feather name="navigation" size={26} color={sharing ? "#047857" : colors.textMuted} />
+          <View style={[styles.iconCircle, { backgroundColor: "#ECFDF5" }]}>
+            <Feather name="navigation" size={26} color="#047857" />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.toggleTitle}>{sharing ? "Sharing live location" : "Sharing is OFF"}</Text>
+            <Text style={styles.toggleTitle}>Live location is ON</Text>
             <Text style={styles.toggleSub}>
-              {sharing
-                ? updatedAt ? formatActiveAgo(updatedAt) : "Pinging now…"
-                : "Customers won't see you in the nearby feed."}
+              {updatedAt ? formatActiveAgo(updatedAt) : "Pinging now…"}
             </Text>
           </View>
-          <Switch
-            value={sharing}
-            onValueChange={onToggle}
-            disabled={busy}
-            trackColor={{ false: "#cbd5e1", true: "#10B98166" }}
-            thumbColor={sharing ? "#10B981" : "#fff"}
-            testID="provider-loc-toggle"
-          />
+          <View style={styles.statusPill}>
+            <View style={styles.statusDot} />
+            <Text style={styles.statusPillText}>ACTIVE</Text>
+          </View>
         </View>
 
         {lastError ? (
@@ -189,16 +149,17 @@ export default function ProviderLocation() {
           </View>
         ) : null}
 
-        {sharing ? (
-          <TouchableOpacity onPress={broadcastNow} disabled={busy} style={styles.refreshBtn}>
-            {busy ? (
-              <ActivityIndicator color={colors.primary} size="small" />
-            ) : (
-              <Feather name="refresh-cw" size={14} color={colors.primary} />
-            )}
-            <Text style={styles.refreshText}>  Refresh my location now</Text>
-          </TouchableOpacity>
-        ) : null}
+        {/* Always-on: a manual "refresh now" affordance for users who want to
+            push their position immediately without waiting for the 5-second
+            background tick. */}
+        <TouchableOpacity onPress={broadcastNow} disabled={busy} style={styles.refreshBtn}>
+          {busy ? (
+            <ActivityIndicator color={colors.primary} size="small" />
+          ) : (
+            <Feather name="refresh-cw" size={14} color={colors.primary} />
+          )}
+          <Text style={styles.refreshText}>  Refresh my location now</Text>
+        </TouchableOpacity>
 
         {coords ? (
           <View style={styles.coordsCard}>
@@ -246,6 +207,15 @@ const styles = StyleSheet.create({
   },
   toggleTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain },
   toggleSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  statusPill: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: "#ECFDF5",
+    borderWidth: 1, borderColor: "#A7F3D0",
+  },
+  statusDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: "#10B981" },
+  statusPillText: { fontSize: 10.5, fontWeight: "900", color: "#047857", letterSpacing: 0.5 },
   errorBox: {
     flexDirection: "row", alignItems: "center",
     backgroundColor: colors.error + "15",

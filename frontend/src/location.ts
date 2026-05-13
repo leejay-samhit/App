@@ -7,6 +7,65 @@ import * as Location from "expo-location";
 import { Platform } from "react-native";
 
 export type Coords = { lat: number; lng: number; accuracy_m?: number };
+export type PermStatus = "granted" | "denied" | "undetermined" | "unsupported";
+
+/**
+ * Request foreground location permission. On web returns "granted" only after
+ * the user accepts the browser prompt (we detect via a probe getCurrentCoords
+ * call inside requestAndGetCoords). For native we use expo-location.
+ */
+export async function checkLocationPermission(): Promise<PermStatus> {
+  if (Platform.OS === "web") {
+    if (typeof navigator === "undefined" || !("permissions" in navigator)) {
+      // Some browsers don't support Permissions API — treat as undetermined.
+      return typeof navigator !== "undefined" && (navigator as any).geolocation ? "undetermined" : "unsupported";
+    }
+    try {
+      const result = await (navigator as any).permissions.query({ name: "geolocation" as any });
+      const s = (result?.state || "prompt") as string;
+      if (s === "granted") return "granted";
+      if (s === "denied") return "denied";
+      return "undetermined";
+    } catch {
+      return "undetermined";
+    }
+  }
+  try {
+    const { status } = await Location.getForegroundPermissionsAsync();
+    if (status === "granted") return "granted";
+    if (status === "denied") return "denied";
+    return "undetermined";
+  } catch {
+    return "unsupported";
+  }
+}
+
+/**
+ * Trigger the OS permission prompt (or browser prompt on web).
+ * Returns the resulting status.
+ */
+export async function requestLocationPermission(): Promise<PermStatus> {
+  if (Platform.OS === "web") {
+    // The only way to trigger the browser prompt is to actually call
+    // getCurrentPosition. We probe it and infer the result.
+    if (typeof navigator === "undefined" || !navigator.geolocation) return "unsupported";
+    return await new Promise<PermStatus>((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        () => resolve("granted"),
+        (err) => resolve(err && err.code === 1 ? "denied" : "undetermined"),
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 },
+      );
+    });
+  }
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status === "granted") return "granted";
+    if (status === "denied") return "denied";
+    return "undetermined";
+  } catch {
+    return "unsupported";
+  }
+}
 
 /**
  * Request foreground location once. Returns `null` if permission is denied

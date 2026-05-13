@@ -571,11 +571,9 @@ metadata:
 
 test_plan:
   current_focus:
-    - "AI Image Generation endpoint with style parameter (Plain/Highlight/Outdoor/Activity/Accessory)"
-    - "Rich Product Editor: AI style chips + separate reference image + Regenerate button"
-    - "Product detail page: swipeable hero gallery + hide empty spec sections"
-    - "Shop header: filter icon removed; cart inline via absolute positioning"
-    - "Shop category page: removed 'no custom layout' hint message"
+    - "LocationGate: mandatory location permission on login for all non-admin users; 5-second background pings"
+    - "Services screen: GPS enable/disable toggle removed; always-on with read-only status pill"
+    - "Admin users list: shows live lat/long + 'Active Xm ago' per user"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
