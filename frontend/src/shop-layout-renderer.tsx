@@ -410,11 +410,9 @@ function ProductGridBlock({
                 <Text style={styles.gridName} numberOfLines={2}>{p.name}</Text>
                 <View style={styles.gridFooter}>
                   <Text style={styles.gridPrice}>{formatINR(p.price)}</Text>
-                  {inStock && onAddToCart ? (
-                    <TouchableOpacity style={[styles.gridAdd, { backgroundColor: block.button_color || colors.primary }]} onPress={() => onAddToCart(p.id)}>
-                      <Feather name="shopping-bag" size={12} color={block.button_text_color || colors.primaryFg} />
-                    </TouchableOpacity>
-                  ) : null}
+                  {/* Add-to-cart pill removed per user feedback (clutters the
+                      grid). Tap the card to open product detail and add from
+                      there. */}
                 </View>
               </View>
             </TouchableOpacity>

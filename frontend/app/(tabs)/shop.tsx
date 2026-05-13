@@ -339,7 +339,7 @@ export default function ShopScreen() {
               testID="shop-cart-btn"
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Feather name="shopping-cart" size={20} color={colors.textMain} />
+              <Feather name="shopping-cart" size={20} color={colors.primaryFg} />
               {cartCount > 0 && (
                 <View style={styles.cartBadgeTop}>
                   <Text style={styles.cartBadgeTopText}>{cartCount > 9 ? "9+" : cartCount}</Text>
@@ -431,6 +431,11 @@ export default function ShopScreen() {
                   <Text style={styles.cardTitle} numberOfLines={2}>{p.name}</Text>
                   <View style={styles.cardFooterNew}>
                     <Text style={styles.cardPrice}>{formatINR(p.price)}</Text>
+                    {/* Out-of-stock items keep the "Notify me" bell so customers
+                        can register interest. In-stock items NO LONGER show an
+                        Add-to-Cart pill at the bottom — the user reported the
+                        pill cluttered the grid. Customers add to cart from the
+                        product detail page (tap the card). */}
                     {opts.oos ? (
                       <TouchableOpacity
                         style={[
@@ -450,23 +455,7 @@ export default function ShopScreen() {
                               color={interestedSet.has(p.id) ? colors.primaryFg : colors.primary}
                             />}
                       </TouchableOpacity>
-                    ) : (
-                      <TouchableOpacity
-                        style={[styles.cardCta, adding === p.id && { opacity: 0.6 }]}
-                        onPress={() => addToCart(p)}
-                        disabled={adding === p.id}
-                        testID={`add-${p.id}`}
-                      >
-                        {adding === p.id
-                          ? <ActivityIndicator color="#fff" size="small" />
-                          : (
-                            <>
-                              <Feather name="shopping-bag" size={13} color="#fff" />
-                              <Text style={styles.cardCtaText}>Add</Text>
-                            </>
-                          )}
-                      </TouchableOpacity>
-                    )}
+                    ) : null}
                   </View>
                 </View>
               </View>
@@ -902,9 +891,11 @@ const styles = StyleSheet.create({
   providerSheetEyebrow: { fontSize: 9, letterSpacing: 1.4, color: colors.textMuted, fontWeight: "800" },
   providerSheetTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4, marginTop: 1 },
   cartIconBtn: {
+    // Primary-colored action button to visually pair with the green filter
+    // icon inside the search bar — gives the top header a balanced look:
+    //   [ search-bar with green filter icon ] [ green cart button ]
     width: 46, height: 46, borderRadius: 14,
-    backgroundColor: colors.surface,
-    borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.primary,
     alignItems: "center", justifyContent: "center",
   },
   cartBadgeTop: {
