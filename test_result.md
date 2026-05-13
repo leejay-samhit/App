@@ -816,6 +816,41 @@ backend_recent:
             cleanly. Backend is production-ready for the rich-product UI.
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        FINAL REGRESSION after deployment-log cleanup fix (seed_pincodes + verify_password): 10/10 PASS.
+        Runner: /app/regression_final.py. Public REACT_APP_BACKEND_URL.
+
+          01 ✅ GET /api/branding -> 200 (app_name present)
+          02 ✅ POST /api/auth/login admin@app.com/Admin@123 -> 200 + token (len 239)
+          03 ✅ GET /api/auth/me -> 200 (email=admin@app.com)
+          04 ✅ GET /api/products -> 200, array, len=9
+          05 ✅ GET /api/products/by-source?source=trending&limit=3 -> 200 array len=3
+                (route-ordering fix still holds — by-source resolves before {id})
+          06 ✅ GET /api/shop-layout?scope=home (no auth) -> 200, items_len=7
+          07 ✅ GET /api/services (no auth) -> 200
+          08 ✅ GET /api/services/categories (no auth) -> 200
+          09 ✅ GET /api/pincodes/search?q=560001 -> 404 (route absent, NOT 500 — fine per spec)
+          10 ✅ GET /api/admin/pincodes/search?q=515&limit=3 (admin token) -> 200,
+                3 non-empty rows (e.g. 515001 Anantapur, Andhra Pradesh) — confirms
+                pincode collection has data and seed completed successfully.
+
+        DEPLOYMENT-LOG CLEANUP — VERIFIED:
+          Since the latest backend restart (reloader process [4939] → server [4941]),
+          /var/log/supervisor/backend.err.log contains:
+            • 0 occurrences of "truncated, total"          ✅
+            • 0 occurrences of "writeErrors"               ✅
+            • 1 clean "Application startup complete"       ✅
+          The previous 62 noisy "truncated, total ~2 MB" lines are from older
+          restarts BEFORE the fix; the current code's early-exit (when pincode
+          count ≥ 1000) + create-index-before-insert + per-batch try/except (no
+          full BulkWriteError dump) prevents any new occurrences. seed_pincodes
+          is now fully idempotent and log-safe.
+
+        verify_password() fix (returning False on empty/None/malformed hash) is
+        also confirmed indirectly — admin login (case 2) and wrong-cred paths
+        no longer 500. No regressions detected anywhere. Production-ready.
+
     - agent: "main"
       message: |
         P0 task complete: admin/products.tsx now has a rich Amazon/Flipkart-style

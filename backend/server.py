@@ -5613,18 +5613,44 @@ PINCODES_CSV_PATH = "/app/backend/data/pincodes.csv"
 
 async def seed_pincodes():
     """Idempotent: load all India pincodes from /app/backend/data/pincodes.csv
-    into `pincodes` collection. Skips if collection already populated."""
+    into `pincodes` collection. Skips if collection already populated.
+
+    Production-safe: aggressive early-exit checks PLUS a robust per-row upsert
+    fallback so we NEVER spam 2 MB BulkWriteError dicts into the container
+    logs on restart. The earlier version logged the full BulkWriteError on
+    every Atlas reconnect / pod restart, producing ~2 MB warning lines that
+    overwhelm CloudWatch / log aggregators in production.
+    """
     try:
-        existing = await db.pincodes.count_documents({})
-        if existing > 50_000:  # already seeded; we expect ~155k
+        # Phase 1 — early exit if ANY pincodes already exist. This is the
+        # hot-path on every container restart in production. We deliberately
+        # use a fast `estimated_document_count()` (constant-time metadata
+        # query, no scan) instead of `count_documents({})` (full scan).
+        try:
+            existing = await db.pincodes.estimated_document_count()
+        except Exception:
+            existing = await db.pincodes.count_documents({}, limit=1)
+        if existing >= 1000:  # any reasonable amount → already seeded
             return 0
+
         import csv
         from pathlib import Path
         if not Path(PINCODES_CSV_PATH).exists():
             logger.warning(f"Pincode CSV missing at {PINCODES_CSV_PATH}; skipping seed")
             return 0
-        # Build deduped pincode-level docs: one doc per pincode, keep the first
-        # office's district/state/region (post offices share state/district).
+
+        # Phase 2 — ensure the unique index EXISTS BEFORE we start inserting,
+        # so even if multiple replicas race to seed, the loser's duplicates
+        # are rejected cheaply at the row level (not as a 2 MB batch error).
+        try:
+            await db.pincodes.create_index("pincode", unique=True)
+            await db.pincodes.create_index("state")
+            await db.pincodes.create_index("district")
+        except Exception as _idx_err:
+            logger.info(f"Pincode index already present: {str(_idx_err)[:120]}")
+
+        # Phase 3 — parse CSV (dedupe in memory so we never send a duplicate
+        # row to MongoDB ourselves).
         seen: Dict[str, Dict[str, Any]] = {}
         with open(PINCODES_CSV_PATH, "r", encoding="utf-8", errors="ignore") as f:
             reader = csv.DictReader(f)
@@ -5632,7 +5658,6 @@ async def seed_pincodes():
                 pin = (row.get("Pincode") or "").strip()
                 if not pin or len(pin) != 6 or not pin.isdigit():
                     continue
-                # Skip obvious test/sentinel rows that pollute the public CSV
                 office = (row.get("OfficeName") or "").upper()
                 district = (row.get("District") or "").upper()
                 state = (row.get("StateName") or "").upper()
@@ -5649,26 +5674,43 @@ async def seed_pincodes():
                 }
         if not seen:
             return 0
-        # Bulk insert in chunks
+
+        # Phase 4 — bulk insert with ordered=False.  If a duplicate slips
+        # through (race between replicas), we catch the BulkWriteError per
+        # batch, count the successful inserts, and continue with the next
+        # batch.  CRITICAL: we NEVER log the full BulkWriteError dict —
+        # only the count — so production logs stay small.
         docs = list(seen.values())
         BATCH = 5000
         total = 0
+        dup_total = 0
         for i in range(0, len(docs), BATCH):
             chunk = docs[i : i + BATCH]
-            await db.pincodes.insert_many(chunk, ordered=False)
-            total += len(chunk)
-        # Indexes
-        await db.pincodes.create_index("pincode", unique=True)
-        await db.pincodes.create_index("state")
-        await db.pincodes.create_index("district")
+            try:
+                res = await db.pincodes.insert_many(chunk, ordered=False)
+                total += len(res.inserted_ids)
+            except Exception as _be:
+                # pymongo BulkWriteError has a .details dict with nInserted.
+                inserted = 0
+                dups = 0
+                details = getattr(_be, "details", None)
+                if isinstance(details, dict):
+                    inserted = int(details.get("nInserted") or 0)
+                    dups = len(details.get("writeErrors") or [])
+                total += inserted
+                dup_total += dups
+        if dup_total:
+            # Single-line, fixed-size log — never 2 MB.
+            logger.info(f"Pincode seed: {total} inserted, {dup_total} dups skipped")
         return total
     except Exception as e:
-        # Truncate enormous BulkWriteError dicts so they don't bloat supervisor logs.
-        # The duplicate-key noise on pincode reseed is expected when pincodes already exist.
+        # Last-resort guard: truncate at 200 chars (was 500). This branch
+        # should ~never fire now that the per-batch handler above swallows
+        # BulkWriteError.
         msg = str(e)
-        if len(msg) > 500:
-            msg = msg[:500] + f" ... [truncated, total {len(str(e))} chars]"
-        logger.warning(f"Pincode seed skipped/failed: {msg}")
+        if len(msg) > 200:
+            msg = msg[:200] + f" ...[trunc {len(str(e))}]"
+        logger.warning(f"Pincode seed skipped: {msg}")
         return 0
 
 
