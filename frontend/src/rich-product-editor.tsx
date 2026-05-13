@@ -287,6 +287,7 @@ export function RichProductEditor({
 
   // ── AI Image Generation (Clothes only) ──
   const isClothes = (category || "").trim().toLowerCase() === "clothes";
+  const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
 
   const onGenerateAI = async () => {
     if (!isClothes) return;
@@ -300,7 +301,7 @@ export function RichProductEditor({
     }
     Alert.alert(
       "Generate AI catalog photos?",
-      "This will REPLACE all current gallery images with 5 AI-generated photos of an Indian model wearing the garment. The cover image is preserved. Continue?",
+      "This will REPLACE all current gallery images with 5 AI-generated photos of an Indian model wearing the garment. The cover image is preserved.\n\nThis may take 1–2 minutes total — please keep the screen open.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -308,26 +309,54 @@ export function RichProductEditor({
           style: "default",
           onPress: async () => {
             setAiBusy(true);
+            const TARGET = 5;
+            setAiProgress({ done: 0, total: TARGET });
+            // Sequential single-image requests — each completes in ~20-30s
+            // (well under the 60s K8s ingress timeout). We progressively
+            // collect images and update the gallery as they arrive so the
+            // user sees real-time feedback.
+            const collected: string[] = [];
             try {
-              const res: any = await api.post("/products/ai-image", {
-                image_data_url: imageUrl,
-                gender: subCategory,
-                category: "Clothes",
-                size: clothingSize || undefined,
-                count: 5,
-              });
-              const imgs: string[] = Array.isArray(res?.data?.images) ? res.data.images : [];
-              if (!imgs.length) {
-                Alert.alert("No images", "AI did not return any images. Please try again with a clearer reference photo.");
+              for (let i = 0; i < TARGET; i++) {
+                try {
+                  const res: any = await api.post(
+                    "/products/ai-image",
+                    {
+                      image_data_url: imageUrl,
+                      gender: subCategory,
+                      category: "Clothes",
+                      size: clothingSize || undefined,
+                      count: 1,
+                    },
+                    { timeout: 90000 },
+                  );
+                  const imgs: string[] = Array.isArray(res?.data?.images) ? res.data.images : [];
+                  if (imgs.length) {
+                    collected.push(imgs[0]);
+                    // Live-update the gallery so the user sees progress
+                    setGalleryImages([...collected].slice(0, 10));
+                  }
+                } catch (innerErr) {
+                  // Don't abort the whole batch on one failure; continue.
+                  // eslint-disable-next-line no-console
+                  console.warn("AI image #" + i + " failed:", formatApiError(innerErr));
+                }
+                setAiProgress({ done: i + 1, total: TARGET });
+              }
+              if (!collected.length) {
+                Alert.alert(
+                  "AI generation failed",
+                  "No images could be generated. Please try a clearer reference photo or check your network and try again.",
+                );
                 return;
               }
-              // Replace gallery completely (cap to 10)
-              setGalleryImages(imgs.slice(0, 10));
-              Alert.alert("Done", `Generated ${imgs.length} AI image${imgs.length === 1 ? "" : "s"} and replaced the gallery.`);
-            } catch (e) {
-              Alert.alert("AI generation failed", formatApiError(e));
+              Alert.alert(
+                "Done",
+                `Generated ${collected.length} of ${TARGET} AI image${collected.length === 1 ? "" : "s"} and replaced the gallery.`,
+              );
             } finally {
               setAiBusy(false);
+              setAiProgress(null);
             }
           },
         },
@@ -510,7 +539,9 @@ export function RichProductEditor({
                     {aiBusy ? (
                       <>
                         <ActivityIndicator color="#fff" />
-                        <Text style={sectionStyles.aiBtnText}>Generating 5 AI photos…</Text>
+                        <Text style={sectionStyles.aiBtnText}>
+                          {aiProgress ? `Generating ${aiProgress.done}/${aiProgress.total}…` : "Generating AI photos…"}
+                        </Text>
                       </>
                     ) : (
                       <>
@@ -521,7 +552,8 @@ export function RichProductEditor({
                   </TouchableOpacity>
                   <Text style={sectionStyles.aiHint}>
                     Uses Gemini Nano Banana to create 5 photorealistic Indian model photos wearing your clothes.
-                    Replaces all existing gallery images. Cover image is kept as-is.
+                    Each photo takes ~25 seconds — the gallery updates live as each one finishes. Replaces all
+                    existing gallery images. Cover image is kept as-is.
                   </Text>
                 </View>
               ) : null}
