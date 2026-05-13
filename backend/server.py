@@ -4292,63 +4292,109 @@ async def on_startup():
     # so they polluted total_revenue (e.g. 5 phantom rows × ₹118 = ₹590).
     # Going forward, those rows are kept with amount=0, but legacy data needs the
     # same correction so the dashboard numbers are accurate.
-    try:
-        zero_res = await db.transactions.update_many(
-            {
-                "type": "registration_fee",
-                "status": {"$in": ["created", "failed"]},
-                "amount": {"$gt": 0},
-            },
-            {"$set": {"amount": 0.0}},
-        )
-        if zero_res.modified_count:
-            logger.info(f"Reg-fee phantom amount backfill: zeroed {zero_res.modified_count} pending/failed rows")
-    except Exception as _bf_err:
-        logger.warning(f"Reg-fee phantom amount backfill failed: {_bf_err}")
-    await seed_admin()
-    await seed_products()
-    # Seed default service categories (no-op if already present)
-    try:
-        seeded = await seed_service_categories()
-        if seeded:
-            logger.info(f"Seeded {seeded} default service categories")
-    except Exception as _sc_err:
-        logger.warning(f"Service category seed failed: {_sc_err}")
-    # Ensure 2dsphere geo index for nearby-worker search
-    await _ensure_geo_index()
-    # Seed all India pincodes (~155k) — idempotent, no-op after first run
-    try:
-        seeded = await seed_pincodes()
-        if seeded:
-            logger.info(f"Seeded {seeded} India pincodes")
-    except Exception as _pin_err:
-        logger.warning(f"Pincode seed failed: {_pin_err}")
-    # Distributor exclusive-territory unique index
-    await _ensure_distributor_indexes()
-    # Backfill: any existing user without approval_status — assume approved (legacy users
-    # who joined before the approval gate existed). Admins get auto-approved too.
-    await db.users.update_many(
-        {"approval_status": {"$exists": False}},
-        {"$set": {
-            "approval_status": "approved",
-            "commission_triggered": True,
-            "approval_reviewed_at": None,
-            "approval_reviewed_by": None,
-            "approval_reject_category": None,
-            "approval_reject_reason": None,
-            "extra_docs": {
-                "cibil_report": None, "bank_statement": None,
-                "income_proof": None, "other": None, "submitted_at": None,
-            },
-        }},
-    )
-    # Always make sure admin accounts are 'approved'
-    await db.users.update_many(
-        {"role": "admin"},
-        {"$set": {"approval_status": "approved", "commission_triggered": True}},
-    )
-    # Kick off the periodic backup task
+    #
+    # === DEPLOYMENT-CRITICAL: this and all the following heavy work runs in
+    # the BACKGROUND so uvicorn can bind to 0.0.0.0:8001 immediately and
+    # pass the Kubernetes startup probe.  Previously, the seed-pincodes step
+    # parsed a 9 MB CSV (155 k rows) + did a 155 k bulk insert which took
+    # 30-60 s, exceeding the K8s startup probe timeout and causing the pod
+    # to be restarted in a crash loop (nginx then logged "connect() failed
+    # (111: Connection refused)" for every request). ===
+    asyncio.create_task(_background_init())
+    # Kick off the periodic backup task (also background, also fast)
     asyncio.create_task(_backup_scheduler())
+
+
+async def _background_init():
+    """Long-running startup work that MUST NOT block uvicorn's port-binding.
+
+    Runs once, asynchronously, AFTER the FastAPI app has started serving
+    requests. If anything in here is slow (pincode CSV parsing, large
+    update_many backfills, etc), the live app continues to serve traffic
+    while this task chugs away in the background.
+
+    Wrapped in a broad try/except so a single failed step never kills the
+    whole init sequence — each step has its own try/except inside.
+    """
+    try:
+        # Small initial delay to let uvicorn fully register the port + let
+        # the K8s readiness probe pass with the first /api/branding call.
+        await asyncio.sleep(2)
+        try:
+            zero_res = await db.transactions.update_many(
+                {
+                    "type": "registration_fee",
+                    "status": {"$in": ["created", "failed"]},
+                    "amount": {"$gt": 0},
+                },
+                {"$set": {"amount": 0.0}},
+            )
+            if zero_res.modified_count:
+                logger.info(f"Reg-fee phantom amount backfill: zeroed {zero_res.modified_count} pending/failed rows")
+        except Exception as _bf_err:
+            logger.warning(f"Reg-fee phantom amount backfill failed: {_bf_err}")
+        try:
+            await seed_admin()
+        except Exception as _e:
+            logger.warning(f"seed_admin failed: {str(_e)[:200]}")
+        try:
+            await seed_products()
+        except Exception as _e:
+            logger.warning(f"seed_products failed: {str(_e)[:200]}")
+        # Seed default service categories (no-op if already present)
+        try:
+            seeded = await seed_service_categories()
+            if seeded:
+                logger.info(f"Seeded {seeded} default service categories")
+        except Exception as _sc_err:
+            logger.warning(f"Service category seed failed: {str(_sc_err)[:200]}")
+        # Ensure 2dsphere geo index for nearby-worker search
+        try:
+            await _ensure_geo_index()
+        except Exception as _e:
+            logger.warning(f"geo index failed: {str(_e)[:200]}")
+        # Seed all India pincodes (~155k) — idempotent, fast no-op after first run.
+        # First-time seed (cold start in production Atlas) can take ~30 s — that
+        # is why this MUST run in the background, not in the startup hook.
+        try:
+            seeded = await seed_pincodes()
+            if seeded:
+                logger.info(f"Seeded {seeded} India pincodes")
+        except Exception as _pin_err:
+            logger.warning(f"Pincode seed failed: {str(_pin_err)[:200]}")
+        # Distributor exclusive-territory unique index
+        try:
+            await _ensure_distributor_indexes()
+        except Exception as _e:
+            logger.warning(f"distributor indexes failed: {str(_e)[:200]}")
+        # Backfill: any existing user without approval_status — assume approved
+        # (legacy users joined before the approval gate). Admins auto-approved.
+        try:
+            await db.users.update_many(
+                {"approval_status": {"$exists": False}},
+                {"$set": {
+                    "approval_status": "approved",
+                    "commission_triggered": True,
+                    "approval_reviewed_at": None,
+                    "approval_reviewed_by": None,
+                    "approval_reject_category": None,
+                    "approval_reject_reason": None,
+                    "extra_docs": {
+                        "cibil_report": None, "bank_statement": None,
+                        "income_proof": None, "other": None, "submitted_at": None,
+                    },
+                }},
+            )
+            await db.users.update_many(
+                {"role": "admin"},
+                {"$set": {"approval_status": "approved", "commission_triggered": True}},
+            )
+        except Exception as _e:
+            logger.warning(f"approval-status backfill failed: {str(_e)[:200]}")
+        logger.info("Background init complete")
+    except Exception as _root_err:
+        # Catch-all: never let the background init task die loudly.
+        logger.warning(f"Background init crashed: {str(_root_err)[:300]}")
 
 
 @app.on_event("shutdown")

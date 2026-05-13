@@ -818,6 +818,42 @@ backend_recent:
 agent_communication:
     - agent: "testing"
       message: |
+        CRITICAL DEPLOYMENT FIX VERIFICATION — 8/8 PASS. Runner: /tmp/deploy_fix_test.py.
+        Public REACT_APP_BACKEND_URL (https://network-pay-1.preview.emergentagent.com/api).
+
+          1 ✅ GET /api/branding                              -> 200, app_name=NetworkPay
+                (confirms uvicorn bound to port 8001 quickly; nginx no longer 502s)
+          2 ✅ POST /api/auth/login admin@app.com/Admin@123   -> 200, token len=239
+          3 ✅ GET /api/auth/me                               -> 200, email=admin@app.com
+          4 ✅ GET /api/products                              -> 200, array len=9
+          5 ✅ GET /api/products/by-source?source=trending&limit=3 -> 200, len=3
+          6 ✅ GET /api/shop-layout?scope=home (no auth)      -> 200
+          7 ✅ GET /api/services (no auth)                    -> 200
+          8 ✅ GET /api/admin/pincodes/search?q=515&limit=3   -> 200, 3 rows
+                (e.g. 515001 Anantapur, Andhra Pradesh, Kurnool Region) —
+                confirms background pincode seed completed successfully.
+
+        BACKGROUND-INIT FIX VERIFIED IN LOGS:
+          Since the latest backend restart (reloader process [5439]),
+          /var/log/supervisor/backend.err.log shows the expected sequence:
+            • INFO:     Started reloader process [5439] using WatchFiles
+            • INFO:     Application startup complete.    ← uvicorn bound fast
+            • 2026-05-13 07:32:42,860 - server - INFO - Background init complete
+              (~16s after startup complete — heavy work moved off the critical path)
+          Critical checks since [5439]:
+            • 0 occurrences of "truncated, total"           ✅
+            • 0 ERROR-level entries                          ✅
+            • Application startup complete is NOT followed by another reloader
+              (no crash-loop) and IS followed by Background init complete (not
+              between, not failing)                          ✅
+
+        The on_startup fast-bind + asyncio.create_task(_background_init()) fix is
+        working as designed. Kubernetes startup probe will no longer time out;
+        nginx 502 "connect() failed (111: Connection refused)" errors are resolved.
+        No regressions. Production-ready.
+
+    - agent: "testing"
+      message: |
         FINAL REGRESSION after deployment-log cleanup fix (seed_pincodes + verify_password): 10/10 PASS.
         Runner: /app/regression_final.py. Public REACT_APP_BACKEND_URL.
 
