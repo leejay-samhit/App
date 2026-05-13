@@ -1029,6 +1029,11 @@ const styles = StyleSheet.create({
   //  product cards with stock-aware states)
   // ============================================================
   shopSearch: {
+    // flex:1 is CRITICAL — without it the search bar takes 100% of the
+    // topHeader's width and pushes the cart icon onto a new line on real
+    // devices (a user-reported bug). With flex:1 the search bar shrinks
+    // to leave exactly 46px for the cart button on its right.
+    flex: 1,
     flexDirection: "row", alignItems: "center", gap: 8,
     backgroundColor: colors.surface,
     borderWidth: 1, borderColor: colors.border,
