@@ -3,10 +3,10 @@ import { View, Text, StyleSheet, ScrollView, FlatList, Modal, TextInput, Touchab
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import * as ImagePicker from "expo-image-picker";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { RichProductEditor } from "../../src/rich-product-editor";
 
 type Stats = { total_sales: number; total_earnings: number; today_earnings: number; today_orders: number; all_orders: number; products_count: number; published_count: number; wallet_balance: number };
 type Product = { id: string; name: string; price: number; stock: number; image_url: string; description?: string; category?: string; is_published?: boolean; created_at?: string; interested_count?: number };
@@ -367,11 +367,15 @@ export default function VendorDashboard() {
         )
       )}
 
-      <ProductEditor
+      <RichProductEditor
         visible={editorOpen}
-        product={editing}
+        existing={editing as any}
         onClose={() => setEditorOpen(false)}
         onSaved={async () => { setEditorOpen(false); await load(); }}
+        endpoints={{
+          create: "/vendor/me/products",
+          update: (id: string) => `/vendor/me/products/${id}`,
+        }}
       />
 
       {/* Interested customers modal */}
@@ -426,89 +430,11 @@ function StatCard({ icon, label, value, color }: { icon: any; label: string; val
   );
 }
 
-function ProductEditor({ visible, product, onClose, onSaved }: { visible: boolean; product: Product | null; onClose: () => void; onSaved: () => void }) {
-  const [name, setName] = useState("");
-  const [price, setPrice] = useState("");
-  const [stock, setStock] = useState("100");
-  const [imageUrl, setImageUrl] = useState("");
-  const [desc, setDesc] = useState("");
-  const [category, setCategory] = useState("");
-  const [published, setPublished] = useState(true);
-  const [saving, setSaving] = useState(false);
-
-  useFocusEffect(useCallback(() => {}, []));
-
-  // Sync state when product changes
-  useFocusEffect(useCallback(() => {
-    if (product) {
-      setName(product.name || ""); setPrice(product.price ? String(product.price) : "");
-      setStock(product.stock != null ? String(product.stock) : "100");
-      setImageUrl(product.image_url || ""); setDesc(product.description || "");
-      setCategory(product.category || ""); setPublished(product.is_published !== false);
-    }
-  }, [product]));
-
-  const pickImage = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== "granted") return;
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7, base64: true });
-    if (res.canceled || !res.assets?.length) return;
-    const a = res.assets[0];
-    if (a.base64) setImageUrl(`data:image/jpeg;base64,${a.base64}`);
-  };
-
-  const onSave = async () => {
-    if (!name.trim() || !price.trim() || !imageUrl.trim()) { Alert.alert("Missing fields", "Name, price and image are required."); return; }
-    const priceN = Number(price);
-    if (!Number.isFinite(priceN) || priceN <= 0) { Alert.alert("Invalid price"); return; }
-    setSaving(true);
-    try {
-      const body = { name: name.trim(), price: priceN, stock: Number(stock) || 0, image_url: imageUrl.trim(), description: desc.trim(), category: category.trim() || null, is_published: published };
-      if (product?.id) await api.patch(`/vendor/me/products/${product.id}`, body);
-      else await api.post("/vendor/me/products", body);
-      onSaved();
-    } catch (e) { Alert.alert("Couldn't save", formatApiError(e)); }
-    finally { setSaving(false); }
-  };
-
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
-          <View style={styles.header}>
-            <TouchableOpacity onPress={onClose} style={styles.iconBtn}><Feather name="x" size={20} color={colors.textMain} /></TouchableOpacity>
-            <Text style={styles.title}>{product?.id ? "Edit product" : "New product"}</Text>
-            <View style={{ width: 40 }} />
-          </View>
-          <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }} keyboardShouldPersistTaps="handled">
-            <Text style={styles.label}>Image</Text>
-            {imageUrl ? <Image source={{ uri: imageUrl }} style={styles.imagePreview} /> : null}
-            <TouchableOpacity onPress={pickImage} style={styles.attachBtn}><Feather name="image" size={16} color={colors.textMain} /><Text style={styles.attachBtnText}>  Pick from gallery</Text></TouchableOpacity>
-            <Text style={styles.label}>Name *</Text>
-            <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Product name" placeholderTextColor={colors.textMuted} />
-            <Text style={styles.label}>Price (₹) *</Text>
-            <TextInput style={styles.input} value={price} onChangeText={setPrice} placeholder="0" placeholderTextColor={colors.textMuted} keyboardType="numeric" />
-            <Text style={styles.label}>Stock</Text>
-            <TextInput style={styles.input} value={stock} onChangeText={setStock} placeholder="100" placeholderTextColor={colors.textMuted} keyboardType="numeric" />
-            <Text style={styles.label}>Category</Text>
-            <TextInput style={styles.input} value={category} onChangeText={setCategory} placeholder="e.g. Electronics, Apparel" placeholderTextColor={colors.textMuted} />
-            <Text style={styles.label}>Description</Text>
-            <TextInput style={[styles.input, styles.area]} value={desc} onChangeText={setDesc} placeholder="Describe what makes this product great..." placeholderTextColor={colors.textMuted} multiline textAlignVertical="top" />
-            <TouchableOpacity onPress={() => setPublished((v) => !v)} style={styles.toggleRow}>
-              <View style={[styles.toggleBox, published && styles.toggleBoxOn]}>{published ? <Feather name="check" size={14} color="#fff" /> : null}</View>
-              <Text style={styles.toggleLabel}>Publish on shop</Text>
-            </TouchableOpacity>
-          </ScrollView>
-          <View style={styles.modalFooter}>
-            <TouchableOpacity onPress={onSave} disabled={saving} style={[styles.primaryBtn, saving && { opacity: 0.6 }]}>
-              {saving ? <ActivityIndicator color={colors.primaryFg} /> : <><Feather name="save" size={16} color={colors.primaryFg} /><Text style={styles.primaryBtnText}>  Save</Text></>}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </SafeAreaView>
-    </Modal>
-  );
-}
+// Note: the legacy local ProductEditor was removed — both Admin and Vendor
+// panels now share the RichProductEditor in /src/rich-product-editor.tsx so
+// the vendor product form is identical to the admin form (all 7 sections:
+// basics, brand/sub-features, gallery, styled summaries, attrs, spec tabs,
+// what's in the box).
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
