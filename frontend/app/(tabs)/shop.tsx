@@ -291,21 +291,20 @@ export default function ShopScreen() {
         stickyHeaderIndices={[0]}
       >
         {/* Top header — sticks to the top when scrolling.
-            Shop mode: in-line search bar + cart icon (Member-Store text removed).
-            Services mode: eyebrow + title + globe icon (unchanged).
+            Shop mode: in-line search bar + cart icon.
+            Services mode: eyebrow + title + globe icon.
 
-            IMPORTANT — keep this row literal:
-              <View flexDirection="row"> <Search flex:1 /> <Button width:46 /> </View>
-            We do NOT use `gap` here because the user reported the cart icon
-            wrapping below the search bar on real devices.  Some Android
-            versions / older Expo runtimes don't honour `gap` on plain Views
-            and fall back to ZERO spacing, but the issue we hit was different:
-            the cart was being pushed to a NEW LINE on narrower devices.
-            Using an explicit `marginLeft: 10` on the trailing button
-            guarantees the gap is honoured and the cart NEVER wraps. */}
+            The cart/language button is ABSOLUTELY POSITIONED on the right.
+            The search bar reserves space for it with `paddingRight: 60`.
+            We use absolute positioning (instead of flex) because the user
+            reported the cart icon being pushed BELOW the search bar on real
+            Android devices — some Android/Expo runtimes wrap flex rows
+            even with `flexWrap: 'nowrap'` and explicit widths. Absolute
+            positioning sidesteps flexbox entirely and guarantees the cart
+            NEVER wraps. */}
         <View style={styles.topHeader}>
           {mode === "shop" ? (
-            <View style={[styles.shopSearch, { flex: 1, flexShrink: 1, minWidth: 0, marginVertical: 0 }]}>
+            <View style={[styles.shopSearch, { marginVertical: 0 }]}>
               <Feather name="search" size={16} color={colors.textMuted} />
               <TextInput
                 style={styles.shopSearchInput}
@@ -322,7 +321,7 @@ export default function ShopScreen() {
               )}
             </View>
           ) : (
-            <View style={{ flex: 1, flexShrink: 1, minWidth: 0 }}>
+            <View style={{ flex: 1, paddingRight: 60 }}>
               <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
               <Text style={styles.topHeaderTitle}>Find local talent</Text>
             </View>
@@ -330,7 +329,7 @@ export default function ShopScreen() {
           {mode === "services" && (
             <TouchableOpacity
               onPress={() => setLangModalOpen(true)}
-              style={[styles.cartIconBtn, { marginLeft: 10, flexShrink: 0 }, languageQ && { backgroundColor: colors.brand100, borderColor: colors.primary }]}
+              style={[styles.cartIconBtnAbs, languageQ && { backgroundColor: colors.brand100, borderColor: colors.primary }]}
               testID="services-language-top-btn"
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
@@ -345,7 +344,7 @@ export default function ShopScreen() {
           {mode === "shop" && (
             <TouchableOpacity
               onPress={() => router.push("/cart")}
-              style={[styles.cartIconBtn, { marginLeft: 10, flexShrink: 0 }]}
+              style={styles.cartIconBtnAbs}
               testID="shop-cart-btn"
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
@@ -838,16 +837,15 @@ const styles = StyleSheet.create({
   cartBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   cartBadge: { position: "absolute", top: -2, right: -2, minWidth: 20, height: 20, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 5 },
   cartBadgeText: { fontSize: 10, fontWeight: "800" },
-  // Slim top header (replaces the SHOP gradient hero) with a small cart icon at right
+  // Slim top header — uses ABSOLUTE positioning for the cart so it can
+  // never wrap below the search bar on any device (Android Expo Go quirk).
   topHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    // NOTE: intentionally NO `gap` here.  Some Android/Expo runtimes the user
-    // is on don't honour `gap` on Views and the cart icon was wrapping below
-    // the search bar.  We use `marginLeft: 10` on the trailing button instead.
+    position: "relative",
     paddingHorizontal: 12,
-    paddingTop: 6, paddingBottom: 12,
+    paddingTop: 6,
+    paddingBottom: 12,
     backgroundColor: colors.background,
+    minHeight: 64, // search 46 + paddingTop 6 + paddingBottom 12
   },
   topHeaderEyebrow: { fontSize: 10, letterSpacing: 1.6, color: colors.textMuted, fontWeight: "800" },
   topHeaderTitle: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.6, marginTop: 2 },
@@ -911,6 +909,17 @@ const styles = StyleSheet.create({
     width: 46, height: 46, borderRadius: 14,
     backgroundColor: colors.primary,
     alignItems: "center", justifyContent: "center",
+  },
+  // Absolute-positioned variant used inside `topHeader` so the cart icon
+  // can never wrap below the search bar on any device.
+  cartIconBtnAbs: {
+    position: "absolute",
+    right: 12,
+    top: 6, // matches topHeader.paddingTop so it aligns with the search bar
+    width: 46, height: 46, borderRadius: 14,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+    zIndex: 2,
   },
   cartBadgeTop: {
     position: "absolute", top: -4, right: -4,
@@ -1043,15 +1052,15 @@ const styles = StyleSheet.create({
   //  product cards with stock-aware states)
   // ============================================================
   shopSearch: {
-    // flex:1 is CRITICAL — without it the search bar takes 100% of the
-    // topHeader's width and pushes the cart icon onto a new line on real
-    // devices (a user-reported bug). With flex:1 the search bar shrinks
-    // to leave exactly 46px for the cart button on its right.
-    flex: 1,
+    // The cart icon is absolutely positioned (see `cartIconBtnAbs`) so the
+    // search bar reserves 60px on the right (46px button + 14px breathing
+    // room) via marginRight. This guarantees the cart never overlaps and
+    // the search bar text never disappears behind it.
     flexDirection: "row", alignItems: "center", gap: 8,
     backgroundColor: colors.surface,
     borderWidth: 1, borderColor: colors.border,
     borderRadius: 14, paddingHorizontal: 14, height: 46,
+    marginRight: 60,
   },
   shopSearchInput: {
     flex: 1, fontSize: 14, color: colors.textMain, paddingVertical: 0,
