@@ -258,7 +258,14 @@ async def register(payload: RegisterRequest):
 async def login(payload: LoginRequest):
     email = payload.email.lower().strip()
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(payload.password, user["password_hash"]):
+    # IMPORTANT: use `user.get("password_hash") or ""` instead of indexing the
+    # field directly.  Accounts created via Google OAuth (POST /auth/google/
+    # exchange) have NO password_hash, so `user["password_hash"]` would raise
+    # a KeyError → uncaught → 500 Internal Server Error.  By falling back to
+    # an empty string, verify_password() returns False cleanly and the user
+    # gets the proper 401 "Invalid credentials" message.  This was the exact
+    # bug a deployed user hit when trying to log in.
+    if not user or not verify_password(payload.password, user.get("password_hash") or ""):
         # Before returning a generic 401, check if this email belongs to a rejected
         # registration archive record — give the user a category-specific message
         # so they know why they can't log in. Only do this on a plain not-found case

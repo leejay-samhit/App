@@ -575,6 +575,55 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+bcrypt_safe_login_retest_2026_05_13:
+  - task: "bcrypt-safe verify_password() — Google-OAuth / malformed-hash login regression"
+    implemented: true
+    working: true
+    file: "backend/core/security.py + backend/server.py (login)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Regression test for the bcrypt-safe verify_password() fix: 8/8 PASS.
+            Runner: /app/bcrypt_verify_test.py.
+
+            All seven required cases (case 7 split into register + login) verified
+            on the public REACT_APP_BACKEND_URL (=EXPO_PUBLIC_BACKEND_URL):
+
+              1. POST /auth/login admin@app.com / Admin@123 → 200 with token. ✅
+              2. POST /auth/login testuser@app.com / Test@123 → 200 with token. ✅
+              3. POST /auth/login admin@app.com / WrongPass!999
+                 → 401 {"detail":"Invalid credentials"}. ✅
+              4. POST /auth/login nobody-XXXX@nowhere-xyz.com / Whatever@1
+                 → 401 {"detail":"Invalid credentials"}. ✅
+              5. SETUP: direct Mongo insert of a user document with role=user,
+                   google_id=g-test-1, NO password_hash field at all.
+                 POST /auth/login on that email + any password
+                 → 401 {"detail":"Invalid credentials"}, NOT 500. ✅
+                 CLEANUP: db.users.delete_many({"email": …}) → 1 doc removed.
+              6. SETUP: direct Mongo insert with password_hash="not-a-real-bcrypt-hash".
+                 POST /auth/login on that email + any password
+                 → 401 {"detail":"Invalid credentials"}, NOT 500. ✅
+                 (Previously this triggered ValueError("Invalid salt") → 500.)
+                 CLEANUP: 1 doc removed.
+              7a. POST /auth/register {name, email, password=Regress@2026, phone}
+                  → 200, token returned. ✅
+              7b. POST /auth/login with the same creds → 200, token returned. ✅
+                  CLEANUP: 1 doc removed.
+
+            Backend logs confirm the new behaviour: requests that previously hit
+            the bcrypt.checkpw → ValueError("Invalid salt") → 500 path now cleanly
+            return 401. The fix in /app/backend/core/security.py:31-37 (early
+            `if not plain or not hashed: return False` + try/except over
+            ValueError/TypeError) and the `user.get("password_hash") or ""`
+            guard in server.py:268 work together to eliminate the 500 leak.
+
+            No regressions observed in adjacent flows (valid logins, wrong
+            password, missing user, register→login). Production fix is verified.
+
 bug_fix_retest_2026_05_12:
   - task: "Public-access / route-ordering fixes (4 bugs)"
     implemented: true
@@ -1323,3 +1372,29 @@ agent_communication:
         runs on backend boot, or document that the account is created on first registration.
 
         Product was cleaned up via DELETE /api/admin/products/{pid} -> 200 at end of run.
+
+    - agent: "testing"
+      message: |
+        bcrypt-safe verify_password() regression: 8/8 PASS. Runner: /app/bcrypt_verify_test.py.
+
+        Verified all 7 review cases against POST /api/auth/login on the public
+        REACT_APP_BACKEND_URL:
+
+          1. admin@app.com / Admin@123                        → 200 (token returned)
+          2. testuser@app.com / Test@123                      → 200 (token returned)
+          3. admin@app.com / wrong password                   → 401 "Invalid credentials"
+          4. nonexistent email                                → 401 "Invalid credentials"
+          5. user inserted via Mongo with NO password_hash    → 401 "Invalid credentials" (NOT 500)
+             (Google-OAuth-only simulation: {id, email, role:user, google_id})
+          6. user inserted with password_hash="not-a-real-bcrypt-hash"
+                                                              → 401 "Invalid credentials" (NOT 500)
+             (Was previously raising ValueError("Invalid salt") → 500.)
+          7. register fresh user + login round-trip           → 200/200 (both)
+
+        The fix in /app/backend/core/security.py (verify_password now returns
+        False on empty/None/malformed hashes via early-return + try/except over
+        ValueError/TypeError) plus the `user.get("password_hash") or ""` guard
+        in server.py:268 successfully eliminate the production 500. Backend
+        logs confirm requests that previously triggered "ValueError: Invalid
+        salt" now return 401 cleanly. All Mongo setup/cleanup ran successfully
+        (3 test docs inserted and removed). Fix is production-ready.

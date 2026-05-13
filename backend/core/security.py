@@ -18,7 +18,23 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    """Safely verify a plaintext password against a bcrypt hash.
+
+    Returns False (NEVER raises) when:
+      • `hashed` is empty / None  — e.g. Google-OAuth-only accounts have no
+        password_hash, so a malicious email+password login attempt against
+        them must cleanly return 401 instead of 500.
+      • `hashed` is malformed     — bcrypt.checkpw raises ValueError("Invalid
+        salt") on garbage input which would otherwise leak as a 500 Internal
+        Server Error and look like the backend is down.
+    """
+    if not plain or not hashed:
+        return False
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        # Malformed hash → treat as failed login (defence-in-depth).
+        return False
 
 
 def create_access_token(user_id: str, email: str, role: str) -> str:
