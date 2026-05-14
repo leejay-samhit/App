@@ -290,69 +290,70 @@ export default function ShopScreen() {
         keyboardShouldPersistTaps="handled"
         stickyHeaderIndices={[0]}
       >
-        {/* Top header — sticks to the top when scrolling.
-            Shop mode: in-line search bar + cart icon.
-            Services mode: eyebrow + title + globe icon.
-
-            The cart/language button is ABSOLUTELY POSITIONED on the right.
-            The search bar reserves space for it with `paddingRight: 60`.
-            We use absolute positioning (instead of flex) because the user
-            reported the cart icon being pushed BELOW the search bar on real
-            Android devices — some Android/Expo runtimes wrap flex rows
-            even with `flexWrap: 'nowrap'` and explicit widths. Absolute
-            positioning sidesteps flexbox entirely and guarantees the cart
-            NEVER wraps. */}
+        {/* Top header — refactored 2026-06 per user bug report.
+            Previous implementation used position:absolute on the cart which
+            overflowed off-screen on certain Android devices (see screenshot).
+            Now uses a clean flex row, exactly per spec:
+              <Row flexDirection=row width=100% paddingHorizontal=16>
+                <SearchBox flex:1 minWidth:0 height:52 />
+                <CartButton width:52 height:52 marginLeft:12 />
+              </Row>
+            `minWidth: 0` on the flex child is the critical fix that prevents
+            wrapping on Android — without it RN never lets the search bar
+            shrink below its intrinsic content width. */}
         <View style={styles.topHeader}>
           {mode === "shop" ? (
-            <View style={[styles.shopSearch, { marginVertical: 0 }]}>
-              <Feather name="search" size={16} color={colors.textMuted} />
-              <TextInput
-                style={styles.shopSearchInput}
-                placeholder="Search for products"
-                placeholderTextColor={colors.textMuted}
-                value={shopSearch}
-                onChangeText={setShopSearch}
-                returnKeyType="search"
-              />
-              {shopSearch.length > 0 ? (
-                <TouchableOpacity onPress={() => setShopSearch("")}><Feather name="x-circle" size={18} color={colors.textMuted} /></TouchableOpacity>
-              ) : null}
-            </View>
+            <>
+              <View style={styles.shopSearch}>
+                <Feather name="search" size={16} color={colors.textMuted} />
+                <TextInput
+                  style={styles.shopSearchInput}
+                  placeholder="Search for products"
+                  placeholderTextColor={colors.textMuted}
+                  value={shopSearch}
+                  onChangeText={setShopSearch}
+                  returnKeyType="search"
+                />
+                {shopSearch.length > 0 ? (
+                  <TouchableOpacity onPress={() => setShopSearch("")}>
+                    <Feather name="x-circle" size={18} color={colors.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+              <TouchableOpacity
+                onPress={() => router.push("/cart")}
+                style={styles.cartIconBtn}
+                testID="shop-cart-btn"
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Feather name="shopping-cart" size={22} color={colors.primaryFg} />
+                {cartCount > 0 && (
+                  <View style={styles.cartBadgeTop}>
+                    <Text style={styles.cartBadgeTopText}>{cartCount > 9 ? "9+" : cartCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </>
           ) : (
-            <View style={{ flex: 1, paddingRight: 60 }}>
-              <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
-              <Text style={styles.topHeaderTitle}>Find local talent</Text>
-            </View>
-          )}
-          {mode === "services" && (
-            <TouchableOpacity
-              onPress={() => setLangModalOpen(true)}
-              style={[styles.cartIconBtnAbs, languageQ && { backgroundColor: colors.brand100, borderColor: colors.primary }]}
-              testID="services-language-top-btn"
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Feather name="globe" size={18} color={languageQ ? colors.primary : colors.textMain} />
-              {languageQ ? (
-                <View style={styles.cartBadgeTop}>
-                  <Text style={styles.cartBadgeTopText}>{languageQ.toUpperCase()}</Text>
-                </View>
-              ) : null}
-            </TouchableOpacity>
-          )}
-          {mode === "shop" && (
-            <TouchableOpacity
-              onPress={() => router.push("/cart")}
-              style={styles.cartIconBtnAbs}
-              testID="shop-cart-btn"
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Feather name="shopping-cart" size={20} color={colors.primaryFg} />
-              {cartCount > 0 && (
-                <View style={styles.cartBadgeTop}>
-                  <Text style={styles.cartBadgeTopText}>{cartCount > 9 ? "9+" : cartCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            <>
+              <View style={styles.servicesTitleWrap}>
+                <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
+                <Text style={styles.topHeaderTitle}>Find local talent</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setLangModalOpen(true)}
+                style={[styles.cartIconBtn, languageQ && { backgroundColor: colors.brand100, borderWidth: 1, borderColor: colors.primary }]}
+                testID="services-language-top-btn"
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Feather name="globe" size={20} color={languageQ ? colors.primary : colors.primaryFg} />
+                {languageQ ? (
+                  <View style={styles.cartBadgeTop}>
+                    <Text style={styles.cartBadgeTopText}>{languageQ.toUpperCase()}</Text>
+                  </View>
+                ) : null}
+              </TouchableOpacity>
+            </>
           )}
         </View>
 
@@ -837,13 +838,27 @@ const styles = StyleSheet.create({
   cartBadgeText: { fontSize: 10, fontWeight: "800" },
   // Slim top header — uses ABSOLUTE positioning for the cart so it can
   // never wrap below the search bar on any device (Android Expo Go quirk).
+  // Top header — refactored 2026-06. Clean flex row, NO absolute positioning.
+  // Per user bug report: previous absolute-positioned cart was overflowing
+  // off the right edge on certain Android devices. This implementation
+  // exactly follows the spec the user provided:
+  //   <Row width=100% flexDirection=row paddingHorizontal=16>
+  //     <SearchBox flex:1 minWidth:0 height:52 />
+  //     <CartBtn 52x52 marginLeft:12 />
+  //   </Row>
   topHeader: {
-    position: "relative",
-    paddingHorizontal: 14,
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
     paddingTop: 10,
-    paddingBottom: 14,
+    paddingBottom: 12,
     backgroundColor: colors.background,
-    minHeight: 72,
+  },
+  servicesTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: 12,
   },
   topHeaderEyebrow: { fontSize: 10, letterSpacing: 1.6, color: colors.textMuted, fontWeight: "800" },
   topHeaderTitle: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.6, marginTop: 2 },
@@ -901,25 +916,17 @@ const styles = StyleSheet.create({
   providerSheetEyebrow: { fontSize: 9, letterSpacing: 1.4, color: colors.textMuted, fontWeight: "800" },
   providerSheetTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4, marginTop: 1 },
   cartIconBtn: {
-    // Primary-colored action button to visually pair with the green filter
-    // icon inside the search bar — gives the top header a balanced look:
-    //   [ search-bar with green filter icon ] [ green cart button ]
-    width: 46, height: 46, borderRadius: 14,
+    // 52×52 fixed-size cart/language button — exactly matches search bar
+    // height so they sit on a single visual baseline. `flexShrink: 0`
+    // guarantees the button never compresses on narrow screens.
+    width: 52,
+    height: 52,
+    marginLeft: 12,
+    flexShrink: 0,
+    borderRadius: 18,
     backgroundColor: colors.primary,
-    alignItems: "center", justifyContent: "center",
-  },
-  // Compact, balanced absolute-positioned cart/language button.
-  // 44×44 = iOS minimum tap target; pairs cleanly with a 46px search bar
-  // (subtle vertical centering via top: 8 → search-bar bottom is 56,
-  // cart bottom is 52, both visually aligned).
-  cartIconBtnAbs: {
-    position: "absolute",
-    right: 14,
-    top: 12, // matches topHeader.paddingTop + 2px so cart centers on search-bar mid-line
-    width: 44, height: 44, borderRadius: 12,
-    backgroundColor: colors.primary,
-    alignItems: "center", justifyContent: "center",
-    zIndex: 2,
+    alignItems: "center",
+    justifyContent: "center",
     ...Platform.select({
       ios: {
         shadowColor: colors.primary,
@@ -930,6 +937,13 @@ const styles = StyleSheet.create({
       android: { elevation: 2 },
       default: { boxShadow: "0px 2px 6px rgba(15,42,29,0.12)" as any },
     }),
+  },
+  // Legacy absolute-positioned variant kept only to avoid breaking other
+  // imports of this stylesheet — no longer referenced in JSX.
+  cartIconBtnAbs: {
+    width: 52, height: 52, borderRadius: 18,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
   },
   cartBadgeTop: {
     position: "absolute", top: -5, right: -5,
@@ -1062,13 +1076,21 @@ const styles = StyleSheet.create({
   //  product cards with stock-aware states)
   // ============================================================
   shopSearch: {
-    // Cart is absolute-positioned (see `cartIconBtnAbs`). We reserve 54px
-    // on the right (44px button + 10px gap) so the input never overlaps it.
-    flexDirection: "row", alignItems: "center", gap: 10,
+    // CRITICAL: `flex: 1 + minWidth: 0` is the only reliable way to make a
+    // flex child shrink properly on Android. Without `minWidth: 0` Android
+    // pushes the cart button off the right edge of the screen because the
+    // search bar refuses to shrink below its intrinsic content width.
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    height: 52,
+    paddingHorizontal: 16,
+    borderRadius: 18,
     backgroundColor: colors.surface,
-    borderWidth: 1, borderColor: colors.border,
-    borderRadius: 14, paddingHorizontal: 14, height: 46,
-    marginRight: 54,
+    borderWidth: 1,
+    borderColor: colors.border,
     ...Platform.select({
       ios: {
         shadowColor: "#0F2A1D",
@@ -1083,6 +1105,7 @@ const styles = StyleSheet.create({
   shopSearchInput: {
     flex: 1, fontSize: 14, color: colors.textMain, paddingVertical: 0,
     fontWeight: "500",
+    minWidth: 0,
   },
   searchFilterBtn: {
     width: 30, height: 30, borderRadius: 8,
