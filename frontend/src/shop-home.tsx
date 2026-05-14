@@ -91,6 +91,10 @@ export function ShopHome({
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  // Once the user taps the Search button (or hits Return) we flip this true
+  // and the home swaps to a dedicated "Search results" grid. Clearing the
+  // input OR tapping the back chevron resets it.
+  const [searchSubmitted, setSearchSubmitted] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("all");
   const [bannerIdx, setBannerIdx] = useState(0);
 
@@ -265,22 +269,48 @@ export function ShopHome({
           </View>
         </View>
 
-        {/* 2. SEARCH BAR — full width with search button on the right */}
+        {/* 2. SEARCH BAR — full width with search button on the right.
+            Submitting (keyboard return OR tapping the green button) flips
+            `searchSubmitted=true` and the screen swaps to a dedicated
+            search-results grid below. Clearing the input resets it. */}
         <View style={styles.searchRow}>
           <View style={styles.searchBox}>
-            <Feather name="search" size={15} color={colors.textMuted} />
+            {searchSubmitted ? (
+              <TouchableOpacity
+                onPress={() => { setSearch(""); setSearchSubmitted(false); }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              >
+                <Feather name="arrow-left" size={16} color={colors.textMain} />
+              </TouchableOpacity>
+            ) : (
+              <Feather name="search" size={15} color={colors.textMuted} />
+            )}
             <TextInput
               value={search}
-              onChangeText={setSearch}
+              onChangeText={(t) => {
+                setSearch(t);
+                if (!t.trim()) setSearchSubmitted(false);
+              }}
+              onSubmitEditing={() => { if (search.trim()) setSearchSubmitted(true); }}
               placeholder="Search for sarees, mobiles, more…"
               placeholderTextColor={colors.textMuted}
               returnKeyType="search"
               style={styles.searchInput}
+              testID="home-search-input"
             />
+            {search.length > 0 ? (
+              <TouchableOpacity
+                onPress={() => { setSearch(""); setSearchSubmitted(false); }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              >
+                <Feather name="x-circle" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : null}
           </View>
           <TouchableOpacity
             style={styles.searchBtn}
-            onPress={() => router.push(`/shop-search?q=${encodeURIComponent(search)}` as any)}
+            onPress={() => { if (search.trim()) setSearchSubmitted(true); }}
+            disabled={!search.trim()}
             testID="home-search-btn"
           >
             <Feather name="search" size={16} color={colors.primaryFg} />
@@ -292,6 +322,52 @@ export function ShopHome({
         contentContainerStyle={{ paddingBottom: 32 }}
         showsVerticalScrollIndicator={false}
       >
+        {searchSubmitted && search.trim() ? (
+          // ── SEARCH RESULTS VIEW ─────────────────────────────────────
+          <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+            <View style={styles.searchResultHeader}>
+              <Text style={styles.searchResultTitle}>
+                Results for "<Text style={{ color: colors.primary }}>{search.trim()}</Text>"
+              </Text>
+              <Text style={styles.searchResultCount}>{filteredProducts.length} product{filteredProducts.length === 1 ? "" : "s"}</Text>
+            </View>
+            {loading ? (
+              <View style={styles.loadingRow}><ActivityIndicator color={colors.primary} /></View>
+            ) : filteredProducts.length === 0 ? (
+              <View style={styles.emptyResultsWrap}>
+                <View style={[styles.iconRound, { backgroundColor: colors.brand100 }]}>
+                  <Feather name="search" size={28} color={colors.primary} />
+                </View>
+                <Text style={styles.emptyResultsTitle}>No results found</Text>
+                <Text style={styles.emptyResultsSub}>
+                  We couldn't find anything matching "{search.trim()}".
+                  Try a different keyword or browse the categories above.
+                </Text>
+                <TouchableOpacity
+                  style={styles.bannerCta}
+                  onPress={() => { setSearch(""); setSearchSubmitted(false); }}
+                >
+                  <Text style={[styles.bannerCtaText, { color: colors.primary }]}>Back to home</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <FlatList
+                data={filteredProducts}
+                keyExtractor={(p) => `result-${p.id}`}
+                numColumns={2}
+                scrollEnabled={false}
+                columnWrapperStyle={{ gap: 12, marginBottom: 12 }}
+                renderItem={({ item }) => (
+                  <View style={{ flex: 1 }}>
+                    <ProductCard p={item} />
+                  </View>
+                )}
+              />
+            )}
+          </View>
+        ) : (
+          // ── DEFAULT HOME VIEW ───────────────────────────────────────
+          <>
         {/* 3. HORIZONTAL CATEGORY SCROLL — circular icons */}
         <ScrollView
           horizontal
@@ -423,6 +499,8 @@ export function ShopHome({
             ItemSeparatorComponent={() => <View style={{ width: 12 }} />}
             renderItem={({ item }) => <ProductCard p={item} badge="Best Seller" compact />}
           />
+        )}
+          </>
         )}
       </ScrollView>
     </View>
@@ -642,4 +720,24 @@ const styles = StyleSheet.create({
   // Misc
   loadingRow: { paddingVertical: 24, alignItems: "center" },
   emptyText: { fontSize: 12.5, color: colors.textMuted, paddingHorizontal: 16, paddingVertical: 12 },
+
+  // Search results view
+  searchResultHeader: {
+    flexDirection: "row", alignItems: "baseline", justifyContent: "space-between",
+    marginBottom: 12,
+  },
+  searchResultTitle: { fontSize: 15, fontWeight: "900", color: colors.textMain, flexShrink: 1 },
+  searchResultCount: { fontSize: 11.5, color: colors.textMuted, fontWeight: "700" },
+  emptyResultsWrap: {
+    alignItems: "center", paddingVertical: 36, gap: 12,
+  },
+  iconRound: {
+    width: 76, height: 76, borderRadius: 38,
+    alignItems: "center", justifyContent: "center",
+  },
+  emptyResultsTitle: { fontSize: 16, fontWeight: "900", color: colors.textMain },
+  emptyResultsSub: {
+    fontSize: 13, color: colors.textMuted, textAlign: "center",
+    lineHeight: 18, maxWidth: 280,
+  },
 });
