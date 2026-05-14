@@ -30,6 +30,7 @@ export default function AdminLayout() {
     >
       <Tabs.Screen name="home" options={{ title: "Home", tabBarIcon: ({ color, size }) => <Feather name="grid" size={size} color={color} /> }} />
       <Tabs.Screen name="users" options={{ title: "Users", tabBarIcon: ({ color, size }) => <Feather name="users" size={size} color={color} /> }} />
+      <Tabs.Screen name="shop" options={{ title: "Shop", tabBarIcon: ({ color, size }) => <Feather name="shopping-bag" size={size} color={color} /> }} />
       <Tabs.Screen name="payouts" options={{ title: "Payouts", tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="currency-inr" size={size} color={color} /> }} />
       <Tabs.Screen name="wallet" options={{ title: "Wallet", tabBarIcon: ({ color, size }) => <Feather name="credit-card" size={size} color={color} /> }} />
       <Tabs.Screen name="more" options={{ title: "More", tabBarIcon: ({ color, size }) => <Feather name="more-horizontal" size={size} color={color} /> }} />
@@ -59,6 +60,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="users-tree" options={{ href: null }} />
       <Tabs.Screen name="service-management" options={{ href: null }} />
       <Tabs.Screen name="area-mapping" options={{ href: null }} />
+      <Tabs.Screen name="shop-categories" options={{ href: null }} />
     </Tabs>
   );
 }

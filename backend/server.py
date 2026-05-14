@@ -156,6 +156,7 @@ from routes import shop_layout_analytics as shop_layout_analytics_router  # noqa
 from routes import chat as chat_router  # noqa: E402
 from routes import products_extended as products_extended_router  # noqa: E402
 from routes import products_ai as products_ai_router  # noqa: E402
+from routes import shop_categories as shop_categories_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -6151,6 +6152,7 @@ app.include_router(shop_layout_analytics_router.router, prefix="/api")
 app.include_router(chat_router.router, prefix="/api")
 app.include_router(products_extended_router.router, prefix="/api")
 app.include_router(products_ai_router.router, prefix="/api")
+app.include_router(shop_categories_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,

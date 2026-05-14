@@ -35,6 +35,7 @@ const ITEMS = [
 const STORE_ITEMS = [
   { icon: "package", label: "Products", route: "/admin/products", hint: "Manage catalog · stock · pricing" },
   { icon: "layout", label: "Shop layout", route: "/admin/shop-layout", hint: "12 block types · per-category layouts · live preview" },
+  { icon: "grid", label: "Shop categories", route: "/admin/shop-categories", hint: "Rename · re-icon · upload image · delete" },
   { icon: "image", label: "Promo banners (legacy)", route: "/admin/promo-banners", hint: "Migrated into Shop layout → Banner slider" },
 ];
 

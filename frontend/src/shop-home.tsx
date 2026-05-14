@@ -28,6 +28,7 @@ import { api, formatApiError } from "./api";
 import { colors } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
 import { getCurrentCoords } from "./location";
+import { LocationBanner } from "./location-banner";
 
 // ── Types ────────────────────────────────────────────────────────────────
 type Product = {
@@ -58,11 +59,12 @@ const seededDiscount = (id: string) => {
 const productImage = (p: Product) =>
   (p.images && p.images[0]) || p.image_data_url || p.image_url || null;
 
-// Hardcoded category circles per spec. Uses `pack` so we can mix icon
-// families (Feather is limited; MaterialCommunityIcons gives us proper
-// fashion/electronics icons).
+// Hardcoded category circles per spec — used as fallback when the
+// admin-managed /api/shop-categories endpoint is unreachable. In normal
+// operation the strip is populated by the API (with the "More" pill always
+// appended as a UI control to open the full-list modal).
 type CatIconPack = "feather" | "mci" | "mat";
-const CATEGORIES: {
+const FALLBACK_CATEGORIES: {
   key: string; label: string;
   icon: string; pack: CatIconPack; color: string;
 }[] = [
@@ -73,30 +75,20 @@ const CATEGORIES: {
   { key: "Electronics", label: "Electronics", icon: "tv",            pack: "mci",     color: "#E0E7FF" },
   { key: "Home",        label: "Home",        icon: "sofa",          pack: "mci",     color: "#FFEDD5" },
   { key: "Beauty",      label: "Beauty",      icon: "lipstick",      pack: "mci",     color: "#FCE7F3" },
-  { key: "More",        label: "More",        icon: "dots-grid",     pack: "mci",     color: "#F3F4F6" },
 ];
 
-// Master category list shown when user taps "More".
-const ALL_CATEGORIES: { key: string; label: string; icon: string; pack: CatIconPack; color: string }[] = [
-  { key: "Sarees",      label: "Sarees",      icon: "hanger",          pack: "mci", color: "#FCE7F3" },
-  { key: "Men",         label: "Men",         icon: "human-male",      pack: "mci", color: "#DBEAFE" },
-  { key: "Women",       label: "Women",       icon: "human-female",    pack: "mci", color: "#FDE68A" },
-  { key: "Kids",        label: "Kids",        icon: "baby-face",       pack: "mci", color: "#FEE2E2" },
-  { key: "Clothes",     label: "Clothes",     icon: "tshirt-crew",     pack: "mci", color: "#FCE7F3" },
-  { key: "Shoes",       label: "Shoes",       icon: "shoe-sneaker",    pack: "mci", color: "#E0E7FF" },
-  { key: "Accessories", label: "Accessories", icon: "sunglasses",      pack: "mci", color: "#FFE4E6" },
-  { key: "Electronics", label: "Electronics", icon: "tv",              pack: "mci", color: "#E0E7FF" },
-  { key: "Mobiles",     label: "Mobiles",     icon: "cellphone",       pack: "mci", color: "#DBEAFE" },
-  { key: "Laptop",      label: "Laptop",      icon: "laptop",          pack: "mci", color: "#E5E7EB" },
-  { key: "Home",        label: "Home",        icon: "sofa",            pack: "mci", color: "#FFEDD5" },
-  { key: "Beauty",      label: "Beauty",      icon: "lipstick",        pack: "mci", color: "#FCE7F3" },
-  { key: "Grocery",     label: "Grocery",     icon: "cart",            pack: "mci", color: "#DCFCE7" },
-  { key: "Toys",        label: "Toys",        icon: "robot-happy",     pack: "mci", color: "#FAE8FF" },
-  { key: "Books",       label: "Books",       icon: "book-open-page-variant", pack: "mci", color: "#FEF3C7" },
-  { key: "Sports",      label: "Sports",      icon: "soccer",          pack: "mci", color: "#D1FAE5" },
-  { key: "Health",      label: "Health",      icon: "heart-pulse",     pack: "mci", color: "#FFE4E6" },
-  { key: "Pet Care",    label: "Pet Care",    icon: "dog",             pack: "mci", color: "#FDE68A" },
-];
+// Shape returned by /api/shop-categories
+type ApiCategory = {
+  id: string;
+  name: string;
+  slug: string;
+  icon_pack: CatIconPack;
+  icon_name: string;
+  image_url: string | null;
+  color: string;
+  sort_order: number;
+  active: boolean;
+};
 
 // Tiny helper to render whichever icon pack a category requests.
 function CatIcon({ icon, pack, size, color }: { icon: string; pack: CatIconPack; size: number; color: string }) {
@@ -136,6 +128,9 @@ export function ShopHome({
   const [bannerIdx, setBannerIdx] = useState(0);
   // "More" tap opens an all-categories sheet
   const [allCatModalOpen, setAllCatModalOpen] = useState(false);
+  // Admin-managed shop categories (fetched from /api/shop-categories).
+  // Falls back to a hardcoded short list if the API fails.
+  const [apiCategories, setApiCategories] = useState<ApiCategory[] | null>(null);
 
   // ── Delivery address (live reverse-geocoded from user coords) ─────────
   const [deliveryAddress, setDeliveryAddress] = useState<string>(defaultAddress);
@@ -219,7 +214,22 @@ export function ShopHome({
     } finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // Admin-managed categories — fetched in parallel with products. Falls
+  // back to FALLBACK_CATEGORIES on any error so the strip is never empty.
+  const loadCategories = useCallback(async () => {
+    try {
+      const r = await api.get<{ items: ApiCategory[] }>("/shop-categories");
+      const items = (r.data?.items || []).filter((c) => c.active !== false);
+      items.sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+      setApiCategories(items);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("ShopHome /shop-categories failed:", formatApiError(e));
+      setApiCategories(null);
+    }
+  }, []);
+
+  useEffect(() => { load(); loadCategories(); }, [load, loadCategories]);
 
   // ── Derived collections per section ───────────────────────────────────
   const filteredProducts = useMemo(() => {
@@ -435,6 +445,7 @@ export function ShopHome({
         contentContainerStyle={{ paddingBottom: 32 }}
         showsVerticalScrollIndicator={false}
       >
+        <LocationBanner />
         {searchSubmitted && search.trim() ? (
           // ── SEARCH RESULTS VIEW ─────────────────────────────────────
           <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
@@ -481,35 +492,76 @@ export function ShopHome({
         ) : (
           // ── DEFAULT HOME VIEW ───────────────────────────────────────
           <>
-        {/* 3. HORIZONTAL CATEGORY SCROLL — circular icons */}
+        {/* 3. HORIZONTAL CATEGORY SCROLL — circular icons. Data comes from
+            /api/shop-categories (admin-managed). The first chip is always
+            "All" (resets filter); the last is always "More" which opens
+            the full-list modal. Strip is capped at 6 admin categories so
+            "More" stays visible — the full list is in the modal. */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.catScroll}
         >
-          {CATEGORIES.map((c) => {
-            const active = activeCategory === c.key;
+          {/* Always-visible "All" pill (resets filter) */}
+          <TouchableOpacity
+            key="all"
+            style={styles.catItem}
+            onPress={() => setActiveCategory("all")}
+            activeOpacity={0.75}
+            testID="home-cat-all"
+          >
+            <View style={[
+              styles.catCircle,
+              { backgroundColor: "#E5F2EC" },
+              activeCategory === "all" && styles.catCircleActive,
+            ]}>
+              <MaterialIcons name="grid-view" size={22} color={activeCategory === "all" ? colors.primaryFg : colors.textMain} />
+            </View>
+            <Text style={[styles.catLabel, activeCategory === "all" && { color: colors.primary, fontWeight: "800" }]}>All</Text>
+          </TouchableOpacity>
+
+          {/* Admin categories (max 6 in the strip — rest live in the More modal) */}
+          {(apiCategories || FALLBACK_CATEGORIES.filter((c) => c.key !== "all")).slice(0, 6).map((c: any) => {
+            const key = c.id ? c.name : c.key;
+            const label = c.name || c.label || "";
+            const pack: CatIconPack = c.icon_pack || c.pack || "feather";
+            const iconName = c.icon_name || c.icon || "shopping-bag";
+            const color = c.color || "#E5F2EC";
+            const imageUrl = c.image_url || null;
+            const active = activeCategory === key;
             return (
               <TouchableOpacity
-                key={c.key}
+                key={c.id || key}
                 style={styles.catItem}
-                onPress={() => {
-                  if (c.key === "More") {
-                    setAllCatModalOpen(true);
-                  } else {
-                    setActiveCategory(c.key);
-                  }
-                }}
+                onPress={() => setActiveCategory(key)}
                 activeOpacity={0.75}
-                testID={`home-cat-${c.key}`}
+                testID={`home-cat-${key}`}
               >
-                <View style={[styles.catCircle, { backgroundColor: c.color }, active && styles.catCircleActive]}>
-                  <CatIcon icon={c.icon} pack={c.pack} size={22} color={active ? colors.primaryFg : colors.textMain} />
+                <View style={[styles.catCircle, { backgroundColor: color }, active && styles.catCircleActive]}>
+                  {imageUrl ? (
+                    <Image source={{ uri: imageUrl }} style={styles.catCircleImg} />
+                  ) : (
+                    <CatIcon icon={iconName} pack={pack} size={22} color={active ? colors.primaryFg : colors.textMain} />
+                  )}
                 </View>
-                <Text style={[styles.catLabel, active && { color: colors.primary, fontWeight: "800" }]}>{c.label}</Text>
+                <Text style={[styles.catLabel, active && { color: colors.primary, fontWeight: "800" }]} numberOfLines={1}>{label}</Text>
               </TouchableOpacity>
             );
           })}
+
+          {/* Always-visible "More" pill (opens the full grid modal) */}
+          <TouchableOpacity
+            key="more"
+            style={styles.catItem}
+            onPress={() => setAllCatModalOpen(true)}
+            activeOpacity={0.75}
+            testID="home-cat-More"
+          >
+            <View style={[styles.catCircle, { backgroundColor: "#F3F4F6" }]}>
+              <MaterialCommunityIcons name="dots-grid" size={22} color={colors.textMain} />
+            </View>
+            <Text style={styles.catLabel}>More</Text>
+          </TouchableOpacity>
         </ScrollView>
 
         {/* 4–7. ADMIN-CONFIGURABLE LAYOUT BLOCKS — banners, flash sales,
@@ -653,24 +705,38 @@ export function ShopHome({
                 <Text style={styles.allCatLabel} numberOfLines={1}>All</Text>
               </TouchableOpacity>
 
-              {ALL_CATEGORIES.map((c) => {
-                const active = activeCategory === c.key;
+              {(apiCategories || FALLBACK_CATEGORIES.filter((c) => c.key !== "all").map((c) => ({
+                id: c.key,
+                name: c.label,
+                slug: c.key.toLowerCase(),
+                icon_pack: c.pack,
+                icon_name: c.icon,
+                image_url: null,
+                color: c.color,
+                sort_order: 0,
+                active: true,
+              } as ApiCategory))).map((c) => {
+                const active = activeCategory === c.name;
                 return (
                   <TouchableOpacity
-                    key={`all-${c.key}`}
+                    key={`all-${c.id}`}
                     style={[styles.allCatItem, active && styles.allCatItemActive]}
                     onPress={() => {
-                      setActiveCategory(c.key);
+                      setActiveCategory(c.name);
                       setAllCatModalOpen(false);
-                      router.push(`/shop-category/${encodeURIComponent(c.key)}` as any);
+                      router.push(`/shop-category/${encodeURIComponent(c.name)}` as any);
                     }}
                     activeOpacity={0.75}
-                    testID={`all-cat-${c.key}`}
+                    testID={`all-cat-${c.slug}`}
                   >
                     <View style={[styles.allCatIconCircle, { backgroundColor: c.color }]}>
-                      <CatIcon icon={c.icon} pack={c.pack} size={24} color={colors.textMain} />
+                      {c.image_url ? (
+                        <Image source={{ uri: c.image_url }} style={styles.allCatIconImg} />
+                      ) : (
+                        <CatIcon icon={c.icon_name} pack={c.icon_pack as CatIconPack} size={24} color={colors.textMain} />
+                      )}
                     </View>
-                    <Text style={styles.allCatLabel} numberOfLines={1}>{c.label}</Text>
+                    <Text style={styles.allCatLabel} numberOfLines={1}>{c.name}</Text>
                   </TouchableOpacity>
                 );
               })}
@@ -780,6 +846,7 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   catCircleActive: { backgroundColor: colors.primary },
+  catCircleImg: { width: 56, height: 56, borderRadius: 28 },
   catLabel: { fontSize: 11.5, color: colors.textMain, fontWeight: "700", textAlign: "center" },
 
   // 4. Banner
@@ -994,7 +1061,9 @@ const styles = StyleSheet.create({
     width: 54, height: 54, borderRadius: 27,
     alignItems: "center", justifyContent: "center",
     marginBottom: 6,
+    overflow: "hidden",
   },
+  allCatIconImg: { width: 54, height: 54, borderRadius: 27 },
   allCatLabel: {
     fontSize: 11.5,
     fontWeight: "800",

@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, 
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 
@@ -225,6 +226,20 @@ export default function AdminPayouts() {
           </View>
         ) : null}
 
+        {/* ── Quick Actions (moved from admin Home) ─────────────────────
+            Consolidated here per user spec — admin can access KYC, Orders,
+            Audit, Settings, and Approvals directly from this screen instead
+            of bouncing back to Home. */}
+        <Text style={styles.quickLabel}>QUICK ACTIONS</Text>
+        <View style={styles.quickGrid}>
+          <QuickActionTile icon="user-check" label="KYC queue"     route="/admin/kyc" testID="qa-kyc" />
+          <QuickActionTile icon="package"    label="Orders"        route="/admin/orders" testID="qa-orders" />
+          <QuickActionTile icon="file-text"  label="Audit log"     route="/admin/audit" testID="qa-audit" />
+          <QuickActionTile icon="sliders"    label="Settings"      route="/admin/settings" testID="qa-settings" />
+          <QuickActionTile icon="user-plus"  label="Approvals"     route="/admin/approvals" testID="qa-approvals" />
+          <QuickActionTile icon="list"       label="Transactions"  route="/admin/transactions" testID="qa-transactions" />
+        </View>
+
         <View style={styles.tabs}>
           {(["pending", "processing", "success", "rejected"] as const).map((t) => (
             <TouchableOpacity key={t} onPress={() => { setTab(t); setSelectMode(false); setSelected(new Set()); }} style={[styles.tab, tab === t && styles.tabActive]} testID={`payouts-tab-${t}`}>
@@ -404,4 +419,28 @@ const styles = StyleSheet.create({
   modalActions: { flexDirection: "row", gap: 8, marginTop: 18 },
   modalBtn: { flex: 1, paddingVertical: 13, borderRadius: radii.button, alignItems: "center" },
   modalBtnText: { fontWeight: "800", fontSize: 13 },
+
+  // Quick actions (moved from admin Home)
+  quickLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginTop: 16, marginBottom: 8 },
+  quickGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 10 },
+  quickCard: {
+    flexBasis: "31%", flexGrow: 1,
+    flexDirection: "column", alignItems: "center", gap: 6,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+    borderRadius: 14,
+    paddingVertical: 12, paddingHorizontal: 8,
+  },
+  quickIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
+  quickLabelText: { fontSize: 11, fontWeight: "700", color: colors.textMain, textAlign: "center" },
 });
+
+function QuickActionTile({ icon, label, route, testID }: { icon: any; label: string; route: string; testID?: string }) {
+  const r = useRouter();
+  return (
+    <TouchableOpacity style={styles.quickCard} onPress={() => r.push(route as any)} testID={testID}>
+      <View style={styles.quickIcon}><Feather name={icon} size={16} color={colors.primary} /></View>
+      <Text style={styles.quickLabelText}>{label}</Text>
+    </TouchableOpacity>
+  );
+}

@@ -10,6 +10,7 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
 import { RichProductEditor } from "../../src/rich-product-editor";
+import { ProductCategoryPicker } from "../../src/product-category-picker";
 
 // Walkthrough steps shown on first visit (and via the "?" button) of
 // /admin/products. Keep these in plain language; admins are not engineers.
@@ -661,7 +662,7 @@ function ProductModal({ visible, existing, onClose, onSaved }: { visible: boolea
               <Text style={modalStyles.fieldLabel}>Stock</Text>
               <TextInput value={stock} onChangeText={setStock} keyboardType="number-pad" style={modalStyles.input} testID="product-stock" />
               <Text style={modalStyles.fieldLabel}>Category</Text>
-              <TextInput value={category} onChangeText={setCategory} placeholder="e.g. Electronics, Fashion" placeholderTextColor={colors.textMuted} style={modalStyles.input} testID="product-category" />
+              <ProductCategoryPicker value={category} onChange={setCategory} testID="product-category" />
               <Text style={modalStyles.fieldLabel}>Description</Text>
               <TextInput value={description} onChangeText={setDescription} multiline style={[modalStyles.input, { minHeight: 70, paddingTop: 12 }]} testID="product-description" />
               <View style={modalStyles.switchRow}>

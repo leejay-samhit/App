@@ -1670,3 +1670,178 @@ agent_communication:
           `servicesTitleWrap (flex:1) + cartIconBtn (marginLeft:12)` so the icon
           cannot overflow regardless of screen width. Language picker modal
           opens cleanly when tapped (All languages, EN, TE, HI, TA selections).
+
+## backend:
+  - task: "Shop Categories CRUD API (admin-managed)"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/shop_categories.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          New router with public GET /api/shop-categories and admin
+          GET/POST/PUT/DELETE /api/admin/shop-categories. Idempotent
+          seed on first call inserts 18 defaults (Sarees, Men, Women,
+          Kids, Clothes, Shoes, Accessories, Electronics, Mobiles,
+          Laptop, Home, Beauty, Grocery, Toys, Books, Sports, Health,
+          Pet Care). Schema: { name, slug, icon_pack, icon_name,
+          image_url, color, sort_order, active }. Verified via curl —
+          admin endpoint returns 18 items; public endpoint returns
+          only active items.
+
+## frontend:
+  - task: "Admin · Shop Categories CRUD page + Icon picker + Image upload"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/admin/shop-categories.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          New admin page lets admin rename, change icon (35+ MCI icons
+          to pick from), upload base64 image (takes precedence over
+          icon), pick pastel background colour, set sort order, toggle
+          active, and delete categories. Linked from Admin → More →
+          Store section ("Shop categories") AND from the new admin
+          /admin/shop quick-manage bar. Backend verified working with
+          authenticated curl returning 18 items.
+
+  - task: "Shop home — admin-managed categories (replaces hardcoded list)"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/shop-home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Replaced hardcoded CATEGORIES and ALL_CATEGORIES arrays with a
+          fetch from /api/shop-categories. The horizontal strip shows
+          "All" + 6 admin categories + "More". The More-modal grid
+          renders every admin category. Supports custom image_url per
+          category (renders as 54x54 round image). FALLBACK_CATEGORIES
+          still shipped — used only if /api/shop-categories fails.
+
+  - task: "Product form — Category dropdown synced with admin categories"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/product-category-picker.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          New <ProductCategoryPicker/> replaces the plain text category
+          field in admin/products.tsx. Pulls categories from
+          /api/shop-categories, shows them as chips, supports "Custom…"
+          mode for legacy free-text categories. If API fails, gracefully
+          degrades to text input.
+
+  - task: "Location prompt UX — replaced full-screen blocker with one-time banner"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/location-gate.tsx, /app/frontend/src/location-banner.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          LocationGate is now a non-blocking pass-through that only
+          kicks off the silent background useLocationTracking hook for
+          non-admin users. The "Turn on location" wall is gone. Replaced
+          by a small dismissable banner rendered inside the Shop home
+          ("For best shop experience — Allow location"). Banner persists
+          @app/locationBannerDismissed=1 in AsyncStorage on Allow or
+          close, never shown again. Hidden automatically if permission
+          is already granted, and hidden on web.
+
+  - task: "Profile — Live Location entry removed"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/profile.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Per user spec, the "Live Location · SHARING ON/OFF" tile that
+          linked to /services/location was removed from the customer
+          profile. Tracking still runs silently via useLocationTracking
+          for service-providing users — only the explicit UI entry is
+          gone.
+
+  - task: "Admin · Quick Actions moved from Home → Payouts"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/admin/payouts.tsx, /app/frontend/app/admin/home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Per user UX consolidation, the QUICK ACTIONS grid (KYC queue,
+          Orders, Audit log, Settings) plus two new tiles (Approvals,
+          Transactions) is now rendered inside Payouts after the digest
+          alert. Verified via screenshot — all 6 tiles render correctly.
+          Admin home removed its QuickAction grid (component still
+          present but unused).
+
+  - task: "Admin · Shop tab added"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/admin/_layout.tsx, /app/frontend/app/admin/shop.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          New 6th tab "Shop" inserted between Users and Payouts. Reuses
+          <ShopHome/> so admin sees the customer experience exactly,
+          with a horizontal quick-manage chip bar on top
+          (Products / Layout / Categories / Orders) for fast access.
+
+  - task: "Admin · More → Store · 'Shop categories' link"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/admin/more.tsx"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added a new STORE_ITEMS entry "Shop categories" under
+          Admin → More → Store, alongside Products and Shop layout.
+
+## agent_communication:
+  - agent: "main"
+    message: |
+      Completed multi-feature update: (1) Admin-managed shop categories
+      with full CRUD + icon picker + image upload (replaces hardcoded
+      list), (2) sync of categories into product form, (3) location
+      prompt changed from full-screen blocker to small one-time banner,
+      (4) Live Location entry removed from user profile, (5) admin
+      Home quick-action tiles moved into Payouts page, (6) new admin
+      Shop tab. Backend tested with curl (returns 18 items). All
+      frontend pages render correctly when authenticated.
+

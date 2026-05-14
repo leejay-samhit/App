@@ -251,13 +251,9 @@ export default function AdminHome() {
         <BarChart title="Daily new users" data={data.daily_users} color={colors.accent} />
         <BarChart title="Daily transactions" data={data.daily_txns} color={colors.brand500} />
 
-        <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
-        <View style={styles.quickGrid}>
-          <QuickAction icon="user-check" label="KYC queue" onPress={() => router.push("/admin/kyc")} testID="qa-kyc" />
-          <QuickAction icon="package" label="Orders" onPress={() => router.push("/admin/orders")} testID="qa-orders" />
-          <QuickAction icon="file-text" label="Audit log" onPress={() => router.push("/admin/audit")} testID="qa-audit" />
-          <QuickAction icon="sliders" label="Settings" onPress={() => router.push("/admin/settings")} testID="qa-settings" />
-        </View>
+        {/* Quick Actions moved to /admin/payouts (Quick Actions section) per
+            user UX consolidation. Admin can now reach KYC, Orders, Audit,
+            Settings, Approvals, Transactions directly from the Payouts tab. */}
       </ScrollView>
     </SafeAreaView>
   );
