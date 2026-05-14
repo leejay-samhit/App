@@ -23,6 +23,7 @@ import { Feather } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, formatApiError } from "./api";
 import { colors } from "./theme";
+import { ShopLayoutRenderer } from "./shop-layout-renderer";
 
 // ── Types ────────────────────────────────────────────────────────────────
 type Product = {
@@ -396,110 +397,21 @@ export function ShopHome({
           })}
         </ScrollView>
 
-        {/* 4. SINGLE MAIN BANNER */}
-        <View style={styles.bannerWrap}>
-          <View style={[styles.banner, { backgroundColor: activeBanner.gradient[0] }]}>
-            {/* Decorative blob — pure RN, no extra deps */}
-            <View style={[styles.bannerBlob, { backgroundColor: activeBanner.gradient[1] + "55" }]} />
-            <View style={styles.bannerLeft}>
-              <Text style={styles.bannerEyebrow}>{activeBanner.subtitle}</Text>
-              <Text style={styles.bannerTitle}>{activeBanner.title}</Text>
-              <TouchableOpacity
-                style={styles.bannerCta}
-                onPress={() => router.push(activeBanner.target as any)}
-                testID="home-banner-cta"
-              >
-                <Text style={styles.bannerCtaText}>{activeBanner.cta}</Text>
-                <Feather name="arrow-right" size={13} color={colors.primary} />
-              </TouchableOpacity>
-            </View>
-            <View style={styles.bannerRight}>
-              <Feather name="shopping-bag" size={84} color="#ffffff55" />
-            </View>
-          </View>
-          <View style={styles.bannerDots}>
-            {banners.map((_, i) => (
-              <TouchableOpacity
-                key={i}
-                onPress={() => setBannerIdx(i)}
-                style={[styles.bannerDot, i === bannerIdx && styles.bannerDotActive]}
-              />
-            ))}
-          </View>
-        </View>
-
-        {/* 5. DEAL OF THE DAY */}
-        <SectionHeader
-          icon="zap"
-          title="Deal of the Day"
-          onViewAll={() => router.push("/shop-category/All" as any)}
+        {/* 4–7. ADMIN-CONFIGURABLE LAYOUT BLOCKS — banners, flash sales,
+            product grids, sliders, etc. Managed by super-admin via
+            /admin/shop-layout (Home scope). Replaces the hardcoded "Deal
+            of the Day / Popular Categories / Best Sellers" sections so the
+            admin's edits actually reflect in the customer view. */}
+        <ShopLayoutRenderer
+          scope="home"
+          category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
+          onProductPress={(id) => router.push(`/product/${id}` as any)}
+          onAddToCart={async (id) => {
+            try {
+              await api.post("/cart", { product_id: id, quantity: 1 });
+            } catch (e) { /* eslint-disable-next-line no-console */ console.warn("add to cart failed:", formatApiError(e)); }
+          }}
         />
-        {loading ? (
-          <View style={styles.loadingRow}><ActivityIndicator color={colors.primary} /></View>
-        ) : dealsOfTheDay.length === 0 ? (
-          <Text style={styles.emptyText}>No deals right now. Check back soon!</Text>
-        ) : (
-          <FlatList
-            data={dealsOfTheDay}
-            keyExtractor={(p) => `deal-${p.id}`}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.hList}
-            ItemSeparatorComponent={() => <View style={{ width: 12 }} />}
-            renderItem={({ item }) => <ProductCard p={item} />}
-          />
-        )}
-
-        {/* 6. POPULAR CATEGORIES */}
-        <SectionHeader
-          icon="grid"
-          title="Popular Categories"
-          onViewAll={() => router.push("/shop-category/All" as any)}
-        />
-        <FlatList
-          data={POPULAR_CATEGORIES}
-          keyExtractor={(c) => `popcat-${c.key}`}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.hList}
-          ItemSeparatorComponent={() => <View style={{ width: 12 }} />}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              activeOpacity={0.82}
-              onPress={() => router.push(`/shop-category/${encodeURIComponent(item.key)}` as any)}
-              style={styles.popCatCard}
-              testID={`home-popcat-${item.key}`}
-            >
-              <View style={[styles.popCatIcon, { backgroundColor: item.color }]}>
-                <Feather name={item.icon as any} size={26} color={colors.textMain} />
-              </View>
-              <Text style={styles.popCatTitle} numberOfLines={1}>{item.label}</Text>
-              <Text style={styles.popCatSub} numberOfLines={1}>{item.sub}</Text>
-            </TouchableOpacity>
-          )}
-        />
-
-        {/* 7. BEST SELLERS */}
-        <SectionHeader
-          icon="trending-up"
-          title="Best Sellers"
-          onViewAll={() => router.push("/shop-category/All" as any)}
-        />
-        {loading ? (
-          <View style={styles.loadingRow}><ActivityIndicator color={colors.primary} /></View>
-        ) : bestSellers.length === 0 ? (
-          <Text style={styles.emptyText}>Building our best-seller list — come back soon.</Text>
-        ) : (
-          <FlatList
-            data={bestSellers}
-            keyExtractor={(p) => `best-${p.id}`}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.hList}
-            ItemSeparatorComponent={() => <View style={{ width: 12 }} />}
-            renderItem={({ item }) => <ProductCard p={item} badge="Best Seller" compact />}
-          />
-        )}
           </>
         )}
       </ScrollView>
