@@ -22,7 +22,7 @@ import {
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
-import { Feather } from "@expo/vector-icons";
+import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, formatApiError } from "./api";
 import { colors } from "./theme";
@@ -58,17 +58,52 @@ const seededDiscount = (id: string) => {
 const productImage = (p: Product) =>
   (p.images && p.images[0]) || p.image_data_url || p.image_url || null;
 
-// Hardcoded category circles per spec.
-const CATEGORIES: { key: string; label: string; icon: any; color: string }[] = [
-  { key: "all",         label: "All",         icon: "grid",         color: "#E5F2EC" },
-  { key: "Sarees",      label: "Sarees",      icon: "feather",      color: "#FCE7F3" },
-  { key: "Men",         label: "Men",         icon: "user",         color: "#DBEAFE" },
-  { key: "Women",       label: "Women",       icon: "user",         color: "#FDE68A" },
-  { key: "Electronics", label: "Electronics", icon: "smartphone",   color: "#E0E7FF" },
-  { key: "Home",        label: "Home",        icon: "home",         color: "#FFEDD5" },
-  { key: "Beauty",      label: "Beauty",      icon: "heart",        color: "#FCE7F3" },
-  { key: "More",        label: "More",        icon: "more-horizontal", color: "#F3F4F6" },
+// Hardcoded category circles per spec. Uses `pack` so we can mix icon
+// families (Feather is limited; MaterialCommunityIcons gives us proper
+// fashion/electronics icons).
+type CatIconPack = "feather" | "mci" | "mat";
+const CATEGORIES: {
+  key: string; label: string;
+  icon: string; pack: CatIconPack; color: string;
+}[] = [
+  { key: "all",         label: "All",         icon: "grid-view",     pack: "mat",     color: "#E5F2EC" },
+  { key: "Sarees",      label: "Sarees",      icon: "hanger",        pack: "mci",     color: "#FCE7F3" },
+  { key: "Men",         label: "Men",         icon: "human-male",    pack: "mci",     color: "#DBEAFE" },
+  { key: "Women",       label: "Women",       icon: "human-female",  pack: "mci",     color: "#FDE68A" },
+  { key: "Electronics", label: "Electronics", icon: "tv",            pack: "mci",     color: "#E0E7FF" },
+  { key: "Home",        label: "Home",        icon: "sofa",          pack: "mci",     color: "#FFEDD5" },
+  { key: "Beauty",      label: "Beauty",      icon: "lipstick",      pack: "mci",     color: "#FCE7F3" },
+  { key: "More",        label: "More",        icon: "dots-grid",     pack: "mci",     color: "#F3F4F6" },
 ];
+
+// Master category list shown when user taps "More".
+const ALL_CATEGORIES: { key: string; label: string; icon: string; pack: CatIconPack; color: string }[] = [
+  { key: "Sarees",      label: "Sarees",      icon: "hanger",          pack: "mci", color: "#FCE7F3" },
+  { key: "Men",         label: "Men",         icon: "human-male",      pack: "mci", color: "#DBEAFE" },
+  { key: "Women",       label: "Women",       icon: "human-female",    pack: "mci", color: "#FDE68A" },
+  { key: "Kids",        label: "Kids",        icon: "baby-face",       pack: "mci", color: "#FEE2E2" },
+  { key: "Clothes",     label: "Clothes",     icon: "tshirt-crew",     pack: "mci", color: "#FCE7F3" },
+  { key: "Shoes",       label: "Shoes",       icon: "shoe-sneaker",    pack: "mci", color: "#E0E7FF" },
+  { key: "Accessories", label: "Accessories", icon: "sunglasses",      pack: "mci", color: "#FFE4E6" },
+  { key: "Electronics", label: "Electronics", icon: "tv",              pack: "mci", color: "#E0E7FF" },
+  { key: "Mobiles",     label: "Mobiles",     icon: "cellphone",       pack: "mci", color: "#DBEAFE" },
+  { key: "Laptop",      label: "Laptop",      icon: "laptop",          pack: "mci", color: "#E5E7EB" },
+  { key: "Home",        label: "Home",        icon: "sofa",            pack: "mci", color: "#FFEDD5" },
+  { key: "Beauty",      label: "Beauty",      icon: "lipstick",        pack: "mci", color: "#FCE7F3" },
+  { key: "Grocery",     label: "Grocery",     icon: "cart",            pack: "mci", color: "#DCFCE7" },
+  { key: "Toys",        label: "Toys",        icon: "robot-happy",     pack: "mci", color: "#FAE8FF" },
+  { key: "Books",       label: "Books",       icon: "book-open-page-variant", pack: "mci", color: "#FEF3C7" },
+  { key: "Sports",      label: "Sports",      icon: "soccer",          pack: "mci", color: "#D1FAE5" },
+  { key: "Health",      label: "Health",      icon: "heart-pulse",     pack: "mci", color: "#FFE4E6" },
+  { key: "Pet Care",    label: "Pet Care",    icon: "dog",             pack: "mci", color: "#FDE68A" },
+];
+
+// Tiny helper to render whichever icon pack a category requests.
+function CatIcon({ icon, pack, size, color }: { icon: string; pack: CatIconPack; size: number; color: string }) {
+  if (pack === "mci") return <MaterialCommunityIcons name={icon as any} size={size} color={color} />;
+  if (pack === "mat") return <MaterialIcons name={icon as any} size={size} color={color} />;
+  return <Feather name={icon as any} size={size} color={color} />;
+}
 
 // Popular Categories — bigger tiles, curated.
 const POPULAR_CATEGORIES = [
@@ -99,6 +134,8 @@ export function ShopHome({
   const [searchSubmitted, setSearchSubmitted] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("all");
   const [bannerIdx, setBannerIdx] = useState(0);
+  // "More" tap opens an all-categories sheet
+  const [allCatModalOpen, setAllCatModalOpen] = useState(false);
 
   // ── Delivery address (live reverse-geocoded from user coords) ─────────
   const [deliveryAddress, setDeliveryAddress] = useState<string>(defaultAddress);
@@ -457,14 +494,17 @@ export function ShopHome({
                 key={c.key}
                 style={styles.catItem}
                 onPress={() => {
-                  setActiveCategory(c.key);
-                  if (c.key === "More") router.push("/shop-category/All" as any);
+                  if (c.key === "More") {
+                    setAllCatModalOpen(true);
+                  } else {
+                    setActiveCategory(c.key);
+                  }
                 }}
                 activeOpacity={0.75}
                 testID={`home-cat-${c.key}`}
               >
                 <View style={[styles.catCircle, { backgroundColor: c.color }, active && styles.catCircleActive]}>
-                  <Feather name={c.icon} size={20} color={active ? colors.primaryFg : colors.textMain} />
+                  <CatIcon icon={c.icon} pack={c.pack} size={22} color={active ? colors.primaryFg : colors.textMain} />
                 </View>
                 <Text style={[styles.catLabel, active && { color: colors.primary, fontWeight: "800" }]}>{c.label}</Text>
               </TouchableOpacity>

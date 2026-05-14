@@ -129,9 +129,16 @@ export default function AdminShopLayoutScreen() {
   const [scope, setScope] = useState<"home" | "category">("home");
   const [scopeCategory, setScopeCategory] = useState<string>("");
 
-  // Categories list derived from products
+  // Categories list — merge canonical user-facing categories with whatever
+  // is found on actual products in the DB. This guarantees the admin can
+  // always manage layouts for every category the customer sees on the
+  // Shop tab, even if no products are in that category yet.
+  const CANONICAL_CATEGORIES = [
+    "Sarees", "Men", "Women", "Electronics", "Mobiles", "Laptop",
+    "Clothes", "Shoes", "Accessories", "Home", "Beauty", "Kids",
+  ];
   const categories = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(CANONICAL_CATEGORIES);
     products.forEach((p) => { if (p.category) set.add(p.category); });
     return Array.from(set).sort();
   }, [products]);
