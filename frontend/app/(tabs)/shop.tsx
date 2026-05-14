@@ -21,6 +21,7 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { ShopLayoutRenderer } from "../../src/shop-layout-renderer";
+import { ShopHome } from "../../src/shop-home";
 import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
 
 type Product = {
@@ -276,7 +277,24 @@ export default function ShopScreen() {
     return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
   }
 
-  // ============ Render ============
+  // ============ Shop Home Screen (redesigned 2026-06) ============
+  // Per user spec: a complete UI redesign of the Shop tab only. Services
+  // mode below is untouched. This branch short-circuits the legacy
+  // shop-mode rendering and delegates to the dedicated <ShopHome />
+  // component which contains its own header, search, banner & sections.
+  if (mode === "shop") {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <ShopHome
+          cartCount={cartCount}
+          wishlistCount={0}
+          deliveryAddress="Mumbai, India"
+        />
+      </SafeAreaView>
+    );
+  }
+
+  // ============ Render (services mode — unchanged) ============
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView
