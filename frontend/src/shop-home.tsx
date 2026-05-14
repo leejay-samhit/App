@@ -17,13 +17,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, TextInput,
   ActivityIndicator, FlatList, Platform, useWindowDimensions,
+  Modal, Pressable,
 } from "react-native";
+import * as Location from "expo-location";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, formatApiError } from "./api";
 import { colors } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
+import { getCurrentCoords } from "./location";
 
 // ── Types ────────────────────────────────────────────────────────────────
 type Product = {
@@ -79,7 +83,7 @@ const POPULAR_CATEGORIES = [
 export function ShopHome({
   cartCount = 0,
   wishlistCount = 0,
-  deliveryAddress = "Mumbai, India",
+  deliveryAddress: defaultAddress = "Set your location",
 }: {
   cartCount?: number;
   wishlistCount?: number;
@@ -92,12 +96,78 @@ export function ShopHome({
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  // Once the user taps the Search button (or hits Return) we flip this true
-  // and the home swaps to a dedicated "Search results" grid. Clearing the
-  // input OR tapping the back chevron resets it.
   const [searchSubmitted, setSearchSubmitted] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("all");
   const [bannerIdx, setBannerIdx] = useState(0);
+
+  // ── Delivery address (live reverse-geocoded from user coords) ─────────
+  const [deliveryAddress, setDeliveryAddress] = useState<string>(defaultAddress);
+  const [locModalOpen, setLocModalOpen] = useState(false);
+  const [locBusy, setLocBusy] = useState(false);
+  const [manualAddress, setManualAddress] = useState<string>("");
+
+  // Persisted cache key — survives reloads / logout-login on the same device.
+  const ADDR_KEY = "@app/deliveryAddress";
+
+  // Hydrate cached address on mount, then try to refresh from current GPS.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cached = await AsyncStorage.getItem(ADDR_KEY);
+        if (cached && !cancelled) setDeliveryAddress(cached);
+      } catch { /* ignore */ }
+      // Fire-and-forget refresh from current location.
+      refreshLocation(false);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const persistAddress = useCallback(async (a: string) => {
+    try { await AsyncStorage.setItem(ADDR_KEY, a); } catch { /* ignore */ }
+  }, []);
+
+  /**
+   * Best-effort reverse-geocode of the current device location.
+   * `silent=true` means "don't show errors — use cache if anything fails".
+   * On web, `Location.reverseGeocodeAsync` isn't supported so we fall back
+   * to plain "City near {lat},{lng}".
+   */
+  const refreshLocation = useCallback(async (interactive: boolean) => {
+    setLocBusy(true);
+    try {
+      const c = await getCurrentCoords();
+      if (!c) {
+        if (interactive) alert("Couldn't read your GPS. Please check location permission in your device settings.");
+        return;
+      }
+      let nice = "";
+      if (Platform.OS !== "web") {
+        try {
+          const places = await Location.reverseGeocodeAsync({ latitude: c.lat, longitude: c.lng });
+          if (places && places[0]) {
+            const p = places[0];
+            const city = p.city || p.subregion || p.district || "";
+            const region = p.region || p.country || "";
+            nice = [city, region].filter(Boolean).join(", ");
+          }
+        } catch { /* fall through */ }
+      }
+      if (!nice) nice = `Near ${c.lat.toFixed(2)}, ${c.lng.toFixed(2)}`;
+      setDeliveryAddress(nice);
+      persistAddress(nice);
+    } finally { setLocBusy(false); }
+  }, [persistAddress]);
+
+  const onSaveManualAddress = useCallback(() => {
+    const v = manualAddress.trim();
+    if (!v) return;
+    setDeliveryAddress(v);
+    persistAddress(v);
+    setLocModalOpen(false);
+    setManualAddress("");
+  }, [manualAddress, persistAddress]);
 
   // ── Data ───────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
@@ -235,7 +305,12 @@ export function ShopHome({
       {/* 1. TOP HEADER — delivery + wishlist + cart */}
       <View style={[styles.headerWrap, { paddingTop: insets.top + 8 }]}>
         <View style={styles.headerRow}>
-          <TouchableOpacity style={styles.deliveryBlock} activeOpacity={0.7}>
+          <TouchableOpacity
+            style={styles.deliveryBlock}
+            activeOpacity={0.7}
+            onPress={() => setLocModalOpen(true)}
+            testID="home-delivery-btn"
+          >
             <Feather name="map-pin" size={13} color={colors.primary} />
             <View style={{ flexShrink: 1 }}>
               <Text style={styles.deliveryEyebrow}>Deliver to</Text>
@@ -415,6 +490,82 @@ export function ShopHome({
           </>
         )}
       </ScrollView>
+
+      {/* ── Delivery-location picker modal ─────────────────────────────
+          Opens when the user taps the "Deliver to {city}" pill in the
+          header. Offers two paths:
+            1. Auto-detect via device GPS + reverse geocoding
+            2. Manual text entry (saved to AsyncStorage)
+          Selected address is persisted locally so it survives reloads. */}
+      <Modal
+        visible={locModalOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setLocModalOpen(false)}
+      >
+        <Pressable style={styles.modalScrim} onPress={() => setLocModalOpen(false)}>
+          <Pressable style={styles.modalSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.modalGrabber} />
+            <View style={styles.modalHeader}>
+              <Feather name="map-pin" size={18} color={colors.primary} />
+              <Text style={styles.modalTitle}>Set delivery location</Text>
+            </View>
+            <Text style={styles.modalCurrent} numberOfLines={2}>
+              Current: <Text style={{ fontWeight: "900", color: colors.textMain }}>{deliveryAddress}</Text>
+            </Text>
+
+            <TouchableOpacity
+              onPress={() => refreshLocation(true)}
+              disabled={locBusy}
+              style={[styles.modalPrimary, locBusy && { opacity: 0.7 }]}
+              testID="home-loc-use-current"
+            >
+              {locBusy ? (
+                <ActivityIndicator color={colors.primaryFg} />
+              ) : (
+                <>
+                  <Feather name="navigation" size={15} color={colors.primaryFg} />
+                  <Text style={styles.modalPrimaryText}>Use my current location</Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <View style={styles.modalDividerRow}>
+              <View style={styles.modalDividerLine} />
+              <Text style={styles.modalDividerText}>OR ENTER MANUALLY</Text>
+              <View style={styles.modalDividerLine} />
+            </View>
+
+            <View style={styles.modalInputRow}>
+              <TextInput
+                value={manualAddress}
+                onChangeText={setManualAddress}
+                placeholder="e.g. Andheri West, Mumbai"
+                placeholderTextColor={colors.textMuted}
+                style={styles.modalInput}
+                returnKeyType="done"
+                onSubmitEditing={onSaveManualAddress}
+                testID="home-loc-manual-input"
+              />
+              <TouchableOpacity
+                onPress={onSaveManualAddress}
+                style={[styles.modalSaveBtn, !manualAddress.trim() && { opacity: 0.4 }]}
+                disabled={!manualAddress.trim()}
+                testID="home-loc-save"
+              >
+                <Feather name="check" size={16} color={colors.primaryFg} />
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              onPress={() => setLocModalOpen(false)}
+              style={styles.modalClose}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -652,4 +803,48 @@ const styles = StyleSheet.create({
     fontSize: 13, color: colors.textMuted, textAlign: "center",
     lineHeight: 18, maxWidth: 280,
   },
+
+  // ── Delivery-location picker modal ─────────────────────────────────
+  modalScrim: {
+    flex: 1, backgroundColor: "rgba(0,0,0,0.45)",
+    justifyContent: "flex-end",
+  },
+  modalSheet: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 18, paddingTop: 8, paddingBottom: 28,
+    gap: 14,
+  },
+  modalGrabber: {
+    alignSelf: "center", width: 38, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, marginBottom: 4,
+  },
+  modalHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+  modalTitle: { fontSize: 16, fontWeight: "900", color: colors.textMain },
+  modalCurrent: { fontSize: 12.5, color: colors.textMuted, lineHeight: 17 },
+  modalPrimary: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    backgroundColor: colors.primary,
+    paddingVertical: 13, paddingHorizontal: 18,
+    borderRadius: 14,
+  },
+  modalPrimaryText: { color: colors.primaryFg, fontWeight: "900", fontSize: 13.5, letterSpacing: 0.2 },
+  modalDividerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  modalDividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  modalDividerText: { fontSize: 10, fontWeight: "900", color: colors.textMuted, letterSpacing: 1 },
+  modalInputRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  modalInput: {
+    flex: 1, minWidth: 0,
+    height: 46, paddingHorizontal: 14, fontSize: 13.5,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border, borderRadius: 14,
+    color: colors.textMain, fontWeight: "500",
+  },
+  modalSaveBtn: {
+    width: 46, height: 46, borderRadius: 14,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+  },
+  modalClose: { alignItems: "center", paddingVertical: 6 },
+  modalCloseText: { color: colors.textMuted, fontSize: 12.5, fontWeight: "700" },
 });

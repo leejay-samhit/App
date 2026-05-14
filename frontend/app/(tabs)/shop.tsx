@@ -288,7 +288,6 @@ export default function ShopScreen() {
         <ShopHome
           cartCount={cartCount}
           wishlistCount={0}
-          deliveryAddress="Mumbai, India"
         />
       </SafeAreaView>
     );
