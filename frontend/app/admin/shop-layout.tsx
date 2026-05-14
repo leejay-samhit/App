@@ -16,7 +16,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
-import { ShopLayoutRenderer, LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
+import { LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
 import { DraggableLayoutList } from "../../src/draggable-layout-list";
 import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
 
@@ -60,8 +60,8 @@ const LAYOUT_GUIDE_STEPS: GuideStep[] = [
   },
   {
     icon: "smartphone",
-    title: "6. Live preview + Analytics",
-    body: "Scroll down to see the LIVE CUSTOMER PREVIEW — exactly what shoppers see. Each card shows 7-day impressions, clicks, and CTR%. Iterate from data!",
+    title: "6. Analytics",
+    body: "Each saved block shows 7-day impressions, clicks, and CTR%. Use the data to refine your layout. Tap the Shop tab to browse the experience as a customer.",
     tip: "Green CTR badge = ≥5% (great). Amber = below 5% — try a new image or title.",
   },
 ];
@@ -346,24 +346,8 @@ export default function AdminShopLayoutScreen() {
             </View>
           </GradientCard>
 
-          {/* === Live customer preview using the SAME renderer as the mobile app === */}
-          {filteredItems.filter((b) => b.active).length > 0 ? (
-            <View style={styles.previewWrap}>
-              <View style={styles.previewHeader}>
-                <Feather name="smartphone" size={14} color={colors.primary} />
-                <Text style={styles.previewLabel}>LIVE CUSTOMER PREVIEW</Text>
-                <Text style={styles.previewHint}>Identical to mobile app</Text>
-              </View>
-              <View style={styles.previewFrame}>
-                <ShopLayoutRenderer
-                  scope={scope}
-                  category={scope === "category" ? scopeCategory : undefined}
-                  onProductPress={() => {}}
-                  onCategoryPress={() => {}}
-                />
-              </View>
-            </View>
-          ) : null}
+          {/* Live customer preview was removed per user request — admin can
+              still view the rendered experience from /admin/shop tab. */}
 
           {filteredItems.length === 0 ? (
             <View style={styles.emptyCard}>
