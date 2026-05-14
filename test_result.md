@@ -1628,3 +1628,45 @@ agent_communication:
         logs confirm requests that previously triggered "ValueError: Invalid
         salt" now return 401 cleanly. All Mongo setup/cleanup ran successfully
         (3 test docs inserted and removed). Fix is production-ready.
+
+
+## frontend:
+  - task: "Shop Home — 'More' Categories Modal & richer icons"
+    implemented: true
+    working: true
+    file: "/app/frontend/src/shop-home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added a slide-up Modal triggered by tapping the "More" circle in the
+          horizontal category strip. Modal renders an 18-category grid (Sarees,
+          Men, Women, Kids, Clothes, Shoes, Accessories, Electronics, Mobiles,
+          Laptop, Home, Beauty, Grocery, Toys, Books, Sports, Health, Pet Care)
+          using rich MaterialCommunityIcons (hanger, human-male, sofa, lipstick,
+          shoe-sneaker, etc). Tapping a category closes the modal AND navigates
+          to /shop-category/<key> via expo-router. Active category shows a
+          green border + brand100 background. Verified via screenshot tool —
+          modal opens correctly at 390x844 viewport with 3-column responsive
+          grid. Top-row "All products" tile filters without navigation.
+
+  - task: "Services tab — Language icon top-right alignment"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/shop.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Verified via screenshot tool — the language picker button is correctly
+          locked to top-right at x=310 (out of 390 viewport width), y=34, with
+          fixed 52x52 size and `flexShrink: 0`. Uses flex layout
+          `servicesTitleWrap (flex:1) + cartIconBtn (marginLeft:12)` so the icon
+          cannot overflow regardless of screen width. Language picker modal
+          opens cleanly when tapped (All languages, EN, TE, HI, TA selections).

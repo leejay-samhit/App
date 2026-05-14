@@ -606,6 +606,85 @@ export function ShopHome({
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* ── All-Categories picker modal ─────────────────────────────────
+          Opens when the user taps the "More" circle in the horizontal
+          category strip. Shows every category in a 3-column grid with
+          a colourful icon tile. Tap one to filter the home view; the
+          modal closes automatically and the active filter is shown
+          in the strip. Tap the scrim to dismiss. */}
+      <Modal
+        visible={allCatModalOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setAllCatModalOpen(false)}
+      >
+        <Pressable style={styles.modalScrim} onPress={() => setAllCatModalOpen(false)}>
+          <Pressable
+            style={[styles.modalSheet, { maxHeight: "85%" }]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.modalGrabber} />
+            <View style={styles.modalHeader}>
+              <MaterialCommunityIcons name="view-grid" size={18} color={colors.primary} />
+              <Text style={styles.modalTitle}>All categories</Text>
+            </View>
+            <Text style={styles.modalCurrent}>
+              Pick a category to explore — we'll show products tailored just for it.
+            </Text>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.allCatGrid}
+            >
+              {/* "All products" row at the top */}
+              <TouchableOpacity
+                style={[styles.allCatItem, activeCategory === "all" && styles.allCatItemActive]}
+                onPress={() => {
+                  setActiveCategory("all");
+                  setAllCatModalOpen(false);
+                }}
+                activeOpacity={0.75}
+                testID="all-cat-all"
+              >
+                <View style={[styles.allCatIconCircle, { backgroundColor: "#E5F2EC" }]}>
+                  <MaterialIcons name="grid-view" size={24} color={colors.primary} />
+                </View>
+                <Text style={styles.allCatLabel} numberOfLines={1}>All</Text>
+              </TouchableOpacity>
+
+              {ALL_CATEGORIES.map((c) => {
+                const active = activeCategory === c.key;
+                return (
+                  <TouchableOpacity
+                    key={`all-${c.key}`}
+                    style={[styles.allCatItem, active && styles.allCatItemActive]}
+                    onPress={() => {
+                      setActiveCategory(c.key);
+                      setAllCatModalOpen(false);
+                      router.push(`/shop-category/${encodeURIComponent(c.key)}` as any);
+                    }}
+                    activeOpacity={0.75}
+                    testID={`all-cat-${c.key}`}
+                  >
+                    <View style={[styles.allCatIconCircle, { backgroundColor: c.color }]}>
+                      <CatIcon icon={c.icon} pack={c.pack} size={24} color={colors.textMain} />
+                    </View>
+                    <Text style={styles.allCatLabel} numberOfLines={1}>{c.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              onPress={() => setAllCatModalOpen(false)}
+              style={styles.modalClose}
+            >
+              <Text style={styles.modalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -887,4 +966,40 @@ const styles = StyleSheet.create({
   },
   modalClose: { alignItems: "center", paddingVertical: 6 },
   modalCloseText: { color: colors.textMuted, fontSize: 12.5, fontWeight: "700" },
+
+  // ── All-Categories grid (in the "More" modal) ─────────────────────
+  // 3-column responsive grid with `flexBasis: "31%"` so the tiles wrap
+  // cleanly on phones of every width. The gap is achieved with row +
+  // margin since gap on FlexWrap isn't supported on every RN version.
+  allCatGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    paddingVertical: 6,
+    rowGap: 12,
+  },
+  allCatItem: {
+    flexBasis: "31%",
+    alignItems: "center",
+    paddingVertical: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  allCatItemActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.brand100,
+  },
+  allCatIconCircle: {
+    width: 54, height: 54, borderRadius: 27,
+    alignItems: "center", justifyContent: "center",
+    marginBottom: 6,
+  },
+  allCatLabel: {
+    fontSize: 11.5,
+    fontWeight: "800",
+    color: colors.textMain,
+    textAlign: "center",
+    paddingHorizontal: 4,
+  },
 });
