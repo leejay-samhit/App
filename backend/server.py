@@ -181,18 +181,27 @@ async def register(payload: RegisterRequest):
 
     sponsor = None
     sponsor_code = (payload.referral_code or "").strip().upper() or None
+    # `no_referral_signup` is True when the user did not provide a valid
+    # sponsor referral code. Used by _trigger_referral_commissions to route
+    # the registration fee (GST-inclusive) into admin's `direct_signup` bucket
+    # and into the GST bucket — separate from the L1..L10 cascade payouts.
+    no_referral_signup = False
     if sponsor_code:
         sponsor = await db.users.find_one({"referral_code": sponsor_code})
         if not sponsor:
             raise HTTPException(status_code=400, detail="Invalid referral code")
         # If user explicitly typed admin's own code (EARN), apply forced-matrix
-        # spillover so early EARN-joiners earn first instead of admin always
+        # placement so early EARN-joiners earn first instead of admin always
         # taking every direct.
         if sponsor.get("email") == ADMIN_EMAIL.lower():
+            no_referral_signup = True
             sponsor = await get_admin_sponsor() or sponsor
     else:
-        # No referral code given → default sponsor is the platform admin so
-        # admin earns the referral commission for self-signups.
+        # No referral code given → treat as direct admin signup. Money flows
+        # to admin's `direct_signup` bucket on approval (see
+        # _trigger_referral_commissions). User is still placed in the matrix
+        # under the most-qualified downline so the cascade can fire.
+        no_referral_signup = True
         sponsor = await get_admin_sponsor()
 
     user_id = str(uuid.uuid4())
@@ -241,6 +250,7 @@ async def register(payload: RegisterRequest):
         "approval_reject_category": None,
         "approval_reject_reason": None,
         "commission_triggered": False,
+        "no_referral_signup": no_referral_signup,
         "extra_docs": {
             "cibil_report": None,
             "bank_statement": None,
@@ -437,6 +447,115 @@ async def logout(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 # ------------------ Payment (Mock) ------------------
+async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_sponsor: Optional[Dict[str, Any]]) -> None:
+    """Credit admin's `direct_signup` bucket for users who joined WITHOUT a
+    referral code. GST-INCLUSIVE math: settings.registration_fee is the gross
+    total paid by the user.
+
+      gross = settings.registration_fee  (e.g. 118)
+      gst   = gross × 18 / 118           (₹18 → routed to gst_collected)
+      net   = gross − gst                (₹100 → routed to direct_signup)
+
+    This is SEPARATE from the L1..L10 cascade. The cascade still fires up
+    from the placement_sponsor afterward, so admin earns L2..L10 normally.
+    """
+    settings = await get_settings()
+    gross = float(settings.get("registration_fee") or 0)
+    if gross <= 0:
+        return
+    # GST-inclusive: GST is a portion of the gross
+    gst = round(gross * (REFERRAL_GST_PCT / (100.0 + REFERRAL_GST_PCT)), 2)
+    net = round(gross - gst, 2)
+
+    ts = now_utc().isoformat()
+    ref = f"DIRSU-{str(uuid.uuid4())[:8].upper()}"
+
+    await credit_admin_bucket("direct_signup", net, also_total_earned=True)
+    if gst > 0:
+        await credit_admin_bucket("gst_collected", gst, also_total_earned=False)
+
+    admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not admin_user:
+        return
+
+    placement_name = (placement_sponsor or {}).get("name") or "admin"
+    placement_email = (placement_sponsor or {}).get("email") or ""
+
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": admin_user["id"],
+        "type": "direct_signup_credit",
+        "amount": net,
+        "gross_amount": gross,
+        "gst_amount": gst,
+        "gst_pct": REFERRAL_GST_PCT,
+        "status": "success",
+        "description": (
+            f"Direct join (no referral) · {joiner.get('name','')} · "
+            f"placed under {placement_name} · ₹{gross:g} gross − ₹{gst} GST = ₹{net} net"
+        ),
+        "source_user_id": joiner["id"],
+        "source_user_name": joiner.get("name"),
+        "source_user_email": joiner.get("email"),
+        "placement_sponsor_id": (placement_sponsor or {}).get("id"),
+        "placement_sponsor_name": placement_name,
+        "placement_sponsor_email": placement_email,
+        "reference_number": ref,
+        "created_at": ts,
+    })
+
+    if gst > 0:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": admin_user["id"],
+            "type": "gst_collected",
+            "amount": gst,
+            "status": "success",
+            "description": (
+                f"GST {int(REFERRAL_GST_PCT)}% on direct signup of {joiner.get('name','')} "
+                f"(gross ₹{gross:g})"
+            ),
+            "source_user_id": joiner["id"],
+            "source_user_name": joiner.get("name"),
+            "linked_payout_to_user_id": joiner["id"],
+            "reference_number": ref + "-GST",
+            "created_at": ts,
+        })
+
+
+async def _credit_cascade_overflow_to_admin(joiner_name: str, missing_levels: List[int], level_payouts: List[float]) -> None:
+    """When the upline chain runs out before all 10 levels are paid, the
+    remaining (uncascaded) L_N..L10 amounts must not be lost — they're
+    routed to admin's `referral_commission` bucket as overflow.
+    """
+    admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not admin_user or not missing_levels:
+        return
+    ts = now_utc().isoformat()
+    for lv in missing_levels:
+        amt = float(level_payouts[lv - 1] or 0)
+        if amt <= 0:
+            continue
+        await credit_admin_bucket("referral_commission", amt, also_total_earned=True)
+        ref = f"OVRFL-L{lv}-{str(uuid.uuid4())[:6].upper()}"
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": admin_user["id"],
+            "type": "cascade_overflow",
+            "level": lv,
+            "amount": amt,
+            "status": "success",
+            "description": (
+                f"L{lv} cascade overflow · upline chain ended before L{lv} · "
+                f"source {joiner_name}"
+            ),
+            "source_user_name": joiner_name,
+            "reference_number": ref,
+            "created_at": ts,
+        })
+
+
+
 async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = ""):
     """Credit a referral payout to a sponsor at a given level.
 
@@ -547,6 +666,14 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     sponsor_id = user.get("sponsor_id")
     # Mark first to avoid race-condition double trigger
     await db.users.update_one({"id": user["id"]}, {"$set": {"commission_triggered": True}})
+
+    # Direct-signup credit (no_referral_signup=True). This is INDEPENDENT
+    # of the L1..L10 cascade — admin still earns L2..L10 below if placement
+    # sponsor isn't admin.
+    if user.get("no_referral_signup"):
+        placement_sponsor = await db.users.find_one({"id": sponsor_id}) if sponsor_id else None
+        await _credit_no_ref_signup_to_admin(user, placement_sponsor)
+
     if not sponsor_id:
         return
 
@@ -582,6 +709,7 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
 
     # Walk up levels 2..10 — credit per qualifying activation if amount > 0
     current_id = sponsor.get("sponsor_id")
+    paid_levels: List[int] = []
     for level in range(2, 11):
         if not current_id:
             break
@@ -591,7 +719,15 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         amt = level_payouts[level - 1]
         if amt > 0:
             await _credit_payout(upline, amt, level, user["name"])
+            paid_levels.append(level)
         current_id = upline.get("sponsor_id")
+
+    # Cascade-overflow: any L2..L10 amounts that COULDN'T be paid because the
+    # upline chain ended early are rerouted to admin's referral_commission
+    # bucket so the configured payout pool isn't silently lost.
+    missing_levels = [lv for lv in range(2, 11) if lv not in paid_levels and (level_payouts[lv - 1] or 0) > 0]
+    if missing_levels:
+        await _credit_cascade_overflow_to_admin(user["name"], missing_levels, level_payouts)
 
 
 @api_router.post("/payment/register-fee")
@@ -1523,14 +1659,39 @@ async def admin_users_tree(
             raise HTTPException(status_code=404, detail="Root user not found")
         roots = [root]
     else:
+        # Admin is the matrix root.
         admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "password_hash": 0})
+        roots: List[Dict[str, Any]] = []
         if admin:
-            roots = [admin]
-        else:
-            roots = await db.users.find(
-                {"$or": [{"sponsor_id": None}, {"sponsor_id": {"$exists": False}}]},
-                {"_id": 0, "password_hash": 0},
-            ).sort("created_at", 1).to_list(50)
+            roots.append(admin)
+        # ALSO surface orphaned users — those with no sponsor OR a sponsor_id
+        # that no longer points to a real user. Without this, any user not
+        # linked to admin's subtree would be invisible (which is the bug
+        # admin reported: "View Network Tree doesn't show all users").
+        admin_id = admin["id"] if admin else None
+        all_user_ids = {u["id"] async for u in db.users.find({}, {"id": 1, "_id": 0})}
+        orphans_q = {
+            "$or": [
+                {"sponsor_id": None},
+                {"sponsor_id": {"$exists": False}},
+                {"sponsor_id": ""},
+            ],
+        }
+        if admin_id:
+            # exclude admin itself, already a root
+            orphans_q = {"$and": [orphans_q, {"id": {"$ne": admin_id}}]}
+        orphans_no_sp = await db.users.find(orphans_q, {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(2000)
+        # Users with stale sponsor_id (pointing to a deleted parent)
+        stale_q: Dict[str, Any] = {"sponsor_id": {"$nin": list(all_user_ids) + [None, ""]}}
+        if admin_id:
+            stale_q = {"$and": [stale_q, {"id": {"$ne": admin_id}}]}
+        orphans_stale = await db.users.find(stale_q, {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(2000)
+        # De-dupe across both queries
+        seen_root_ids = {r["id"] for r in roots}
+        for o in (orphans_no_sp + orphans_stale):
+            if o["id"] not in seen_root_ids:
+                seen_root_ids.add(o["id"])
+                roots.append(o)
 
     # BFS with depth limit, batching DB calls per level for efficiency.
     async def build(uid: str, level: int) -> List[Dict[str, Any]]:
@@ -3522,6 +3683,47 @@ async def get_system_wallet(admin: Dict[str, Any] = Depends(require_admin_role("
     }
 
 
+# Bucket → transaction type(s) mapping. Drives the per-bucket detail view in
+# the frontend System Wallet UI.
+_BUCKET_TXN_TYPES: Dict[str, List[str]] = {
+    "direct_signup":       ["direct_signup_credit"],
+    "referral_commission": ["referral_payout", "cascade_overflow"],
+    "gst_collected":       ["gst_collected"],
+    "direct_added":        ["system_deposit"],
+    "service_margin":      ["service_margin"],
+    "shopping_margin":     ["shopping_margin"],
+}
+
+
+@api_router.get("/admin/system-wallet/transactions")
+async def get_system_wallet_transactions(
+    bucket: str,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+    limit: int = 200,
+):
+    """List admin transactions that contributed to a given system-wallet bucket.
+
+    Powers the per-tab detail view (Direct Joins, Referral Commission, GST
+    Collected, etc.) in /admin/system-wallet. Each row has the source user
+    info plus the original gross / GST / net split where applicable.
+    """
+    a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not a:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    types = _BUCKET_TXN_TYPES.get(bucket)
+    if not types:
+        raise HTTPException(status_code=400, detail=f"Unknown bucket: {bucket}")
+    limit = max(10, min(int(limit or 200), 1000))
+    rows = await db.transactions.find(
+        {"user_id": a["id"], "type": {"$in": types}, "status": "success"},
+        {"_id": 0, "password_hash": 0},
+    ).sort("created_at", -1).limit(limit).to_list(limit)
+    # Subtotal of the visible rows (informational; differs from bucket total
+    # if more rows exist beyond the limit).
+    subtotal = round(sum(float(r.get("amount") or 0) for r in rows), 2)
+    return {"bucket": bucket, "subtotal": subtotal, "count": len(rows), "items": rows}
+
+
 @api_router.post("/admin/system-wallet/deposit")
 async def system_wallet_deposit(payload: SystemWalletDeposit, admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance"))):
     """Manual UTR deposit into the system wallet. Once recorded, the
@@ -3963,7 +4165,7 @@ async def seed_admin():
 # ============================================================
 # SYSTEM WALLET — admin's wallet broken down into 4 categorised buckets
 # ============================================================
-SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_added", "service_margin", "shopping_margin", "gst_collected")
+SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_signup", "direct_added", "service_margin", "shopping_margin", "gst_collected")
 
 
 async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: bool = True):
@@ -4003,53 +4205,43 @@ async def debit_admin_bucket(bucket: str, amount: float) -> bool:
 
 
 async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
-    """Pick the sponsor for a no-referral / EARN-code signup.
+    """Pick the placement sponsor for a no-referral / EARN-code signup.
 
-    Forced-matrix spillover model:
-      • Phase 1: while admin.direct_referrals_count < directs_required,
-        the admin is the direct sponsor (admin fills their L1 first).
-      • Phase 2 (after admin's L1 cycle is complete): BFS admin's downline
-        level-by-level, sorted by joining time (created_at asc), and place the
-        new user under the EARLIEST descendant whose own L1 isn't yet full.
-        This way the early EARN-joiners earn their L1, and admin starts
-        earning Level 2 commissions through the existing 1+10 cascade.
-      • Fallback: if every slot in the tree is full (rare), admin keeps
-        earning the next L1 cycle.
+    New placement algorithm (user-requested):
+      • Prefer an APPROVED + active downline user who has the MOST completed
+        referrals (4 → 3 → 2 → 1). Among candidates with the same count,
+        the EARLIEST joined one wins (fair queue).
+      • If no qualifying downline exists, admin keeps the placement (admin
+        becomes the user's sponsor).
+
+    Note: this only picks the *placement sponsor*. The registration-fee
+    credit-to-admin happens separately in `_trigger_referral_commissions`
+    once the new user is approved (regardless of placement).
     """
-    settings = await get_settings()
-    n = int(settings.get("directs_required") or 5)
     admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not admin:
         admin = await db.users.find_one({"role": "admin", "admin_role": "super_admin"})
     if not admin:
         return None
 
-    # Phase 1: admin still has open slots in current cycle
-    if int(admin.get("direct_referrals_count") or 0) < n:
-        return admin
+    # Look for approved, active, non-admin candidates in descending preference
+    # of direct_referrals_count (4 → 3 → 2 → 1). Pick the EARLIEST joined.
+    for desired in (4, 3, 2, 1):
+        candidate = await db.users.find_one(
+            {
+                "direct_referrals_count": desired,
+                "approval_status": "approved",
+                "registration_paid": True,
+                "is_blocked": {"$ne": True},
+                "role": {"$ne": "admin"},
+                "email": {"$ne": ADMIN_EMAIL.lower()},
+            },
+            sort=[("created_at", 1)],
+        )
+        if candidate:
+            return candidate
 
-    # Phase 2: spillover — BFS admin's tree level-by-level, sorted by created_at
-    frontier: List[str] = [admin["id"]]
-    visited: set = {admin["id"]}
-    max_depth = 12  # safety cap to avoid pathological loops
-    for _depth in range(max_depth):
-        if not frontier:
-            break
-        children = await db.users.find(
-            {"sponsor_id": {"$in": frontier}, "role": "user"},
-            {"_id": 0},
-        ).sort("created_at", 1).to_list(5000)
-        if not children:
-            break
-        # Earliest child with an open L1 slot wins
-        for c in children:
-            if int(c.get("direct_referrals_count") or 0) < n:
-                return c
-        # Descend to next level
-        frontier = [c["id"] for c in children if c["id"] not in visited]
-        visited.update(frontier)
-
-    # Last resort: admin earns another L1 cycle
+    # Fall back to admin if no qualifying downline yet
     return admin
 
 
@@ -4066,6 +4258,76 @@ async def seed_products():
     for s in samples:
         await db.products.insert_one({"id": str(uuid.uuid4()), **s, "created_at": now_utc().isoformat()})
     logger.info("Sample products seeded")
+
+
+# Demo users — 5 pre-seeded approved users sponsored directly by admin so
+# the network tree, payout cascade demos, and admin views always have
+# realistic data on a fresh install. Admins can rename, delete, change
+# referral codes, etc., from the standard Users list.
+DEMO_USERS = [
+    {"name": "Aarav Sharma",   "email": "aarav@demo.app",   "phone": "+91 9000010001", "referral_code": "AARAV01"},
+    {"name": "Diya Patel",     "email": "diya@demo.app",    "phone": "+91 9000010002", "referral_code": "DIYA002"},
+    {"name": "Vihaan Mehta",   "email": "vihaan@demo.app",  "phone": "+91 9000010003", "referral_code": "VIHN003"},
+    {"name": "Ananya Iyer",    "email": "ananya@demo.app",  "phone": "+91 9000010004", "referral_code": "ANNY004"},
+    {"name": "Rohan Kapoor",   "email": "rohan@demo.app",   "phone": "+91 9000010005", "referral_code": "ROHN005"},
+]
+DEMO_PASSWORD = "Demo@123"
+
+
+async def seed_demo_users():
+    """Ensure 5 default demo users exist under admin. Idempotent:
+    safe to call on every startup."""
+    admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not admin:
+        return
+    for d in DEMO_USERS:
+        if await db.users.find_one({"email": d["email"]}):
+            continue
+        code = d["referral_code"]
+        if await db.users.find_one({"referral_code": code}):
+            while True:
+                code = gen_referral_code()
+                if not await db.users.find_one({"referral_code": code}):
+                    break
+        ts = now_utc().isoformat()
+        uid = str(uuid.uuid4())
+        await db.users.insert_one({
+            "id": uid,
+            "name": d["name"],
+            "email": d["email"].lower(),
+            "password_hash": hash_password(DEMO_PASSWORD),
+            "phone": d["phone"],
+            "role": "user",
+            "admin_role": None,
+            "referral_code": code,
+            "referred_by": admin.get("referral_code"),
+            "sponsor_id": admin["id"],
+            "wallet_balance": 0.0,
+            "total_earned": 0.0,
+            "registration_paid": True,
+            "payment_attempts": 0,
+            "direct_referrals_count": 0,
+            "pending_directs": 0,
+            "payouts_received": 0,
+            "upi_id": None,
+            "bank_account": None,
+            "ifsc": None,
+            "account_holder": None,
+            "is_blocked": False,
+            "block_reason": None,
+            "wallet_frozen": False,
+            "kyc_status": "approved",
+            "kyc_full_name": d["name"],
+            "approval_status": "approved",
+            "approval_reviewed_at": ts,
+            "approval_reviewed_by": admin["id"],
+            "commission_triggered": True,
+            "no_referral_signup": False,
+            "demo_seed": True,
+            "created_at": ts,
+        })
+    logger.info("Demo users seeded (or already present)")
+
 
 
 # ------------------ Data Backup / Restore (admin) ------------------
@@ -4339,6 +4601,10 @@ async def _background_init():
             await seed_admin()
         except Exception as _e:
             logger.warning(f"seed_admin failed: {str(_e)[:200]}")
+        try:
+            await seed_demo_users()
+        except Exception as _e:
+            logger.warning(f"seed_demo_users failed: {str(_e)[:200]}")
         try:
             await seed_products()
         except Exception as _e:

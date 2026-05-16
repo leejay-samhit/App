@@ -575,6 +575,144 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+mlm_payout_system_wallet_redesign_2026_05_16:
+  - task: "No-ref signup → admin direct_signup credit (GST-inclusive ₹118→₹100+₹18) + L2..L10 cascade overflow"
+    implemented: true
+    working: true
+    file: "backend/server.py (L450-555, L650-731, L3232-3270, L3670-3724, L4207-4329)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Full MLM payout & system-wallet redesign regression: 51/52 PASS.
+          Runner: /app/backend_test.py. Public EXPO_PUBLIC_BACKEND_URL.
+          The one "failure" is a false-positive in the test brief — actual
+          behaviour matches the code by design (see Test A note below).
+
+          A) NO-REF SIGNUP → ADMIN DIRECT CREDIT (highest priority)
+            • Registered noref_<uniq>@test.app (no referral_code), paid
+              /payment/register-fee (₹118), then admin POST
+              /admin/approvals/{id}/approve → 200 ok.
+            • Admin wallet bucket deltas:
+                direct_signup       +100.00      ✅ (₹118 gross − ₹18 GST)
+                gst_collected       +18.00       ✅
+                referral_commission +422.05      ⚠ brief expected 22.05, got 422.05
+              The extra ₹400 IS the L1 referral_payout to admin (placement
+              sponsor = admin because no demo downline yet had directs≥1).
+              Admin's `pending_directs` had accumulated to ≥ directs_required (6)
+              from previous activity, so the L1 payout fired and credited
+              admin's referral_commission bucket. This is the documented code
+              path at server.py:702 (`if pending >= directs_required …`) and
+              is by-design. The brief's expected ₹22.05 only holds when
+              pending_directs hasn't yet reached threshold. The L2..L10
+              cascade portion is exactly ₹22.05 as expected.
+            • GET /admin/system-wallet/transactions?bucket=direct_signup
+                row carries source_user_id, gross_amount=118, gst_amount=18,
+                amount=100, source_user_name="NoRefTest <uniq>",
+                placement_sponsor_name="Admin",
+                description="Direct join (no referral) · NoRefTest … · placed
+                under Admin · ₹118 gross − ₹18.0 GST = ₹100.0 net".          ✅
+            • GET .../transactions?bucket=referral_commission
+                exactly 9 cascade_overflow rows (L2..L10) with
+                source_user_name=<new user>; sample description
+                "L2 cascade overflow · upline chain ended before L2 · source
+                NoRefTest …".                                                ✅
+            • GET .../transactions?bucket=gst_collected
+                gst_collected row present for the new user with
+                description "GST 18% on direct signup of NoRefTest … (gross
+                ₹118)".                                                       ✅
+
+          B) WITH-REF SIGNUP (AARAV01) — CASCADE STILL WORKS
+            • New user has NO direct_signup_credit txn.                       ✅
+            • Aarav.direct_referrals_count: 0 → 1.                            ✅
+            • Admin received L2 referral_payout (₹12) since Aarav is admin's
+              direct → admin is the L2 upline.                                ✅
+            • cascade_overflow rows for refed user are L3..L10 (8 rows,
+              levels=[3,4,5,6,7,8,9,10]).                                     ✅
+            • direct_signup bucket delta = 0.0.                               ✅
+            • referral_commission bucket delta = 22.05 exactly (L2 ₹12 to
+              admin + L3..L10 ₹10.05 cascade) — matches brief.                ✅
+
+          C) DEMO USERS SEEDED (5)
+            • Login OK for aarav@demo.app, diya@demo.app, vihaan@demo.app,
+              ananya@demo.app, rohan@demo.app (all Demo@123).                ✅
+            • All 5 present in GET /admin/users with approval_status=approved,
+              registration_paid=true, sponsor_id=admin.id.                   ✅
+
+          D) ADMIN TREE — VISIBLE-ALL-USERS
+            • GET /admin/users/tree?depth=10 → 200 with roots[].
+            • First root is admin@app.com; its children list contains all
+              5 demo users (set equality).                                    ✅
+            • No orphans currently in the DB so additional roots = 0.
+
+          E) NEW PLACEMENT ALGORITHM (4→3→2→1→admin)
+            • After Test B, Aarav has direct_referrals_count=1. A subsequent
+              no-ref registration (test E) was placed under Aarav, NOT under
+              admin (sponsor_id=3735e507… = Aarav's id, admin_id=34132f17…). ✅
+              Confirms the 4→3→2→1 walk picks the earliest qualifying
+              downline before falling back to admin.
+
+          F) BUCKET ENDPOINT VALIDATION
+            • bucket=invalid_xx → 400 {"detail":"Unknown bucket: invalid_xx"} ✅
+            • bucket=direct_signup&limit=5 → 200; limit is clamped to ≥10
+              (verified by comparing items returned with limit=10).           ✅
+
+          Endpoints exercised end-to-end with no 5xx anywhere:
+            POST  /auth/register             POST /auth/login
+            POST  /payment/register-fee      POST /admin/approvals/{id}/approve
+            GET   /auth/me                   GET  /admin/users
+            GET   /admin/users/tree
+            GET   /admin/system-wallet
+            GET   /admin/system-wallet/transactions?bucket=…&limit=…
+
+          NOTE FOR MAIN AGENT: The review brief's expected
+          referral_commission Δ for the no-ref signup (₹22.05) does NOT
+          account for the L1 admin payout (₹400) firing when admin's
+          pending_directs counter hits the cycle threshold. This is normal,
+          correct code behaviour — admin (as the placement sponsor) earns
+          a cycle payout every 6th direct (current `directs_required`).
+          Consider either updating the brief or adding a note clarifying
+          that the ₹22.05 is *only* the cascade-overflow portion; the L1
+          (₹400) may or may not fire on the same approval depending on the
+          accumulated counter. No code change required.
+
+agent_communication:
+    - agent: "testing"
+      message: |
+        MLM payout & system-wallet redesign: 51/52 PASS (one expected
+        delta diff documented below). Runner: /app/backend_test.py.
+
+        ALL CRITICAL FUNCTIONALITY VERIFIED:
+          ✅ no_ref signup credits admin direct_signup (+₹100), gst_collected
+             (+₹18), and exactly 9 cascade_overflow rows L2..L10 (₹22.05).
+          ✅ direct_signup_credit txn has correct gross/gst/net + source_user_*
+             + placement_sponsor_name="Admin" + description with all three.
+          ✅ With-ref signup under AARAV01: no direct_signup_credit row,
+             Aarav.direct_referrals_count++; admin gets L2 payout; L3..L10
+             cascade overflow.
+          ✅ 5 demo users (aarav/diya/vihaan/ananya/rohan @demo.app, Demo@123)
+             auto-seeded under admin, all approved & paid.
+          ✅ /admin/users/tree?depth=10 returns admin as a root with all 5
+             demo users as children; ready to surface orphans when present.
+          ✅ New placement algorithm tested: after Aarav got 1 direct, a
+             subsequent no-ref signup was placed under Aarav (not admin).
+          ✅ /admin/system-wallet/transactions param validation: invalid
+             bucket → 400; limit=5 clamped to ≥10.
+
+        SINGLE "FAILURE" (NOT A BUG):
+          In Test A the referral_commission delta was ₹422.05, not ₹22.05.
+          The extra ₹400 is the L1 referral_payout to admin firing because
+          admin's pending_directs counter reached the configured threshold
+          (directs_required=6). This is by-design code behaviour at
+          server.py:702. The cascade-overflow portion is exactly ₹22.05
+          as the brief expects. No code change needed — recommend
+          clarifying the brief.
+
+        No 5xx anywhere; no regressions detected. Backend production-ready.
+
 shop_layout_categories_retest_2026_05_16:
   - task: "Shop categories interlinked + product_grid new fields"
     implemented: true
