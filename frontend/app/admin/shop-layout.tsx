@@ -519,6 +519,7 @@ function BlockFormModal({
   defaultScope: "home" | "category"; defaultScopeCategory: string;
   onClose: () => void; onSaved: () => void;
 }) {
+  const router = useRouter();
   const [type, setType] = useState<BlockType>("banner_slider");
   const [scope, setScope] = useState<"home" | "category">(defaultScope);
   const [scopeCategory, setScopeCategory] = useState(defaultScopeCategory);
@@ -546,6 +547,9 @@ function BlockFormModal({
   const [categoryFilter, setCategoryFilter] = useState("");
   const [items, setItems] = useState<LayoutItem[]>([]);
   const [flashEndsAt, setFlashEndsAt] = useState("");
+  const [productsPerRow, setProductsPerRow] = useState<string>("2");
+  const [showViewAll, setShowViewAll] = useState<boolean>(false);
+  const [viewAllLink, setViewAllLink] = useState<string>("");
   // UI
   const [saving, setSaving] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -580,6 +584,9 @@ function BlockFormModal({
     setCategoryFilter((block as any)?.category_filter || "");
     setItems(block?.items || []);
     setFlashEndsAt((block as any)?.flash_sale_ends_at || "");
+    setProductsPerRow(String((block as any)?.products_per_row || 2));
+    setShowViewAll(Boolean((block as any)?.show_view_all));
+    setViewAllLink((block as any)?.view_all_link || "");
   }, [visible, block, defaultScope, defaultScopeCategory]);
 
   const pickImage = async (cb: (url: string) => void) => {
@@ -603,7 +610,8 @@ function BlockFormModal({
     finally { setPicking(false); }
   };
 
-  const usesItems = ["banner_slider", "category_circles", "brand_slider", "offer_cards"].includes(type);
+  const usesItems = ["banner_slider", "brand_slider", "offer_cards"].includes(type);
+  const usesDynamicCategories = type === "category_circles";
   const usesProducts = ["product_grid", "horizontal_slider", "flash_sale"].includes(type);
   const usesSingleProduct = type === "content_box" || type === "background";
   const usesImage = type === "background";
@@ -611,8 +619,7 @@ function BlockFormModal({
   const onSave = async () => {
     if (usesImage && !imageDataUrl) { Alert.alert("Image required", "Banner blocks need an image."); return; }
     if (type === "content_box" && !productId) { Alert.alert("Product required", "Pick a product for this content box."); return; }
-    if (usesItems && items.length === 0) { Alert.alert("Items required", "Add at least one slide/item."); return; }
-    setSaving(true);
+    if (usesItems && items.length === 0) { Alert.alert("Items required", "Add at least one slide/item."); return; }    setSaving(true);
     try {
       const payload: any = {
         block_type: type,
@@ -634,6 +641,9 @@ function BlockFormModal({
         category_filter: usesProducts ? categoryFilter : "",
         items: usesItems ? items : [],
         flash_sale_ends_at: type === "flash_sale" ? flashEndsAt : "",
+        products_per_row: type === "product_grid" ? Math.max(1, Math.min(4, parseInt(productsPerRow, 10) || 2)) : 2,
+        show_view_all: type === "product_grid" ? showViewAll : false,
+        view_all_link: type === "product_grid" ? viewAllLink.trim() : "",
       };
       if (block) await api.patch(`/admin/shop-layout/${block.id}`, payload);
       else await api.post("/admin/shop-layout", payload);
@@ -711,6 +721,28 @@ function BlockFormModal({
               })}
             </View>
             <Text style={styles.hint}>{TYPE_META[type].hint}</Text>
+
+            {/* Category Circles: dynamic from /admin/shop-categories */}
+            {usesDynamicCategories ? (
+              <View style={styles.dynamicCatInfo}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <Feather name="link" size={14} color={colors.primary} />
+                  <Text style={styles.dynamicCatTitle}>Categories are interlinked</Text>
+                </View>
+                <Text style={styles.dynamicCatBody}>
+                  This block automatically shows ALL categories from{"\n"}
+                  <Text style={{ fontWeight: "800" }}>Admin → Shop Categories</Text>. Any rename, icon swap or image upload there reflects here, on the customer Shop, and on the admin Shop preview — instantly.
+                </Text>
+                <TouchableOpacity
+                  onPress={() => { onClose(); router.push("/admin/shop-categories" as any); }}
+                  style={styles.dynamicCatBtn}
+                  testID="manage-shop-categories"
+                >
+                  <Feather name="grid" size={14} color={colors.primaryFg} />
+                  <Text style={styles.dynamicCatBtnText}>Manage categories</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
 
             {/* Title / Subtitle / Body */}
             {(type !== "content_box" && type !== "background") ? (
@@ -816,6 +848,58 @@ function BlockFormModal({
 
                 <Text style={styles.label}>Product count (1-50)</Text>
                 <TextInput style={styles.input} value={productCount} onChangeText={setProductCount} keyboardType="numeric" placeholder="10" placeholderTextColor={colors.textMuted} />
+
+                {/* Product Grid extras: per-row count, View More link */}
+                {type === "product_grid" ? (
+                  <>
+                    <Text style={styles.label}>Products per row</Text>
+                    <View style={{ flexDirection: "row", gap: 8 }}>
+                      {([1, 2, 3, 4] as const).map((n) => {
+                        const active = String(n) === productsPerRow;
+                        return (
+                          <TouchableOpacity
+                            key={`ppr-${n}`}
+                            onPress={() => setProductsPerRow(String(n))}
+                            style={[styles.perRowChip, active && styles.perRowChipActive]}
+                            testID={`ppr-${n}`}
+                          >
+                            <Text style={[styles.perRowChipText, active && { color: colors.primaryFg }]}>{n}</Text>
+                            <Text style={[styles.perRowChipSub, active && { color: colors.primaryFg, opacity: 0.85 }]}>
+                              per row
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.hint}>
+                      Combine with Size (S/M/L) on the block card to fine-tune card height. 1 per row = full-width hero cards, 4 per row = compact thumbnails.
+                    </Text>
+
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12, paddingHorizontal: 4 }}>
+                      <View style={{ flex: 1, paddingRight: 10 }}>
+                        <Text style={[styles.label, { marginTop: 0 }]}>Show "View More" link</Text>
+                        <Text style={styles.hint}>Appears at the top-right of the section header.</Text>
+                      </View>
+                      <Switch value={showViewAll} onValueChange={setShowViewAll} />
+                    </View>
+
+                    {showViewAll ? (
+                      <>
+                        <Text style={styles.label}>"View More" target</Text>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                          <TouchableOpacity onPress={() => setViewAllLink("")} style={[styles.chip, !viewAllLink && styles.chipActive]}>
+                            <Text style={[styles.chipText, !viewAllLink && { color: colors.primaryFg }]}>Whole shop</Text>
+                          </TouchableOpacity>
+                          {categories.map((c) => (
+                            <TouchableOpacity key={`val-${c}`} onPress={() => setViewAllLink(c)} style={[styles.chip, viewAllLink === c && styles.chipActive]}>
+                              <Text style={[styles.chipText, viewAllLink === c && { color: colors.primaryFg }]}>{c}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
 
                 {type === "flash_sale" ? (
                   <>
@@ -1094,11 +1178,19 @@ const styles = StyleSheet.create({
   alignBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   productRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 14, borderRadius: 12, borderWidth: 1, borderColor: colors.border, marginBottom: 8, backgroundColor: colors.surface },
   productRowText: { fontSize: 14, fontWeight: "700", color: colors.textMain },
-  previewWrap: { marginBottom: 16, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceMuted, overflow: "hidden" },
-  previewHeader: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: colors.brand100 },
-  previewLabel: { fontSize: 10, fontWeight: "900", letterSpacing: 1.4, color: colors.primary, marginLeft: 2 },
-  previewHint: { fontSize: 10, color: colors.textMuted, marginLeft: "auto", fontStyle: "italic" },
-  previewFrame: { padding: 12, backgroundColor: colors.background },
+  // Category-circles "interlinked" info banner shown in the form for the
+  // category_circles block type. Categories themselves are managed from
+  // /admin/shop-categories so the editor here is intentionally read-only.
+  dynamicCatInfo: { marginTop: 14, padding: 12, borderRadius: 14, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.brand100, gap: 4 },
+  dynamicCatTitle: { fontSize: 13, fontWeight: "900", color: colors.primary },
+  dynamicCatBody: { fontSize: 12, color: colors.textMain, lineHeight: 18 },
+  dynamicCatBtn: { marginTop: 8, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, backgroundColor: colors.primary },
+  dynamicCatBtnText: { fontSize: 12, fontWeight: "900", color: colors.primaryFg, letterSpacing: 0.2 },
+  // Products per row chip (1..4) — square, large, easy to tap.
+  perRowChip: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 12, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, gap: 2 },
+  perRowChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  perRowChipText: { fontSize: 18, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4 },
+  perRowChipSub: { fontSize: 9, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.4 },
   sizeChips: { flexDirection: "row", borderWidth: 1, borderColor: colors.border, borderRadius: 999, overflow: "hidden", backgroundColor: colors.surface },
   sizeChip: { paddingHorizontal: 8, paddingVertical: 4, minWidth: 22, alignItems: "center", justifyContent: "center" },
   sizeChipActive: { backgroundColor: colors.primary },

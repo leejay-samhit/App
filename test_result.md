@@ -570,13 +570,79 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "LocationGate: mandatory location permission on login for all non-admin users; 5-second background pings"
-    - "Services screen: GPS enable/disable toggle removed; always-on with read-only status pill"
-    - "Admin users list: shows live lat/long + 'Active Xm ago' per user"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+shop_layout_categories_retest_2026_05_16:
+  - task: "Shop categories interlinked + product_grid new fields"
+    implemented: true
+    working: true
+    file: "backend/routes/shop_categories.py + backend/routes/shop_layout.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            Shop categories + product_grid new fields regression: 28/28 PASS.
+            Runner: /app/shop_layout_test.py. Public EXPO_PUBLIC_BACKEND_URL.
+
+            A) Public GET /api/shop-categories (no auth)
+              • A1 returns 200                                                    ✅
+              • A2 response shape {items:[...]} (count=5 visible active in DB)    ✅
+              • A3 every item carries icon_pack, icon_name, image_url, color,
+                   sort_order, active (plus id, name, slug, created_at,
+                   updated_at)                                                    ✅
+              • A4 only active=true categories are returned (non-active count=0)  ✅
+
+            B) Admin CRUD + reflection in public
+              • B1 GET /api/admin/shop-categories (admin token) -> 200             ✅
+              • B2 admin list returned 18 items (vs 5 active publicly — confirms
+                   inactive rows are visible to admins only)                       ✅
+              • B3 PUT /api/admin/shop-categories/{id} on "Mobiles"
+                   {icon_name:"tshirt-crew", color:"#DCFCE7"} -> 200, response
+                   reflects new values                                              ✅
+              • B4 Re-fetching public /api/shop-categories shows the same item
+                   with the new icon_name AND new color — single source of truth
+                   propagates instantly                                             ✅
+              • B5 Restored "Mobiles" original icon_name=cellphone and
+                   color=#DBEAFE (test was non-destructive)                         ✅
+
+            C) Shop layout product_grid new fields
+              • C1 POST /api/admin/shop-layout {block_type:"product_grid",
+                   scope:"home", products_per_row:3, show_view_all:true,
+                   view_all_link:"Electronics", product_count:6,
+                   data_source:"trending"} -> 200, response has
+                   products_per_row=3, show_view_all=true,
+                   view_all_link="Electronics"                                     ✅
+              • C2 GET /api/admin/shop-layout?scope=home -> created block
+                   present with all three new fields persisted exactly             ✅
+              • C3 PATCH .../{id} {products_per_row:4, show_view_all:false}
+                   -> 200, response shows products_per_row=4, show_view_all=false,
+                   view_all_link still "Electronics" (untouched field preserved)   ✅
+              • C4 Public GET /api/shop-layout?scope=home -> 200, the test
+                   block is visible with the patched fields
+                   (products_per_row=4, show_view_all=false,
+                   view_all_link="Electronics")                                    ✅
+              • C5 DELETE /api/admin/shop-layout/{id} -> 200 cleanup ran cleanly   ✅
+
+            D) Backward compatibility
+              • D1 Public GET /api/shop-layout?scope=home -> 200 with 7 items
+                   from the existing seeded home layout                            ✅
+              • D2/D3 Every legacy block has products_per_row, show_view_all,
+                   view_all_link backfilled via _serialize() defaults — no block
+                   crashes/missing fields after the new-field addition             ✅
+
+            Validation ranges enforced server-side in _build_doc_from_in /
+            _build_updates: products_per_row clamped to 1..4 via
+            max(1, min(4, int(...))). show_view_all coerced to bool.
+            view_all_link trimmed. Backward-compat handled by _serialize()
+            setdefault() on legacy docs. Both Pydantic models
+            (ShopLayoutBlockIn and ShopLayoutBlockPatch) include the three
+            new fields. No regressions; production-ready.
 
 ai_image_generation_2026_05_13:
   - task: "AI Image Generation endpoint (POST /api/products/ai-image) — Gemini Nano Banana"

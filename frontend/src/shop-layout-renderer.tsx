@@ -64,6 +64,10 @@ export type LayoutBlock = {
   category_filter?: string;
   items?: LayoutItem[];
   flash_sale_ends_at?: string;
+  // Grid extras
+  products_per_row?: number;       // 1..4
+  show_view_all?: boolean;
+  view_all_link?: string;          // category name (empty = /shop)
 };
 
 export type Product = {
@@ -199,16 +203,65 @@ function BannerSliderBlock({
 
 /* ─────────────────────────── Block: Category Circles ─────────────────────────── */
 
+// Shape returned by /api/shop-categories
+type ApiCategory = {
+  id: string;
+  name: string;
+  slug: string;
+  icon_pack: "feather" | "mci" | "mat";
+  icon_name: string;
+  image_url: string | null;
+  color: string;
+  sort_order: number;
+  active: boolean;
+};
+
 function CategoryCirclesBlock({
   block, onCategoryPress,
 }: { block: LayoutBlock; onCategoryPress?: (c: string) => void }) {
-  const items = block.items || [];
+  // INTERLINKED: Always source categories from the admin-managed
+  // /api/shop-categories DB so a single edit in /admin/shop-categories
+  // (icon, image, color, name) reflects on every category_circles block
+  // across all scopes (home, category, admin shop preview).
+  // Falls back to block.items only if the API returns nothing AND the
+  // block has items (legacy support).
+  const [apiCats, setApiCats] = useState<ApiCategory[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get<{ items: ApiCategory[] }>("/shop-categories");
+        if (cancelled) return;
+        const items = (r.data?.items || []).filter((c) => c.active !== false);
+        items.sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+        setApiCats(items);
+      } catch {
+        if (!cancelled) setApiCats([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Build a unified items list: prefer API categories.
+  const apiItems = (apiCats || []).map<LayoutItem & { _pack?: string; _icon?: string }>((c) => ({
+    label: c.name,
+    image_data_url: c.image_url || "",
+    color: c.color,
+    link_type: "category" as const,
+    link_value: c.name,
+    _pack: c.icon_pack,
+    _icon: c.icon_name,
+  }));
+  const fallbackItems = block.items || [];
+  const items = apiItems.length > 0 ? apiItems : fallbackItems;
+
+  if (apiCats === null) return <SkeletonBlock height={100} />;
   if (items.length === 0) return null;
   return (
     <View style={{ marginBottom: 14 }}>
       {block.title ? <SectionTitle block={block} /> : null}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
-        {items.map((it, i) => (
+        {items.map((it: any, i) => (
           <TouchableOpacity
             key={`cc-${i}`}
             style={styles.circleTile}
@@ -378,23 +431,50 @@ function FlashSaleBlock({
 /* ─────────────────────────── Block: Product Grid ─────────────────────────── */
 
 function ProductGridBlock({
-  block, products, onProductPress, onAddToCart,
-}: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void }) {
+  block, products, onProductPress, onAddToCart, onViewAll,
+}: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void; onViewAll?: (target: string) => void }) {
   if (products.length === 0) return <SkeletonBlock height={160} />;
+  const perRow = Math.max(1, Math.min(4, block.products_per_row || 2));
+  // flexBasis percent per card so columns wrap cleanly. Subtract a tiny
+  // amount per column to account for the 8px gap between cards.
+  const basisPct = `${Math.floor(100 / perRow) - (perRow > 1 ? 2 : 0)}%`;
+  const size = block.size || "medium";
+  // Aspect ratio of the image varies with card size — smaller cards get a
+  // slightly taller-than-square image, larger cards get square.
+  const aspect = size === "small" ? 1 : size === "large" ? 0.95 : 1.1;
+  const nameLines = perRow >= 3 ? 1 : 2;
+  const fontMul = perRow >= 4 ? 0.85 : perRow >= 3 ? 0.92 : 1;
   return (
     <View style={{ marginBottom: 14 }}>
-      {block.title ? <SectionTitle block={block} /> : null}
+      {(block.title || block.show_view_all) ? (
+        <View style={styles.gridHeader}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            {block.title ? <SectionTitle block={block} /> : null}
+          </View>
+          {block.show_view_all ? (
+            <TouchableOpacity
+              onPress={() => onViewAll?.(block.view_all_link || block.category_filter || "")}
+              style={styles.gridViewAllBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              testID={`grid-view-all-${block.id}`}
+            >
+              <Text style={styles.gridViewAllText}>View More</Text>
+              <Feather name="chevron-right" size={13} color={colors.primary} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      ) : null}
       <View style={styles.gridWrap}>
         {products.slice(0, block.product_count || 10).map((p) => {
           const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
           return (
             <TouchableOpacity
               key={p.id}
-              style={[styles.gridCard, !inStock && { opacity: 0.55 }]}
+              style={[styles.gridCard, { flexBasis: basisPct as any }, !inStock && { opacity: 0.55 }]}
               activeOpacity={0.85}
               onPress={() => onProductPress?.(p.id)}
             >
-              <View style={styles.gridImgWrap}>
+              <View style={[styles.gridImgWrap, { aspectRatio: aspect }]}>
                 {pickImage(p) ? (
                   <Image source={{ uri: pickImage(p) }} style={styles.gridImg} resizeMode="cover" />
                 ) : (
@@ -406,13 +486,13 @@ function ProductGridBlock({
                   <View style={styles.gridOOSBadge}><Text style={styles.gridOOSText}>SOLD OUT</Text></View>
                 ) : null}
               </View>
-              <View style={{ padding: 10 }}>
-                <Text style={styles.gridName} numberOfLines={2}>{p.name}</Text>
+              <View style={{ padding: perRow >= 3 ? 6 : 10 }}>
+                <Text
+                  style={[styles.gridName, { fontSize: 12 * fontMul, minHeight: nameLines === 1 ? 16 : 30 }]}
+                  numberOfLines={nameLines}
+                >{p.name}</Text>
                 <View style={styles.gridFooter}>
-                  <Text style={styles.gridPrice}>{formatINR(p.price)}</Text>
-                  {/* Add-to-cart pill removed per user feedback (clutters the
-                      grid). Tap the card to open product detail and add from
-                      there. */}
+                  <Text style={[styles.gridPrice, { fontSize: 14 * fontMul }]}>{formatINR(p.price)}</Text>
                 </View>
               </View>
             </TouchableOpacity>
@@ -766,7 +846,7 @@ export function ShopLayoutRenderer({
           case "flash_sale":
             return <FlashSaleBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
           case "product_grid":
-            return <ProductGridBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
+            return <ProductGridBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} onViewAll={(target) => { trackClick(b.id); onCategoryPress?.(target || ""); }} />;
           case "horizontal_slider":
             return <HorizontalSliderBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
           case "section_header":
@@ -833,8 +913,11 @@ const styles = StyleSheet.create({
   flashCardName: { fontSize: 11, fontWeight: "700", color: colors.textMain, padding: 6, paddingBottom: 0 },
   flashCardPrice: { fontSize: 13, fontWeight: "900", color: "#DC2626", paddingHorizontal: 6, paddingBottom: 6 },
   // Product grid
+  gridHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4, gap: 8 },
+  gridViewAllBtn: { flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.brand100 },
+  gridViewAllText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
   gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  gridCard: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
+  gridCard: { flexBasis: "48%", flexGrow: 0, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   gridImgWrap: { width: "100%", aspectRatio: 1.1, backgroundColor: colors.surfaceMuted, position: "relative" },
   gridImg: { width: "100%", height: "100%" },
   gridOOSBadge: { position: "absolute", top: 8, left: 8, backgroundColor: "#B91C1C", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },

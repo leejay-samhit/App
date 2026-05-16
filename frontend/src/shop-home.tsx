@@ -21,7 +21,7 @@ import {
 } from "react-native";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, formatApiError } from "./api";
@@ -230,6 +230,10 @@ export function ShopHome({
   }, []);
 
   useEffect(() => { load(); loadCategories(); }, [load, loadCategories]);
+  // Reload categories whenever the shop home regains focus so admin
+  // changes (icon swap, rename, new category) show up immediately
+  // when the admin pops back from /admin/shop-categories.
+  useFocusEffect(useCallback(() => { loadCategories(); }, [loadCategories]));
 
   // ── Derived collections per section ───────────────────────────────────
   const filteredProducts = useMemo(() => {
@@ -573,6 +577,10 @@ export function ShopHome({
           scope="home"
           category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
+          onCategoryPress={(c) => {
+            if (!c) router.push("/shop" as any);
+            else router.push(`/shop-category/${encodeURIComponent(c)}` as any);
+          }}
           onAddToCart={async (id) => {
             try {
               await api.post("/cart", { product_id: id, quantity: 1 });

@@ -95,6 +95,10 @@ class ShopLayoutBlockIn(BaseModel):
     category_filter: Optional[str] = ""
     items: Optional[List[LayoutItem]] = None
     flash_sale_ends_at: Optional[str] = ""
+    # Grid layout extras
+    products_per_row: Optional[int] = 2          # 1..4 (product_grid only)
+    show_view_all: Optional[bool] = False        # show top-right "View More" link
+    view_all_link: Optional[str] = ""            # category name or "" for /shop
 
 
 class ShopLayoutBlockPatch(BaseModel):
@@ -124,6 +128,9 @@ class ShopLayoutBlockPatch(BaseModel):
     category_filter: Optional[str] = None
     items: Optional[List[LayoutItem]] = None
     flash_sale_ends_at: Optional[str] = None
+    products_per_row: Optional[int] = None
+    show_view_all: Optional[bool] = None
+    view_all_link: Optional[str] = None
 
 
 class ReorderItem(BaseModel):
@@ -158,6 +165,9 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
     doc.setdefault("category_filter", "")
     doc.setdefault("items", [])
     doc.setdefault("flash_sale_ends_at", "")
+    doc.setdefault("products_per_row", 2)
+    doc.setdefault("show_view_all", False)
+    doc.setdefault("view_all_link", "")
     return doc
 
 
@@ -217,6 +227,9 @@ def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
         "category_filter": (body.category_filter or "").strip(),
         "items": [i.dict() for i in (body.items or [])][:30],
         "flash_sale_ends_at": (body.flash_sale_ends_at or "").strip(),
+        "products_per_row": max(1, min(4, int(body.products_per_row or 2))),
+        "show_view_all": bool(body.show_view_all),
+        "view_all_link": (body.view_all_link or "").strip(),
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -291,6 +304,15 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "color": str(it.get("color") or "").strip(),
                 })
         updates["items"] = cleaned
+    if "products_per_row" in payload and payload["products_per_row"] is not None:
+        try:
+            updates["products_per_row"] = max(1, min(4, int(payload["products_per_row"])))
+        except (TypeError, ValueError):
+            pass
+    if "show_view_all" in payload and payload["show_view_all"] is not None:
+        updates["show_view_all"] = bool(payload["show_view_all"])
+    if "view_all_link" in payload and payload["view_all_link"] is not None:
+        updates["view_all_link"] = str(payload["view_all_link"]).strip()
     return updates
 
 
