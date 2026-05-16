@@ -134,17 +134,22 @@ export default function AdminShopLayoutScreen() {
   // here update on the next focus / refresh automatically.
   const [shopCats, setShopCats] = useState<{ name: string; active: boolean }[]>([]);
 
-  // Categories list — sourced from admin-managed shop_categories so it
-  // stays perfectly in sync with /admin/shop-categories. Inactive
-  // categories are excluded. Falls back to any categories present on
-  // actual products so legacy products with stale category names still
-  // remain editable until they're cleaned up.
+  // Categories list — sourced ONLY from active admin-managed
+  // shop_categories so it stays perfectly in sync with
+  // /admin/shop-categories. Deleting (or hiding) a category there
+  // removes it from the scope tabs and pickers here on the next focus.
+  // We also include any scope_category currently in use by an existing
+  // layout block so admin can still reach and clean up orphaned blocks
+  // after a category is deleted.
   const categories = useMemo(() => {
     const set = new Set<string>();
     shopCats.forEach((c) => { if (c.active && c.name) set.add(c.name); });
-    products.forEach((p) => { if (p.category) set.add(p.category); });
+    items.forEach((b: any) => {
+      const sc = b?.scope_category;
+      if (b?.scope === "category" && typeof sc === "string" && sc) set.add(sc);
+    });
     return Array.from(set).sort();
-  }, [shopCats, products]);
+  }, [shopCats, items]);
 
   const load = useCallback(async () => {
     try {
