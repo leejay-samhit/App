@@ -128,38 +128,45 @@ export default function AdminShopLayoutScreen() {
   // Scope state: which layout we're editing
   const [scope, setScope] = useState<"home" | "category">("home");
   const [scopeCategory, setScopeCategory] = useState<string>("");
+  // Admin-managed shop categories — the single source of truth, in sync
+  // with /admin/shop-categories. When admin adds / removes / hides a
+  // category there, the scope tabs and the in-form category pickers
+  // here update on the next focus / refresh automatically.
+  const [shopCats, setShopCats] = useState<{ name: string; active: boolean }[]>([]);
 
-  // Categories list — merge canonical user-facing categories with whatever
-  // is found on actual products in the DB. This guarantees the admin can
-  // always manage layouts for every category the customer sees on the
-  // Shop tab, even if no products are in that category yet.
-  const CANONICAL_CATEGORIES = [
-    "Sarees", "Men", "Women", "Electronics", "Mobiles", "Laptop",
-    "Clothes", "Shoes", "Accessories", "Home", "Beauty", "Kids",
-  ];
+  // Categories list — sourced from admin-managed shop_categories so it
+  // stays perfectly in sync with /admin/shop-categories. Inactive
+  // categories are excluded. Falls back to any categories present on
+  // actual products so legacy products with stale category names still
+  // remain editable until they're cleaned up.
   const categories = useMemo(() => {
-    const set = new Set<string>(CANONICAL_CATEGORIES);
+    const set = new Set<string>();
+    shopCats.forEach((c) => { if (c.active && c.name) set.add(c.name); });
     products.forEach((p) => { if (p.category) set.add(p.category); });
     return Array.from(set).sort();
-  }, [products]);
+  }, [shopCats, products]);
 
   const load = useCallback(async () => {
     try {
-      const [bRes, pRes, aRes] = await Promise.all([
+      const [bRes, pRes, aRes, cRes] = await Promise.all([
         api.get<{ items: Block[] }>("/admin/shop-layout"),
         api.get<any>("/admin/products"),
         api.get<{ blocks: Record<string, { impressions: number; clicks: number; ctr: number }> }>("/admin/shop-layout/analytics", { params: { days: 7 } }).catch(() => ({ data: { blocks: {} } as any })),
+        api.get<{ items: { name: string; active: boolean }[] }>("/admin/shop-categories").catch(() => ({ data: { items: [] } as any })),
       ]);
       setItems(bRes.data?.items || []);
       const pData = pRes.data;
       const list: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
       setProducts(list);
       setAnalytics(aRes.data?.blocks || {});
+      setShopCats(cRes.data?.items || []);
     } catch (e) { Alert.alert("Failed to load", formatApiError(e)); }
     finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // Re-fetch on focus so removing / adding a category in
+  // /admin/shop-categories reflects here the next time admin pops back.
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   // Filter items by current scope
   const filteredItems = useMemo(() => {
