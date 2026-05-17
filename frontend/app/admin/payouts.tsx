@@ -1,8 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, RefreshControl, Alert, Modal, TextInput, KeyboardAvoidingView, Platform, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
@@ -34,11 +34,30 @@ type Digest = {
 };
 
 export default function AdminPayouts() {
+  // Allow `?tab=pending|processing|success|rejected` so the Admin → Users
+  // tiles (Withdrawal Pending, Settled) can deep-link straight into the
+  // correct list without an extra tap.
+  const params = useLocalSearchParams<{ tab?: string }>();
+  const initialTabRaw = (Array.isArray(params.tab) ? params.tab[0] : params.tab) || "pending";
+  const allowedTabs = ["pending", "processing", "success", "rejected"] as const;
+  const initialTab = (allowedTabs.includes(initialTabRaw as any)
+    ? initialTabRaw
+    : "pending") as (typeof allowedTabs)[number];
+
   const [items, setItems] = useState<Withdrawal[]>([]);
   const [digest, setDigest] = useState<Digest | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [tab, setTab] = useState<"pending" | "processing" | "success" | "rejected">("pending");
+  const [tab, setTab] = useState<"pending" | "processing" | "success" | "rejected">(initialTab);
+
+  // Keep tab in sync if the user re-enters the route with a different
+  // ?tab= param (e.g. taps Settled then later Withdrawal Pending tile).
+  useEffect(() => {
+    if (allowedTabs.includes(initialTabRaw as any) && initialTabRaw !== tab) {
+      setTab(initialTabRaw as any);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTabRaw]);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
@@ -248,6 +267,27 @@ export default function AdminPayouts() {
           ))}
         </View>
 
+        {/* Tab-total banner — shows the sum of the items in the currently
+            active tab so admin can see "all-time Settled = ₹X" without
+            mental math. Drives the deep-link from Admin → Users tiles. */}
+        {!loading ? (
+          <View style={[styles.tabTotalRow, { borderColor: (tab === "success" ? colors.success : tab === "pending" ? "#E57A44" : colors.primary) + "55" }]}>
+            <Feather
+              name={tab === "success" ? "check-circle" : tab === "pending" ? "clock" : tab === "rejected" ? "slash" : "loader"}
+              size={14}
+              color={tab === "success" ? colors.success : tab === "pending" ? "#E57A44" : colors.primary}
+            />
+            <Text style={styles.tabTotalLabel}>
+              {tab === "success" ? "Settled total" : tab === "pending" ? "Pending total" : tab === "processing" ? "Processing total" : "Rejected total"}
+              {"  ·  "}
+              <Text style={{ color: colors.textMuted, fontWeight: "700" }}>{items.length} txn{items.length === 1 ? "" : "s"}</Text>
+            </Text>
+            <Text style={styles.tabTotalAmount}>
+              {formatINR(items.reduce((s, w) => s + Number(w.amount || 0), 0))}
+            </Text>
+          </View>
+        ) : null}
+
         {/* Batch select toolbar */}
         {(tab === "pending" || tab === "processing") && (
           <View style={styles.toolbarRow}>
@@ -384,6 +424,9 @@ const styles = StyleSheet.create({
   digestAlert: { flexDirection: "row", alignItems: "center", gap: 8, padding: 10, borderRadius: 10, backgroundColor: "#FCE9E5", marginBottom: 10 },
   digestAlertText: { fontSize: 12, color: "#B3261E", fontWeight: "700", flex: 1 },
   tabs: { flexDirection: "row", backgroundColor: colors.surfaceMuted, borderRadius: radii.button, padding: 4, gap: 4 },
+  tabTotalRow: { marginTop: 10, flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surface, borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  tabTotalLabel: { flex: 1, fontSize: 12, fontWeight: "800", color: colors.textMain, letterSpacing: 0.3 },
+  tabTotalAmount: { fontSize: 16, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3, fontVariant: ["tabular-nums"] },
   tab: { flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 99 },
   tabActive: { backgroundColor: colors.primary },
   tabText: { fontSize: 11, fontWeight: "700", color: colors.textMuted, letterSpacing: 1 },

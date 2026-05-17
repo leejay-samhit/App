@@ -2122,13 +2122,15 @@ async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
     total_paid_out = payout_agg[0]["total"] if payout_agg else 0
 
     # NEW: aggregate withdrawal totals by status — drives the "Withdrawal
-    # pending" and "Settled" tiles on Admin → Users.
+    # pending" and "Settled" tiles on Admin → Users. Withdrawal status
+    # vocabulary used elsewhere in this codebase: "pending" | "processing"
+    # | "success" | "rejected". "Settled" maps to status="success".
     pending_wd_agg = await db.withdrawals.aggregate([
         {"$match": {"status": "pending"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     settled_wd_agg = await db.withdrawals.aggregate([
-        {"$match": {"status": "completed"}},
+        {"$match": {"status": "success"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     total_pending_withdrawals_amount = float(pending_wd_agg[0]["total"] if pending_wd_agg else 0)

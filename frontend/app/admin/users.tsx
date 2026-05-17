@@ -115,7 +115,7 @@ export default function AdminUsers() {
                   label="Settled"
                   value={formatINR(stats.total_completed_withdrawals_amount || 0)}
                   hint="View payouts"
-                  onPress={() => router.push("/admin/withdrawals?status=completed" as any)}
+                  onPress={() => router.push("/admin/payouts?tab=success" as any)}
                   testID="stat-settled"
                 />
                 <Stat
@@ -129,7 +129,7 @@ export default function AdminUsers() {
                   label="Withdrawal pending"
                   value={formatINR(stats.total_pending_withdrawals_amount || 0)}
                   hint="Open payouts"
-                  onPress={() => router.push("/admin/withdrawals?status=pending" as any)}
+                  onPress={() => router.push("/admin/payouts?tab=pending" as any)}
                   testID="stat-pending-withdrawals"
                 />
               </View>
