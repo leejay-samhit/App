@@ -2097,19 +2097,16 @@ async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
     total_users = await db.users.count_documents({"role": "user"})
     paid_users = await db.users.count_documents({"role": "user", "registration_paid": True})
     pending_payouts = await db.withdrawals.count_documents({"status": "pending"})
-    # Revenue = sum of every COMPLETED user-facing inbound payment captured
-    # in the transactions ledger (registration fees + COD/shop orders +
-    # service bookings + wallet topups). This is the actual cash that has
-    # flowed into the platform — far more accurate than the legacy
-    # paid_users × fee multiplier (which silently ignored partial refunds
-    # and other payment channels).
+    # Revenue = sum of registration_fee transactions only.
+    # Per user request: "Revenue → show only registration transactions, don't
+    # include referral payouts, shop orders or service bookings".
+    # NOTE: registration_fee txns use status="paid" (not "success") in the
+    # legacy mock flow — we accept either marker since both mean "money
+    # actually arrived".
     rev_agg = await db.transactions.aggregate([
         {"$match": {
-            "status": "success",
-            "type": {"$in": [
-                "registration_fee", "order_payment", "service_booking",
-                "wallet_topup", "vendor_payment", "shop_order",
-            ]},
+            "type": "registration_fee",
+            "status": {"$in": ["success", "paid"]},
         }},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)

@@ -121,8 +121,8 @@ export default function AdminUsers() {
                 <Stat
                   label="Revenue"
                   value={formatINR(stats.total_revenue)}
-                  hint="User payments"
-                  onPress={() => router.push("/admin/transactions?type=revenue" as any)}
+                  hint="Registration fees"
+                  onPress={() => router.push("/admin/transactions?type=registration_fee" as any)}
                   testID="stat-revenue"
                 />
                 <Stat

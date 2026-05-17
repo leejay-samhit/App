@@ -1,11 +1,11 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl, TouchableOpacity,
   Modal, ScrollView, Platform, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useLocalSearchParams } from "expo-router";
 import { WebView } from "react-native-webview";
 import { api } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
@@ -37,10 +37,40 @@ type TxDetail = {
 };
 
 export default function AdminTxns() {
+  // Optional `?type=` query param — e.g. when admin taps the "Revenue" tile
+  // on /admin/users, we route here with type=registration_fee so the list
+  // shows only that type (no referral payouts, no shop / service txns).
+  const params = useLocalSearchParams<{ type?: string }>();
+  const typeFilter = (Array.isArray(params.type) ? params.type[0] : params.type) || "";
+
   const [items, setItems] = useState<Txn[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [includePending, setIncludePending] = useState(false);
+
+  // Title / chip label for the active type filter (when present).
+  const TYPE_LABELS: Record<string, string> = {
+    registration_fee: "Registration fees",
+    referral_payout: "Referral payouts",
+    order_payment: "Shop orders",
+    service_booking: "Service bookings",
+    withdrawal: "Withdrawals",
+    gst_collected: "GST collected",
+    direct_signup_credit: "Direct signups",
+    cascade_overflow: "Cascade overflow",
+  };
+  const typeFilterLabel = typeFilter ? (TYPE_LABELS[typeFilter] || typeFilter) : "";
+
+  // Apply the optional type filter client-side. Keeps the existing list API
+  // simple and avoids a server round-trip when admin toggles include-pending.
+  const visibleItems = useMemo(
+    () => (typeFilter ? items.filter((t) => t.type === typeFilter) : items),
+    [items, typeFilter],
+  );
+  const visibleTotal = useMemo(
+    () => visibleItems.reduce((s, t) => s + Number(t.amount || 0), 0),
+    [visibleItems],
+  );
 
   // detail modal
   const [detail, setDetail] = useState<TxDetail | null>(null);
@@ -106,9 +136,20 @@ export default function AdminTxns() {
         ListHeaderComponent={
           <View>
             <Text style={styles.overline}>ADMIN</Text>
-            <Text style={styles.h1}>Transactions</Text>
+            <Text style={styles.h1}>{typeFilterLabel || "Transactions"}</Text>
+            {typeFilter ? (
+              <View style={styles.filterBanner}>
+                <Feather name="filter" size={13} color={colors.primary} />
+                <Text style={styles.filterBannerText}>
+                  Filtered: only <Text style={{ fontWeight: "900" }}>{typeFilterLabel}</Text>
+                </Text>
+                <Text style={styles.filterBannerAmount}>
+                  {formatINR(visibleTotal)} · {visibleItems.length} txn{visibleItems.length === 1 ? "" : "s"}
+                </Text>
+              </View>
+            ) : null}
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4, marginBottom: 20 }}>
-              <Text style={styles.sub}>{items.length} total</Text>
+              <Text style={styles.sub}>{visibleItems.length} of {items.length} total</Text>
               <TouchableOpacity onPress={() => setIncludePending((v) => !v)} style={styles.toggle} testID="toggle-pending">
                 <Feather name={includePending ? "eye" : "eye-off"} size={13} color={colors.primary} />
                 <Text style={styles.toggleText}>{includePending ? "Showing pending/failed" : "Hide pending/failed"}</Text>
@@ -116,7 +157,7 @@ export default function AdminTxns() {
             </View>
           </View>
         }
-        data={items}
+        data={visibleItems}
         keyExtractor={(i) => i.id}
         renderItem={({ item }) => (
           <TouchableOpacity onPress={() => openDetail(item.id)} style={styles.row} testID={`txn-${item.id}`}>
@@ -294,6 +335,9 @@ const styles = StyleSheet.create({
   sub: { fontSize: 13, color: colors.textMuted },
   toggle: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.brand100 },
   toggleText: { fontSize: 11, fontWeight: "700", color: colors.primary, letterSpacing: 0.5 },
+  filterBanner: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, marginBottom: 4, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.brand100, borderWidth: 1, borderColor: colors.primary + "33" },
+  filterBannerText: { flex: 1, fontSize: 12, color: colors.textMain, fontWeight: "700" },
+  filterBannerAmount: { fontSize: 12, fontWeight: "900", color: colors.primary, letterSpacing: -0.3 },
   row: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 8 },
   iconBox: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center", marginRight: 12 },
   title: { fontSize: 13, fontWeight: "700", color: colors.textMain },
