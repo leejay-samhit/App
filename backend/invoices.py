@@ -195,7 +195,15 @@ def _make_invoice_data(
     is_tax = is_tax_invoice(tx)
     amt = abs(float(tx.get("amount") or 0))
 
-    if is_tax:
+    is_no_gst = (tx.get("type") or "") in NO_GST_INVOICE_TYPES
+    if is_no_gst:
+        # Internal-app movement (UTR deposit, wallet adjustment, peer transfer,
+        # withdrawal). NO GST inflation — gross == net == the actual txn amount.
+        # We still call compute_gst() for shape consistency but treat amount as
+        # gst-inclusive so taxable + GST = gross = amount.
+        gst = compute_gst(amt, gst_inclusive=True, gst_pct=gst_pct, inter_state=inter_state)
+        title = "PAYMENT STATEMENT"
+    elif is_tax:
         gst = compute_gst(amt, gst_inclusive=gst_inclusive, gst_pct=gst_pct, inter_state=inter_state)
         title = "TAX INVOICE"
     else:
