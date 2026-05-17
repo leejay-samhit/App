@@ -58,6 +58,9 @@ export default function AdminSystemWallet() {
   const [remarks, setRemarks] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Reconcile state
+  const [reconciling, setReconciling] = useState(false);
+
   const load = useCallback(async () => {
     try {
       const { data } = await api.get("/admin/system-wallet");
@@ -89,8 +92,41 @@ export default function AdminSystemWallet() {
     }
   }, []);
 
-  const submitDeposit = async () => {
-    const amt = Number(amount);
+  const runReconcile = useCallback(() => {
+    Alert.alert(
+      "Reconcile books?",
+      "This recomputes each bucket from the transaction ledger (source of truth) and sets the headline total = sum of buckets. Safe to run any time — it never moves real money, just fixes display drift.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reconcile",
+          style: "default",
+          onPress: async () => {
+            setReconciling(true);
+            try {
+              const { data } = await api.post("/admin/system-wallet/reconcile");
+              await load();
+              const diff = data?.diff || {};
+              const diffLines = Object.entries(diff)
+                .filter(([, v]: any) => Math.abs(Number(v) || 0) > 0.005)
+                .map(([k, v]: any) => `${k}: ${Number(v) > 0 ? "+" : ""}${formatINR(Number(v))}`)
+                .join("\n");
+              Alert.alert(
+                "Books reconciled",
+                diffLines || "No drift detected — books were already in sync.",
+              );
+            } catch (e) {
+              Alert.alert("Reconcile failed", formatApiError(e));
+            } finally {
+              setReconciling(false);
+            }
+          },
+        },
+      ],
+    );
+  }, [load]);
+
+  const submitDeposit = async () => {    const amt = Number(amount);
     if (!amt || amt <= 0) return Alert.alert("Amount required");
     if (!utr.trim() || utr.trim().length < 4) return Alert.alert("UTR / reference number required");
     setSubmitting(true);
@@ -188,6 +224,23 @@ export default function AdminSystemWallet() {
           <Text style={styles.depositBtnText}>Add Direct-Added Money (UTR)</Text>
         </TouchableOpacity>
         <Text style={styles.helpText}>Only Direct-Added funds can be posted to user wallets.</Text>
+
+        <TouchableOpacity
+          style={[styles.reconcileBtn, reconciling && { opacity: 0.6 }]}
+          onPress={runReconcile}
+          disabled={reconciling}
+          testID="reconcile-books"
+        >
+          {reconciling ? (
+            <ActivityIndicator size="small" color={colors.primary} />
+          ) : (
+            <Feather name="refresh-cw" size={15} color={colors.primary} />
+          )}
+          <Text style={styles.reconcileBtnText}>{reconciling ? "Reconciling…" : "Reconcile books"}</Text>
+        </TouchableOpacity>
+        <Text style={styles.helpText}>
+          Recomputes each bucket from the transaction ledger and fixes any drift. Run any time to verify books tally.
+        </Text>
 
         <Text style={styles.sectionLabel}>Recent UTR Deposits</Text>
         {(data?.deposits || []).length === 0 ? (
@@ -339,6 +392,8 @@ const styles = StyleSheet.create({
 
   depositBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 14, backgroundColor: colors.primary, borderRadius: radii.button, marginTop: 14 },
   depositBtnText: { fontSize: 14, fontWeight: "800", color: colors.primaryFg },
+  reconcileBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 12, backgroundColor: colors.surface, borderRadius: radii.button, borderWidth: 1, borderColor: colors.primary + "55", marginTop: 12 },
+  reconcileBtnText: { fontSize: 13, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
   helpText: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 8, marginBottom: 4 },
 
   empty: { padding: 30, alignItems: "center", gap: 6 },

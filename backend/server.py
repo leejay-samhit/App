@@ -3725,15 +3725,77 @@ async def get_system_wallet(admin: Dict[str, Any] = Depends(require_admin_role("
     }
 
 
+@api_router.post("/admin/system-wallet/reconcile")
+async def reconcile_system_wallet(
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance")),
+):
+    """One-shot accounting reconciliation:
+      • Recompute each bucket from the transactions ledger (source of truth).
+      • Set admin.wallet_balance = sum(buckets) so the headline matches.
+
+    Returns a before/after diff so admin can see what was corrected.
+    """
+    a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not a:
+        raise HTTPException(status_code=404, detail="Admin not found")
+
+    before = {b: float((a.get("wallet_buckets") or {}).get(b) or 0) for b in SYSTEM_WALLET_BUCKETS}
+    before_total = float(a.get("wallet_balance") or 0)
+
+    # Sum admin txns by (bucket → txn types) defined in _BUCKET_TXN_TYPES.
+    # For buckets that don't have explicit types in that map yet (none
+    # currently), recomputed value is left at 0 — admin can still see the
+    # diff and decide whether to manually adjust.
+    after: Dict[str, float] = {b: 0.0 for b in SYSTEM_WALLET_BUCKETS}
+    for bucket, types in _BUCKET_TXN_TYPES.items():
+        agg = await db.transactions.aggregate([
+            {"$match": {
+                "user_id": a["id"],
+                "type": {"$in": types},
+                "status": {"$in": ["success", "paid", "credited", "approved"]},
+            }},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        after[bucket] = round(float(agg[0]["total"] if agg else 0), 2)
+
+    after_total = round(sum(after.values()), 2)
+
+    # Apply
+    await db.users.update_one(
+        {"id": a["id"]},
+        {"$set": {
+            "wallet_buckets": after,
+            "wallet_balance": after_total,
+        }},
+    )
+    await _audit_log(admin, "system_wallet.reconcile", "wallet", a["id"], {
+        "before": {**before, "wallet_balance": before_total},
+        "after": {**after, "wallet_balance": after_total},
+    })
+
+    # Build a per-bucket diff for the response (positive = bucket increased,
+    # negative = decreased).
+    diff = {b: round(after[b] - before[b], 2) for b in SYSTEM_WALLET_BUCKETS}
+    diff["wallet_balance"] = round(after_total - before_total, 2)
+    return {
+        "ok": True,
+        "before": {**before, "wallet_balance": before_total},
+        "after":  {**after,  "wallet_balance": after_total},
+        "diff":   diff,
+    }
+
+
 # Bucket → transaction type(s) mapping. Drives the per-bucket detail view in
-# the frontend System Wallet UI.
+# the frontend System Wallet UI AND the reconcile endpoint (which recomputes
+# each bucket from its ledger types). Keep this in sync whenever new admin
+# income types are added so the books always balance after a reconcile.
 _BUCKET_TXN_TYPES: Dict[str, List[str]] = {
     "direct_signup":       ["direct_signup_credit"],
     "referral_commission": ["referral_payout", "cascade_overflow"],
     "gst_collected":       ["gst_collected"],
     "direct_added":        ["system_deposit"],
-    "service_margin":      ["service_margin"],
-    "shopping_margin":     ["shopping_margin"],
+    "service_margin":      ["service_margin", "service_commission"],
+    "shopping_margin":     ["shopping_margin", "shop_commission"],
 }
 
 
