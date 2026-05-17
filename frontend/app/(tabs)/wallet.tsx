@@ -196,8 +196,25 @@ export default function WalletScreen() {
                 numberOfLines={1}
                 adjustsFontSizeToFit
               >
-                {formatINR(user?.wallet_balance || 0)}
+                {(() => {
+                  // For admin: only the referral_commission bucket counts as
+                  // "your earnings" (per payout structure). The other buckets
+                  // (direct_signup, direct_added, GST, service/shopping
+                  // margin) are platform treasury, not personal earnings.
+                  // For regular users: total wallet_balance (single bucket).
+                  const isAdmin = (user?.role === "admin");
+                  const buckets = (user as any)?.wallet_buckets || {};
+                  const value = isAdmin
+                    ? Number(buckets.referral_commission || 0)
+                    : Number(user?.wallet_balance || 0);
+                  return formatINR(value);
+                })()}
               </Text>
+              {user?.role === "admin" ? (
+                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700", marginTop: 2, letterSpacing: 0.3 }}>
+                  Referral earnings only · See System Wallet for treasury
+                </Text>
+              ) : null}
             </View>
             <View style={styles.miniStatsCol}>
               <View style={styles.miniStat}>

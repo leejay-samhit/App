@@ -639,8 +639,15 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
             "level": level,
             "amount": gst,
             "status": "success",
-            "description": f"GST {int(REFERRAL_GST_PCT)}% on Level {level} commission to {sponsor_user.get('name')} (gross ₹{int(gross)})",
-            "source_user_name": sponsor_user.get("name"),
+            "description": (
+                f"GST {int(REFERRAL_GST_PCT)}% on L{level} payout to {sponsor_user.get('name')} "
+                f"(gross ₹{int(gross)}) · triggered by {src_short or 'a downline activation'}"
+            ),
+            "source_user_name": src_short or sponsor_user.get("name"),
+            "sponsor_name": sponsor_user.get("name"),  # who received the payout
+            "sponsor_email": sponsor_user.get("email"),
+            "gross_amount": gross,
+            "gst_pct": REFERRAL_GST_PCT,
             "reference_number": base_ref + "-GST",
             "linked_payout_to_user_id": sponsor_user["id"],
             "created_at": ts,
@@ -2090,18 +2097,54 @@ async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
     total_users = await db.users.count_documents({"role": "user"})
     paid_users = await db.users.count_documents({"role": "user", "registration_paid": True})
     pending_payouts = await db.withdrawals.count_documents({"status": "pending"})
-    total_revenue = paid_users * settings["registration_fee"]
+    # Revenue = sum of every COMPLETED user-facing inbound payment captured
+    # in the transactions ledger (registration fees + COD/shop orders +
+    # service bookings + wallet topups). This is the actual cash that has
+    # flowed into the platform — far more accurate than the legacy
+    # paid_users × fee multiplier (which silently ignored partial refunds
+    # and other payment channels).
+    rev_agg = await db.transactions.aggregate([
+        {"$match": {
+            "status": "success",
+            "type": {"$in": [
+                "registration_fee", "order_payment", "service_booking",
+                "wallet_topup", "vendor_payment", "shop_order",
+            ]},
+        }},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    total_revenue = float(rev_agg[0]["total"] if rev_agg else 0)
+    # Fallback for fresh installs / clean DB: assume legacy reg-fee × paid_users
+    if total_revenue == 0:
+        total_revenue = paid_users * settings["registration_fee"]
+
     payout_agg = await db.transactions.aggregate([
         {"$match": {"type": "referral_payout"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     total_paid_out = payout_agg[0]["total"] if payout_agg else 0
+
+    # NEW: aggregate withdrawal totals by status — drives the "Withdrawal
+    # pending" and "Settled" tiles on Admin → Users.
+    pending_wd_agg = await db.withdrawals.aggregate([
+        {"$match": {"status": "pending"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    settled_wd_agg = await db.withdrawals.aggregate([
+        {"$match": {"status": "completed"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    total_pending_withdrawals_amount = float(pending_wd_agg[0]["total"] if pending_wd_agg else 0)
+    total_completed_withdrawals_amount = float(settled_wd_agg[0]["total"] if settled_wd_agg else 0)
+
     return {
         "total_users": total_users,
         "paid_users": paid_users,
         "pending_payouts": pending_payouts,
         "total_revenue": total_revenue,
         "total_referral_payouts": total_paid_out,
+        "total_pending_withdrawals_amount": total_pending_withdrawals_amount,
+        "total_completed_withdrawals_amount": total_completed_withdrawals_amount,
     }
 
 

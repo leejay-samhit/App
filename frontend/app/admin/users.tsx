@@ -53,6 +53,8 @@ type Stats = {
   pending_payouts: number;
   total_revenue: number;
   total_referral_payouts: number;
+  total_pending_withdrawals_amount?: number;
+  total_completed_withdrawals_amount?: number;
 };
 
 export default function AdminUsers() {
@@ -102,10 +104,34 @@ export default function AdminUsers() {
             <Text style={styles.h1}>Users</Text>
             {stats && (
               <View style={styles.statsGrid}>
-                <Stat label="Total users" value={String(stats.total_users)} />
-                <Stat label="Paid" value={String(stats.paid_users)} />
-                <Stat label="Revenue" value={formatINR(stats.total_revenue)} />
-                <Stat label="Payouts paid" value={formatINR(stats.total_referral_payouts)} />
+                <Stat
+                  label="Total users"
+                  value={String(stats.total_users)}
+                  hint="View approvals"
+                  onPress={() => router.push("/admin/approvals" as any)}
+                  testID="stat-total-users"
+                />
+                <Stat
+                  label="Settled"
+                  value={formatINR(stats.total_completed_withdrawals_amount || 0)}
+                  hint="View payouts"
+                  onPress={() => router.push("/admin/withdrawals?status=completed" as any)}
+                  testID="stat-settled"
+                />
+                <Stat
+                  label="Revenue"
+                  value={formatINR(stats.total_revenue)}
+                  hint="User payments"
+                  onPress={() => router.push("/admin/transactions?type=revenue" as any)}
+                  testID="stat-revenue"
+                />
+                <Stat
+                  label="Withdrawal pending"
+                  value={formatINR(stats.total_pending_withdrawals_amount || 0)}
+                  hint="Open payouts"
+                  onPress={() => router.push("/admin/withdrawals?status=pending" as any)}
+                  testID="stat-pending-withdrawals"
+                />
               </View>
             )}
             {canCreate && (
@@ -771,13 +797,38 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.statCard}>
-      <Text style={styles.statValue}>{value}</Text>
+function Stat({ label, value, hint, onPress, testID }: {
+  label: string;
+  value: string;
+  hint?: string;
+  onPress?: () => void;
+  testID?: string;
+}) {
+  const body = (
+    <>
+      <Text style={styles.statValue} numberOfLines={1} adjustsFontSizeToFit>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
-    </View>
+      {onPress ? (
+        <View style={styles.statHintRow}>
+          <Text style={styles.statHint}>{hint || "Open"}</Text>
+          <Feather name="chevron-right" size={11} color={colors.primary} />
+        </View>
+      ) : null}
+    </>
   );
+  if (onPress) {
+    return (
+      <TouchableOpacity
+        onPress={onPress}
+        activeOpacity={0.7}
+        style={[styles.statCard, styles.statCardTappable]}
+        testID={testID}
+      >
+        {body}
+      </TouchableOpacity>
+    );
+  }
+  return <View style={styles.statCard} testID={testID}>{body}</View>;
 }
 
 const styles = StyleSheet.create({
@@ -788,8 +839,11 @@ const styles = StyleSheet.create({
   h1: { fontSize: 30, fontWeight: "800", color: colors.textMain, letterSpacing: -1, marginBottom: 20 },
   statsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 20 },
   statCard: { flexBasis: "48%", flexGrow: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16, padding: 14 },
+  statCardTappable: { borderColor: colors.primary + "40" },
   statValue: { fontSize: 22, fontWeight: "800", color: colors.textMain, letterSpacing: -0.5 },
   statLabel: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
+  statHintRow: { flexDirection: "row", alignItems: "center", gap: 2, marginTop: 6 },
+  statHint: { fontSize: 10, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
   searchWrap: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16, gap: 8 },
   newUserBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 14, marginBottom: 16 },
   newUserBtnText: { color: colors.primaryFg, fontSize: 14, fontWeight: "800" },

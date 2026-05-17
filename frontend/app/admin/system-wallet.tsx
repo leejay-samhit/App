@@ -132,8 +132,27 @@ export default function AdminSystemWallet() {
 
         <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 18 }}>
           <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>TOTAL ADMIN FUNDS</Text>
-          <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>{formatINR(data?.total || 0)}</Text>
-          <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>Sum of all categorised buckets below. Tap a bucket to see every transaction.</Text>
+          <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>
+            {formatINR(
+              Number(data?.buckets?.direct_signup || 0) +
+              Number(data?.buckets?.direct_added || 0) +
+              Number(data?.buckets?.service_margin || 0) +
+              Number(data?.buckets?.shopping_margin || 0)
+            )}
+          </Text>
+          <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>
+            Spendable treasury (excludes admin referral earnings and GST collected, which are accounted separately).
+          </Text>
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+            <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", borderRadius: 10, paddingVertical: 8, paddingHorizontal: 10 }}>
+              <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.6 }}>ADMIN REFERRAL EARNINGS</Text>
+              <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 3 }}>{formatINR(data?.buckets?.referral_commission || 0)}</Text>
+            </View>
+            <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", borderRadius: 10, paddingVertical: 8, paddingHorizontal: 10 }}>
+              <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.6 }}>GST COLLECTED</Text>
+              <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 3 }}>{formatINR(data?.buckets?.gst_collected || 0)}</Text>
+            </View>
+          </View>
         </GradientCard>
 
         <Text style={styles.sectionLabel}>Earnings & Routing</Text>

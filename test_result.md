@@ -575,6 +575,107 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+treasury_accounting_fixes_2026_05_17:
+  - task: "Admin stats new withdrawal totals + actual-revenue + GST txn enrichment + system wallet buckets"
+    implemented: true
+    working: true
+    file: "backend/server.py (L2094-2148 admin_stats; L559-654 _credit_payout w/ GST enrichment; L3713-3767 system_wallet)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Treasury / admin-stats / GST enrichment / system-wallet regression: 28/30 PASS.
+          The 2 "failures" are test-script assertion bugs, NOT backend bugs — the
+          actual review-brief requirements all pass (details below). Runner:
+          /app/treasury_test.py. Public EXPO_PUBLIC_BACKEND_URL.
+
+          A) GET /api/admin/stats  ✅ ALL PASS
+            • A.1 200 OK with body including all 7 required fields.
+            • A.2 All required keys present: total_users, paid_users,
+                  pending_payouts, total_revenue, total_referral_payouts,
+                  total_pending_withdrawals_amount,
+                  total_completed_withdrawals_amount.                          ✅
+            • A.3 All 7 values numeric & non-negative.                          ✅
+            • A.4 total_revenue=₹1180.0 > 0 (10 paid_users × ₹118 reg-fee
+                  derived from ACTUAL successful txns in the ledger — the new
+                  aggregation pipeline at server.py:2106-2116 with types
+                  in {registration_fee, order_payment, service_booking,
+                  wallet_topup, vendor_payment, shop_order}; legacy
+                  paid_users × fee fallback at L2118 was NOT used).            ✅
+            • A.5 Demo user (aarav@demo.app) /withdrawals {amount:100} →
+                  400 "Insufficient balance" (no crash, expected).             ✅
+            • A.6 /admin/stats still 200 after withdrawal attempt.             ✅
+            Snapshot: total_users=13 paid_users=10 total_revenue=1180.0
+            total_referral_payouts=424.0 pending_payouts=0
+            pending_wd_amt=0.0 completed_wd_amt=0.0.
+
+          B) GST txn enrichment (_credit_payout path)  ✅ ALL CRITICAL PASS
+            Setup: chain admin → Aarav → user_A → user_B. When user_B is
+            approved, the L2 payout fires to a NON-ADMIN sponsor (Aarav),
+            which is the only path that creates gst_collected via
+            _credit_payout (admin-recipient path early-returns at L595
+            without GST split — this is the existing design and is correct).
+
+            • B.1-B.4 Register A under AARAV01, pay+approve A; register B
+                      under A's referral_code; pay+approve B.                   ✅
+            • B.5 GET /admin/system-wallet/transactions?bucket=gst_collected
+                  → 200. 1 NEW row created for joiner B.                       ✅
+            • Sample row carries ALL enriched fields:
+                {
+                  "type":"gst_collected", "level":2, "amount":2.16,
+                  "gross_amount": 12.0,              ✅ (was None before fix)
+                  "gst_pct": 18.0,                   ✅
+                  "sponsor_name": "Aarav Sharma",    ✅ (L2 payout recipient)
+                  "sponsor_email": "aarav@demo.app", ✅
+                  "source_user_name": "ChainUserB <uniq>",  ✅ (the joiner)
+                  "description": "GST 18% on L2 payout to Aarav Sharma
+                    (gross ₹12) · triggered by ChainUserB <uniq>",  ✅
+                  "linked_payout_to_user_id": "<Aarav's user id>"
+                }
+            • B.6 gross_amount numeric (12.0)                                  ✅
+            • B.7 gst_pct == 18.0                                              ✅
+            • B.8 sponsor_name present (Aarav Sharma)                          ✅
+            • B.9 source_user_name present and == joiner B name                ✅
+            • B.10 description format "GST 18% on L<level> payout to <sponsor>
+                   ... triggered by <joiner>" — verified exactly.              ✅
+            • B.10c description mentions joiner (user B)                       ✅
+            • B.11 All rows for joiner have enriched fields, no nulls          ✅
+
+            ── The 2 "failures" (test-script bugs, not backend bugs):
+            • B.8b expected sponsor_name=="ChainUserA …" — WRONG ASSERTION.
+                   user A had only 1 pending_direct (B) which is < 6
+                   (directs_required). So L1 payout to A did NOT fire (this is
+                   correct cycle behaviour). The L2 payout went to Aarav (A's
+                   upline) per the cascade. The brief explicitly says
+                   sponsor_name = "the upline who received the payout" — that's
+                   Aarav, which is what the backend stored. Backend is RIGHT.
+            • B.10b same root cause — expected "ChainUserA" in description but
+                   the description correctly contains "Aarav Sharma" (recipient)
+                   and "ChainUserB …" (joiner). Brief requirement met.
+
+          C) GET /api/admin/system-wallet  ✅ ALL PASS
+            • C.1 200 OK.                                                      ✅
+            • C.2 Response has buckets dict.                                   ✅
+            • C.3 Response has total key (total=15256.46).                     ✅
+            • C.4 ALL 6 expected bucket keys present:
+                  referral_commission, direct_signup, direct_added,
+                  service_margin, shopping_margin, gst_collected.              ✅
+            Snapshot: {ref_comm:520.3, direct_signup:200.0, direct_added:0.0,
+            service_margin:0.0, shopping_margin:24494.0, gst_collected:38.16}.
+
+          NOTE FOR FRONTEND "Total Admin Funds" computation:
+          The buckets value gst_collected (38.16) and referral_commission
+          (520.3) are both returned and visible. The new frontend formula
+          (direct_signup + direct_added + service_margin + shopping_margin =
+          200+0+0+24494 = ₹24,694) correctly EXCLUDES referral_commission &
+          gst_collected per the brief. The API contract is unchanged; the
+          frontend just sums a different subset.
+
+          All review-brief criteria are met. Production-ready.
+
 mlm_payout_system_wallet_redesign_2026_05_16:
   - task: "No-ref signup → admin direct_signup credit (GST-inclusive ₹118→₹100+₹18) + L2..L10 cascade overflow"
     implemented: true
@@ -2048,4 +2149,40 @@ agent_communication:
       Home quick-action tiles moved into Payouts page, (6) new admin
       Shop tab. Backend tested with curl (returns 18 items). All
       frontend pages render correctly when authenticated.
+
+
+  - agent: "testing"
+    message: |
+      Treasury fixes regression: 28/30 PASS (2 "failures" are test-script
+      assertion bugs, not backend bugs). Runner /app/treasury_test.py.
+
+      ✅ A) /admin/stats now returns ALL 7 fields: total_users, paid_users,
+         pending_payouts, total_revenue, total_referral_payouts,
+         total_pending_withdrawals_amount, total_completed_withdrawals_amount.
+         All numeric, non-negative. total_revenue=₹1180 derived from actual
+         transactions ledger (not legacy multiplier). Withdrawal endpoint
+         doesn't crash on insufficient balance (returns 400).
+
+      ✅ B) gst_collected rows from _credit_payout cascade NOW carry the
+         full enriched payload: gross_amount (12.0), gst_pct (18.0),
+         sponsor_name ("Aarav Sharma" — the L2 payout recipient),
+         sponsor_email, source_user_name (the joiner), and description
+         "GST 18% on L2 payout to Aarav Sharma (gross ₹12) · triggered by
+         ChainUserB <uniq>". All required fields present and correct.
+
+         Test setup detail: enrichment ONLY happens when payout recipient
+         is non-admin (admin path early-returns at server.py:579-595
+         without GST split — this is correct existing design). So the test
+         builds a 3-level chain admin→Aarav→A and registers B under A; on
+         B's approval the L2 payout to Aarav (non-admin) creates the
+         enriched row.
+
+      ✅ C) /admin/system-wallet returns buckets dict with ALL 6 keys
+         (referral_commission, direct_signup, direct_added, service_margin,
+         shopping_margin, gst_collected) plus top-level "total" key.
+         API contract unchanged — frontend can compute its new "Total
+         Admin Funds" subset (excluding ref_commission and gst_collected).
+
+      All review-brief criteria met. Backend treasury-accounting fixes
+      production-ready.
 
