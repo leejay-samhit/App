@@ -85,7 +85,9 @@ export default function AdminPayouts() {
     finally { setLoading(false); setRefreshing(false); }
   }, [tab]);
 
-  useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
+  // First focus shows the spinner; subsequent focus re-fetches in the
+  // background so pull-to-refresh on a populated list still works.
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {

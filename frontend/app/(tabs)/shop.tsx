@@ -181,6 +181,9 @@ export default function ShopScreen() {
       console.warn(e);
     } finally {
       setServicesLoading(false);
+      // Also clear the pull-to-refresh spinner — earlier versions only
+      // toggled `servicesLoading`, leaving the RefreshControl stuck.
+      setRefreshing(false);
     }
   }, [searchQ, pincodeQ, categoryId, languageQ, myCoords]);
 

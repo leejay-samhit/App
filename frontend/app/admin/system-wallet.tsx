@@ -37,10 +37,35 @@ type Txn = {
   placement_sponsor_name?: string; placement_sponsor_email?: string;
   reference_number?: string; created_at: string;
 };
+type Breakdown = {
+  inflow: {
+    registration_fee_total: number;
+    no_ref_signup_revenue: number;
+    with_ref_signup_revenue: number;
+    no_ref_count: number;
+    with_ref_count: number;
+    utr_deposits: number;
+    service_margin: number;
+    shop_margin: number;
+    total: number;
+  };
+  outflow: {
+    to_user_wallets_referral: number;
+    to_admin_direct_signup: number;
+    to_admin_cascade_overflow: number;
+    to_admin_gst_collected: number;
+    user_withdrawals_settled: number;
+    total: number;
+  };
+  balance: { in_admin_wallet: number; in_user_wallets: number; held_total: number };
+  settings: { registration_fee: number; directs_required: number; level_payouts: number[] };
+};
 
 export default function AdminSystemWallet() {
   const router = useRouter();
   const [data, setData] = useState<{ buckets: Record<string, number>; total: number; deposits: Deposit[] } | null>(null);
+  const [breakdown, setBreakdown] = useState<Breakdown | null>(null);
+  const [showBreakdown, setShowBreakdown] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -63,8 +88,12 @@ export default function AdminSystemWallet() {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get("/admin/system-wallet");
+      const [{ data }, bd] = await Promise.all([
+        api.get("/admin/system-wallet"),
+        api.get<Breakdown>("/admin/system-wallet/breakdown").catch(() => ({ data: null as any })),
+      ]);
       setData(data);
+      setBreakdown(bd.data || null);
     } catch (e) {
       console.warn(e);
     } finally {
@@ -190,6 +219,62 @@ export default function AdminSystemWallet() {
             </View>
           </View>
         </GradientCard>
+
+        {/* ─── Money Flow Breakdown — every rupee accounted for ─── */}
+        <TouchableOpacity
+          style={styles.breakdownToggle}
+          onPress={() => setShowBreakdown((v) => !v)}
+          activeOpacity={0.7}
+          testID="breakdown-toggle"
+        >
+          <Feather name="bar-chart-2" size={16} color={colors.primary} />
+          <Text style={styles.breakdownToggleText}>Money flow breakdown</Text>
+          <Feather name={showBreakdown ? "chevron-up" : "chevron-down"} size={16} color={colors.primary} />
+        </TouchableOpacity>
+        {showBreakdown && breakdown ? (
+          <View style={styles.breakdownPanel}>
+            {/* Inflow */}
+            <Text style={styles.breakdownHeader}>💰 INFLOW · money coming in</Text>
+            <BreakdownRow label="Registration fees (no-ref)" sub={`${breakdown.inflow.no_ref_count} signups × ₹${breakdown.settings.registration_fee.toFixed(0)}`} value={breakdown.inflow.no_ref_signup_revenue} hint="₹100 → direct_signup + ₹18 → GST per signup" />
+            <BreakdownRow label="Registration fees (with-ref)" sub={`${breakdown.inflow.with_ref_count} signups × ₹${breakdown.settings.registration_fee.toFixed(0)}`} value={breakdown.inflow.with_ref_signup_revenue} hint="Funds the L1-L10 cascade (paid out to upline)" />
+            <BreakdownRow label="UTR direct-added" value={breakdown.inflow.utr_deposits} hint="Manual bank deposits to system wallet" />
+            <BreakdownRow label="Service margin" value={breakdown.inflow.service_margin} hint="Platform fees from service bookings" />
+            <BreakdownRow label="Shop margin" value={breakdown.inflow.shop_margin} hint="Platform commission from shop orders" />
+            <View style={styles.breakdownTotal}>
+              <Text style={styles.breakdownTotalLabel}>Total inflow</Text>
+              <Text style={styles.breakdownTotalAmount}>{formatINR(breakdown.inflow.total)}</Text>
+            </View>
+
+            {/* Outflow */}
+            <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>📤 REDISTRIBUTED · where it went</Text>
+            <BreakdownRow label="To user wallets (L1-L10 net)" value={breakdown.outflow.to_user_wallets_referral} hint="Sum of net referral payouts credited to user wallets" />
+            <BreakdownRow label="Admin · direct signup" value={breakdown.outflow.to_admin_direct_signup} hint="₹100 per no-ref signup" />
+            <BreakdownRow label="Admin · cascade overflow" value={breakdown.outflow.to_admin_cascade_overflow} hint="Uncascaded L2..L10 when upline chain ends early" />
+            <BreakdownRow label="Admin · GST collected" value={breakdown.outflow.to_admin_gst_collected} hint="18% routed to regulatory bucket" />
+            <BreakdownRow label="User withdrawals (settled)" value={breakdown.outflow.user_withdrawals_settled} hint="Cash that left to bank/UPI" />
+            <View style={styles.breakdownTotal}>
+              <Text style={styles.breakdownTotalLabel}>Total redistributed</Text>
+              <Text style={styles.breakdownTotalAmount}>{formatINR(breakdown.outflow.total)}</Text>
+            </View>
+
+            {/* Held */}
+            <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏦 CURRENTLY HELD</Text>
+            <BreakdownRow label="In admin wallet" value={breakdown.balance.in_admin_wallet} hint="Sum of all admin buckets" />
+            <BreakdownRow label="In user wallets" value={breakdown.balance.in_user_wallets} hint="Across all paid users" />
+            <View style={styles.breakdownTotal}>
+              <Text style={styles.breakdownTotalLabel}>Held total</Text>
+              <Text style={styles.breakdownTotalAmount}>{formatINR(breakdown.balance.held_total)}</Text>
+            </View>
+
+            {/* Config */}
+            <View style={styles.breakdownNote}>
+              <Feather name="info" size={12} color={colors.textMuted} />
+              <Text style={styles.breakdownNoteText}>
+                Current rules · L1 fires every {breakdown.settings.directs_required} directs · Reg fee ₹{breakdown.settings.registration_fee.toFixed(0)} · L1-L10: ₹{breakdown.settings.level_payouts.map((x) => x.toFixed(0)).join(" / ")}
+              </Text>
+            </View>
+          </View>
+        ) : null}
 
         <Text style={styles.sectionLabel}>Earnings & Routing</Text>
         {BUCKETS.map((b) => (
@@ -323,6 +408,21 @@ export default function AdminSystemWallet() {
   );
 }
 
+/* ────────────────────────── Breakdown row ────────────────────────── */
+
+function BreakdownRow({ label, sub, value, hint }: { label: string; sub?: string; value: number; hint?: string }) {
+  return (
+    <View style={styles.bRow}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.bRowLabel}>{label}</Text>
+        {sub ? <Text style={styles.bRowSub}>{sub}</Text> : null}
+        {hint ? <Text style={styles.bRowHint}>{hint}</Text> : null}
+      </View>
+      <Text style={styles.bRowAmount}>{formatINR(value)}</Text>
+    </View>
+  );
+}
+
 /* ────────────────────────── Transaction row ────────────────────────── */
 
 function TxnRow({ txn }: { txn: Txn }) {
@@ -381,6 +481,22 @@ const styles = StyleSheet.create({
   overline: { fontSize: 10, letterSpacing: 1.5, color: colors.textMuted, fontWeight: "700" },
   title: { fontSize: 22, fontWeight: "800", color: colors.textMain, marginTop: 2 },
   sectionLabel: { fontSize: 11, fontWeight: "800", color: colors.textMuted, marginTop: 6, marginBottom: 8, letterSpacing: 1, textTransform: "uppercase" },
+
+  // Money-flow breakdown panel
+  breakdownToggle: { flexDirection: "row", alignItems: "center", gap: 8, justifyContent: "center", paddingVertical: 12, marginBottom: 14, backgroundColor: colors.brand100, borderRadius: 14, borderWidth: 1, borderColor: colors.primary + "55" },
+  breakdownToggleText: { flex: 1, fontSize: 13, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
+  breakdownPanel: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 18 },
+  breakdownHeader: { fontSize: 11, fontWeight: "900", color: colors.textMain, letterSpacing: 1, marginBottom: 8, textTransform: "uppercase" },
+  bRow: { flexDirection: "row", alignItems: "flex-start", paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, gap: 10 },
+  bRowLabel: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+  bRowSub: { fontSize: 10, color: colors.textMuted, marginTop: 1, fontWeight: "700" },
+  bRowHint: { fontSize: 10, color: colors.textMuted, marginTop: 2, fontStyle: "italic" },
+  bRowAmount: { fontSize: 13, fontWeight: "900", color: colors.textMain, fontVariant: ["tabular-nums"], letterSpacing: -0.3 },
+  breakdownTotal: { flexDirection: "row", justifyContent: "space-between", paddingTop: 10, marginTop: 4, borderTopWidth: 1, borderTopColor: colors.primary + "55" },
+  breakdownTotalLabel: { fontSize: 12, fontWeight: "900", color: colors.primary, letterSpacing: 0.3 },
+  breakdownTotalAmount: { fontSize: 15, fontWeight: "900", color: colors.primary, fontVariant: ["tabular-nums"], letterSpacing: -0.3 },
+  breakdownNote: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 14, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  breakdownNoteText: { flex: 1, fontSize: 10, color: colors.textMuted, fontStyle: "italic", lineHeight: 14 },
 
   bucketRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderLeftWidth: 4, borderRadius: 14, padding: 14, marginBottom: 8 },
   bucketIcon: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },

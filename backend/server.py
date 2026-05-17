@@ -3779,6 +3779,110 @@ async def admin_unblock_user(user_id: str, admin: Dict[str, Any] = Depends(requi
     return {"ok": True}
 
 
+@api_router.get("/admin/system-wallet/breakdown")
+async def get_system_wallet_breakdown(
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
+    """Full money-flow breakdown — categorizes every successful transaction
+    on the platform into INFLOW (money coming in) and OUTFLOW (money going
+    out) so admin can reconcile WHY treasury balances differ from raw
+    revenue. Answers: where did every rupee go?
+
+    Inflow categories (cash entering the platform):
+      • Registration fees — no-ref signups (admin pockets full ₹118)
+      • Registration fees — with-ref signups (funds the L1..L10 cascade)
+      • UTR direct-added deposits
+      • Service margin (platform fees on bookings)
+      • Shop margin (platform fees on orders)
+
+    Outflow categories (cash leaving / being redistributed):
+      • Referral commissions credited to user wallets (net of GST)
+      • GST collected (regulatory hold)
+      • User withdrawals (completed)
+      • Cascade overflow rerouted to admin
+    """
+    settings = await get_settings()
+    fee = float(settings.get("registration_fee") or 0)
+
+    async def _sum(query: Dict[str, Any]) -> float:
+        agg = await db.transactions.aggregate([
+            {"$match": query},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        return float(agg[0]["total"] if agg else 0)
+
+    async def _count(coll, query: Dict[str, Any]) -> int:
+        return await coll.count_documents(query)
+
+    # ─── INFLOW ───
+    no_ref_count = await _count(db.users, {"no_referral_signup": True, "registration_paid": True})
+    with_ref_count = await _count(db.users, {
+        "no_referral_signup": {"$ne": True},
+        "registration_paid": True,
+        "role": "user",
+    })
+    no_ref_revenue = round(no_ref_count * fee, 2)
+    with_ref_revenue = round(with_ref_count * fee, 2)
+    total_revenue = round(no_ref_revenue + with_ref_revenue, 2)
+    utr_deposits = await _sum({"type": "system_deposit", "status": {"$in": ["success", "paid", "approved"]}})
+    service_margin = await _sum({"type": {"$in": ["service_margin", "service_commission"]}, "status": "success"})
+    shop_margin = await _sum({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"})
+    inflow_total = round(total_revenue + utr_deposits + service_margin + shop_margin, 2)
+
+    # ─── OUTFLOW ───
+    # Net amounts credited to user wallets via cascade payouts
+    user_wallets_paid = await _sum({"type": "referral_payout", "status": "success"})
+    gst_collected = await _sum({"type": "gst_collected", "status": "success"})
+    cascade_overflow = await _sum({"type": "cascade_overflow", "status": "success"})
+    direct_signup_credit = await _sum({"type": "direct_signup_credit", "status": "success"})
+    user_withdrawals_done = abs(await _sum({"type": "withdrawal", "status": "success"}))
+    outflow_total = round(
+        user_wallets_paid + gst_collected + cascade_overflow + direct_signup_credit + user_withdrawals_done,
+        2,
+    )
+
+    # ─── BALANCE CHECK ───
+    a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    admin_total = float((a or {}).get("wallet_balance") or 0)
+    users_wallet_agg = await db.users.aggregate([
+        {"$match": {"role": "user"}},
+        {"$group": {"_id": None, "total": {"$sum": "$wallet_balance"}}},
+    ]).to_list(1)
+    users_wallet_total = float(users_wallet_agg[0]["total"] if users_wallet_agg else 0)
+
+    return {
+        "inflow": {
+            "registration_fee_total": total_revenue,
+            "no_ref_signup_revenue":  no_ref_revenue,
+            "with_ref_signup_revenue": with_ref_revenue,
+            "no_ref_count": no_ref_count,
+            "with_ref_count": with_ref_count,
+            "utr_deposits": round(utr_deposits, 2),
+            "service_margin": round(service_margin, 2),
+            "shop_margin": round(shop_margin, 2),
+            "total": inflow_total,
+        },
+        "outflow": {
+            "to_user_wallets_referral":  round(user_wallets_paid, 2),
+            "to_admin_direct_signup":    round(direct_signup_credit, 2),
+            "to_admin_cascade_overflow": round(cascade_overflow, 2),
+            "to_admin_gst_collected":    round(gst_collected, 2),
+            "user_withdrawals_settled":  round(user_withdrawals_done, 2),
+            "total":                     outflow_total,
+        },
+        "balance": {
+            "in_admin_wallet": round(admin_total, 2),
+            "in_user_wallets": round(users_wallet_total, 2),
+            "held_total":      round(admin_total + users_wallet_total, 2),
+        },
+        "settings": {
+            "registration_fee": fee,
+            "directs_required": int(settings.get("directs_required") or 4),
+            "level_payouts":    [float(settings.get(f"payout_l{i}", 0) or 0) for i in range(1, 11)],
+        },
+    }
+
+
 @api_router.get("/admin/system-wallet")
 async def get_system_wallet(admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance"))):
     """Return the admin's wallet broken down by bucket + recent deposits."""
