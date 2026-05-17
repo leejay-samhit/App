@@ -2534,6 +2534,64 @@ async def admin_set_danger_pin(
     await _audit_log(admin, "danger_pin.set", "system", "global")
     return {"ok": True}
 
+class ResetShopRequest(BaseModel):
+    danger_pin: str = Field(..., min_length=6, max_length=6)
+
+
+@api_router.post("/admin/system/reset-shop-products")
+async def admin_reset_shop_products(
+    payload: ResetShopRequest,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Scoped reset — wipes ONLY shop products and directly-related data:
+      • products
+      • product_reviews
+      • cart_items
+      • shop_layout_blocks  (the per-block layout config)
+      • shop_categories      (dynamic category list)
+
+    EVERYTHING else is preserved: users, transactions, withdrawals,
+    orders (historical sales record), services, wallets, settings,
+    branding, snapshots, tickets, audit log, system_wallet_deposits.
+
+    Per user request — a less destructive alternative to the full
+    "wipe-users" / "wipe-all" actions, so admin can rebuild the catalog
+    without losing customer or financial data.
+
+    Requires the 6-digit Danger PIN. super_admin only. Auto-snapshot
+    taken just before deletion so a restore is always possible.
+    """
+    if not await get_danger_pin_hash():
+        raise HTTPException(status_code=400, detail="Danger PIN not set. Please set it in Admin → Admin access.")
+    if not await verify_danger_pin(payload.danger_pin):
+        raise HTTPException(status_code=401, detail="Invalid Danger PIN")
+
+    snap_info = await _take_snapshot(
+        kind="auto-pre-reset-shop",
+        note="Auto-backup before Reset Shop Products",
+        created_by=admin["id"],
+    )
+
+    products_deleted = await db.products.delete_many({})
+    reviews_deleted = await db.product_reviews.delete_many({})
+    cart_deleted = await db.cart_items.delete_many({})
+    layout_deleted = await db.shop_layout_blocks.delete_many({})
+    categories_deleted = await db.shop_categories.delete_many({})
+
+    summary = {
+        "products_deleted":          products_deleted.deleted_count,
+        "product_reviews_deleted":   reviews_deleted.deleted_count,
+        "cart_items_deleted":        cart_deleted.deleted_count,
+        "shop_layout_blocks_deleted": layout_deleted.deleted_count,
+        "shop_categories_deleted":   categories_deleted.deleted_count,
+    }
+    await _audit_log(admin, "system.reset_shop_products", "system", "shop", summary)
+    return {
+        "ok": True,
+        "summary": summary,
+        "snapshot_id": snap_info.get("id") if snap_info else None,
+    }
+
 
 @api_router.post("/admin/system/wipe-users")
 async def admin_wipe_users(
@@ -4392,7 +4450,12 @@ DEMO_PASSWORD = "Demo@123"
 
 async def seed_demo_users():
     """Ensure 5 default demo users exist under admin. Idempotent:
-    safe to call on every startup."""
+    safe to call on every startup.
+
+    Disabled in production by setting env `SEED_DEMO_USERS=false`.
+    Default is enabled so dev/staging still have realistic data."""
+    if os.environ.get("SEED_DEMO_USERS", "true").lower() in ("0", "false", "no", "off"):
+        return
     admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not admin:
         return

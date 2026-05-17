@@ -13,7 +13,9 @@ export default function Index() {
     if (user === null) {
       router.replace("/login");
     } else if (user.role === "admin") {
-      router.replace("/admin/home");
+      // Admin's default landing tab is Shop (per product spec) — admin
+      // sees the store from a customer's perspective on login.
+      router.replace("/admin/shop");
     } else if (!user.registration_paid) {
       router.replace("/payment");
     } else if (((user as any).approval_status || "approved") !== "approved") {

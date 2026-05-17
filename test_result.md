@@ -575,6 +575,112 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+reset_shop_and_invoice_changes_2026_05_17:
+  - task: "POST /admin/system/reset-shop-products auth + danger_pin gates"
+    implemented: true
+    working: true
+    file: "backend/server.py (L2537-2593)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Auth-gate validation: 7/7 PASS. Runner: /app/backend_test.py.
+          Destructive path was NOT invoked (correct PIN never sent).
+            • A.1 wrong PIN "000000" -> 401 {"detail":"Invalid Danger PIN"}        ✅
+            • A.2 no body (no JSON) -> 422                                          ✅
+            • A.2b empty {} body  -> 422 (danger_pin required)                      ✅
+            • A.2c short PIN "123" -> 422 (Field min_length=6 enforced)             ✅
+            • A.3 non-super-admin (demo user aarav@demo.app) -> 403
+                  body: {"detail":"Admin access required"}                          ✅
+            • A.4 unauthenticated -> 401                                            ✅
+          Endpoint is properly gated. Ordering matters: super_admin role check
+          fires BEFORE danger_pin verification (so a regular user gets 403 even
+          with a syntactically valid PIN payload).
+
+  - task: "Invoice for referral_payout (with GST rows)"
+    implemented: true
+    working: true
+    file: "backend/invoices.py (INVOICEABLE_COMMISSION) + backend/server.py (L1516-1538)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          referral_payout invoice generation: 3/3 PASS.
+            • B.0 GET /api/admin/transactions -> 200, 87 rows, located a
+              referral_payout txn (id=6d88b06f-…).                                  ✅
+            • B.1 GET /api/transactions/{id}/invoice (admin auth) -> 200
+              text/html, len=4683, contains <html>. Body has CGST AND SGST rows
+              (intra-state default; IGST not used). GST rows are present as
+              required because referral_payout is NOT in NO_GST_INVOICE_TYPES.      ✅
+            • B.2 GET /api/transactions/{id}/invoice.pdf -> 200
+              application/pdf, magic bytes %PDF verified.                           ✅
+          Note: No level_payout txn in DB so bonus B.3/B.4 skipped; code path
+          is identical (both in INVOICEABLE_COMMISSION set per invoices.py:39).
+
+  - task: "No-GST invoices for system_deposit / admin_credit / admin_debit / transfer / withdrawal"
+    implemented: true
+    working: true
+    file: "backend/invoices.py (NO_GST_INVOICE_TYPES, suppress_gst)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          NO_GST_INVOICE_TYPES suppression: all PASS.
+            • C.0 Created a fresh system_deposit via POST /admin/system-wallet/
+              deposit {amount:1000, utr:TESTUTR-INVOICE-…} -> 200 deposit_id
+              returned; matching transaction row located by reference_number.      ✅
+            • C.1 GET /api/transactions/{id}/invoice (system_deposit) -> 200
+              text/html, len=4547. Body contains NO "CGST", NO "SGST", NO
+              "IGST" rows. Suppression in invoices.py:240 working correctly.      ✅
+            • C.1b Invoice contains "Net payment" total row.                        ✅
+            • C.1c Invoice shows a gross amount.                                    ✅
+            • C.1d GET .../invoice.pdf -> 200 application/pdf, %PDF magic.          ✅
+            • C.3 Existing withdrawal txn invoice HTML -> 200, NO CGST/SGST/
+              IGST rows (suppression honoured).                                     ✅
+          C.2 (admin_credit) skipped — no admin_credit txn in current DB.
+          NO_GST_INVOICE_TYPES set is fully effective for the three types I
+          could exercise (system_deposit, withdrawal). Same code path covers
+          admin_credit, admin_debit, transfer_in, transfer_out per the set.
+
+          Minor observation (NOT a blocking bug, flagged for awareness):
+          For NO_GST_INVOICE_TYPES the displayed "Net payment" is computed via
+          compute_gst(amount, gst_inclusive=False) which produces
+          gross = amount × 1.18. So a ₹1000 deposit prints as "₹ 1180.00".
+          The invoice is internally consistent (no GST rows shown, "Net
+          payment" matches the description-row amount), but the printed
+          figure does NOT equal the actual ₹1000 cash moved. If the intent
+          per the brief is "show the gross amount" of the underlying txn
+          (i.e. ₹1000), invoices.py should switch to
+          compute_gst(amount, gst_inclusive=True) — or skip compute_gst
+          entirely — for types in NO_GST_INVOICE_TYPES. Not blocking; just
+          a presentation point for main agent to confirm intent.
+
+  - task: "SEED_DEMO_USERS env flag (informational only)"
+    implemented: true
+    working: true
+    file: "backend/server.py (L4451-4458)"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Code verified: server.py:4457 reads
+          os.environ.get("SEED_DEMO_USERS", "true") and short-circuits
+          seed_demo_users() when the value is in {"0","false","no","off"}
+          (case-insensitive). Default = enabled. No backend restart performed
+          per the brief's "informational only" note.
+
 treasury_accounting_fixes_2026_05_17:
   - task: "Admin stats new withdrawal totals + actual-revenue + GST txn enrichment + system wallet buckets"
     implemented: true

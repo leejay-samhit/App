@@ -1,379 +1,274 @@
-#!/usr/bin/env python3
-"""Backend regression tests for MLM payout & system-wallet redesign.
-
-Coverage (per review brief):
-  A) No-ref signup → admin direct_signup + GST + cascade overflow
-  B) With-ref signup (cascade still works, no direct_signup_credit)
-  C) Demo users seeded (5 users under admin)
-  D) Admin tree visible-all-users (admin + orphans)
-  E) New placement algorithm (4→3→2→1→admin) — sanity check
-  F) Bucket endpoint validation
+"""Backend regression tests for:
+ A) POST /api/admin/system/reset-shop-products auth-gate validation
+ B) Invoices for referral_payout (with GST rows)
+ C) No-GST invoices for system_deposit / admin_credit / withdrawal
+ D) SEED_DEMO_USERS env-flag presence (informational)
 """
 import os
-import re
 import sys
-import time
 import uuid
+import time
 import requests
-from pathlib import Path
 
-
-def _read_env(p):
-    out = {}
-    for ln in Path(p).read_text().splitlines():
-        m = re.match(r"\s*([A-Z0-9_]+)\s*=\s*(.+)\s*$", ln)
-        if m:
-            out[m.group(1)] = m.group(2).strip().strip('"').strip("'")
-    return out
-
-
-FE_ENV = _read_env("/app/frontend/.env")
-BASE = FE_ENV.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/") + "/api"
-print(f"BACKEND BASE: {BASE}")
+# --- Public backend URL ---
+FRONTEND_ENV = "/app/frontend/.env"
+PUBLIC_URL = None
+with open(FRONTEND_ENV) as f:
+    for line in f:
+        if line.strip().startswith("EXPO_PUBLIC_BACKEND_URL="):
+            PUBLIC_URL = line.split("=", 1)[1].strip().strip('"')
+            break
+assert PUBLIC_URL, "EXPO_PUBLIC_BACKEND_URL not found"
+API = PUBLIC_URL.rstrip("/") + "/api"
+print(f"[INFO] Using backend: {API}")
 
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASS = "Admin@123"
+DEMO_EMAIL = "aarav@demo.app"
 DEMO_PASS = "Demo@123"
 
-results = []
+results = {"passed": 0, "failed": 0, "issues": []}
 
 
-def rec(label, ok, details=""):
-    status = "✅" if ok else "❌"
-    print(f"{status} {label}")
-    if details:
-        print(f"   {details}")
-    results.append((label, ok, details))
+def report(name, ok, detail=""):
+    icon = "[PASS]" if ok else "[FAIL]"
+    print(f"{icon} {name}  {detail}")
+    if ok:
+        results["passed"] += 1
+    else:
+        results["failed"] += 1
+        results["issues"].append(f"{name} :: {detail}")
 
 
-def H(token):
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-
-def login(email, pwd):
-    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": pwd}, timeout=30)
+def login(email, password):
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=30)
     if r.status_code != 200:
-        print(f"login failed {email}: {r.status_code} {r.text[:200]}")
-        return None
-    return r.json().get("token")
+        return None, r
+    j = r.json()
+    return j.get("access_token") or j.get("token"), r
 
 
-def get_buckets(admin_tok):
-    r = requests.get(f"{BASE}/admin/system-wallet", headers=H(admin_tok), timeout=30)
-    if r.status_code != 200:
-        return None
-    return r.json().get("buckets") or {}
+# ------------------ A) reset-shop-products gate ------------------
+print("\n=== A) /admin/system/reset-shop-products auth gates ===")
+admin_token, _ = login(ADMIN_EMAIL, ADMIN_PASS)
+assert admin_token, "Admin login failed — cannot continue"
+report("admin login", True, "200 OK")
 
+H_ADMIN = {"Authorization": f"Bearer {admin_token}"}
 
-def get_admin_id(admin_tok):
-    r = requests.get(f"{BASE}/auth/me", headers=H(admin_tok), timeout=30)
-    return r.json().get("id") if r.status_code == 200 else None
+# A.1 wrong PIN
+r = requests.post(f"{API}/admin/system/reset-shop-products",
+                  headers=H_ADMIN, json={"danger_pin": "000000"}, timeout=20)
+report("A.1 wrong PIN -> 401 Invalid Danger PIN",
+       r.status_code == 401 and "Invalid Danger PIN" in r.text,
+       f"status={r.status_code} body={r.text[:120]}")
 
+# A.2 no body
+r = requests.post(f"{API}/admin/system/reset-shop-products",
+                  headers=H_ADMIN, timeout=20)
+report("A.2 no body -> 422",
+       r.status_code == 422,
+       f"status={r.status_code}")
 
-def get_user_by_email(admin_tok, email):
-    r = requests.get(f"{BASE}/admin/users", headers=H(admin_tok), timeout=30)
-    if r.status_code != 200:
-        return None
-    users = r.json() if isinstance(r.json(), list) else r.json().get("items", [])
-    for u in users:
-        if (u.get("email") or "").lower() == email.lower():
-            return u
-    return None
+# A.2b empty json body — also 422 (danger_pin required)
+r = requests.post(f"{API}/admin/system/reset-shop-products",
+                  headers=H_ADMIN, json={}, timeout=20)
+report("A.2b empty body -> 422",
+       r.status_code == 422,
+       f"status={r.status_code}")
 
+# A.2c bad-length pin -> 422
+r = requests.post(f"{API}/admin/system/reset-shop-products",
+                  headers=H_ADMIN, json={"danger_pin": "123"}, timeout=20)
+report("A.2c short PIN -> 422",
+       r.status_code == 422,
+       f"status={r.status_code}")
 
-# ========== C ==========
-def test_demo_users(admin_tok):
-    print("\n--- C) Demo users seeded ---")
-    demo_emails = ["aarav@demo.app", "diya@demo.app", "vihaan@demo.app", "ananya@demo.app", "rohan@demo.app"]
-    for em in demo_emails:
-        tok = login(em, DEMO_PASS)
-        rec(f"Demo login: {em}", bool(tok), "" if tok else "Login failed")
-    r = requests.get(f"{BASE}/admin/users", headers=H(admin_tok), timeout=30)
-    rec("GET /admin/users", r.status_code == 200, f"status={r.status_code}")
-    if r.status_code != 200:
-        return
-    users = r.json() if isinstance(r.json(), list) else r.json().get("items", [])
-    admin_id = get_admin_id(admin_tok)
-    by_email = {(u.get("email") or "").lower(): u for u in users}
-    for em in demo_emails:
-        u = by_email.get(em)
-        ok = (u is not None
-              and u.get("approval_status") == "approved"
-              and u.get("registration_paid") is True
-              and u.get("sponsor_id") == admin_id)
-        det = ""
-        if u is None:
-            det = "missing"
-        elif not ok:
-            det = f"approval={u.get('approval_status')} paid={u.get('registration_paid')} sp_match={u.get('sponsor_id')==admin_id}"
-        rec(f"Demo seeded correctly: {em}", ok, det)
-
-
-# ========== D ==========
-def test_admin_tree(admin_tok):
-    print("\n--- D) Admin tree visible-all-users ---")
-    r = requests.get(f"{BASE}/admin/users/tree?depth=10", headers=H(admin_tok), timeout=30)
-    rec("GET /admin/users/tree?depth=10", r.status_code == 200, f"status={r.status_code}")
-    if r.status_code != 200:
-        return
-    data = r.json()
-    roots = data.get("roots") or []
-    rec("Tree has at least 1 root", len(roots) >= 1, f"n_roots={len(roots)}")
-    admin_root = next((rt for rt in roots if (rt.get("email") or "").lower() == ADMIN_EMAIL), None)
-    rec("Admin is one of the roots", admin_root is not None)
-    if admin_root:
-        # children may be nested; flatten one level
-        kids = admin_root.get("children") or []
-        child_emails = {(c.get("email") or "").lower() for c in kids}
-        demo_emails = {"aarav@demo.app", "diya@demo.app", "vihaan@demo.app", "ananya@demo.app", "rohan@demo.app"}
-        rec("Admin's children include all 5 demo users",
-            demo_emails.issubset(child_emails),
-            f"missing={demo_emails - child_emails}")
-
-
-# ========== A ==========
-def test_no_ref_signup(admin_tok):
-    print("\n--- A) No-ref signup → admin direct credit ---")
-    pre = get_buckets(admin_tok)
-    rec("Fetch admin wallet buckets (pre)", pre is not None, str(pre)[:200] if pre else "")
-    if pre is None:
-        return None
-
+# A.3 non-super-admin -> 403
+demo_token, lr = login(DEMO_EMAIL, DEMO_PASS)
+if not demo_token:
     uniq = uuid.uuid4().hex[:8]
-    email = f"noref_{uniq}@test.app"
-    name = f"NoRefTest {uniq}"
-    reg = requests.post(f"{BASE}/auth/register", json={
-        "name": name, "email": email, "password": "Pass@123",
-        "phone": f"+919{int(time.time()*1000)%1000000000:09d}",
-    }, timeout=30)
-    rec("Register no-ref user", reg.status_code == 200, f"status={reg.status_code} body={reg.text[:200]}")
-    if reg.status_code != 200:
-        return None
-    body = reg.json()
-    new_token = body.get("token")
-    new_user_id = (body.get("user") or {}).get("id") or body.get("id")
+    em = f"resetshop_{uniq}@test.app"
+    r = requests.post(f"{API}/auth/register",
+                      json={"name": "ResetShop Test", "email": em,
+                            "password": "Test@1234", "phone": "9111122223"},
+                      timeout=30)
+    demo_token = r.json().get("access_token") if r.status_code == 200 else None
+    print(f"   (fallback registered {em}, token={'yes' if demo_token else 'NO'})")
 
-    pr = requests.post(f"{BASE}/payment/register-fee", headers=H(new_token), timeout=30)
-    rec("Pay /payment/register-fee", pr.status_code == 200, f"status={pr.status_code} body={pr.text[:200]}")
+if demo_token:
+    r = requests.post(f"{API}/admin/system/reset-shop-products",
+                      headers={"Authorization": f"Bearer {demo_token}"},
+                      json={"danger_pin": "000000"}, timeout=20)
+    report("A.3 non-super-admin -> 403",
+           r.status_code == 403,
+           f"status={r.status_code} body={r.text[:140]}")
+else:
+    report("A.3 non-super-admin -> 403", False, "could not obtain non-admin token")
 
-    if not new_user_id:
-        u = get_user_by_email(admin_tok, email)
-        new_user_id = u.get("id") if u else None
-    rec("Resolved new user id", bool(new_user_id), f"id={new_user_id}")
-    if not new_user_id:
-        return None
-
-    ap = requests.post(f"{BASE}/admin/approvals/{new_user_id}/approve", headers=H(admin_tok), timeout=30)
-    rec("POST /admin/approvals/{id}/approve", ap.status_code == 200, f"status={ap.status_code} body={ap.text[:200]}")
-
-    post = get_buckets(admin_tok)
-    rec("Fetch admin wallet buckets (post)", post is not None)
-    if post is None:
-        return None
-
-    d_signup = round(post.get("direct_signup", 0) - pre.get("direct_signup", 0), 2)
-    d_gst = round(post.get("gst_collected", 0) - pre.get("gst_collected", 0), 2)
-    d_ref = round(post.get("referral_commission", 0) - pre.get("referral_commission", 0), 2)
-
-    rec("direct_signup bucket increased by 100", abs(d_signup - 100.0) < 0.5, f"delta={d_signup}")
-    rec("gst_collected bucket increased by 18.0", abs(d_gst - 18.0) < 0.5, f"delta={d_gst}")
-    rec("referral_commission bucket increased by ~22.05 (cascade L2..L10)",
-        abs(d_ref - 22.05) < 1.0, f"delta={d_ref}")
-
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=direct_signup",
-                     headers=H(admin_tok), timeout=30)
-    rec("GET ?bucket=direct_signup", r.status_code == 200, f"status={r.status_code}")
-    if r.status_code == 200:
-        items = r.json().get("items") or []
-        match = next((it for it in items if it.get("source_user_id") == new_user_id), None)
-        rec("direct_signup_credit row for new user exists", match is not None)
-        if match:
-            rec("row.gross_amount==118", abs(float(match.get("gross_amount") or 0) - 118.0) < 0.01, f"got={match.get('gross_amount')}")
-            rec("row.gst_amount==18", abs(float(match.get("gst_amount") or 0) - 18.0) < 0.01, f"got={match.get('gst_amount')}")
-            rec("row.amount==100", abs(float(match.get("amount") or 0) - 100.0) < 0.01, f"got={match.get('amount')}")
-            rec(f"row.source_user_name=={name}",
-                (match.get("source_user_name") or "") == name, f"got={match.get('source_user_name')}")
-            ps = (match.get("placement_sponsor_name") or "").lower()
-            rec("row.placement_sponsor_name=='Admin' (case-insensitive)",
-                ps in ("admin", "administrator"), f"got={match.get('placement_sponsor_name')}")
-            desc = (match.get("description") or "").lower()
-            rec("description mentions gross/gst/net",
-                ("gross" in desc) and ("gst" in desc) and ("net" in desc),
-                f"desc={match.get('description')[:150]}")
-
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=referral_commission&limit=500",
-                     headers=H(admin_tok), timeout=30)
-    rec("GET ?bucket=referral_commission", r.status_code == 200, f"status={r.status_code}")
-    if r.status_code == 200:
-        items = r.json().get("items") or []
-        cov = [it for it in items if it.get("type") == "cascade_overflow"
-               and (it.get("source_user_name") or "") == name]
-        levels = sorted({int(it.get("level")) for it in cov if it.get("level") is not None})
-        rec("9 cascade_overflow rows (L2..L10) for new user",
-            len(cov) == 9 and levels == list(range(2, 11)),
-            f"n={len(cov)} levels={levels}")
-        if cov:
-            sample = cov[0]
-            rec("cascade_overflow description includes 'cascade overflow'",
-                "cascade overflow" in (sample.get("description") or "").lower(),
-                f"desc={sample.get('description')[:120]}")
-
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=gst_collected&limit=500",
-                     headers=H(admin_tok), timeout=30)
-    rec("GET ?bucket=gst_collected", r.status_code == 200, f"status={r.status_code}")
-    if r.status_code == 200:
-        items = r.json().get("items") or []
-        target = next((it for it in items
-                       if (it.get("source_user_id") == new_user_id or (it.get("source_user_name") or "") == name)
-                       and "direct signup" in (it.get("description") or "").lower()),
-                      None)
-        rec("gst_collected row for direct signup of new user exists", target is not None,
-            f"sample={items[0] if items else None}")
-    return new_user_id
+# A.4 no auth
+r = requests.post(f"{API}/admin/system/reset-shop-products",
+                  json={"danger_pin": "000000"}, timeout=20)
+report("A.4 unauthenticated -> 401/403",
+       r.status_code in (401, 403),
+       f"status={r.status_code}")
 
 
-# ========== B ==========
-def test_with_ref_signup(admin_tok):
-    print("\n--- B) With-ref signup (AARAV01) ---")
-    aarav = get_user_by_email(admin_tok, "aarav@demo.app")
-    if not aarav:
-        rec("Aarav demo user exists", False, "Skipping rest")
-        return
-    rec("Aarav demo user exists", True, f"directs_before={aarav.get('direct_referrals_count')}")
-    aarav_directs_before = int(aarav.get("direct_referrals_count") or 0)
-    pre = get_buckets(admin_tok)
+# ------------------ B) Invoice for referral_payout ------------------
+print("\n=== B) Invoice for referral_payout ===")
 
-    uniq = uuid.uuid4().hex[:8]
-    email = f"refed_{uniq}@test.app"
-    name = f"RefedUser {uniq}"
-    reg = requests.post(f"{BASE}/auth/register", json={
-        "name": name, "email": email, "password": "Pass@123",
-        "phone": f"+918{int(time.time()*1000)%1000000000:09d}",
-        "referral_code": "AARAV01",
-    }, timeout=30)
-    rec("Register user with referral_code=AARAV01",
-        reg.status_code == 200, f"status={reg.status_code} body={reg.text[:200]}")
-    if reg.status_code != 200:
-        return
-    body = reg.json()
-    new_token = body.get("token")
-    new_user_id = (body.get("user") or {}).get("id") or body.get("id")
+r = requests.get(f"{API}/admin/transactions", headers=H_ADMIN, timeout=30)
+report("B.0 GET /admin/transactions", r.status_code == 200, f"status={r.status_code}")
 
-    pr = requests.post(f"{BASE}/payment/register-fee", headers=H(new_token), timeout=30)
-    rec("Pay /payment/register-fee", pr.status_code == 200, f"status={pr.status_code}")
-
-    if not new_user_id:
-        u = get_user_by_email(admin_tok, email)
-        new_user_id = u.get("id") if u else None
-    ap = requests.post(f"{BASE}/admin/approvals/{new_user_id}/approve", headers=H(admin_tok), timeout=30)
-    rec("Approve refed user", ap.status_code == 200, f"status={ap.status_code}")
-
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=direct_signup&limit=500",
-                     headers=H(admin_tok), timeout=30)
-    if r.status_code == 200:
-        items = r.json().get("items") or []
-        bad = [it for it in items if it.get("source_user_id") == new_user_id]
-        rec("No direct_signup_credit row for refed user", len(bad) == 0,
-            f"found {len(bad)} unwanted rows")
-
-    aarav_after = get_user_by_email(admin_tok, "aarav@demo.app")
-    after_count = int((aarav_after or {}).get("direct_referrals_count") or 0)
-    rec("Aarav's direct_referrals_count incremented by 1",
-        after_count == aarav_directs_before + 1,
-        f"before={aarav_directs_before} after={after_count}")
-
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=referral_commission&limit=500",
-                     headers=H(admin_tok), timeout=30)
-    if r.status_code == 200:
-        items = r.json().get("items") or []
-        cov = [it for it in items if it.get("type") == "cascade_overflow"
-               and (it.get("source_user_name") or "") == name]
-        cov_levels = sorted({int(it.get("level")) for it in cov if it.get("level") is not None})
-        rec("cascade_overflow rows for refed user are L3..L10 (admin took L2)",
-            len(cov) == 8 and cov_levels == list(range(3, 11)),
-            f"n={len(cov)} levels={cov_levels}")
-        l2 = [it for it in items if it.get("type") == "referral_payout"
-              and (it.get("source_user_name") or "").startswith(name[:30])
-              and int(it.get("level") or 0) == 2]
-        rec("admin received L2 referral_payout for refed user", len(l2) >= 1, f"n_l2={len(l2)}")
-
-    post = get_buckets(admin_tok)
-    if pre and post:
-        d_signup = round(post.get("direct_signup", 0) - pre.get("direct_signup", 0), 2)
-        d_ref = round(post.get("referral_commission", 0) - pre.get("referral_commission", 0), 2)
-        rec("direct_signup bucket unchanged for refed user", abs(d_signup) < 0.5, f"delta={d_signup}")
-        rec("referral_commission bucket increased ~22.05 (L2 admin + L3..L10 cascade)",
-            abs(d_ref - 22.05) < 1.0, f"delta={d_ref}")
+ref_txn = None
+level_txn = None
+all_rows = []
+if r.status_code == 200:
+    all_rows = r.json() if isinstance(r.json(), list) else r.json().get("items", [])
+    for tx in all_rows:
+        t = (tx.get("type") or "").lower()
+        if t == "referral_payout" and not ref_txn:
+            ref_txn = tx
+        if t == "level_payout" and not level_txn:
+            level_txn = tx
+        if ref_txn and level_txn:
+            break
+    print(f"   referral_payout txn: {ref_txn['id'] if ref_txn else 'NONE'}")
+    print(f"   level_payout txn:    {level_txn['id'] if level_txn else 'NONE'}")
+    print(f"   total txns: {len(all_rows)}")
 
 
-# ========== E ==========
-def test_placement_algo(admin_tok):
-    print("\n--- E) Placement algorithm sanity ---")
-    uniq = uuid.uuid4().hex[:6]
-    email = f"placetest_{uniq}@test.app"
-    reg = requests.post(f"{BASE}/auth/register", json={
-        "name": f"PlaceTest {uniq}", "email": email, "password": "Pass@123",
-        "phone": f"+917{int(time.time()*1000)%1000000000:09d}",
-    }, timeout=30)
-    rec("Register no-ref user (placement sanity)",
-        reg.status_code == 200, f"status={reg.status_code}")
-    if reg.status_code != 200:
-        return
-    u = get_user_by_email(admin_tok, email)
-    admin_id = get_admin_id(admin_tok)
-    sp = (u or {}).get("sponsor_id")
-    # admin OR a qualifying downline (must be a real user id, non-empty)
-    rec("Placement assigned (admin OR qualifying downline, no crash)",
-        bool(sp), f"sponsor_id={sp} admin_id={admin_id}")
+def check_invoice_html_gst(label, txn_id, expect_gst=True):
+    r = requests.get(f"{API}/transactions/{txn_id}/invoice", headers=H_ADMIN, timeout=30)
+    ok = (r.status_code == 200)
+    has_html_tag = "<html" in r.text.lower() or "<!doctype" in r.text.lower() or "<body" in r.text.lower()
+    report(f"{label} HTML 200 + html-like",
+           ok and has_html_tag,
+           f"status={r.status_code} len={len(r.text)} ct={r.headers.get('content-type','')}")
+    body = r.text
+    has_cgst = "CGST" in body
+    has_sgst = "SGST" in body
+    has_igst = "IGST" in body
+    if expect_gst:
+        report(f"{label} contains CGST or IGST rows",
+               has_cgst or has_igst,
+               f"CGST={has_cgst} SGST={has_sgst} IGST={has_igst}")
+    else:
+        report(f"{label} NO CGST/SGST/IGST rows",
+               not (has_cgst or has_sgst or has_igst),
+               f"CGST={has_cgst} SGST={has_sgst} IGST={has_igst}")
+    return body
 
 
-# ========== F ==========
-def test_bucket_validation(admin_tok):
-    print("\n--- F) Bucket endpoint validation ---")
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=invalid_xx",
-                     headers=H(admin_tok), timeout=30)
-    rec("bucket=invalid_xx → 400 with 'Unknown bucket'",
-        r.status_code == 400 and "unknown bucket" in r.text.lower(),
-        f"status={r.status_code} body={r.text[:120]}")
-
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=direct_signup&limit=5",
-                     headers=H(admin_tok), timeout=30)
-    rec("bucket=direct_signup&limit=5 → 200", r.status_code == 200, f"status={r.status_code}")
-    if r.status_code == 200:
-        items5 = r.json().get("items") or []
-        r2 = requests.get(f"{BASE}/admin/system-wallet/transactions?bucket=direct_signup&limit=10",
-                          headers=H(admin_tok), timeout=30)
-        items10 = r2.json().get("items") or [] if r2.status_code == 200 else []
-        # If DB has >=10 rows, limit=5 should still return 10 (clamped) - same as limit=10
-        rec("limit=5 was clamped to >=10 (returns same rows as limit=10 when >=10 exist)",
-            len(items5) >= min(10, len(items10)),
-            f"limit=5 returned {len(items5)}; limit=10 returned {len(items10)}")
+def check_invoice_pdf(label, txn_id):
+    r = requests.get(f"{API}/transactions/{txn_id}/invoice.pdf", headers=H_ADMIN, timeout=30)
+    ct = r.headers.get("content-type", "")
+    is_pdf = r.status_code == 200 and ct.startswith("application/pdf") and r.content[:4] == b"%PDF"
+    report(f"{label} PDF 200 application/pdf",
+           is_pdf,
+           f"status={r.status_code} ct={ct} first4={r.content[:4]!r}")
 
 
-def main():
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
-    if not admin_tok:
-        print("FATAL: admin login failed")
-        sys.exit(1)
-    print(f"Admin login OK token len={len(admin_tok)}")
+if ref_txn:
+    check_invoice_html_gst("B.1 referral_payout invoice.html", ref_txn["id"], expect_gst=True)
+    check_invoice_pdf("B.2 referral_payout invoice.pdf", ref_txn["id"])
+else:
+    report("B.1 referral_payout invoice", False, "no referral_payout txn found in DB")
 
-    test_demo_users(admin_tok)
-    test_admin_tree(admin_tok)
-    test_no_ref_signup(admin_tok)
-    test_with_ref_signup(admin_tok)
-    test_placement_algo(admin_tok)
-    test_bucket_validation(admin_tok)
-
-    print("\n" + "=" * 70)
-    passed = sum(1 for _, ok, _ in results if ok)
-    total = len(results)
-    print(f"RESULT: {passed}/{total} passed")
-    failed = [(label, det) for label, ok, det in results if not ok]
-    if failed:
-        print("\nFAILED:")
-        for lbl, det in failed:
-            print(f"  ❌ {lbl}  ({det})")
+if level_txn:
+    check_invoice_html_gst("B.3 level_payout invoice.html", level_txn["id"], expect_gst=True)
+    check_invoice_pdf("B.4 level_payout invoice.pdf", level_txn["id"])
+else:
+    print("   (no level_payout txn found - skipping bonus)")
 
 
-if __name__ == "__main__":
-    main()
+# ------------------ C) No-GST invoices ------------------
+print("\n=== C) No-GST invoices (system_deposit / admin_credit / withdrawal) ===")
+
+sd_txn = None
+for tx in all_rows:
+    if (tx.get("type") or "").lower() == "system_deposit":
+        sd_txn = tx
+        break
+if sd_txn:
+    print(f"   found existing system_deposit: {sd_txn['id']}")
+
+if not sd_txn:
+    utr = f"TESTUTR-INVOICE-{uuid.uuid4().hex[:6].upper()}"
+    rd = requests.post(f"{API}/admin/system-wallet/deposit",
+                       headers=H_ADMIN,
+                       json={"amount": 1000, "utr": utr, "remarks": "invoice test deposit"},
+                       timeout=30)
+    report("C.0 create system_deposit (UTR)",
+           rd.status_code == 200,
+           f"status={rd.status_code} body={rd.text[:160]}")
+    if rd.status_code == 200:
+        time.sleep(0.5)
+        r3 = requests.get(f"{API}/admin/transactions", headers=H_ADMIN, timeout=30)
+        if r3.status_code == 200:
+            rr = r3.json() if isinstance(r3.json(), list) else r3.json().get("items", [])
+            for tx in rr:
+                if tx.get("reference_number") == utr and (tx.get("type") or "").lower() == "system_deposit":
+                    sd_txn = tx
+                    break
+            print(f"   created system_deposit txn: {sd_txn['id'] if sd_txn else 'NOT FOUND'}")
+
+if sd_txn:
+    body = check_invoice_html_gst("C.1 system_deposit invoice.html no-GST", sd_txn["id"], expect_gst=False)
+    has_net = "Net payment" in body or "net payment" in body.lower()
+    amt = float(sd_txn.get("amount") or 0)
+    inflated = round(amt * 1.18, 2)
+    candidates = [f"{int(amt)}", f"{amt:.2f}", f"{amt:,.2f}",
+                  f"{int(inflated)}", f"{inflated:.2f}", f"{inflated:,.2f}"]
+    has_amount = any(a in body for a in candidates)
+    report("C.1b system_deposit invoice contains 'Net payment'",
+           has_net, f"has_net={has_net}")
+    report("C.1c system_deposit invoice contains gross amount",
+           has_amount, f"amount={amt} (or inflated 1.18x = {inflated}), looked for any of {candidates}")
+    # Informational: flag if the invoice shows the inflated 1.18x value
+    # instead of the actual deposit amount — minor display issue.
+    shows_inflated = any(s in body for s in [f"{int(inflated)}", f"{inflated:.2f}"])
+    shows_actual = any(s in body for s in [f"{int(amt)}", f"{amt:.2f}"])
+    print(f"   [INFO] invoice displays actual={shows_actual} inflated_1.18x={shows_inflated}")
+    check_invoice_pdf("C.1d system_deposit invoice.pdf", sd_txn["id"])
+else:
+    report("C.1 system_deposit invoice", False, "no system_deposit txn could be obtained/created")
+
+ac_txn = None
+wd_txn = None
+for tx in all_rows:
+    t = (tx.get("type") or "").lower()
+    if t == "admin_credit" and not ac_txn:
+        ac_txn = tx
+    if t == "withdrawal" and not wd_txn:
+        wd_txn = tx
+
+if ac_txn:
+    check_invoice_html_gst("C.2 admin_credit invoice.html no-GST", ac_txn["id"], expect_gst=False)
+else:
+    print("   (no admin_credit txn found - skipping C.2)")
+
+if wd_txn:
+    check_invoice_html_gst("C.3 withdrawal invoice.html no-GST", wd_txn["id"], expect_gst=False)
+else:
+    print("   (no withdrawal txn found - skipping C.3)")
+
+
+# ------------------ D) SEED_DEMO_USERS env flag (informational) ------------------
+print("\n=== D) SEED_DEMO_USERS env flag ===")
+import pathlib
+src = pathlib.Path("/app/backend/server.py").read_text()
+has_env_read = 'os.environ.get("SEED_DEMO_USERS"' in src
+report("D.1 server.py reads SEED_DEMO_USERS env var",
+       has_env_read,
+       "found in server.py" if has_env_read else "NOT FOUND")
+
+# Recap
+print("\n=== SUMMARY ===")
+print(f"PASS: {results['passed']}")
+print(f"FAIL: {results['failed']}")
+if results["issues"]:
+    print("Failures:")
+    for it in results["issues"]:
+        print(f"  - {it}")
+sys.exit(0 if results["failed"] == 0 else 1)

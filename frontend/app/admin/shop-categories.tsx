@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, FlatList, TouchableOpacity,
   Modal, TextInput, ActivityIndicator, Alert, Image, Platform,
-  KeyboardAvoidingView, Switch,
+  KeyboardAvoidingView, Switch, RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
@@ -98,6 +98,7 @@ export default function AdminShopCategories() {
   const router = useRouter();
   const [items, setItems] = useState<Cat[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<Cat | null>(null);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -274,6 +275,14 @@ export default function AdminShopCategories() {
         data={items}
         keyExtractor={(c) => c.id}
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }}
+            colors={[colors.primary]}
+            tintColor={colors.primary}
+          />
+        }
         renderItem={({ item: c }) => (
           <View style={styles.row}>
             <View style={[styles.iconCircle, { backgroundColor: c.color }]}>

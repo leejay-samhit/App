@@ -29,15 +29,30 @@ GST_PCT_DEFAULT = 18.0  # India standard rate
 # Transaction types that yield "tax invoices" (B2C goods/services sold by platform)
 INVOICEABLE_TAX_INVOICE = {"order", "service_booking", "registration_fee"}
 # Transaction types that yield "commission/income statements" (paid TO the user).
-#
-# NOTE: `referral_payout`, `level_payout` and the admin-side `gst_collected`
-# mirror entries are intentionally EXCLUDED. Per business rule, the GST split
-# happens silently inside the wallet (net credited to user, 18% routed to
-# admin), but no invoice/statement document is issued for referral commissions.
 INVOICEABLE_COMMISSION = {
     "vendor_sale", "service_earning",
     "shop_commission", "service_commission", "admin_credit", "transfer_in",
     "transfer_out", "withdrawal", "admin_debit", "system_deposit",
+    # L1..L10 MLM payouts — users CAN download an invoice copy. The
+    # gross/GST/net split is rendered inline so they can reconcile against
+    # the gross they expected and the net actually credited.
+    "referral_payout", "level_payout",
+}
+
+# Types where GST/CGST/SGST rows MUST be SUPPRESSED on the printed invoice.
+# These are internal-app money movements that are NOT a taxable supply:
+#   • system_deposit  — admin UTR direct-add (Direct-Added bucket)
+#   • admin_credit / admin_debit — manual wallet adjustments
+#   • transfer_in / transfer_out — peer-to-peer wallet transfer
+#   • withdrawal     — user pulling THEIR OWN money to bank/UPI
+#
+# For these, the printed statement only shows the gross amount as
+# "Net payment" with no taxable-value / IGST / CGST / SGST breakdown.
+NO_GST_INVOICE_TYPES = {
+    "system_deposit",
+    "admin_credit", "admin_debit",
+    "transfer_in", "transfer_out",
+    "withdrawal",
 }
 
 
@@ -219,9 +234,15 @@ def invoice_html(
 ) -> str:
     d = _make_invoice_data(tx, owner, branding, counter_party)
     c, cu, gst = d["company"], d["customer"], d["gst"]
-    inter = gst["igst"] > 0
+    # Skip GST rows entirely for internal-app movements (UTR deposit, admin
+    # wallet adjustment, peer transfer, withdrawal). For these, the invoice
+    # is just a receipt of the gross transfer with no tax breakdown.
+    suppress_gst = (tx.get("type") or "") in NO_GST_INVOICE_TYPES
+    inter = (not suppress_gst) and gst["igst"] > 0
     gst_rows = ""
-    if inter:
+    if suppress_gst:
+        gst_rows = ""  # explicit no-op for readability
+    elif inter:
         gst_rows = f"<tr><td>IGST @ {gst['gst_pct']:.0f}%</td><td class='r'>₹ {gst['igst']:.2f}</td></tr>"
     else:
         gst_rows = (
@@ -288,11 +309,11 @@ body{{margin:0;padding:24px;color:#1c2520;background:#fff}}
     <table class="tbl">
       <thead><tr><th>Description</th><th class="r">Amount</th></tr></thead>
       <tbody>
-        <tr><td>{d['description']}</td><td class="r">₹ {gst['taxable']:.2f}</td></tr>
+        <tr><td>{d['description']}</td><td class="r">₹ {(gst['gross'] if suppress_gst else gst['taxable']):.2f}</td></tr>
       </tbody>
     </table>
     <table class="summ">
-      <tr><td>Taxable value</td><td class="r">₹ {gst['taxable']:.2f}</td></tr>
+      {"" if suppress_gst else f"<tr><td>Taxable value</td><td class='r'>₹ {gst['taxable']:.2f}</td></tr>"}
       {gst_rows}
       <tr class="total"><td>{'Total payable' if d['is_tax_invoice'] else 'Net payment'}</td><td class="r">₹ {gst['gross']:.2f}</td></tr>
     </table>
@@ -310,7 +331,11 @@ def invoice_pdf(
 ) -> bytes:
     d = _make_invoice_data(tx, owner, branding, counter_party)
     c, cu, gst = d["company"], d["customer"], d["gst"]
-    inter = gst["igst"] > 0
+    # Same suppression rule as the HTML invoice — internal app movements
+    # (UTR deposit, admin adjustment, peer transfer, withdrawal) print
+    # without any GST breakdown.
+    suppress_gst = (tx.get("type") or "") in NO_GST_INVOICE_TYPES
+    inter = (not suppress_gst) and gst["igst"] > 0
 
     buf = BytesIO()
     doc = SimpleDocTemplate(
@@ -394,7 +419,7 @@ def invoice_pdf(
     # Line item table
     items = [
         ["Description", "Amount"],
-        [d["description"], f"{gst['taxable']:.2f}"],
+        [d["description"], f"{(gst['gross'] if suppress_gst else gst['taxable']):.2f}"],
     ]
     items_tbl = Table(items, colWidths=[130 * mm, 40 * mm])
     items_tbl.setStyle(TableStyle([
@@ -413,12 +438,14 @@ def invoice_pdf(
     story.append(items_tbl)
 
     # Summary
-    summary = [["Taxable value", f"₹ {gst['taxable']:.2f}"]]
-    if inter:
-        summary.append([f"IGST @ {gst['gst_pct']:.0f}%", f"₹ {gst['igst']:.2f}"])
-    else:
-        summary.append([f"CGST @ {gst['gst_pct']/2:.1f}%", f"₹ {gst['cgst']:.2f}"])
-        summary.append([f"SGST @ {gst['gst_pct']/2:.1f}%", f"₹ {gst['sgst']:.2f}"])
+    summary: List[List[str]] = []
+    if not suppress_gst:
+        summary.append(["Taxable value", f"₹ {gst['taxable']:.2f}"])
+        if inter:
+            summary.append([f"IGST @ {gst['gst_pct']:.0f}%", f"₹ {gst['igst']:.2f}"])
+        else:
+            summary.append([f"CGST @ {gst['gst_pct']/2:.1f}%", f"₹ {gst['cgst']:.2f}"])
+            summary.append([f"SGST @ {gst['gst_pct']/2:.1f}%", f"₹ {gst['sgst']:.2f}"])
     summary.append([
         ("Total payable" if d["is_tax_invoice"] else "Net payment"),
         f"₹ {gst['gross']:.2f}",

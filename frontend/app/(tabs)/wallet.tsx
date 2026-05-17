@@ -319,12 +319,25 @@ export default function WalletScreen() {
           <Text style={styles.empty}>{txFilter === "all" ? "No transactions yet." : `No ${txFilter} yet.`}</Text>
         ) : (
           filteredTxns.map((t) => {
+            // Decide if this row is a DEBIT (money leaving the wallet) or a
+            // CREDIT. Most txns have a signed `amount` but some legacy rows
+            // store positive amounts on debit-typed records — so we treat
+            // a row as debit if EITHER the amount is < 0 OR the type is
+            // one of the known outgoing types. Per user request: debits
+            // must always render in red, credits in green.
+            const DEBIT_TYPES = new Set([
+              "withdrawal", "transfer_out", "admin_debit", "order",
+              "vendor_payout_debit", "purchase",
+            ]);
+            const isDebit = (Number(t.amount) < 0) || DEBIT_TYPES.has(t.type);
             const icon = t.type === "referral_payout" || t.type === "level_payout" ? "trending-up"
               : t.type === "withdrawal" ? "arrow-up-right"
               : t.type === "transfer_out" ? "send"
               : t.type === "transfer_in" ? "download"
               : t.type === "admin_adjust" && t.amount > 0 ? "gift"
               : t.type === "admin_adjust" ? "edit-3"
+              : t.type === "admin_debit" ? "minus-circle"
+              : t.type === "admin_credit" ? "plus-circle"
               : t.type === "vendor_sale" ? "shopping-bag"
               : t.type === "registration_fee" ? "user-plus"
               : t.type === "order" ? "shopping-cart"
@@ -333,10 +346,17 @@ export default function WalletScreen() {
               : t.status === "success" ? colors.success
               : t.status === "rejected" ? "#B3261E"
               : null;
+            // Color rule: debits ALWAYS red, credits ALWAYS green (success).
+            // Failure/rejected statuses fall back to red regardless of sign.
+            const amountColor = isDebit ? "#B3261E"
+              : t.status === "rejected" || t.status === "failed" ? "#B3261E"
+              : colors.success;
+            const displaySign = isDebit ? "−" : "+";
+            const displayAmt = Math.abs(Number(t.amount) || 0);
             return (
               <TouchableOpacity key={t.id} style={styles.row} onPress={() => openTxDetail(t.id)} testID={`tx-row-${t.id}`}>
                 <View style={styles.rowLeft}>
-                  <Feather name={icon as any} size={18} color={t.amount > 0 ? colors.success : colors.textMain} style={{ marginRight: 12 }} />
+                  <Feather name={icon as any} size={18} color={isDebit ? "#B3261E" : colors.success} style={{ marginRight: 12 }} />
                   <View style={{ flex: 1 }}>
                     <Text style={styles.rowTitle} numberOfLines={2}>{t.description || t.type}</Text>
                     <Text style={styles.rowSub}>
@@ -345,8 +365,8 @@ export default function WalletScreen() {
                     </Text>
                   </View>
                 </View>
-                <Text style={[styles.amountText, { color: t.amount >= 0 ? colors.success : statusColor || "#B3261E" }]}>
-                  {t.amount >= 0 ? "+" : ""}{formatINR(t.amount)}
+                <Text style={[styles.amountText, { color: amountColor }]}>
+                  {displaySign}{formatINR(displayAmt)}
                 </Text>
               </TouchableOpacity>
             );
