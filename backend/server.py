@@ -674,12 +674,24 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     # Mark first to avoid race-condition double trigger
     await db.users.update_one({"id": user["id"]}, {"$set": {"commission_triggered": True}})
 
-    # Direct-signup credit (no_referral_signup=True). This is INDEPENDENT
-    # of the L1..L10 cascade — admin still earns L2..L10 below if placement
-    # sponsor isn't admin.
+    # ─────────────────────────────────────────────────────────────────
+    # NO-REFERRAL SIGNUP — clean accounting model
+    # ─────────────────────────────────────────────────────────────────
+    # The user paid the registration fee directly to admin. Admin pockets
+    # the FULL fee, split GST-inclusive into direct_signup (net) and
+    # gst_collected (18%).  We DO NOT trigger the L1..L10 cascade or
+    # overflow for this signup — the user came directly to admin with
+    # no upline to compensate, so the books exactly equal the fee paid:
+    #
+    #     ₹118 paid  →  ₹100 to direct_signup  +  ₹18 to GST  =  ₹118
+    #
+    # This eliminates the "double-entry" concern (same signup credited
+    # to both direct_signup AND referral_commission overflow) and keeps
+    # admin wallet exactly equal to the actual revenue inflow.
     if user.get("no_referral_signup"):
         placement_sponsor = await db.users.find_one({"id": sponsor_id}) if sponsor_id else None
         await _credit_no_ref_signup_to_admin(user, placement_sponsor)
+        return  # ← stop here. No cascade. No overflow.
 
     if not sponsor_id:
         return
