@@ -196,6 +196,18 @@ async def register(payload: RegisterRequest):
         if sponsor.get("email") == ADMIN_EMAIL.lower():
             no_referral_signup = True
             sponsor = await get_admin_sponsor() or sponsor
+        else:
+            # USER SPILLOVER — once the referrer has completed at least one
+            # L1 cycle (`payouts_received >= 1`), they're done with their
+            # first earnings. New joiners that came to them are SPILLED
+            # deeper into the team using the same 4→3→2→1→0 preference, so
+            # the original referrer's downline grows wide and earns. The
+            # original referrer is unaffected: they still earn L2 in the
+            # cascade because the new placement is below them.
+            if int(sponsor.get("payouts_received") or 0) >= 1:
+                spill = await _find_spillover_under(sponsor)
+                if spill:
+                    sponsor = spill
     else:
         # No referral code given → treat as direct admin signup. Money flows
         # to admin's `direct_signup` bucket on approval (see
@@ -4485,16 +4497,15 @@ async def debit_admin_bucket(bucket: str, amount: float) -> bool:
 async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
     """Pick the placement sponsor for a no-referral / EARN-code signup.
 
-    New placement algorithm (user-requested):
-      • Prefer an APPROVED + active downline user who has the MOST completed
-        referrals (4 → 3 → 2 → 1). Among candidates with the same count,
-        the EARLIEST joined one wins (fair queue).
-      • If no qualifying downline exists, admin keeps the placement (admin
-        becomes the user's sponsor).
+    Placement preference (descending) — pick an APPROVED + active downline
+    user whose direct count is as close to "ready for next L1" as possible:
 
-    Note: this only picks the *placement sponsor*. The registration-fee
-    credit-to-admin happens separately in `_trigger_referral_commissions`
-    once the new user is approved (regardless of placement).
+        4 directs  →  3  →  2  →  1  →  0  →  admin
+
+    Among candidates with the same count, the EARLIEST joined one wins
+    (fair queue). The terminal `0` step intentionally selects an approved
+    user who hasn't yet earned a single direct, giving them their first
+    real opportunity to climb the matrix before admin gets the placement.
     """
     admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not admin:
@@ -4502,9 +4513,9 @@ async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
     if not admin:
         return None
 
-    # Look for approved, active, non-admin candidates in descending preference
-    # of direct_referrals_count (4 → 3 → 2 → 1). Pick the EARLIEST joined.
-    for desired in (4, 3, 2, 1):
+    # 4 → 3 → 2 → 1 → 0 sweep. Picks the EARLIEST joined approved, active,
+    # non-admin candidate at each desired direct-count.
+    for desired in (4, 3, 2, 1, 0):
         candidate = await db.users.find_one(
             {
                 "direct_referrals_count": desired,
@@ -4519,8 +4530,64 @@ async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
         if candidate:
             return candidate
 
-    # Fall back to admin if no qualifying downline yet
     return admin
+
+
+async def _find_spillover_under(parent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Find a downline user under `parent` to receive a new direct, using
+    the same 4 → 3 → 2 → 1 → 0 preference as the admin placement algorithm.
+
+    Used when a user who has ALREADY completed their L1 cycle refers a
+    new joiner — instead of letting them stack endlessly under the same
+    referrer, we spill the new joiner deeper into the team so the team
+    grows wide and earns. The original referrer still earns L2 in the
+    cascade because they're upline of the new placement.
+
+    BFS through parent's tree (max 12 levels deep, safety cap). Returns
+    None if no qualifying downline user is found — caller falls back to
+    placing under `parent` directly.
+    """
+    if not parent or not parent.get("id"):
+        return None
+    # Pool = every approved active user that is an descendant of parent.
+    # We collect ids per level via BFS and rank by direct_referrals_count.
+    visited: set = {parent["id"]}
+    frontier: List[str] = [parent["id"]]
+    descendants: List[Dict[str, Any]] = []
+    for _depth in range(12):
+        if not frontier:
+            break
+        children = await db.users.find(
+            {
+                "sponsor_id": {"$in": frontier},
+                "approval_status": "approved",
+                "registration_paid": True,
+                "is_blocked": {"$ne": True},
+                "role": {"$ne": "admin"},
+                "email": {"$ne": ADMIN_EMAIL.lower()},
+            },
+            {"_id": 0, "password_hash": 0},
+        ).sort("created_at", 1).to_list(5000)
+        if not children:
+            break
+        descendants.extend(children)
+        frontier = [c["id"] for c in children if c["id"] not in visited]
+        visited.update(frontier)
+
+    if not descendants:
+        return None
+
+    # 4 → 3 → 2 → 1 → 0 preference, earliest joined wins ties.
+    by_count: Dict[int, List[Dict[str, Any]]] = {}
+    for d in descendants:
+        c = int(d.get("direct_referrals_count") or 0)
+        by_count.setdefault(c, []).append(d)
+    for desired in (4, 3, 2, 1, 0):
+        pool = by_count.get(desired) or []
+        if pool:
+            pool.sort(key=lambda x: x.get("created_at") or "")
+            return pool[0]
+    return None
 
 
 async def seed_products():
