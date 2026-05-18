@@ -653,6 +653,30 @@ mlm_engine_option_b_2026_05_18:
       - working: true
         agent: "testing"
         comment: |
+          BUG FIX VERIFIED (snap["outflow"] → snap["withdrawals_out"] at L4910/L4912).
+          Quick re-verification after the schema-mismatch fix:
+            • GET /api/admin/ledger-alerts (admin) → 200. Current snapshot keys
+              are EXACTLY {inflow, withdrawals_out, expected_held, held, drift,
+              checked_at} — 6 keys, matches spec.
+            • Live snapshot: inflow=₹27028.0, withdrawals_out=₹9996.0,
+              expected_held=₹17032.0, held=₹28923.4, drift=₹11891.4. (Real
+              drift in test DB; close to the ~₹12,083 cited in the brief.)
+            • alerts[] is now NON-EMPTY (count=1). The background checker
+              successfully fired and inserted an alert row after the fix:
+                [LEDGER ALERT] drift ₹11891.4 | inflow ₹27028.0 |
+                withdrawn ₹9996.0 | expected_held ₹17032.0 |
+                actual_held ₹28923.4
+            • POST /admin/ledger-alerts/<fake-id>/resolve → 404
+              {"detail":"Alert not found"} — 404 path intact.
+            • Re-GET /admin/ledger-alerts → 200 (alerts=1) — read not broken.
+            • Backend err.log observed for ~60s after re-test: NO new
+              "Money flow checker iteration failed: 'outflow'" entries. The
+              only such line in the log is a stale 09:27:33 entry from before
+              the fix was applied; nothing new since the restart. KeyError
+              is resolved.
+      - working: true
+        agent: "testing"
+        comment: |
           Ledger alert endpoints regression: 9/9 PASS.
 
           SCENARIO C — Ledger Alert endpoints:

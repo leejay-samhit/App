@@ -4907,9 +4907,13 @@ async def _money_flow_checker():
                     "severity": "warn" if abs(snap["drift"]) < 100 else "high",
                     "drift": snap["drift"],
                     "inflow": snap["inflow"],
-                    "outflow": snap["outflow"],
+                    "withdrawals_out": snap["withdrawals_out"],
+                    "expected_held": snap["expected_held"],
                     "held": snap["held"],
-                    "message": f"Money flow drift: ₹{snap['drift']} (inflow ₹{snap['inflow']} vs outflow ₹{snap['outflow']})",
+                    "message": (
+                        f"Money flow drift: ₹{snap['drift']} "
+                        f"(held ₹{snap['held']} vs expected ₹{snap['expected_held']})"
+                    ),
                     "created_at": snap["checked_at"],
                     "resolved": False,
                 })
