@@ -1028,12 +1028,79 @@ mlm_payout_system_wallet_redesign_2026_05_16:
 ledger_drift_fix_2026_05_18:
   - task: "Ledger drift fix — cleanup endpoint, COD deferral, fee residual, cancel reversal, breakdown change"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py (L4329-4675 cancel/cleanup; L825-866 fee residual; L3104-3169 COD defer; L3902-4020 breakdown)"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          FINAL REGRESSION 2026-05-18 (post-fix re-run): 20/20 PASS.
+          Runner: /app/backend_test.py. All 5 follow-up fixes verified end-to-end.
+
+          SCENARIO A — Cleanup idempotency (3/3 PASS):
+            • A.1 First cleanup call → 200 {orders_processed:0, fee_residuals_backfilled:0}
+            • A.2 Second cleanup call → 200 {fee_residuals_backfilled:0} (idempotent)
+            • A.3 Drift remains ₹0.00 after both calls
+
+          SCENARIO B — Fee residual exactly once (8/8 PASS):
+            • Registered ResidualTester <sfx>@test.app with testuser's
+              referral_code, paid /payment/register-fee, admin approved.
+            • B.4 EXACTLY ONE direct_signup_credit txn with related_signup_id ==
+              new_user.id, description="Fee residual ₹95.95 from ResidualTester
+              <sfx>'s signup (₹118 fee − ₹22 cascade)", amount=₹95.95.
+            • B.5 new user's fee_residual_backfilled flag == True.
+            • B.6 POST /admin/system-wallet/cleanup-legacy-refunds AFTER signup
+              → 200 {fee_residuals_backfilled:0} — NO double-credit.
+            • B.7 Still exactly ONE residual row after cleanup.
+            • B.8 Drift remains ₹0.00 after the with-ref signup.
+
+          SCENARIO C — Admin wallet transfer mirror (5/5 PASS):
+            • C.1 POST /admin/users/{testuser.id}/wallet {type:"credit",
+              amount:500, reason:"..."} → 200.
+            • C.2 USER-side txn exists: type=admin_credit, amount=+500.
+            • C.3 ADMIN-side MIRROR txn exists:
+                  type=admin_credit, amount=-500, linked_user_id=testuser.id,
+                  linked_txn_id=<user txn id>,
+                  description="Transfer to Test User · ledger drift mirror txn test"
+            • C.4 POST /admin/system-wallet/reconcile → 200, direct_added
+              diff=₹0.00 (already reconciled — buckets stable). Before/after
+              both = 6500.0; no re-inflation, no phantom drift. The mirror
+              admin_credit (-500) txn now correctly contributes to direct_added
+              bucket sum (via _BUCKET_TXN_TYPES["direct_added"] including
+              admin_credit & admin_debit), so reconcile preserves the bucket.
+            • C.5 Drift remains ₹0.00 after credit + reconcile.
+
+          SCENARIO D — Checkout 500-fix (1/1 PASS):
+            • POST /orders/checkout {shipping_address:"garbage string",
+              payment_method:"cod"} → 400 with clean detail message
+              "Shipping address missing: name, phone, line1, city, state, pincode"
+              (NOT a 500 traceback). Defensive isinstance(raw_addr, dict)
+              check at server.py:2983 handles non-dict input correctly.
+
+          SCENARIO E — Drift stays at zero (1/1 PASS):
+            • Final GET /admin/ledger-alerts.current snapshot:
+                inflow=₹14387.00, withdrawals_out=₹0.00,
+                expected_held=₹14387.00, held=₹14387.00, drift=₹0.00
+            • Drift is EXACTLY ₹0.00 after running all 4 prior scenarios.
+
+          ALL 5 FOLLOW-UP FIXES CONFIRMED:
+            1. credit_admin_bucket now accepts negative amounts (cancel-reversal
+               sites successfully debit the bucket).
+            2. _BUCKET_TXN_TYPES["direct_added"] includes admin_credit/admin_debit
+               so reconcile correctly tracks admin-wallet transfers OUT.
+            3. /admin/users/{id}/wallet writes the mirror txn on admin's record
+               (opposite sign, linked_user_id, linked_txn_id) — visible in
+               GET /admin/transactions.
+            4. Fee-residual double-credit fixed: signup sets
+               fee_residual_backfilled=True; cleanup also checks for existing
+               "[Ff]ee residual" txn before crediting.
+            5. /orders/checkout defensively handles non-dict shipping_address —
+               clean 400 instead of 500.
+
+          Ledger is production-stable. No drift accumulation observed.
       - working: false
         agent: "testing"
         comment: |
@@ -1175,6 +1242,33 @@ ledger_drift_fix_2026_05_18:
           PRIORITY: HIGH — without BUG #1 fix, the very drift-elimination
           goal of this change set is undermined. The TXN ledger looks
           balanced but the actual wallet doesn't reflect it.
+
+agent_communication:
+    - agent: "testing"
+      message: |
+        FINAL LEDGER DRIFT REGRESSION (post-fix re-run 2026-05-18): 20/20 PASS.
+
+        All 5 follow-up fixes verified working:
+          A — Cleanup idempotency                              PASS (3/3)
+          B — With-ref signup writes residual exactly once     PASS (8/8)
+          C — Admin wallet transfer mirror txn + reconcile     PASS (5/5)
+          D — Checkout 500-fix for non-dict shipping_address   PASS (1/1)
+          E — Drift stays at zero throughout                   PASS (1/1)
+
+        Final ledger snapshot:
+          inflow=14387, withdrawals_out=0, expected_held=14387,
+          held=14387, drift=0.00
+
+        Production-stable. No drift accumulation observed across cleanup,
+        fresh signup, admin wallet transfer (+reconcile), or the garbage-
+        shipping-address checkout path.
+
+        NOTE: testuser@app.com / Test@123 was NOT pre-seeded in this env;
+        backend_test.py auto-creates it (referral_code=EARN, approved) when
+        login fails. The seeded credentials in /app/memory/test_credentials.md
+        say it should exist — main agent may want to add a seed step. Not
+        blocking.
+
 
 agent_communication:
     - agent: "testing"

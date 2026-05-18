@@ -864,6 +864,13 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
                 "source_user_name": user["name"],
                 "created_at": now_utc().isoformat(),
             })
+    # Always mark the user as fee-residual-handled so the legacy cleanup
+    # endpoint never double-credits them (regardless of whether a residual
+    # was actually owed).
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"fee_residual_backfilled": True}},
+    )
 
 
 @api_router.post("/payment/register-fee")
@@ -2971,6 +2978,10 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     if payment_method not in ("wallet", "cod"):
         raise HTTPException(status_code=400, detail="Unsupported payment_method. Use 'wallet' or 'cod'.")
     raw_addr = (payload or {}).get("shipping_address") or {}
+    # Defensive: some legacy clients may send shipping_address as a string
+    # instead of an object. Treat anything non-dict as missing.
+    if not isinstance(raw_addr, dict):
+        raw_addr = {}
     shipping_address = {
         "name": str(raw_addr.get("name") or "").strip(),
         "phone": str(raw_addr.get("phone") or "").strip(),
@@ -4104,7 +4115,10 @@ _BUCKET_TXN_TYPES: Dict[str, List[str]] = {
     "direct_signup":       ["direct_signup_credit"],
     "referral_commission": ["referral_payout", "cascade_overflow"],
     "gst_collected":       ["gst_collected"],
-    "direct_added":        ["system_deposit"],
+    # admin_credit/admin_debit are signed (positive=credit, negative=debit)
+    # so summing them naturally captures both deposits and admin transfers
+    # out — keeping the bucket reconciled with reality.
+    "direct_added":        ["system_deposit", "admin_credit", "admin_debit"],
     "service_margin":      ["service_margin", "service_commission", "service_commission_reversal"],
     "shopping_margin":     ["shopping_margin", "shop_commission", "shop_commission_reversal"],
 }
@@ -4229,6 +4243,32 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
         "remarks": payload.reason.strip(),
         "created_at": now_utc().isoformat(),
     })
+    # Mirror txn on ADMIN's record so the system-wallet reconcile (which
+    # aggregates by admin.id) can see the direct_added bucket movement. The
+    # buckets were already adjusted via debit/credit_admin_bucket above; this
+    # mirror is purely for ledger-completeness so reconcile doesn't undo it.
+    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if admin_doc:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": admin_doc["id"],
+            # On user CREDIT (money out of admin's direct_added → into user wallet),
+            # admin's bucket DECREASES, so we write a negative-amount admin_credit
+            # entry. On user DEBIT (money back into admin), admin's bucket
+            # INCREASES, so we write a positive-amount admin_debit. Sign matches
+            # what reconcile expects when summing this bucket.
+            "type": "admin_credit" if payload.type == "credit" else "admin_debit",
+            "amount": -delta,  # opposite sign — money moved AWAY from admin on credit, BACK on debit
+            "status": "success",
+            "description": (
+                f"Transfer {'to' if payload.type == 'credit' else 'from'} "
+                f"{(target.get('name') or '')[:30]} · {payload.reason.strip()}"
+            ),
+            "linked_txn_id": txn_id,
+            "linked_user_id": user_id,
+            "linked_user_email": target.get("email"),
+            "created_at": now_utc().isoformat(),
+        })
     await _create_notification(user_id, "wallet", f"Wallet {payload.type}ed by ₹{int(payload.amount)}", payload.reason.strip())
     await _audit_log(admin, f"wallet.{payload.type}", "user", user_id, {"amount": payload.amount, "reason": payload.reason})
     return {"ok": True, "transaction_id": txn_id}
@@ -4645,7 +4685,16 @@ async def admin_cleanup_legacy_refunds(
                 credited += float(tx.get("amount") or 0)
 
         residual = round(fee - credited, 2)
-        if residual > 0.01:
+        # Defensive: skip if a fee-residual credit ALREADY exists for this
+        # signup (regardless of when written) — prevents double-credit if
+        # this endpoint is called twice or if the new signup flow already
+        # wrote the residual.
+        existing_residual = await db.transactions.find_one({
+            "type": "direct_signup_credit",
+            "related_signup_id": u["id"],
+            "description": {"$regex": "[Ff]ee residual"},
+        })
+        if residual > 0.01 and not existing_residual:
             await credit_admin_bucket("direct_signup", residual, also_total_earned=True)
             await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
@@ -4906,15 +4955,19 @@ SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_signup", "direct_added",
 
 
 async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: bool = True):
-    """Credit a specific bucket of the admin's system wallet AND the rolled-up
-    wallet_balance. Use this everywhere admin earns money so the dashboard
-    shows the right category breakdown.
+    """Credit (or reverse) a specific bucket of the admin's system wallet AND
+    the rolled-up wallet_balance. Use this everywhere admin earns money so
+    the dashboard shows the right category breakdown.
 
-    bucket ∈ {referral_commission, direct_added, service_margin, shopping_margin}
+    bucket ∈ SYSTEM_WALLET_BUCKETS
+
+    Note: this function ALLOWS negative `amount` so reversal sites (cancelled
+    orders, commission reversals, etc.) can debit the bucket atomically via
+    the same `$inc` path. Only an exact-zero amount is a no-op.
     """
     if bucket not in SYSTEM_WALLET_BUCKETS:
         raise ValueError(f"Unknown bucket: {bucket}")
-    if amount <= 0:
+    if amount == 0:
         return
     admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not admin:
