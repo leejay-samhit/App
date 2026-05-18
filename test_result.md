@@ -1025,7 +1025,202 @@ mlm_payout_system_wallet_redesign_2026_05_16:
           (₹400) may or may not fire on the same approval depending on the
           accumulated counter. No code change required.
 
+ledger_drift_fix_2026_05_18:
+  - task: "Ledger drift fix — cleanup endpoint, COD deferral, fee residual, cancel reversal, breakdown change"
+    implemented: true
+    working: false
+    file: "backend/server.py (L4329-4675 cancel/cleanup; L825-866 fee residual; L3104-3169 COD defer; L3902-4020 breakdown)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          Ledger drift fix regression: 29/30 PASS, 1 CRITICAL BUG FOUND.
+          Runner: /app/backend_test.py. Public EXPO_PUBLIC_BACKEND_URL.
+
+          SCENARIO A — cleanup-legacy-refunds (4/4 PASS):
+            • A.1 anonymous → 401 "Not authenticated"                          ✅
+            • A.2 regular user token → 403 "Admin access required"             ✅
+            • A.3 admin call#1 → 200 (orders_processed=0,
+              fee_residuals_backfilled=1 on first ever run)                    ✅
+            • A.4 second call → 200 (orders_processed=0,
+              fee_residuals_backfilled=0). Endpoint is idempotent via
+              order.legacy_drift_cleaned and users.fee_residual_backfilled.   ✅
+
+          SCENARIO B — Fee residual safety net (6/6 PASS):
+            • Registered ScenB Joiner with referral_code=AARAV01, paid fee,
+              admin approved → cascade fired.
+            • A `direct_signup_credit` txn was written tagged with
+                related_signup_id=<new_user_id>
+                amount=₹95.95
+                description="Fee residual ₹95.95 from ScenB Joiner …'s
+                  signup (₹118 fee − ₹22 cascade)"                            ✅
+            • breakdown.inflow.registration_fee_total uses SUM of actual
+              registration_fee TXNs, NOT user_count×fee. Verified:
+                reg_fee_total=₹1298 vs paid_users(16)×₹118=₹1888               ✅
+            • breakdown.inflow.total == reg_fee + utr + svc + shop (exact)    ✅
+
+          SCENARIO C — Order cancellation reversal (8/9 PARTIAL):
+            • Wallet order placed (₹499 Classic Cotton Tote, no vendor)       ✅
+            • Cancel → buyer wallet refunded ₹499 ✅, refund txn with
+              order_id written ✅, shop_commission_reversal txn (amount=-499)
+              written with order_id ✅
+            • vendor_sale_reversal n/a (no vendor items)                       ✅
+            • Admin shopping_margin BUCKET — TEST PASSED LOOSELY but actual
+              bucket value did NOT decrease (stayed at ₹499 after cancel).
+              See CRITICAL BUG below.
+
+          SCENARIO D — COD commission deferred (5/5 PASS):
+            • COD order placed (₹2499 Premium Gift Hamper). NO `shop_commission`
+              txn at placement (0 found, expected 0)                           ✅
+            • PATCH status→delivered → `shop_commission` txn IS written:
+                amount=₹2499
+                description="Shop margin from COD order #d4c68f44
+                             (settled on delivery)"                            ✅
+              Matches the spec's required wording "COD … settled on delivery". ✅
+
+          SCENARIO E — Drift snapshot stays at 0 (1/2 FAIL):
+            • E.1 drift within ±₹1 of zero — FAIL. Got drift=₹594.95 after
+              scenarios A-D (NOT 0). Snapshot:
+                inflow=₹14033.0 withdrawals_out=₹0.0
+                expected_held=₹14033.0 held=₹14627.95 drift=₹594.95           ❌
+            • E.2 ledger-alerts.inflow ≈ breakdown.inflow.total — PASS,
+              diff=₹0.00.                                                      ✅
+
+          SCENARIO F — No regression on existing endpoints (4/4 PASS):
+            • GET /admin/system-wallet/breakdown → 200                         ✅
+            • POST /admin/system-wallet/reconcile → 200                        ✅
+            • GET /admin/users → 200                                           ✅
+            • POST /admin/approvals/{id}/approve → 200                         ✅
+            (NOTE: after F.2 reconcile ran, snapshot drift JUMPED from
+             ₹594.95 to ₹3095.95 — see CRITICAL BUG #2 in main agent notes.)
+
+          ═══════════════════════════════════════════════════════════════
+          CRITICAL BUG #1 — `credit_admin_bucket` rejects negative amounts
+          ═══════════════════════════════════════════════════════════════
+          File: /app/backend/server.py:4917-4918
+              async def credit_admin_bucket(bucket, amount, *, also_total_earned=True):
+                  ...
+                  if amount <= 0:
+                      return       # ← THIS GUARD BLOCKS ALL REVERSALS
+
+          The new order-cancellation reversal code at L4427 calls:
+              await credit_admin_bucket("shopping_margin", -platform_total, ...)
+          And the legacy cleanup at L4523 does the same. With negative
+          amount, the guard returns immediately so admin's
+          wallet_buckets.shopping_margin AND wallet_balance are NOT
+          decremented. The shop_commission_reversal TXN is still written,
+          so the breakdown's txn-summed shop_margin shows the right value,
+          but the underlying wallet stays inflated.
+
+          DIRECT REPRO CONFIRMED via runtime injection:
+              before: shopping_margin=2499.0 wallet_balance=14246.95
+              await credit_admin_bucket('shopping_margin', -10.0)
+              after:  shopping_margin=2499.0 wallet_balance=14246.95
+              diff:   sm=0.0 wb=0.0
+
+          IMPACT: every cancelled order leaks a positive amount into
+          admin's wallet relative to what the txn ledger says. Drift grows
+          by `platform_share` per cancellation until /admin/system-wallet/
+          reconcile is run (which rebuilds buckets from txns).
+
+          FIX: change the guard to bypass for negative amounts. Suggested
+          patch — replace:
+                  if amount <= 0:
+                      return
+          with:
+                  if amount == 0:
+                      return
+          OR split into a separate `_apply_bucket_delta(bucket, delta)` that
+          accepts signed deltas and is called by both credit_admin_bucket
+          (which validates amount>0) and the reversal sites.
+
+          ═══════════════════════════════════════════════════════════════
+          CRITICAL BUG #2 (pre-existing, not part of this fix but
+          surfaced by scenario F) — `reconcile_system_wallet` rebuilds
+          `direct_added` from system_deposit txns WITHOUT subtracting
+          admin_credit/admin_debit movements.
+          ═══════════════════════════════════════════════════════════════
+          File: /app/backend/server.py:4039-4096 and _BUCKET_TXN_TYPES
+          at L4103-4110.
+              "direct_added": ["system_deposit"]
+
+          When admin uses POST /admin/users/{id}/wallet to credit a user's
+          wallet from `direct_added` (debit_admin_bucket at L4204), the
+          bucket goes down (correctly), but reconcile later overwrites it
+          back to the system_deposit txn sum — effectively un-debiting the
+          spend. This added ₹3000 of phantom drift in our run (we credited
+          a buyer wallet ₹3000 from admin's direct_added before testing
+          the order flow). After F.2 ran reconcile, the snapshot drift
+          jumped from ₹594.95 → ₹3095.95. The extra ₹2501 = ₹3000 phantom
+          - ₹499 (BUG #1 reversal that reconcile actually fixed at bucket
+          level) ≈ ₹2501. Math checks out.
+
+          FIX: add `admin_credit`, `admin_debit` (negated) to the
+          `direct_added` types list in _BUCKET_TXN_TYPES, OR exclude
+          reconcile from acting on direct_added (treat it as authoritative
+          since both deposit and adjust paths $inc it correctly in-place).
+
+          ═══════════════════════════════════════════════════════════════
+          OVERALL: 5 of 6 scenarios PASS for the new functionality. The
+          new endpoints, COD deferral, fee residual safety net, and
+          breakdown math all work as designed. But the underlying
+          `credit_admin_bucket` guard prevents the wallet from actually
+          mirroring the new reversal txns at runtime — drift remains until
+          a reconcile is run. And reconcile itself has a separate
+          long-standing bug that creates phantom drift on top.
+
+          PRIORITY: HIGH — without BUG #1 fix, the very drift-elimination
+          goal of this change set is undermined. The TXN ledger looks
+          balanced but the actual wallet doesn't reflect it.
+
 agent_communication:
+    - agent: "testing"
+      message: |
+        Ledger-drift fix regression: 29/30 PASS, but 1 CRITICAL latent
+        bug in `credit_admin_bucket` blocks the bucket-level reversal of
+        cancelled-order shop_commission. The reversal TXN is written
+        correctly, but the actual admin wallet is NOT debited, so drift
+        accumulates until the next /admin/system-wallet/reconcile call.
+
+        Per-scenario PASS/FAIL:
+          A — cleanup endpoint idempotency + auth   PASS (4/4)
+          B — fee residual safety net               PASS (6/6)
+          C — order cancellation reversal           PASS at txn level (8/9),
+                                                    BUCKET-level NOT debited
+          D — COD commission deferred               PASS (5/5)
+          E — drift snapshot ≤ ₹1                   FAIL (drift=₹594.95)
+          F — existing endpoints no regression      PASS (4/4)
+
+        CRITICAL BUG #1 (caused by current change set):
+          /app/backend/server.py:4917
+              if amount <= 0:
+                  return
+          Blocks every `credit_admin_bucket(bucket, -x, …)` call used by
+          the new reversal logic at L4427 (order cancel) and L4523 (legacy
+          cleanup). Reproduced live — bucket stayed unchanged after a
+          -₹10 call.
+          FIX: change the guard to `if amount == 0: return` so negative
+          deltas pass through and are $inc'd as -x by MongoDB. Vendor
+          reversals at L4447 already do this correctly (direct $inc),
+          only the admin-bucket calls are broken.
+
+        CRITICAL BUG #2 (pre-existing, surfaced by this test set):
+          /admin/system-wallet/reconcile rebuilds `direct_added` from
+          ONLY `system_deposit` txns — admin_credit/admin_debit movements
+          (when admin pulls from direct_added to credit a user wallet)
+          are ignored, so reconcile re-inflates direct_added. After our
+          test run admin had ₹10000 in direct_added even though ₹3000
+          had been transferred to a buyer. Drift exploded from ₹594.95
+          to ₹3095.95 after the F.2 reconcile call.
+          Not blocking the current fix's scope; flagged for awareness.
+
+        The other 5 scenarios behave exactly as the brief specifies. The
+        endpoints, txn-level math, COD deferral, fee residual, and
+        breakdown reg-fee-source change all work correctly.
+
     - agent: "testing"
       message: |
         MLM payout & system-wallet redesign: 51/52 PASS (one expected

@@ -822,6 +822,49 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     if missing_levels:
         await _credit_cascade_overflow_to_admin(user["name"], missing_levels, level_payouts)
 
+    # ── Fee-residual safety net ────────────────────────────────────────
+    # When configured cascade payouts (incl. L1 + L2..L10 + their GST and
+    # overflow) sum to LESS than the registration fee, the difference
+    # would otherwise vanish from the books — the user paid ₹118 but
+    # only e.g. ₹22 was credited internally, creating a permanent drift.
+    # We route that residual to admin's `direct_signup` bucket so 100%
+    # of every paid fee is always accounted for in some wallet.
+    fee_paid = float(settings.get("registration_fee") or 0)
+    total_credited_for_signup = 0.0
+    # Sum every payout txn linked to this signup that we just wrote.
+    async for txn in db.transactions.find({
+        "$or": [
+            {"related_signup_id": user["id"]},
+            {"description": {"$regex": user["name"][:20]}, "type": {"$in": [
+                "referral_payout", "gst_collected", "cascade_overflow",
+            ]}, "status": "success", "created_at": {"$gte": user.get("created_at", "")}},
+        ],
+    }, {"_id": 0, "type": 1, "amount": 1, "gross_amount": 1}):
+        if txn.get("type") == "referral_payout":
+            # gross = net credited to user + GST routed to admin
+            total_credited_for_signup += float(txn.get("gross_amount") or txn.get("amount") or 0)
+        elif txn.get("type") in ("cascade_overflow",):
+            total_credited_for_signup += float(txn.get("amount") or 0)
+    residual = round(fee_paid - total_credited_for_signup, 2)
+    if residual > 0.01:
+        admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+        if admin_user:
+            await credit_admin_bucket("direct_signup", residual, also_total_earned=True)
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": admin_user["id"],
+                "type": "direct_signup_credit",
+                "amount": residual,
+                "status": "success",
+                "description": (
+                    f"Fee residual ₹{residual} from {user['name']}'s signup "
+                    f"(₹{int(fee_paid)} fee − ₹{int(total_credited_for_signup)} cascade)"
+                ),
+                "related_signup_id": user["id"],
+                "source_user_name": user["name"],
+                "created_at": now_utc().isoformat(),
+            })
+
 
 @api_router.post("/payment/register-fee")
 async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user)):
@@ -3059,8 +3102,11 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         pass  # idempotent — entry already exists for this order
 
     # Credit admin's shopping_margin bucket with the platform share total
+    # COD orders defer this until delivery — credit only on wallet-paid orders
+    # so admin's "earned" only reflects money actually collected. COD orders
+    # will credit on status → "delivered" via _settle_order_commission.
     platform_total = round(sum(float(it.get("platform_share") or 0) for it in enriched), 2)
-    if platform_total > 0:
+    if platform_total > 0 and payment_method == "wallet":
         admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin_doc:
             await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
@@ -3889,18 +3935,35 @@ async def get_system_wallet_breakdown(
         return await coll.count_documents(query)
 
     # ─── INFLOW ───
+    # Source of truth: actual `registration_fee` ledger transactions
+    # (NOT user_count × fee — seed/demo users marked paid without a fee
+    # txn would otherwise inflate the inflow total).
+    reg_fee_txn_total = await _sum({
+        "type": "registration_fee",
+        "status": {"$in": ["paid", "success", "approved"]},
+    })
+    # Counts kept for UI breakdown but not used for inflow math
     no_ref_count = await _count(db.users, {"no_referral_signup": True, "registration_paid": True})
     with_ref_count = await _count(db.users, {
         "no_referral_signup": {"$ne": True},
         "registration_paid": True,
         "role": "user",
     })
-    no_ref_revenue = round(no_ref_count * fee, 2)
-    with_ref_revenue = round(with_ref_count * fee, 2)
-    total_revenue = round(no_ref_revenue + with_ref_revenue, 2)
+    # Split actual fee inflow by no_ref vs with_ref based on the linked user
+    no_ref_revenue_agg = await db.transactions.aggregate([
+        {"$match": {"type": "registration_fee", "status": {"$in": ["paid", "success", "approved"]}}},
+        {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "u"}},
+        {"$match": {"u.no_referral_signup": True}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    no_ref_revenue = round(float(no_ref_revenue_agg[0]["total"] if no_ref_revenue_agg else 0), 2)
+    with_ref_revenue = round(reg_fee_txn_total - no_ref_revenue, 2)
+    total_revenue = round(reg_fee_txn_total, 2)
     utr_deposits = await _sum({"type": "system_deposit", "status": {"$in": ["success", "paid", "approved"]}})
     service_margin = await _sum({"type": {"$in": ["service_margin", "service_commission"]}, "status": "success"})
     shop_margin = await _sum({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"})
+    shop_margin -= abs(await _sum({"type": "shop_commission_reversal", "status": "success"}))
+    service_margin -= abs(await _sum({"type": "service_commission_reversal", "status": "success"}))
     inflow_total = round(total_revenue + utr_deposits + service_margin + shop_margin, 2)
 
     # ─── OUTFLOW ───
@@ -4042,8 +4105,8 @@ _BUCKET_TXN_TYPES: Dict[str, List[str]] = {
     "referral_commission": ["referral_payout", "cascade_overflow"],
     "gst_collected":       ["gst_collected"],
     "direct_added":        ["system_deposit"],
-    "service_margin":      ["service_margin", "service_commission"],
-    "shopping_margin":     ["shopping_margin", "shop_commission"],
+    "service_margin":      ["service_margin", "service_commission", "service_commission_reversal"],
+    "shopping_margin":     ["shopping_margin", "shop_commission", "shop_commission_reversal"],
 }
 
 
@@ -4272,22 +4335,344 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         raise HTTPException(status_code=404, detail="Order not found")
     prev_status = order.get("status")
     await db.orders.update_one({"id": order_id}, {"$set": {"status": payload.status}})
+
+    # ── COD delivery → settle commission + vendor wallets ────────────────
+    # COD orders DEFER the admin commission credit and vendor wallet credit
+    # until delivery is confirmed (cash actually collected). This keeps the
+    # ledger honest: admin only counts money that was truly earned.
+    paid_via = order.get("paid_via") or "wallet"
+    items = order.get("items") or []
+    if (payload.status == "delivered"
+            and prev_status != "delivered"
+            and paid_via == "cod"
+            and not order.get("commission_settled")):
+        # 1) Mark order paid + settled so we never double-credit
+        await db.orders.update_one(
+            {"id": order_id},
+            {"$set": {"payment_status": "paid", "commission_settled": True}},
+        )
+        # 2) Admin platform commission
+        platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
+        if platform_total > 0:
+            admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+            if admin_doc:
+                await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": admin_doc["id"],
+                    "type": "shop_commission",
+                    "amount": platform_total,
+                    "status": "success",
+                    "description": f"Shop margin from COD order #{order_id[:8]} (settled on delivery)",
+                    "order_id": order_id,
+                    "created_at": now_utc().isoformat(),
+                })
+        # 3) Vendor share credits
+        vendor_payouts: Dict[str, float] = {}
+        for it in items:
+            vid = it.get("vendor_id")
+            vshare = float(it.get("vendor_share") or 0)
+            if vid and vshare > 0:
+                vendor_payouts[vid] = vendor_payouts.get(vid, 0) + vshare
+        for vid, amt in vendor_payouts.items():
+            amt = round(amt, 2)
+            await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": amt}})
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": vid,
+                "type": "vendor_sale",
+                "amount": amt,
+                "status": "success",
+                "description": f"Vendor share — COD order #{order_id[:8]} delivered",
+                "order_id": order_id,
+                "created_at": now_utc().isoformat(),
+            })
+
     if payload.status == "cancelled" and prev_status != "cancelled":
-        await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": order["total"]}})
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": order["user_id"],
-            "type": "refund",
-            "amount": order["total"],
-            "status": "credited",
-            "description": f"Order #{order_id[:8]} cancelled - refund",
-            "created_at": now_utc().isoformat(),
-        })
-        await _create_notification(order["user_id"], "order", "Order cancelled", f"₹{int(order['total'])} refunded to your wallet.")
-    else:
+        order_total = float(order.get("total") or 0)
+
+        # ── Refund the buyer ─────────────────────────────────────────────
+        # Wallet-paid orders: credit the wallet back.
+        # COD orders: no actual cash was held in wallet, so we DO NOT credit
+        # the wallet — just mark the order cancelled.
+        if paid_via == "wallet":
+            await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": order_total}})
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": order["user_id"],
+                "type": "refund",
+                "amount": order_total,
+                "status": "credited",
+                "description": f"Order #{order_id[:8]} cancelled — refund",
+                "order_id": order_id,
+                "created_at": now_utc().isoformat(),
+            })
+
+        # ── Reverse the LEDGER credits booked at order placement ─────────
+        # For wallet-paid orders we DID credit shop_commission + vendor_share
+        # at placement, so we must reverse both on cancellation. For COD
+        # orders nothing was credited yet (deferred to delivery) so there is
+        # nothing to reverse — unless the COD was already delivered and
+        # later cancelled, in which case order.commission_settled is True
+        # and we reverse the same way.
+        should_reverse_commission = (
+            paid_via == "wallet"
+            or (paid_via == "cod" and order.get("commission_settled"))
+        )
+        if should_reverse_commission:
+            platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
+            if platform_total > 0:
+                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+                if admin_doc:
+                    await credit_admin_bucket("shopping_margin", -platform_total, also_total_earned=True)
+                    await db.transactions.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "user_id": admin_doc["id"],
+                        "type": "shop_commission_reversal",
+                        "amount": -platform_total,
+                        "status": "success",
+                        "description": f"Reversal — order #{order_id[:8]} cancelled",
+                        "order_id": order_id,
+                        "created_at": now_utc().isoformat(),
+                    })
+            # Reverse vendor credits
+            vendor_payouts2: Dict[str, float] = {}
+            for it in items:
+                vid = it.get("vendor_id")
+                vshare = float(it.get("vendor_share") or 0)
+                if vid and vshare > 0:
+                    vendor_payouts2[vid] = vendor_payouts2.get(vid, 0) + vshare
+            for vid, amt in vendor_payouts2.items():
+                amt = round(amt, 2)
+                await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": -amt}})
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": vid,
+                    "type": "vendor_sale_reversal",
+                    "amount": -amt,
+                    "status": "success",
+                    "description": f"Vendor share reversed — order #{order_id[:8]} cancelled",
+                    "order_id": order_id,
+                    "created_at": now_utc().isoformat(),
+                })
+
+        await _create_notification(
+            order["user_id"], "order", "Order cancelled",
+            f"₹{int(order_total)} refunded to your wallet." if paid_via == "wallet" else "Your order was cancelled.",
+        )
+    elif payload.status != "cancelled":
         await _create_notification(order["user_id"], "order", f"Order {payload.status}", f"Your order is now {payload.status}.")
     await _audit_log(admin, "order.status", "order", order_id, {"status": payload.status, "prev": prev_status})
     return {"ok": True}
+
+
+@api_router.post("/admin/system-wallet/cleanup-legacy-refunds")
+async def admin_cleanup_legacy_refunds(
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance")),
+):
+    """One-shot cleanup for the buggy cancel-refund flow that pre-dated the
+    proper double-entry handling.
+
+    Symptoms it fixes:
+      • COD orders were credited admin's shop_commission AT PLACEMENT
+        (before cash was collected). When cancelled, the bogus refund
+        was deposited into the user's wallet too, doubling the drift.
+      • Wallet orders never reversed admin's commission on cancel.
+
+    Strategy (idempotent — flagged via order.legacy_drift_cleaned):
+      1. For every cancelled order without a *_reversal txn:
+           a) reverse the admin's `shop_commission` bucket
+           b) reverse any vendor_sale credits
+           c) for COD-paid orders: the user got a phantom refund (no real
+              money flowed in or out) — debit the user's wallet back IF
+              they still have at least that much balance. Otherwise log a
+              `legacy_drift_residual` audit note (manual admin write-off).
+    """
+    settings = await get_settings()  # noqa: F841 (kept for parity)
+    cancelled = await db.orders.find({"status": "cancelled"}).to_list(10000)
+    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not admin_doc:
+        raise HTTPException(status_code=500, detail="Admin user missing")
+    report: List[Dict[str, Any]] = []
+
+    for order in cancelled:
+        if order.get("legacy_drift_cleaned"):
+            continue
+        items = order.get("items") or []
+        order_id = order["id"]
+        paid_via = order.get("paid_via") or "wallet"
+        platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
+
+        # Already-reversed orders (new flow handled them) — just mark cleaned
+        already_rev = await db.transactions.find_one({
+            "type": "shop_commission_reversal",
+            "order_id": order_id,
+        })
+        if already_rev:
+            await db.orders.update_one({"id": order_id}, {"$set": {"legacy_drift_cleaned": True}})
+            continue
+
+        actions: List[str] = []
+
+        # (a) reverse admin shop_commission for orders that actually got it
+        # COD pre-fix DID credit at placement — same as wallet
+        had_commission_credit = await db.transactions.find_one({
+            "type": "shop_commission", "order_id": order_id,
+        })
+        if had_commission_credit and platform_total > 0:
+            await credit_admin_bucket("shopping_margin", -platform_total, also_total_earned=True)
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": admin_doc["id"],
+                "type": "shop_commission_reversal",
+                "amount": -platform_total,
+                "status": "success",
+                "description": f"Legacy cleanup — reversal for cancelled order #{order_id[:8]}",
+                "order_id": order_id,
+                "created_at": now_utc().isoformat(),
+            })
+            actions.append(f"admin -{platform_total}")
+
+        # (b) reverse vendor_sale credits
+        vendor_payouts3: Dict[str, float] = {}
+        for it in items:
+            vid = it.get("vendor_id")
+            vshare = float(it.get("vendor_share") or 0)
+            if vid and vshare > 0:
+                vendor_payouts3[vid] = vendor_payouts3.get(vid, 0) + vshare
+        for vid, amt in vendor_payouts3.items():
+            had_vendor_credit = await db.transactions.find_one({
+                "user_id": vid, "type": "vendor_sale", "order_id": order_id,
+            })
+            if had_vendor_credit:
+                amt = round(amt, 2)
+                await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": -amt}})
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": vid,
+                    "type": "vendor_sale_reversal",
+                    "amount": -amt,
+                    "status": "success",
+                    "description": f"Legacy cleanup — reversal for cancelled order #{order_id[:8]}",
+                    "order_id": order_id,
+                    "created_at": now_utc().isoformat(),
+                })
+                actions.append(f"vendor {vid[:8]} -{amt}")
+
+        # (c) for COD-paid orders: phantom refund — debit user back
+        if paid_via == "cod":
+            order_total = float(order.get("total") or 0)
+            phantom_refund_txn = await db.transactions.find_one({
+                "type": "refund", "order_id": order_id,
+            }) or await db.transactions.find_one({
+                "type": "refund", "user_id": order["user_id"],
+                "description": {"$regex": order_id[:8]},
+            })
+            if phantom_refund_txn:
+                u = await db.users.find_one({"id": order["user_id"]})
+                bal = float((u or {}).get("wallet_balance") or 0)
+                if bal >= order_total:
+                    await db.users.update_one(
+                        {"id": order["user_id"]},
+                        {"$inc": {"wallet_balance": -order_total}},
+                    )
+                    await db.transactions.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "user_id": order["user_id"],
+                        "type": "refund_reversal",
+                        "amount": -order_total,
+                        "status": "success",
+                        "description": f"Legacy cleanup — phantom COD refund reversed for order #{order_id[:8]}",
+                        "order_id": order_id,
+                        "created_at": now_utc().isoformat(),
+                    })
+                    actions.append(f"user {order['user_id'][:8]} -{order_total} (phantom refund)")
+                else:
+                    actions.append(
+                        f"user {order['user_id'][:8]} residual ₹{order_total - bal:.2f} (balance too low)"
+                    )
+
+        await db.orders.update_one({"id": order_id}, {"$set": {"legacy_drift_cleaned": True}})
+        report.append({"order_id": order_id, "paid_via": paid_via, "actions": actions})
+
+    await _audit_log(admin, "system_wallet.cleanup_legacy_refunds", "wallet", admin_doc["id"], {
+        "orders_processed": len(report),
+    })
+
+    # ── Phase 2: backfill fee-residuals for already-approved with-ref users ──
+    # For every with-ref signup that was approved BEFORE the residual safety
+    # net existed, compute (fee_paid − cascade_credited) and route any
+    # positive residual to admin's direct_signup bucket. Idempotent via
+    # users.fee_residual_backfilled flag.
+    settings = await get_settings()
+    fee = float(settings.get("registration_fee") or 0)
+    residual_report: List[Dict[str, Any]] = []
+    legacy_users = await db.users.find({
+        "role": "user",
+        "registration_paid": True,
+        "no_referral_signup": {"$ne": True},
+        "fee_residual_backfilled": {"$ne": True},
+    }, {"_id": 0, "id": 1, "name": 1, "created_at": 1}).to_list(10000)
+
+    for u in legacy_users:
+        # Confirm the fee was actually paid (txn exists)
+        fee_paid_txn = await db.transactions.find_one({
+            "user_id": u["id"],
+            "type": "registration_fee",
+            "status": {"$in": ["paid", "success", "approved"]},
+        })
+        if not fee_paid_txn:
+            # No fee txn → seed user without a real fee → skip
+            await db.users.update_one({"id": u["id"]}, {"$set": {"fee_residual_backfilled": True}})
+            continue
+
+        # Sum the cascade credits (referral_payout gross + cascade_overflow)
+        # that were triggered by this user's signup
+        credited = 0.0
+        async for tx in db.transactions.find({
+            "$or": [
+                {"related_signup_id": u["id"]},
+                {
+                    "source_user_name": u["name"],
+                    "type": {"$in": ["referral_payout", "cascade_overflow", "gst_collected"]},
+                    "status": "success",
+                },
+            ],
+        }, {"_id": 0, "type": 1, "amount": 1, "gross_amount": 1}):
+            if tx.get("type") == "referral_payout":
+                credited += float(tx.get("gross_amount") or tx.get("amount") or 0)
+            elif tx.get("type") == "cascade_overflow":
+                credited += float(tx.get("amount") or 0)
+
+        residual = round(fee - credited, 2)
+        if residual > 0.01:
+            await credit_admin_bucket("direct_signup", residual, also_total_earned=True)
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": admin_doc["id"],
+                "type": "direct_signup_credit",
+                "amount": residual,
+                "status": "success",
+                "description": (
+                    f"Legacy fee residual ₹{residual} from {u['name']} "
+                    f"(₹{int(fee)} fee − ₹{int(credited)} cascade)"
+                ),
+                "related_signup_id": u["id"],
+                "source_user_name": u["name"],
+                "created_at": now_utc().isoformat(),
+            })
+            residual_report.append({
+                "user_id": u["id"], "name": u["name"], "residual": residual,
+            })
+        await db.users.update_one({"id": u["id"]}, {"$set": {"fee_residual_backfilled": True}})
+
+    return {
+        "ok": True,
+        "orders_processed": len(report),
+        "details": report,
+        "fee_residuals_backfilled": len(residual_report),
+        "residual_details": residual_report,
+    }
 
 
 # ------------------ Phase 1: Audit Log ------------------
@@ -4839,7 +5224,7 @@ async def _compute_money_flow_snapshot() -> Dict[str, Any]:
                      stays inside wallets and is therefore part of HELD)
     """
     settings = await get_settings()
-    fee = float(settings.get("registration_fee") or 0)
+    fee = float(settings.get("registration_fee") or 0)  # noqa: F841 (kept for response context)
 
     async def _sum(query):
         agg = await db.transactions.aggregate([
@@ -4848,15 +5233,16 @@ async def _compute_money_flow_snapshot() -> Dict[str, Any]:
         ]).to_list(1)
         return float(agg[0]["total"] if agg else 0)
 
-    no_ref_count = await db.users.count_documents({"no_referral_signup": True, "registration_paid": True})
-    with_ref_count = await db.users.count_documents({
-        "no_referral_signup": {"$ne": True}, "registration_paid": True, "role": "user",
-    })
+    # Use ACTUAL registration_fee transactions, NOT user count × fee.
+    # Some seed/demo users are marked registration_paid=True without a
+    # corresponding fee txn, which would otherwise inflate inflow.
+    reg_fee_inflow = round(await _sum({"type": "registration_fee", "status": {"$in": ["paid", "success", "approved"]}}), 2)
     inflow = round(
-        (no_ref_count + with_ref_count) * fee
+        reg_fee_inflow
         + await _sum({"type": "system_deposit", "status": {"$in": ["success", "paid", "approved"]}})
         + await _sum({"type": {"$in": ["service_margin", "service_commission"]}, "status": "success"})
-        + await _sum({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"}),
+        + await _sum({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"})
+        - abs(await _sum({"type": {"$in": ["shop_commission_reversal", "service_commission_reversal"]}, "status": "success"})),
         2,
     )
     # True outflow = money that LEAVES the platform (user withdrawals only).
