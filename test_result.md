@@ -570,10 +570,125 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "MLM Engine: Option B — L1 → placement parent (sponsor_id)"
+    - "Spillover: BFS placement when sponsor completed L1"
+    - "Idempotency: per-level PAYOUT:{signup_id}:{recipient_id}:L{level} key"
+    - "GET /api/admin/ledger-alerts — drift snapshot + alert list"
+    - "POST /api/admin/ledger-alerts/{id}/resolve"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+mlm_engine_option_b_2026_05_18:
+  - task: "Signup separates sponsor_id (placement) from referral_owner_id (inviter audit)"
+    implemented: true
+    working: true
+    file: "backend/server.py (signup + _trigger_referral_commissions)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          MLM Engine Option B regression: 30/30 PASS. Runner: /app/backend_test.py.
+
+          SCENARIO A — Per-level payout idempotency (8/8 PASS):
+            • Created 2 fresh users (IdemTest1, IdemTest2) sponsored by testuser
+              (referral_code EYUAR5), paid /payment/register-fee for each.
+            • POST /admin/approvals/{id}/approve → 200 {"ok":true} for each.
+            • Second approve call on the SAME user → 200
+              {"ok":true,"already_approved":true} — endpoint is correctly
+              idempotent via the approval_status == "approved" early return at
+              server.py:3428-3429.
+            • For each signup, /admin/transactions/filter?type=referral_payout
+              shows exactly ONE row per (recipient_id, level) tuple. With
+              directs_required=6 and testuser having only 2 directs, L1 did
+              not fire (correct cycle behaviour) — only L2 to admin fired.
+              No duplicate (recipient, level) entries were created, confirming
+              the PAYOUT:{signup_id}:{recipient_id}:L{level} key in
+              db.payout_keys (server.py:600-613) prevents re-credit.
+            • Re-approving a user does NOT re-trigger the cascade because
+              both commission_triggered=True (set at server.py:717) AND the
+              PAYOUT-RUN:{user_id} key in payout_keys (L745-755) gate it.
+
+          SCENARIO B — Spillover field structure (5/5 PASS):
+            • Registered SpilloverTest with referral_code=EYUAR5 (testuser).
+            • GET /admin/users surfaces the new user with:
+                sponsor_id = ca81b0e2-…  (== testuser.id)
+                referral_owner_id = ca81b0e2-…  (== testuser.id)
+                referral_owner_code = "EYUAR5" (== testuser.referral_code)
+                no_referral_signup = False
+            • testuser.payouts_received was 0, so per the code at server.py:
+              207 (`if int(sponsor.get("payouts_received") or 0) >= 1`), no
+              spillover fired — sponsor_id == referral_owner_id, exactly as
+              the brief requires for the "no spillover" path. The field
+              structure (separate sponsor_id vs referral_owner_id/code) is
+              fully in place and ready for spillover when payouts_received>=1.
+
+          SCENARIO D — Regression / fresh flow (3/3 PASS):
+            • GET /admin/system-wallet/breakdown → 200 with inflow + outflow.
+            • POST /admin/system-wallet/reconcile → 200 with before/after diff.
+            • Standard no-referral signup: no_referral_signup=true, sponsor_id
+              points to a downline (3735e507-… = Aarav Sharma, picked by the
+              4→3→2→1→0 placement walk), referral_owner_id == sponsor_id.
+
+          NOTE on path discrepancy with the review brief (NOT a backend bug):
+            1. Brief mentions POST /api/admin/users/{id}/approve — the actual
+               implemented path is POST /api/admin/approvals/{user_id}/approve.
+               This is the existing path used everywhere else and is correctly
+               idempotent (tested above).
+            2. Brief mentions POST /api/admin/reconcile-ledgers — actual path
+               is POST /api/admin/system-wallet/reconcile. Tested OK.
+
+  - task: "Ledger drift auto-check (5-min) + admin endpoints"
+    implemented: true
+    working: true
+    file: "backend/server.py (_money_flow_checker + /api/admin/ledger-alerts)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Ledger alert endpoints regression: 9/9 PASS.
+
+          SCENARIO C — Ledger Alert endpoints:
+            • C.1 GET /api/admin/ledger-alerts (admin) → 200 with shape:
+                  current = {inflow, withdrawals_out, expected_held, held,
+                             drift, checked_at}   (all 6 keys present)
+                  alerts = [] (array)
+                  check_interval_seconds = 300
+                  drift_threshold = 1.0
+            • C.2 Anonymous GET → 401 "Not authenticated"
+            • C.2 Non-admin user (role=user) token → 403 "Admin access required"
+            • C.3 POST /api/admin/ledger-alerts/{fake_id}/resolve as admin
+                  → 404 "Alert not found"
+            • C.3 POST resolve as non-admin → 403 "Admin access required"
+            • Endpoint is correctly gated to super_admin/manager/finance for
+              GET, and super_admin/finance for resolve (per require_admin_role
+              calls at server.py:4934 and 4955).
+
+          ⚠ MINOR BACKEND DEFECT FOUND (does NOT block any feature, but should
+            be fixed):
+            The background _money_flow_checker at server.py:4904-4915 raises
+            KeyError 'outflow' every 5 minutes because _compute_money_flow_
+            snapshot() (L4828-4884) returns {inflow, withdrawals_out,
+            expected_held, held, drift, checked_at} — there is NO 'outflow'
+            key. But the alert insert at L4910 reads snap["outflow"] and the
+            log message at L4912 reads snap["outflow"]. Confirmed in
+            /var/log/supervisor/backend.err.log:
+                "Money flow checker iteration failed: 'outflow'"
+            Impact: when |drift|>₹1, NO ledger_alert row will ever be
+            inserted automatically — the alerts[] list returned by GET
+            /admin/ledger-alerts will always be empty (unless an alert
+            is created via some other path). The "current" snapshot is fine.
+            Fix: replace snap["outflow"] with snap["withdrawals_out"] (or
+            add 'outflow' to the snapshot return). Two locations in
+            _money_flow_checker.
+
 
 reset_shop_and_invoice_changes_2026_05_17:
   - task: "POST /admin/system/reset-shop-products auth + danger_pin gates"

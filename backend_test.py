@@ -1,274 +1,358 @@
-"""Backend regression tests for:
- A) POST /api/admin/system/reset-shop-products auth-gate validation
- B) Invoices for referral_payout (with GST rows)
- C) No-GST invoices for system_deposit / admin_credit / withdrawal
- D) SEED_DEMO_USERS env-flag presence (informational)
+"""
+MLM Engine Option B + Ledger Alert endpoint regression tests.
+Runner: python /app/backend_test.py
 """
 import os
 import sys
-import uuid
 import time
+import uuid
+import json
 import requests
+from typing import Optional, Dict, Any, List
 
-# --- Public backend URL ---
-FRONTEND_ENV = "/app/frontend/.env"
-PUBLIC_URL = None
-with open(FRONTEND_ENV) as f:
-    for line in f:
-        if line.strip().startswith("EXPO_PUBLIC_BACKEND_URL="):
-            PUBLIC_URL = line.split("=", 1)[1].strip().strip('"')
-            break
-assert PUBLIC_URL, "EXPO_PUBLIC_BACKEND_URL not found"
-API = PUBLIC_URL.rstrip("/") + "/api"
-print(f"[INFO] Using backend: {API}")
+# ---- Config ----
+FRONTEND_ENV_PATH = "/app/frontend/.env"
+BASE_URL = None
+for line in open(FRONTEND_ENV_PATH).read().splitlines():
+    if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
+        BASE_URL = line.split("=", 1)[1].strip().strip('"') + "/api"
+if not BASE_URL:
+    BASE_URL = "https://vendor-network-app-1.preview.emergentagent.com/api"
+print(f"BASE_URL: {BASE_URL}")
 
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASS = "Admin@123"
-DEMO_EMAIL = "aarav@demo.app"
-DEMO_PASS = "Demo@123"
+ADMIN_PASSWORD = "Admin@123"
+TESTUSER_EMAIL = "testuser@app.com"
+TESTUSER_PASSWORD = "Test@123"
 
-results = {"passed": 0, "failed": 0, "issues": []}
+PASSES: List[str] = []
+FAILURES: List[str] = []
 
 
-def report(name, ok, detail=""):
-    icon = "[PASS]" if ok else "[FAIL]"
-    print(f"{icon} {name}  {detail}")
+def _record(name: str, ok: bool, detail: str = ""):
+    bar = "✅" if ok else "❌"
+    line = f"{bar} {name}" + (f"  --  {detail}" if detail else "")
+    print(line)
     if ok:
-        results["passed"] += 1
+        PASSES.append(name)
     else:
-        results["failed"] += 1
-        results["issues"].append(f"{name} :: {detail}")
+        FAILURES.append(f"{name} :: {detail}")
 
 
-def login(email, password):
-    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=30)
+def _req(method: str, path: str, *, token: Optional[str] = None, json_body: Any = None,
+         params: Any = None, expect: Optional[int] = None) -> requests.Response:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"{BASE_URL}{path}"
+    r = requests.request(method, url, headers=headers, json=json_body, params=params, timeout=60)
+    return r
+
+
+# ---- Auth ----
+def login(email: str, password: str) -> Optional[str]:
+    r = _req("POST", "/auth/login", json_body={"email": email, "password": password})
     if r.status_code != 200:
-        return None, r
-    j = r.json()
-    return j.get("access_token") or j.get("token"), r
+        print(f"LOGIN FAIL {email}: {r.status_code} {r.text[:200]}")
+        return None
+    return r.json()["token"]
 
 
-# ------------------ A) reset-shop-products gate ------------------
-print("\n=== A) /admin/system/reset-shop-products auth gates ===")
-admin_token, _ = login(ADMIN_EMAIL, ADMIN_PASS)
-assert admin_token, "Admin login failed — cannot continue"
-report("admin login", True, "200 OK")
-
-H_ADMIN = {"Authorization": f"Bearer {admin_token}"}
-
-# A.1 wrong PIN
-r = requests.post(f"{API}/admin/system/reset-shop-products",
-                  headers=H_ADMIN, json={"danger_pin": "000000"}, timeout=20)
-report("A.1 wrong PIN -> 401 Invalid Danger PIN",
-       r.status_code == 401 and "Invalid Danger PIN" in r.text,
-       f"status={r.status_code} body={r.text[:120]}")
-
-# A.2 no body
-r = requests.post(f"{API}/admin/system/reset-shop-products",
-                  headers=H_ADMIN, timeout=20)
-report("A.2 no body -> 422",
-       r.status_code == 422,
-       f"status={r.status_code}")
-
-# A.2b empty json body — also 422 (danger_pin required)
-r = requests.post(f"{API}/admin/system/reset-shop-products",
-                  headers=H_ADMIN, json={}, timeout=20)
-report("A.2b empty body -> 422",
-       r.status_code == 422,
-       f"status={r.status_code}")
-
-# A.2c bad-length pin -> 422
-r = requests.post(f"{API}/admin/system/reset-shop-products",
-                  headers=H_ADMIN, json={"danger_pin": "123"}, timeout=20)
-report("A.2c short PIN -> 422",
-       r.status_code == 422,
-       f"status={r.status_code}")
-
-# A.3 non-super-admin -> 403
-demo_token, lr = login(DEMO_EMAIL, DEMO_PASS)
-if not demo_token:
-    uniq = uuid.uuid4().hex[:8]
-    em = f"resetshop_{uniq}@test.app"
-    r = requests.post(f"{API}/auth/register",
-                      json={"name": "ResetShop Test", "email": em,
-                            "password": "Test@1234", "phone": "9111122223"},
-                      timeout=30)
-    demo_token = r.json().get("access_token") if r.status_code == 200 else None
-    print(f"   (fallback registered {em}, token={'yes' if demo_token else 'NO'})")
-
-if demo_token:
-    r = requests.post(f"{API}/admin/system/reset-shop-products",
-                      headers={"Authorization": f"Bearer {demo_token}"},
-                      json={"danger_pin": "000000"}, timeout=20)
-    report("A.3 non-super-admin -> 403",
-           r.status_code == 403,
-           f"status={r.status_code} body={r.text[:140]}")
-else:
-    report("A.3 non-super-admin -> 403", False, "could not obtain non-admin token")
-
-# A.4 no auth
-r = requests.post(f"{API}/admin/system/reset-shop-products",
-                  json={"danger_pin": "000000"}, timeout=20)
-report("A.4 unauthenticated -> 401/403",
-       r.status_code in (401, 403),
-       f"status={r.status_code}")
+def register_user(name: str, email: str, password: str, referral_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    body = {"name": name, "email": email, "password": password}
+    if referral_code:
+        body["referral_code"] = referral_code
+    r = _req("POST", "/auth/register", json_body=body)
+    if r.status_code != 200:
+        print(f"REGISTER FAIL {email}: {r.status_code} {r.text[:300]}")
+        return None
+    return r.json()
 
 
-# ------------------ B) Invoice for referral_payout ------------------
-print("\n=== B) Invoice for referral_payout ===")
-
-r = requests.get(f"{API}/admin/transactions", headers=H_ADMIN, timeout=30)
-report("B.0 GET /admin/transactions", r.status_code == 200, f"status={r.status_code}")
-
-ref_txn = None
-level_txn = None
-all_rows = []
-if r.status_code == 200:
-    all_rows = r.json() if isinstance(r.json(), list) else r.json().get("items", [])
-    for tx in all_rows:
-        t = (tx.get("type") or "").lower()
-        if t == "referral_payout" and not ref_txn:
-            ref_txn = tx
-        if t == "level_payout" and not level_txn:
-            level_txn = tx
-        if ref_txn and level_txn:
-            break
-    print(f"   referral_payout txn: {ref_txn['id'] if ref_txn else 'NONE'}")
-    print(f"   level_payout txn:    {level_txn['id'] if level_txn else 'NONE'}")
-    print(f"   total txns: {len(all_rows)}")
+def get_me(token: str) -> Dict[str, Any]:
+    r = _req("GET", "/auth/me", token=token)
+    return r.json() if r.status_code == 200 else {}
 
 
-def check_invoice_html_gst(label, txn_id, expect_gst=True):
-    r = requests.get(f"{API}/transactions/{txn_id}/invoice", headers=H_ADMIN, timeout=30)
-    ok = (r.status_code == 200)
-    has_html_tag = "<html" in r.text.lower() or "<!doctype" in r.text.lower() or "<body" in r.text.lower()
-    report(f"{label} HTML 200 + html-like",
-           ok and has_html_tag,
-           f"status={r.status_code} len={len(r.text)} ct={r.headers.get('content-type','')}")
-    body = r.text
-    has_cgst = "CGST" in body
-    has_sgst = "SGST" in body
-    has_igst = "IGST" in body
-    if expect_gst:
-        report(f"{label} contains CGST or IGST rows",
-               has_cgst or has_igst,
-               f"CGST={has_cgst} SGST={has_sgst} IGST={has_igst}")
+def pay_register_fee(token: str) -> bool:
+    r = _req("POST", "/payment/register-fee", token=token)
+    return r.status_code == 200
+
+
+def approve_user(admin_token: str, user_id: str) -> requests.Response:
+    return _req("POST", f"/admin/approvals/{user_id}/approve", token=admin_token)
+
+
+def get_admin_users(admin_token: str) -> List[Dict[str, Any]]:
+    r = _req("GET", "/admin/users", token=admin_token)
+    return r.json() if r.status_code == 200 else []
+
+
+def find_user_by_email(admin_token: str, email: str) -> Optional[Dict[str, Any]]:
+    for u in get_admin_users(admin_token):
+        if (u.get("email") or "").lower() == email.lower():
+            return u
+    return None
+
+
+def get_transactions(admin_token: str, txn_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    if txn_type:
+        r = _req("GET", "/admin/transactions/filter", token=admin_token, params={"type": txn_type})
     else:
-        report(f"{label} NO CGST/SGST/IGST rows",
-               not (has_cgst or has_sgst or has_igst),
-               f"CGST={has_cgst} SGST={has_sgst} IGST={has_igst}")
-    return body
+        r = _req("GET", "/admin/transactions", token=admin_token)
+    return r.json() if r.status_code == 200 else []
 
 
-def check_invoice_pdf(label, txn_id):
-    r = requests.get(f"{API}/transactions/{txn_id}/invoice.pdf", headers=H_ADMIN, timeout=30)
-    ct = r.headers.get("content-type", "")
-    is_pdf = r.status_code == 200 and ct.startswith("application/pdf") and r.content[:4] == b"%PDF"
-    report(f"{label} PDF 200 application/pdf",
-           is_pdf,
-           f"status={r.status_code} ct={ct} first4={r.content[:4]!r}")
+# ─────────────────────────────────────────────────────────────────
+# Test main
+# ─────────────────────────────────────────────────────────────────
+def main():
+    # ---- Pre: log in admin + testuser ----
+    print("\n── PRE: AUTH ──")
+    admin_token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    if not admin_token:
+        print("FATAL: admin login failed.")
+        sys.exit(1)
+    _record("admin login", True)
+
+    testuser_token = login(TESTUSER_EMAIL, TESTUSER_PASSWORD)
+    if not testuser_token:
+        print("FATAL: testuser login failed.")
+        sys.exit(1)
+    _record("testuser login", True)
+
+    testuser_me = get_me(testuser_token)
+    testuser_id = testuser_me.get("id")
+    testuser_code = testuser_me.get("referral_code")
+    testuser_payouts = int(testuser_me.get("payouts_received") or 0)
+    print(f"testuser id={testuser_id} code={testuser_code} payouts_received={testuser_payouts}")
+
+    # Settings — fetch directs_required
+    r = _req("GET", "/admin/settings", token=admin_token)
+    settings = r.json() if r.status_code == 200 else {}
+    directs_required = int(settings.get("directs_required") or 4)
+    payout_l1 = float(settings.get("payout_l1") or 400)
+    print(f"settings: directs_required={directs_required} payout_l1={payout_l1}")
+    _record("GET /admin/settings", r.status_code == 200,
+            f"status={r.status_code} directs_required={directs_required}")
+
+    # Create finance/non-admin token for C.2 — register a fresh user and use that token
+    nonadmin_email = f"nonadmin_{uuid.uuid4().hex[:6]}@test.app"
+    nonadmin_reg = register_user("NonAdmin Tester", nonadmin_email, "Tester@123")
+    nonadmin_token = nonadmin_reg["token"] if nonadmin_reg else None
+
+    # ──────────────────────────────────────────────────────────────
+    # SCENARIO A: per-level payout idempotency
+    # ──────────────────────────────────────────────────────────────
+    print("\n── SCENARIO A: Per-level payout idempotency ──")
+    # Create 2 fresh users sponsored by testuser (so cascade hits testuser → admin chain).
+    fresh_users = []
+    for i in range(2):
+        u_email = f"idem_{uuid.uuid4().hex[:6]}@test.app"
+        u_name = f"IdemTest{i+1}"
+        reg = register_user(u_name, u_email, "Tester@123", referral_code=testuser_code)
+        if not reg:
+            _record(f"A: register fresh user {i+1}", False, "register failed")
+            continue
+        u_token = reg["token"]
+        # pay register fee
+        if not pay_register_fee(u_token):
+            _record(f"A: pay register-fee {u_name}", False)
+            continue
+        _record(f"A: register + pay fee {u_name}", True, f"email={u_email}")
+        fresh_users.append({"name": u_name, "email": u_email, "id": reg["user"]["id"], "token": u_token})
+
+    # Snapshot transactions BEFORE approve so we can diff
+    before_txns = get_transactions(admin_token, txn_type="referral_payout")
+    before_count = len(before_txns)
+
+    # Approve each user
+    for fu in fresh_users:
+        r1 = approve_user(admin_token, fu["id"])
+        ok1 = r1.status_code == 200
+        _record(f"A: approve {fu['name']}", ok1, f"status={r1.status_code} body={r1.text[:120]}")
+
+        # Second approve should be a no-op
+        r2 = approve_user(admin_token, fu["id"])
+        # endpoint returns 200 with already_approved=True
+        body2 = r2.json() if r2.headers.get("content-type","").startswith("application/json") else {}
+        is_noop = r2.status_code == 200 and (body2.get("already_approved") is True or body2.get("ok") is True)
+        _record(f"A: re-approve {fu['name']} is no-op",
+                is_noop, f"status={r2.status_code} body={r2.text[:150]}")
+
+    # Verify: for each signup, each (recipient, level) tuple appears exactly once
+    after_txns = get_transactions(admin_token, txn_type="referral_payout")
+    new_txns = [t for t in after_txns if t not in before_txns]
+    # Filter by source_user_name OR description matching fresh_users names
+    for fu in fresh_users:
+        # find all referral_payout txns triggered by THIS signup
+        related = [t for t in after_txns if (t.get("source_user_name") == fu["name"]) or
+                   (fu["name"] in (t.get("description") or ""))]
+        # Group by (user_id, level)
+        seen = {}
+        dup = False
+        for t in related:
+            key = (t.get("user_id"), t.get("level"))
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > 1:
+                dup = True
+        _record(f"A: no duplicate (recipient, level) txns for {fu['name']}",
+                not dup, f"groups={seen}")
+
+    # ──────────────────────────────────────────────────────────────
+    # SCENARIO B: signup spillover fields
+    # ──────────────────────────────────────────────────────────────
+    print("\n── SCENARIO B: spillover fields on signup ──")
+    spill_email = f"spill_{uuid.uuid4().hex[:6]}@test.app"
+    spill_name = "Spillover Test"
+    spill_reg = register_user(spill_name, spill_email, "Tester@123", referral_code=testuser_code)
+    if not spill_reg:
+        _record("B: register spillover user", False)
+    else:
+        spill_user_id = spill_reg["user"]["id"]
+        admin_view = find_user_by_email(admin_token, spill_email)
+        if not admin_view:
+            _record("B: admin can see new user", False)
+        else:
+            sponsor_id = admin_view.get("sponsor_id")
+            ref_owner_id = admin_view.get("referral_owner_id")
+            ref_owner_code = admin_view.get("referral_owner_code")
+            no_ref = admin_view.get("no_referral_signup")
+            print(f"   sponsor_id={sponsor_id}")
+            print(f"   referral_owner_id={ref_owner_id}  (testuser_id={testuser_id})")
+            print(f"   referral_owner_code={ref_owner_code}  (testuser_code={testuser_code})")
+            print(f"   no_referral_signup={no_ref}  testuser_payouts={testuser_payouts}")
+
+            _record("B: referral_owner_id == testuser.id",
+                    ref_owner_id == testuser_id,
+                    f"got {ref_owner_id} expected {testuser_id}")
+            _record("B: referral_owner_code == testuser.referral_code",
+                    ref_owner_code == testuser_code,
+                    f"got {ref_owner_code} expected {testuser_code}")
+            _record("B: sponsor_id is set",
+                    bool(sponsor_id), f"sponsor_id={sponsor_id}")
+            _record("B: no_referral_signup is False (had real referral)",
+                    no_ref is False, f"got {no_ref}")
+
+            # Sub-check: if testuser had payouts_received==0, then no spillover should fire
+            # (sponsor_id == referral_owner_id). If >=1, spillover MAY have fired.
+            if testuser_payouts == 0:
+                _record("B.3: on payouts_received=0, sponsor_id == referral_owner_id (no spillover)",
+                        sponsor_id == ref_owner_id,
+                        f"sponsor_id={sponsor_id} owner_id={ref_owner_id}")
+            else:
+                print(f"   NOTE: testuser already has payouts_received={testuser_payouts}; "
+                      f"spillover may have fired. Reported field structure is correct regardless.")
+                # Still record this as informational PASS as long as fields are set
+                _record("B.3: spillover field structure correct (testuser.payouts_received>=1)",
+                        bool(sponsor_id) and bool(ref_owner_id),
+                        "spillover field structure verified")
+
+    # ──────────────────────────────────────────────────────────────
+    # SCENARIO C: Ledger alert endpoints
+    # ──────────────────────────────────────────────────────────────
+    print("\n── SCENARIO C: Ledger Alert endpoints ──")
+    r = _req("GET", "/admin/ledger-alerts", token=admin_token)
+    _record("C.1: GET /admin/ledger-alerts (admin) 200", r.status_code == 200,
+            f"status={r.status_code}")
+    if r.status_code == 200:
+        body = r.json()
+        # shape: current, alerts[], check_interval_seconds=300, drift_threshold=1.0
+        cur = body.get("current") or {}
+        cur_keys = set(cur.keys())
+        expected_cur_keys = {"inflow", "withdrawals_out", "expected_held", "held", "drift", "checked_at"}
+        _record("C.1: current has all required keys",
+                expected_cur_keys.issubset(cur_keys),
+                f"missing={expected_cur_keys - cur_keys}")
+        _record("C.1: alerts is array",
+                isinstance(body.get("alerts"), list),
+                f"type={type(body.get('alerts')).__name__}")
+        _record("C.1: check_interval_seconds == 300",
+                body.get("check_interval_seconds") == 300,
+                f"got={body.get('check_interval_seconds')}")
+        _record("C.1: drift_threshold == 1.0",
+                float(body.get("drift_threshold") or 0) == 1.0,
+                f"got={body.get('drift_threshold')}")
+
+    # C.2: access gating
+    r_anon = _req("GET", "/admin/ledger-alerts")
+    _record("C.2: anonymous → 401/403", r_anon.status_code in (401, 403),
+            f"status={r_anon.status_code}")
+
+    if nonadmin_token:
+        r_nu = _req("GET", "/admin/ledger-alerts", token=nonadmin_token)
+        _record("C.2: non-admin user token → 403",
+                r_nu.status_code == 403,
+                f"status={r_nu.status_code} body={r_nu.text[:120]}")
+
+    # C.3: resolve unknown id -> 404
+    fake_alert_id = f"fake-{uuid.uuid4().hex[:8]}"
+    r_unk = _req("POST", f"/admin/ledger-alerts/{fake_alert_id}/resolve", token=admin_token)
+    _record("C.3: resolve unknown alert id → 404",
+            r_unk.status_code == 404,
+            f"status={r_unk.status_code} body={r_unk.text[:120]}")
+    # C.3b: non-admin → 403
+    if nonadmin_token:
+        r_unk_nu = _req("POST", f"/admin/ledger-alerts/{fake_alert_id}/resolve", token=nonadmin_token)
+        _record("C.3: non-admin POST resolve → 403",
+                r_unk_nu.status_code == 403,
+                f"status={r_unk_nu.status_code}")
+
+    # ──────────────────────────────────────────────────────────────
+    # SCENARIO D: Regression
+    # ──────────────────────────────────────────────────────────────
+    print("\n── SCENARIO D: Regression of existing flows ──")
+    # D.1: system-wallet/breakdown
+    r = _req("GET", "/admin/system-wallet/breakdown", token=admin_token)
+    ok = r.status_code == 200 and isinstance(r.json(), dict) and "inflow" in r.json() and "outflow" in r.json()
+    _record("D.1: GET /admin/system-wallet/breakdown 200 with schema",
+            ok, f"status={r.status_code}")
+
+    # D.2: /admin/reconcile-ledgers — the test brief mentioned this path,
+    # but the implemented path is /admin/system-wallet/reconcile. Test both.
+    r1 = _req("POST", "/admin/reconcile-ledgers", token=admin_token)
+    r2 = _req("POST", "/admin/system-wallet/reconcile", token=admin_token)
+    _record("D.2: POST /admin/system-wallet/reconcile 200",
+            r2.status_code == 200, f"status={r2.status_code} body={r2.text[:150]}")
+    if r1.status_code != 200:
+        print(f"   NOTE: POST /admin/reconcile-ledgers does NOT exist (status={r1.status_code}). "
+              f"The actual path is /admin/system-wallet/reconcile.")
+
+    # D.3: signup with NO referral
+    nr_email = f"noref_{uuid.uuid4().hex[:6]}@test.app"
+    nr_name = "NoRefTester"
+    nr_reg = register_user(nr_name, nr_email, "Tester@123")  # no referral_code
+    if not nr_reg:
+        _record("D.3: register no-ref user", False)
+    else:
+        nr_view = find_user_by_email(admin_token, nr_email)
+        if not nr_view:
+            _record("D.3: admin can see no-ref user", False)
+        else:
+            print(f"   no-ref: sponsor_id={nr_view.get('sponsor_id')} owner_id={nr_view.get('referral_owner_id')} "
+                  f"no_referral_signup={nr_view.get('no_referral_signup')}")
+            _record("D.3: no_referral_signup is True",
+                    nr_view.get("no_referral_signup") is True,
+                    f"got {nr_view.get('no_referral_signup')}")
+            _record("D.3: sponsor_id is set (placement)",
+                    bool(nr_view.get("sponsor_id")),
+                    f"sponsor_id={nr_view.get('sponsor_id')}")
+            _record("D.3: referral_owner_id == sponsor_id (no-ref → owner=placement)",
+                    nr_view.get("referral_owner_id") == nr_view.get("sponsor_id"),
+                    f"sponsor_id={nr_view.get('sponsor_id')} owner_id={nr_view.get('referral_owner_id')}")
+
+    # ──────────────────────────────────────────────────────────────
+    # Summary
+    # ──────────────────────────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print(f"PASSED: {len(PASSES)}   FAILED: {len(FAILURES)}")
+    print("=" * 70)
+    if FAILURES:
+        print("\nFAILURES:")
+        for f in FAILURES:
+            print(f"  - {f}")
+    return len(FAILURES)
 
 
-if ref_txn:
-    check_invoice_html_gst("B.1 referral_payout invoice.html", ref_txn["id"], expect_gst=True)
-    check_invoice_pdf("B.2 referral_payout invoice.pdf", ref_txn["id"])
-else:
-    report("B.1 referral_payout invoice", False, "no referral_payout txn found in DB")
-
-if level_txn:
-    check_invoice_html_gst("B.3 level_payout invoice.html", level_txn["id"], expect_gst=True)
-    check_invoice_pdf("B.4 level_payout invoice.pdf", level_txn["id"])
-else:
-    print("   (no level_payout txn found - skipping bonus)")
-
-
-# ------------------ C) No-GST invoices ------------------
-print("\n=== C) No-GST invoices (system_deposit / admin_credit / withdrawal) ===")
-
-sd_txn = None
-for tx in all_rows:
-    if (tx.get("type") or "").lower() == "system_deposit":
-        sd_txn = tx
-        break
-if sd_txn:
-    print(f"   found existing system_deposit: {sd_txn['id']}")
-
-if not sd_txn:
-    utr = f"TESTUTR-INVOICE-{uuid.uuid4().hex[:6].upper()}"
-    rd = requests.post(f"{API}/admin/system-wallet/deposit",
-                       headers=H_ADMIN,
-                       json={"amount": 1000, "utr": utr, "remarks": "invoice test deposit"},
-                       timeout=30)
-    report("C.0 create system_deposit (UTR)",
-           rd.status_code == 200,
-           f"status={rd.status_code} body={rd.text[:160]}")
-    if rd.status_code == 200:
-        time.sleep(0.5)
-        r3 = requests.get(f"{API}/admin/transactions", headers=H_ADMIN, timeout=30)
-        if r3.status_code == 200:
-            rr = r3.json() if isinstance(r3.json(), list) else r3.json().get("items", [])
-            for tx in rr:
-                if tx.get("reference_number") == utr and (tx.get("type") or "").lower() == "system_deposit":
-                    sd_txn = tx
-                    break
-            print(f"   created system_deposit txn: {sd_txn['id'] if sd_txn else 'NOT FOUND'}")
-
-if sd_txn:
-    body = check_invoice_html_gst("C.1 system_deposit invoice.html no-GST", sd_txn["id"], expect_gst=False)
-    has_net = "Net payment" in body or "net payment" in body.lower()
-    amt = float(sd_txn.get("amount") or 0)
-    inflated = round(amt * 1.18, 2)
-    candidates = [f"{int(amt)}", f"{amt:.2f}", f"{amt:,.2f}",
-                  f"{int(inflated)}", f"{inflated:.2f}", f"{inflated:,.2f}"]
-    has_amount = any(a in body for a in candidates)
-    report("C.1b system_deposit invoice contains 'Net payment'",
-           has_net, f"has_net={has_net}")
-    report("C.1c system_deposit invoice contains gross amount",
-           has_amount, f"amount={amt} (or inflated 1.18x = {inflated}), looked for any of {candidates}")
-    # Informational: flag if the invoice shows the inflated 1.18x value
-    # instead of the actual deposit amount — minor display issue.
-    shows_inflated = any(s in body for s in [f"{int(inflated)}", f"{inflated:.2f}"])
-    shows_actual = any(s in body for s in [f"{int(amt)}", f"{amt:.2f}"])
-    print(f"   [INFO] invoice displays actual={shows_actual} inflated_1.18x={shows_inflated}")
-    check_invoice_pdf("C.1d system_deposit invoice.pdf", sd_txn["id"])
-else:
-    report("C.1 system_deposit invoice", False, "no system_deposit txn could be obtained/created")
-
-ac_txn = None
-wd_txn = None
-for tx in all_rows:
-    t = (tx.get("type") or "").lower()
-    if t == "admin_credit" and not ac_txn:
-        ac_txn = tx
-    if t == "withdrawal" and not wd_txn:
-        wd_txn = tx
-
-if ac_txn:
-    check_invoice_html_gst("C.2 admin_credit invoice.html no-GST", ac_txn["id"], expect_gst=False)
-else:
-    print("   (no admin_credit txn found - skipping C.2)")
-
-if wd_txn:
-    check_invoice_html_gst("C.3 withdrawal invoice.html no-GST", wd_txn["id"], expect_gst=False)
-else:
-    print("   (no withdrawal txn found - skipping C.3)")
-
-
-# ------------------ D) SEED_DEMO_USERS env flag (informational) ------------------
-print("\n=== D) SEED_DEMO_USERS env flag ===")
-import pathlib
-src = pathlib.Path("/app/backend/server.py").read_text()
-has_env_read = 'os.environ.get("SEED_DEMO_USERS"' in src
-report("D.1 server.py reads SEED_DEMO_USERS env var",
-       has_env_read,
-       "found in server.py" if has_env_read else "NOT FOUND")
-
-# Recap
-print("\n=== SUMMARY ===")
-print(f"PASS: {results['passed']}")
-print(f"FAIL: {results['failed']}")
-if results["issues"]:
-    print("Failures:")
-    for it in results["issues"]:
-        print(f"  - {it}")
-sys.exit(0 if results["failed"] == 0 else 1)
+if __name__ == "__main__":
+    sys.exit(main())

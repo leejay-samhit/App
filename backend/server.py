@@ -576,7 +576,7 @@ async def _credit_cascade_overflow_to_admin(joiner_name: str, missing_levels: Li
 
 
 
-async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = ""):
+async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = "", signup_id: Optional[str] = None):
     """Credit a referral payout to a sponsor at a given level.
 
     Business rule (FinCom #3 — Option B / GST-exclusive):
@@ -589,7 +589,29 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
 
     For admin recipients (Level-1 reaching the seed admin via cycle), no split
     happens — admin receives the full amount in `referral_commission`.
+
+    Idempotency: when `signup_id` is provided, a unique key
+    `PAYOUT:{signup_id}:{recipient_id}:{level}` prevents double-credit if the
+    cascade re-fires (e.g. retry, race). First writer wins; later attempts
+    silently no-op.
     """
+    # Per-level idempotency guard — prevents the same (signup, recipient,
+    # level) tuple from ever being credited twice.
+    if signup_id:
+        idem_key = f"PAYOUT:{signup_id}:{sponsor_user['id']}:L{level}"
+        try:
+            await db.payout_keys.insert_one({
+                "_id": idem_key,
+                "signup_id": signup_id,
+                "recipient_id": sponsor_user["id"],
+                "level": level,
+                "amount": float(amount),
+                "created_at": now_utc().isoformat(),
+            })
+        except Exception:
+            # Already credited — silent no-op
+            return
+
     gross = float(amount)
     is_admin_recipient = (sponsor_user.get("email") or "").lower() == ADMIN_EMAIL.lower()
     ts = now_utc().isoformat()
@@ -732,14 +754,15 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         # cleanly so we never double-pay.
         return
 
-    # ─── L1 commission OWNERSHIP (spillover-safe) ──────────────────────
-    # If spillover happened, sponsor_id (tree parent) ≠ referral_owner_id
-    # (the actual inviter). L1 commission ALWAYS goes to the inviter; the
-    # L2..L10 cascade walks the TREE from sponsor_id upward.
-    referral_owner_id = user.get("referral_owner_id") or sponsor_id
-    sponsor = await db.users.find_one({"id": referral_owner_id})
-    if not sponsor:
-        sponsor = await db.users.find_one({"id": sponsor_id})
+    # ─── L1 commission OWNERSHIP (PLACEMENT-BASED, Option B) ───────────
+    # Business rule: L1 commission goes to the user under whose tree the
+    # new joiner was PLACED (sponsor_id). When BFS spillover applies,
+    # sponsor_id is the deeper downline who actually got the new direct
+    # in their leg — they earn the L1 cycle credit.
+    # `referral_owner_id` is preserved separately as an audit/genealogy
+    # field ("who originally invited this user") but does NOT receive L1.
+    # L2..L10 cascade walks the TREE from sponsor_id upward as usual.
+    sponsor = await db.users.find_one({"id": sponsor_id})
     if not sponsor:
         return
     tree_parent_id = sponsor_id  # for L2..L10 cascade walk
@@ -767,15 +790,14 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
             {"$inc": {"pending_directs": -directs_required}},
         )
         fresh = await db.users.find_one({"id": sponsor_id})
-        await _credit_payout(fresh, payout_l1, 1, user["name"])
+        await _credit_payout(fresh, payout_l1, 1, user["name"], signup_id=user["id"])
 
-    # Walk up levels 2..10 along the TREE (sponsor_id chain), starting from
-    # the tree-parent (which may differ from the L1 commission owner when
-    # spillover applied). This preserves the matrix structure on disk: every
-    # cascade walks the same parentage in `sponsor_id`, while L1 commission
-    # already went to the actual inviter above.
+    # Walk up levels 2..10 along the TREE (sponsor_id chain). The placement
+    # parent (sponsor_id) already received the L1 cycle credit above, so we
+    # start the cascade at the placement parent's sponsor (grandparent of
+    # the new joiner) — preventing double payment to the placement parent.
     tree_parent = await db.users.find_one({"id": tree_parent_id})
-    current_id = (tree_parent or {}).get("sponsor_id") if tree_parent_id != sponsor.get("id") else sponsor.get("sponsor_id")
+    current_id = (tree_parent or {}).get("sponsor_id")
     paid_levels: List[int] = []
     for level in range(2, 11):
         if not current_id:
@@ -789,7 +811,7 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
             continue
         amt = level_payouts[level - 1]
         if amt > 0:
-            await _credit_payout(upline, amt, level, user["name"])
+            await _credit_payout(upline, amt, level, user["name"], signup_id=user["id"])
             paid_levels.append(level)
         current_id = upline.get("sponsor_id")
 
@@ -4795,6 +4817,154 @@ async def _backup_scheduler():
         await asyncio.sleep(BACKUP_INTERVAL_SECONDS)
 
 
+# Money-flow auto-check — runs every 5 minutes and verifies that
+#   INFLOW  ≈  OUTFLOW + HELD_BALANCE
+# Any drift > ₹1 is logged into the `ledger_alerts` collection so the
+# admin sees a red flag in the System Wallet > Audit screen.
+MONEY_FLOW_CHECK_INTERVAL_SECONDS = 300  # 5 minutes
+MONEY_FLOW_DRIFT_THRESHOLD = 1.0          # alert if |drift| > ₹1
+
+
+async def _compute_money_flow_snapshot() -> Dict[str, Any]:
+    """Lightweight money-flow tally for drift detection.
+
+    Identity we enforce:
+        INFLOW − WITHDRAWALS_OUT  ≈  HELD_IN_WALLETS
+
+    Where:
+      INFLOW       = registration fees + UTR deposits + service/shop margin
+      WITHDRAWALS  = successful user withdrawals (only TRUE money leaving)
+      HELD         = admin wallet + Σ user wallets (everything else — gst,
+                     direct-signup, cascade-overflow, referral payouts —
+                     stays inside wallets and is therefore part of HELD)
+    """
+    settings = await get_settings()
+    fee = float(settings.get("registration_fee") or 0)
+
+    async def _sum(query):
+        agg = await db.transactions.aggregate([
+            {"$match": query},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        return float(agg[0]["total"] if agg else 0)
+
+    no_ref_count = await db.users.count_documents({"no_referral_signup": True, "registration_paid": True})
+    with_ref_count = await db.users.count_documents({
+        "no_referral_signup": {"$ne": True}, "registration_paid": True, "role": "user",
+    })
+    inflow = round(
+        (no_ref_count + with_ref_count) * fee
+        + await _sum({"type": "system_deposit", "status": {"$in": ["success", "paid", "approved"]}})
+        + await _sum({"type": {"$in": ["service_margin", "service_commission"]}, "status": "success"})
+        + await _sum({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"}),
+        2,
+    )
+    # True outflow = money that LEAVES the platform (user withdrawals only).
+    # All other "outflow" buckets (GST, cascade overflow, direct-signup,
+    # referral payouts) stay inside admin/user wallets → they're HELD.
+    withdrawals_out = round(abs(await _sum({"type": "withdrawal", "status": "success"})), 2)
+
+    a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    admin_total = float((a or {}).get("wallet_balance") or 0)
+    users_wallet_agg = await db.users.aggregate([
+        {"$match": {"role": "user"}},
+        {"$group": {"_id": None, "total": {"$sum": "$wallet_balance"}}},
+    ]).to_list(1)
+    users_wallet_total = float(users_wallet_agg[0]["total"] if users_wallet_agg else 0)
+    held = round(admin_total + users_wallet_total, 2)
+    expected_held = round(inflow - withdrawals_out, 2)
+    drift = round(held - expected_held, 2)
+    return {
+        "inflow": inflow,
+        "withdrawals_out": withdrawals_out,
+        "expected_held": expected_held,
+        "held": held,
+        "drift": drift,
+        "checked_at": now_utc().isoformat(),
+    }
+
+
+async def _money_flow_checker():
+    """Background task: every 5 minutes, verify the ledger tallies.
+
+    Drift logic:
+      Inflow  = registration fees + utr deposits + service margin + shop margin
+      Outflow = referral payouts + GST + cascade overflow + direct-signup + withdrawals
+      Expected: inflow ≈ outflow  (because every rupee that comes in is
+      classified into one of the outflow buckets — either credited to
+      a user wallet or sitting in an admin bucket like direct_signup).
+
+    If |inflow − outflow| > ₹1, store a `ledger_alerts` row so admin
+    can investigate. The latest 50 alerts are kept; older are purged.
+    """
+    await asyncio.sleep(45)  # let app boot + initial backfills finish
+    while True:
+        try:
+            snap = await _compute_money_flow_snapshot()
+            if abs(snap["drift"]) > MONEY_FLOW_DRIFT_THRESHOLD:
+                await db.ledger_alerts.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "severity": "warn" if abs(snap["drift"]) < 100 else "high",
+                    "drift": snap["drift"],
+                    "inflow": snap["inflow"],
+                    "outflow": snap["outflow"],
+                    "held": snap["held"],
+                    "message": f"Money flow drift: ₹{snap['drift']} (inflow ₹{snap['inflow']} vs outflow ₹{snap['outflow']})",
+                    "created_at": snap["checked_at"],
+                    "resolved": False,
+                })
+                logger.warning(
+                    f"[LEDGER ALERT] drift ₹{snap['drift']} | "
+                    f"inflow ₹{snap['inflow']} | withdrawn ₹{snap['withdrawals_out']} | "
+                    f"expected_held ₹{snap['expected_held']} | actual_held ₹{snap['held']}"
+                )
+                # Trim history — keep newest 50
+                old_ids = await db.ledger_alerts.find(
+                    {}, {"_id": 0, "id": 1}
+                ).sort("created_at", -1).skip(50).to_list(1000)
+                if old_ids:
+                    await db.ledger_alerts.delete_many({"id": {"$in": [x["id"] for x in old_ids]}})
+        except Exception as _err:
+            logger.warning(f"Money flow checker iteration failed: {str(_err)[:200]}")
+        await asyncio.sleep(MONEY_FLOW_CHECK_INTERVAL_SECONDS)
+
+
+@api_router.get("/admin/ledger-alerts")
+async def admin_list_ledger_alerts(
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "finance")),
+    only_unresolved: bool = False,
+):
+    """Most-recent ledger-drift alerts raised by the periodic auto-check."""
+    q: Dict[str, Any] = {}
+    if only_unresolved:
+        q["resolved"] = False
+    items = await db.ledger_alerts.find(q, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    # Live snapshot of current drift (in case the periodic task hasn't fired yet)
+    snap = await _compute_money_flow_snapshot()
+    return {
+        "current": snap,
+        "alerts": items,
+        "check_interval_seconds": MONEY_FLOW_CHECK_INTERVAL_SECONDS,
+        "drift_threshold": MONEY_FLOW_DRIFT_THRESHOLD,
+    }
+
+
+@api_router.post("/admin/ledger-alerts/{alert_id}/resolve")
+async def admin_resolve_ledger_alert(
+    alert_id: str,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance")),
+):
+    """Mark a ledger drift alert as resolved (acknowledged by admin)."""
+    r = await db.ledger_alerts.update_one(
+        {"id": alert_id},
+        {"$set": {"resolved": True, "resolved_by": admin["id"], "resolved_at": now_utc().isoformat()}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"ok": True}
+
+
+
 @api_router.get("/admin/backups")
 async def admin_list_backups(_: Dict[str, Any] = Depends(require_admin_not_finance)):
     """List snapshots — newest first, without the heavy `data` payload."""
@@ -4957,6 +5127,8 @@ async def on_startup():
     asyncio.create_task(_background_init())
     # Kick off the periodic backup task (also background, also fast)
     asyncio.create_task(_backup_scheduler())
+    # Money-flow drift auto-check (every 5 min)
+    asyncio.create_task(_money_flow_checker())
 
 
 async def _background_init():
