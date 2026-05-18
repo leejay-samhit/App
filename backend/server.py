@@ -190,24 +190,24 @@ async def register(payload: RegisterRequest):
         sponsor = await db.users.find_one({"referral_code": sponsor_code})
         if not sponsor:
             raise HTTPException(status_code=400, detail="Invalid referral code")
-        # If user explicitly typed admin's own code (EARN), apply forced-matrix
-        # placement so early EARN-joiners earn first instead of admin always
-        # taking every direct.
+        # Capture the ORIGINAL inviter BEFORE any spillover so commission
+        # ownership stays with them even when the placement moves deeper.
+        referral_owner = sponsor
+
         if sponsor.get("email") == ADMIN_EMAIL.lower():
+            # EARN code → admin-direct signup with placement spillover.
             no_referral_signup = True
             sponsor = await get_admin_sponsor() or sponsor
         else:
             # USER SPILLOVER — once the referrer has completed at least one
-            # L1 cycle (`payouts_received >= 1`), they're done with their
-            # first earnings. New joiners that came to them are SPILLED
-            # deeper into the team using the same 4→3→2→1→0 preference, so
-            # the original referrer's downline grows wide and earns. The
-            # original referrer is unaffected: they still earn L2 in the
-            # cascade because the new placement is below them.
+            # L1 cycle, NEW joiners they invite are SPILLED deeper into the
+            # team using BFS + 4→3→2→1→0 preference. The original referrer
+            # remains the commission owner (referral_owner_id) so they STILL
+            # earn the L1 cycle credit from this new direct.
             if int(sponsor.get("payouts_received") or 0) >= 1:
                 spill = await _find_spillover_under(sponsor)
                 if spill:
-                    sponsor = spill
+                    sponsor = spill  # tree placement moves deeper
     else:
         # No referral code given → treat as direct admin signup. Money flows
         # to admin's `direct_signup` bucket on approval (see
@@ -215,6 +215,7 @@ async def register(payload: RegisterRequest):
         # under the most-qualified downline so the cascade can fire.
         no_referral_signup = True
         sponsor = await get_admin_sponsor()
+        referral_owner = sponsor  # for no-ref, owner == placement
 
     user_id = str(uuid.uuid4())
     # Ensure unique referral code
@@ -263,6 +264,13 @@ async def register(payload: RegisterRequest):
         "approval_reject_reason": None,
         "commission_triggered": False,
         "no_referral_signup": no_referral_signup,
+        # `sponsor_id` is the TREE-PLACEMENT parent (may be reassigned by
+        # spillover BFS so the matrix stays balanced).
+        # `referral_owner_id` is the ORIGINAL inviter who owns the L1
+        # commission credit — never changes after signup. For no-ref/EARN
+        # signups, owner == placement (admin or downline).
+        "referral_owner_id": (referral_owner or sponsor or {}).get("id"),
+        "referral_owner_code": (referral_owner or sponsor or {}).get("referral_code"),
         "extra_docs": {
             "cibil_report": None,
             "bank_statement": None,
@@ -708,10 +716,33 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     if not sponsor_id:
         return
 
-    # Level 1 — direct sponsor: increment direct count + pending counter atomically.
-    sponsor = await db.users.find_one({"id": sponsor_id})
+    # ─── Idempotency guard ────────────────────────────────────────────
+    # Each cascade run is uniquely keyed by the new joiner id. A separate
+    # `payout_keys` collection acts as the system-wide mutex so concurrent
+    # approval calls cannot double-credit. The first writer wins.
+    payout_run_key = f"PAYOUT-RUN:{user['id']}"
+    try:
+        await db.payout_keys.insert_one({
+            "_id": payout_run_key,
+            "joiner_id": user["id"],
+            "created_at": now_utc().isoformat(),
+        })
+    except Exception:
+        # Key already exists → cascade already ran for this joiner. Bail
+        # cleanly so we never double-pay.
+        return
+
+    # ─── L1 commission OWNERSHIP (spillover-safe) ──────────────────────
+    # If spillover happened, sponsor_id (tree parent) ≠ referral_owner_id
+    # (the actual inviter). L1 commission ALWAYS goes to the inviter; the
+    # L2..L10 cascade walks the TREE from sponsor_id upward.
+    referral_owner_id = user.get("referral_owner_id") or sponsor_id
+    sponsor = await db.users.find_one({"id": referral_owner_id})
+    if not sponsor:
+        sponsor = await db.users.find_one({"id": sponsor_id})
     if not sponsor:
         return
+    tree_parent_id = sponsor_id  # for L2..L10 cascade walk
     # Atomically bump both counters; pending_directs starts at 0 if missing.
     await db.users.update_one(
         {"id": sponsor_id},
@@ -738,8 +769,13 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         fresh = await db.users.find_one({"id": sponsor_id})
         await _credit_payout(fresh, payout_l1, 1, user["name"])
 
-    # Walk up levels 2..10 — credit per qualifying activation if amount > 0
-    current_id = sponsor.get("sponsor_id")
+    # Walk up levels 2..10 along the TREE (sponsor_id chain), starting from
+    # the tree-parent (which may differ from the L1 commission owner when
+    # spillover applied). This preserves the matrix structure on disk: every
+    # cascade walks the same parentage in `sponsor_id`, while L1 commission
+    # already went to the actual inviter above.
+    tree_parent = await db.users.find_one({"id": tree_parent_id})
+    current_id = (tree_parent or {}).get("sponsor_id") if tree_parent_id != sponsor.get("id") else sponsor.get("sponsor_id")
     paid_levels: List[int] = []
     for level in range(2, 11):
         if not current_id:
@@ -747,6 +783,10 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         upline = await db.users.find_one({"id": current_id})
         if not upline:
             break
+        # Skip blocked users in the cascade (but keep walking the chain)
+        if upline.get("is_blocked"):
+            current_id = upline.get("sponsor_id")
+            continue
         amt = level_payouts[level - 1]
         if amt > 0:
             await _credit_payout(upline, amt, level, user["name"])
