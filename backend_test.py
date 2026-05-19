@@ -1,507 +1,370 @@
 """
-Quick regression test for 3 backend fixes (2026-05-18):
+L1 Payout Funding & Ledger Integrity verification.
 
-  Fix 1: No-referral signups bump placement sponsor's direct_referrals_count.
-  Fix 2: New admin wallet bucket `fee_residual` (separated from direct_signup).
-  Fix 3: Breakdown endpoint exposes `outflow.to_admin_fee_residual` separately.
-
-Scenarios A..G in /app/test_result.md request body.
+Scenarios:
+  A — Static ledger health (inflow ≈ outflow, no unresolved alerts)
+  B — Live L1 cycle (signup loop until L1 fires; admin buckets debited; recipient wallet credited; l1_funding txn recorded)
+  C — Idempotency (restart backend; backfill must not re-debit)
+  D — Ledger alert smoke (endpoint returns dict)
 """
+import os
 import sys
 import time
-import uuid
-from typing import Optional
+import json
+import random
+import string
+import subprocess
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-BASE_URL = None
-try:
-    for line in open("/app/frontend/.env"):
-        if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
-            BASE_URL = line.split("=", 1)[1].strip().strip('"') + "/api"
-            break
-except Exception:
-    pass
-if not BASE_URL:
-    BASE_URL = "https://vendor-network-app-1.preview.emergentagent.com/api"
+# ----- Configuration -----
+BASE = os.environ.get("BACKEND_URL", "").strip()
+if not BASE:
+    try:
+        with open("/app/frontend/.env") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
+                    BASE = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    except Exception:
+        pass
+if not BASE:
+    BASE = "http://localhost:8001"
+API = BASE.rstrip("/") + "/api"
 
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PW = "Admin@123"
-TEST_USER_EMAIL = "testuser@app.com"
-TEST_USER_PW = "Test@123"
+ADMIN_PASS = "Admin@123"
+TESTUSER_EMAIL = "testuser@app.com"
+TESTUSER_PASS = "Test@123"
 
-print(f"[base] {BASE_URL}\n")
+TIMEOUT = 30
 
-session = requests.Session()
-session.headers.update({"Content-Type": "application/json"})
-
-
-def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+results: List[Tuple[str, bool, str]] = []
 
 
-def login(email: str, pw: str) -> str:
-    r = session.post(f"{BASE_URL}/auth/login", json={"email": email, "password": pw}, timeout=15)
-    r.raise_for_status()
-    return r.json()["token"]
+def log(msg: str):
+    print(msg, flush=True)
 
 
-def find_user(admin_token: str, email: str) -> dict:
-    r = session.get(f"{BASE_URL}/admin/users", headers=_auth(admin_token), timeout=15)
-    r.raise_for_status()
-    for u in r.json():
-        if u.get("email", "").lower() == email.lower():
-            return u
-    return None
+def record(name: str, ok: bool, details: str = ""):
+    status = "PASS" if ok else "FAIL"
+    log(f"[{status}] {name}: {details}")
+    results.append((name, ok, details))
 
 
-def find_user_by_id(admin_token: str, uid: str) -> dict:
-    r = session.get(f"{BASE_URL}/admin/users", headers=_auth(admin_token), timeout=15)
-    r.raise_for_status()
-    for u in r.json():
-        if u.get("id") == uid:
-            return u
-    return None
+def login(email: str, password: str) -> Optional[str]:
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=TIMEOUT)
+    if r.status_code != 200:
+        log(f"  login {email} -> {r.status_code} {r.text[:200]}")
+        return None
+    return r.json().get("access_token") or r.json().get("token")
 
 
-def register(name: str, email: str, password: str, referral_code: Optional[str] = None) -> dict:
-    payload = {"name": name, "email": email, "password": password,
-               "phone": f"99{int(time.time())%10**8:08d}"}
-    if referral_code:
-        payload["referral_code"] = referral_code
-    r = session.post(f"{BASE_URL}/auth/register", json=payload, timeout=15)
-    r.raise_for_status()
-    return r.json()
+def headers(tok: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 
 
-def pay_fee(token: str) -> dict:
-    r = session.post(f"{BASE_URL}/payment/register-fee", headers=_auth(token), timeout=15)
-    if not r.ok:
-        print(f"  pay_fee error: {r.status_code} {r.text}")
-    r.raise_for_status()
-    return r.json()
+def rand_suffix(n=8) -> str:
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
-def admin_approve(admin_token: str, user_id: str) -> dict:
-    r = session.post(f"{BASE_URL}/admin/approvals/{user_id}/approve",
-                     headers=_auth(admin_token), timeout=15)
-    r.raise_for_status()
-    return r.json()
+log(f"==> API base: {API}")
+
+admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
+if not admin_tok:
+    log("FATAL: cannot log in admin")
+    sys.exit(1)
+
+testuser_tok = login(TESTUSER_EMAIL, TESTUSER_PASS)
+if not testuser_tok:
+    log("FATAL: cannot log in testuser")
+    sys.exit(1)
 
 
-def get_admin_wallet(admin_token: str) -> dict:
-    r = session.get(f"{BASE_URL}/admin/system-wallet", headers=_auth(admin_token), timeout=15)
-    r.raise_for_status()
-    return r.json()
+def get(path: str, tok: str, params=None):
+    return requests.get(f"{API}{path}", headers=headers(tok), params=params, timeout=TIMEOUT)
 
 
-def get_admin_user(admin_token: str) -> dict:
-    return find_user(admin_token, ADMIN_EMAIL)
+def post(path: str, tok: Optional[str], body=None):
+    h = headers(tok) if tok else {"Content-Type": "application/json"}
+    return requests.post(f"{API}{path}", headers=h, json=body or {}, timeout=TIMEOUT)
 
 
-PASS = []
-FAIL = []
+# SCENARIO A
+log("\n========= SCENARIO A: Static ledger health =========")
+bd_before = None
+try:
+    r = get("/admin/system-wallet/breakdown", admin_tok)
+    if r.status_code != 200:
+        record("A.breakdown_200", False, f"status={r.status_code} body={r.text[:300]}")
+    else:
+        bd_before = r.json()
+        infl = bd_before["inflow"]["total"]
+        outfl = bd_before["outflow"]["total"]
+        l1d = bd_before["outflow"].get("l1_funding_debit")
+        held = bd_before["balance"]["held_total"]
+        drift = abs(infl - outfl)
+        record(
+            "A.1 breakdown.inflow~=outflow",
+            drift <= 1.0,
+            f"inflow={infl}, outflow={outfl}, drift={drift:.2f}, l1_funding_debit={l1d}, held_total={held}",
+        )
+except Exception as e:
+    record("A.breakdown", False, f"exception {e}")
+
+try:
+    r = get("/admin/ledger-alerts", admin_tok)
+    if r.status_code != 200:
+        record("A.2 ledger-alerts_200", False, f"status={r.status_code}")
+    else:
+        data = r.json()
+        alerts = data.get("alerts", [])
+        unresolved_big = [a for a in alerts if not a.get("resolved", False) and abs(a.get("drift", 0)) > 1.0]
+        snap = data.get("current") or {}
+        record(
+            "A.2 no unresolved drift alerts >1",
+            len(unresolved_big) == 0,
+            f"alerts_total={len(alerts)} unresolved_drift_gt_1={len(unresolved_big)} current_drift={snap.get('drift')}",
+        )
+except Exception as e:
+    record("A.ledger-alerts", False, f"exception {e}")
 
 
-def check(label: str, cond: bool, detail: str = ""):
-    marker = "OK" if cond else "FAIL"
-    print(f"  [{marker}] {label}" + (f"  — {detail}" if detail else ""))
-    (PASS if cond else FAIL).append(label)
-    return cond
+# SCENARIO D — smoke
+log("\n========= SCENARIO D: Ledger alert smoke =========")
+try:
+    r = get("/admin/ledger-alerts", admin_tok)
+    is_dict_or_list = r.status_code == 200 and isinstance(r.json(), (dict, list))
+    record("D.1 ledger-alerts returns 200 dict/list", is_dict_or_list,
+           f"status={r.status_code} type={type(r.json()).__name__ if r.status_code==200 else 'na'}")
+except Exception as e:
+    record("D.1 ledger-alerts smoke", False, f"exception {e}")
 
 
-# ─── SETUP ────────────────────────────────────────────────────
-print("=== SETUP ===")
-admin_token = login(ADMIN_EMAIL, ADMIN_PW)
-print("  admin logged in")
-testuser_token = login(TEST_USER_EMAIL, TEST_USER_PW)
-print("  testuser logged in")
+# SCENARIO B
+log("\n========= SCENARIO B: Live L1 cycle =========")
 
-testuser = find_user(admin_token, TEST_USER_EMAIL)
-assert testuser, "testuser not found"
-TESTUSER_REF = testuser["referral_code"]
-TESTUSER_ID = testuser["id"]
-print(f"  testuser referral_code={TESTUSER_REF}  id={TESTUSER_ID[:8]}")
+r = get("/auth/me", testuser_tok)
+me = r.json() if r.status_code == 200 else {}
+testuser_id = me.get("id")
+testuser_ref = me.get("referral_code")
+testuser_wallet_before = float(me.get("wallet_balance") or 0)
+testuser_pending_before = int(me.get("pending_directs") or 0)
+log(f"  testuser id={testuser_id} ref={testuser_ref} wallet={testuser_wallet_before} pending_directs={testuser_pending_before}")
 
-admin_user_pre = get_admin_user(admin_token)
-ADMIN_ID = admin_user_pre["id"]
-print(f"  admin id={ADMIN_ID[:8]}  admin wallet_balance={admin_user_pre.get('wallet_balance')}")
-print()
+r = get("/admin/system-wallet", admin_tok)
+admin_wallet_before = r.json() if r.status_code == 200 else {}
+buckets_before = (admin_wallet_before.get("buckets") or {})
+log(f"  admin buckets BEFORE: {buckets_before}")
 
-
-def snapshot() -> dict:
-    w = get_admin_wallet(admin_token)
-    b = w.get("buckets", {})
-    return {
-        "wallet_balance": float(w.get("total") or 0),
-        "direct_signup": float(b.get("direct_signup") or 0),
-        "fee_residual": float(b.get("fee_residual") or 0),
-        "referral_commission": float(b.get("referral_commission") or 0),
-        "gst_collected": float(b.get("gst_collected") or 0),
-    }
+r = get("/admin/settings", admin_tok)
+settings = r.json() if r.status_code == 200 else {}
+directs_required = int(settings.get("directs_required") or 4)
+reg_fee = float(settings.get("registration_fee") or 100)
+payout_l1 = float(settings.get("payout_l1") or 0)
+log(f"  settings: directs_required={directs_required} reg_fee={reg_fee} payout_l1={payout_l1}")
 
 
-# ─── Scenario A — no-ref signup increments direct_referrals_count ──
-print("=== Scenario A — no-ref signup increments placement sponsor's direct_referrals_count ===")
-sfx = uuid.uuid4().hex[:6]
-A_email = f"noref_{sfx}@test.app"
-A_pw = "TestNoRef@123"
-A_name = f"NoRef Scenario {sfx}"
+def count_l1_funding_txns() -> Tuple[int, float]:
+    r = get("/admin/transactions", admin_tok)
+    if r.status_code != 200:
+        return -1, 0.0
+    items = r.json()
+    rows = [t for t in items if t.get("type") == "l1_funding" and t.get("status") == "success"]
+    total = sum(float(t.get("amount") or 0) for t in rows)
+    return len(rows), total
 
-reg = register(A_name, A_email, A_pw, referral_code=None)
-A_token = reg["token"]
-A_id = reg["user"]["id"]
 
-new_user_after_signup = find_user_by_id(admin_token, A_id)
-sponsor_id = new_user_after_signup.get("sponsor_id")
-no_ref_flag = new_user_after_signup.get("no_referral_signup")
-check("A.1 user has no_referral_signup=True", bool(no_ref_flag),
-      f"flag={no_ref_flag}")
-check("A.2 user got a sponsor_id (placement parent)", bool(sponsor_id),
-      f"sponsor_id={(sponsor_id or '')[:12]}")
+l1_count_pre, l1_total_pre = count_l1_funding_txns()
+log(f"  l1_funding txns BEFORE: count={l1_count_pre} total={l1_total_pre}")
 
-sponsor_before = find_user_by_id(admin_token, sponsor_id) if sponsor_id else None
-sponsor_email = (sponsor_before or {}).get("email")
-count_before = int((sponsor_before or {}).get("direct_referrals_count") or 0)
-print(f"  placement sponsor: {sponsor_email}  direct_referrals_count BEFORE={count_before}")
+need = max(0, directs_required - testuser_pending_before)
+to_create = need + 1 if need > 0 else 1
+log(f"  Will create {to_create} fresh signups under testuser (need {need} more to fire L1)")
 
-is_admin_sponsor = (sponsor_email or "").lower() == ADMIN_EMAIL.lower()
+created_user_ids: List[str] = []
+created_emails: List[str] = []
 
-pay_fee(A_token)
-admin_approve(admin_token, A_id)
-
-sponsor_after = find_user_by_id(admin_token, sponsor_id)
-count_after = int((sponsor_after or {}).get("direct_referrals_count") or 0)
-print(f"  placement sponsor direct_referrals_count AFTER={count_after}")
-
-if is_admin_sponsor:
-    print("  ! placement sponsor is ADMIN — per code at L740, count is NOT incremented for admin sponsor")
-    check("A.3 placement sponsor is a real downline (not admin)", False,
-          "no eligible downline existed; sponsor==admin so increment test inconclusive")
+if not testuser_ref:
+    record("B.referral_code_present", False, "testuser has no referral_code")
 else:
-    check("A.3 placement sponsor is a real downline (not admin)", True, sponsor_email)
-    check("A.4 placement sponsor's direct_referrals_count incremented by exactly 1",
-          count_after == count_before + 1,
-          f"before={count_before} after={count_after}")
-print()
+    for i in range(to_create):
+        sfx = rand_suffix(6)
+        name = f"L1Test {sfx}"
+        email = f"l1test_{sfx}@test.app"
+        phone = f"9{random.randint(10**8, 10**9 - 1)}"
+        password = "Test@1234"
 
+        r = requests.post(f"{API}/auth/register", json={
+            "name": name, "email": email, "password": password,
+            "phone": phone, "referral_code": testuser_ref,
+        }, timeout=TIMEOUT)
+        if r.status_code != 200:
+            record(f"B.signup_{i+1}", False, f"register {r.status_code} {r.text[:200]}")
+            continue
+        sub = r.json()
+        new_id = (sub.get("user") or {}).get("id") or sub.get("id")
+        if not new_id:
+            r2 = get("/admin/users", admin_tok)
+            for u in (r2.json() if r2.status_code == 200 else []):
+                if u.get("email") == email:
+                    new_id = u.get("id")
+                    break
+        created_user_ids.append(new_id)
+        created_emails.append(email)
 
-# ─── Scenario B — with-ref signup writes fee_residual ───────────
-print("=== Scenario B — with-ref signup writes fee_residual ===")
-snap_before_B = snapshot()
-print(f"  admin BEFORE: direct_signup={snap_before_B['direct_signup']}  "
-      f"fee_residual={snap_before_B['fee_residual']}  "
-      f"wallet_balance={snap_before_B['wallet_balance']}")
+        new_tok = login(email, password)
+        if not new_tok:
+            record(f"B.login_{i+1}", False, "new user login failed")
+            continue
+        r = post("/payment/register-fee", new_tok, {})
+        if r.status_code not in (200, 201):
+            record(f"B.payfee_{i+1}", False, f"register-fee {r.status_code} {r.text[:200]}")
+            continue
+        r = post(f"/admin/approvals/{new_id}/approve", admin_tok, {})
+        if r.status_code != 200:
+            record(f"B.approve_{i+1}", False, f"approve {r.status_code} {r.text[:200]}")
+            continue
+        log(f"  signup #{i+1} done id={new_id} email={email}")
 
-sfx2 = uuid.uuid4().hex[:6]
-B_email = f"withref_{sfx2}@test.app"
-B_name = f"WithRef Scenario {sfx2}"
-B_pw = "TestRef@123"
+r = get("/auth/me", testuser_tok)
+me_after = r.json() if r.status_code == 200 else {}
+testuser_wallet_after = float(me_after.get("wallet_balance") or 0)
+testuser_pending_after = int(me_after.get("pending_directs") or 0)
+log(f"  testuser AFTER: wallet={testuser_wallet_after} pending_directs={testuser_pending_after}")
 
-regB = register(B_name, B_email, B_pw, referral_code=TESTUSER_REF)
-B_token = regB["token"]
-B_id = regB["user"]["id"]
-print(f"  registered {B_email} under referral_code={TESTUSER_REF}")
+r = get("/admin/system-wallet", admin_tok)
+admin_wallet_after = r.json() if r.status_code == 200 else {}
+buckets_after = (admin_wallet_after.get("buckets") or {})
+log(f"  admin buckets AFTER: {buckets_after}")
 
-B_doc = find_user_by_id(admin_token, B_id)
-check("B.1 user.no_referral_signup == False (used testuser's code)",
-      not B_doc.get("no_referral_signup"),
-      f"flag={B_doc.get('no_referral_signup')}")
-
-pay_fee(B_token)
-admin_approve(admin_token, B_id)
-
-fr_r = session.get(f"{BASE_URL}/admin/system-wallet/transactions?bucket=fee_residual&limit=1000",
-                   headers=_auth(admin_token), timeout=15)
-check("B.2 GET ?bucket=fee_residual -> 200", fr_r.status_code == 200,
-      f"status={fr_r.status_code}")
-fr_data = fr_r.json() if fr_r.ok else {}
-fr_items = fr_data.get("items", [])
-my_fr_row = next((t for t in fr_items if t.get("related_signup_id") == B_id), None)
-
-check("B.3 fee_residual txn exists with related_signup_id == new_user.id",
-      my_fr_row is not None,
-      f"found={bool(my_fr_row)}")
-
-residual_amount = 0.0
-if my_fr_row:
-    check("B.4 fee_residual txn type == 'fee_residual' (NOT 'direct_signup_credit')",
-          my_fr_row.get("type") == "fee_residual",
-          f"type={my_fr_row.get('type')}")
-    desc = my_fr_row.get("description", "")
-    check("B.5 fee_residual txn description contains 'Fee residual'",
-          "Fee residual" in desc or "fee residual" in desc.lower(),
-          f"desc={desc!r}")
-    residual_amount = float(my_fr_row.get("amount") or 0)
-    print(f"  residual_amount = ₹{residual_amount}")
-
-ds_r = session.get(f"{BASE_URL}/admin/system-wallet/transactions?bucket=direct_signup&limit=1000",
-                   headers=_auth(admin_token), timeout=15)
-ds_items = ds_r.json().get("items", []) if ds_r.ok else []
-my_ds_row = next((t for t in ds_items if t.get("related_signup_id") == B_id), None)
-check("B.6 NO direct_signup_credit txn for this with-ref signup",
-      my_ds_row is None,
-      f"unexpected={my_ds_row.get('type') if my_ds_row else None}")
-
-mixed = [t for t in ds_items if t.get("type") not in ("direct_signup_credit",)]
-check("B.7 bucket=direct_signup contains ONLY type=direct_signup_credit (no fee_residual mixed in)",
-      len(mixed) == 0,
-      f"mixed_count={len(mixed)}  sample_types={list({t.get('type') for t in mixed})[:5] if mixed else []}")
-
-snap_after_B = snapshot()
-delta_fr = round(snap_after_B["fee_residual"] - snap_before_B["fee_residual"], 2)
-delta_ds = round(snap_after_B["direct_signup"] - snap_before_B["direct_signup"], 2)
-delta_wb = round(snap_after_B["wallet_balance"] - snap_before_B["wallet_balance"], 2)
-print(f"  admin AFTER: direct_signup={snap_after_B['direct_signup']}  "
-      f"fee_residual={snap_after_B['fee_residual']}  "
-      f"wallet_balance={snap_after_B['wallet_balance']}")
-print(f"  deltas: dDirect={delta_ds}  dFR={delta_fr}  dWB={delta_wb}")
-
-check("B.8 admin.wallet_buckets.fee_residual INCREASED (delta > 0)",
-      delta_fr > 0.01, f"delta={delta_fr}")
-check("B.9 admin.wallet_buckets.direct_signup did NOT change for with-ref signup",
-      abs(delta_ds) < 0.01, f"delta={delta_ds}")
-check("B.10 admin.wallet_balance INCREASED",
-      delta_wb >= delta_fr - 0.5,
-      f"dWB={delta_wb}  dFR={delta_fr}")
-print()
-
-
-# ─── Scenario C — Breakdown endpoint ────────────────────────────
-print("=== Scenario C — /admin/system-wallet/breakdown exposes both buckets separately ===")
-br_r = session.get(f"{BASE_URL}/admin/system-wallet/breakdown",
-                   headers=_auth(admin_token), timeout=15)
-check("C.0 GET /admin/system-wallet/breakdown -> 200", br_r.status_code == 200,
-      f"status={br_r.status_code}")
-br = br_r.json() if br_r.ok else {}
-outflow = br.get("outflow", {})
-inflow = br.get("inflow", {})
-print(f"  outflow: {outflow}")
-print(f"  inflow.total={inflow.get('total')}  outflow.total={outflow.get('total')}")
-
-check("C.1 outflow.to_admin_direct_signup field PRESENT",
-      "to_admin_direct_signup" in outflow,
-      f"value={outflow.get('to_admin_direct_signup')}")
-check("C.2 outflow.to_admin_fee_residual field PRESENT (new)",
-      "to_admin_fee_residual" in outflow,
-      f"value={outflow.get('to_admin_fee_residual')}")
-check("C.3 outflow.to_admin_direct_signup is numeric & >= 0",
-      isinstance(outflow.get("to_admin_direct_signup"), (int, float))
-      and outflow["to_admin_direct_signup"] >= 0,
-      f"value={outflow.get('to_admin_direct_signup')}")
-check("C.4 outflow.to_admin_fee_residual is numeric & >= 0",
-      isinstance(outflow.get("to_admin_fee_residual"), (int, float))
-      and outflow["to_admin_fee_residual"] >= 0,
-      f"value={outflow.get('to_admin_fee_residual')}")
-
-expected_out = round(
-    float(outflow.get("to_user_wallets_referral") or 0)
-    + float(outflow.get("to_admin_direct_signup") or 0)
-    + float(outflow.get("to_admin_fee_residual") or 0)
-    + float(outflow.get("to_admin_cascade_overflow") or 0)
-    + float(outflow.get("to_admin_gst_collected") or 0)
-    + float(outflow.get("user_withdrawals_settled") or 0),
-    2,
+wallet_delta = testuser_wallet_after - testuser_wallet_before
+record(
+    "B.1 testuser wallet increased",
+    wallet_delta > 0,
+    f"wallet_delta={wallet_delta:.2f}, payout_l1_gross=₹{payout_l1}",
 )
-actual_out = round(float(outflow.get("total") or 0), 2)
-check("C.5 outflow.total == sum of 6 components",
-      abs(expected_out - actual_out) < 0.5,
-      f"expected={expected_out}  actual={actual_out}")
-
-inflow_total = round(float(inflow.get("total") or 0), 2)
-inflow_reg_fee = round(float(inflow.get("registration_fee_total") or 0), 2)
-held_total = round(float(br.get("balance", {}).get("held_total") or 0), 2)
-# inflow.total ALSO includes utr_deposits + shop_margin + service_margin which
-# go straight into admin wallet (no redistribution), so the literal
-# "inflow.total == outflow.total" check from the brief fails by design.
-# The CORRECT invariant is: outflow.total == inflow.registration_fee_total
-# (the registration fee is what gets split into the 6 outflow buckets), and
-# the BOOKS balance via balance.held_total == inflow.total - withdrawals.
-check("C.6 inflow.registration_fee_total == outflow.total (within Rs 1)",
-      abs(inflow_reg_fee - actual_out) < 1.0,
-      f"reg_fee_inflow={inflow_reg_fee}  outflow={actual_out}")
-check("C.6b balance.held_total == inflow.total - withdrawals (books balance)",
-      abs(held_total - (inflow_total - float(outflow.get('user_withdrawals_settled') or 0))) < 1.0,
-      f"held={held_total}  inflow={inflow_total}")
-print()
+l1_fired = wallet_delta >= (payout_l1 * 0.5)
 
 
-# ─── Scenario D — bucket detail endpoint ───────────────────────
-print("=== Scenario D — bucket detail endpoint ===")
-fr_r2 = session.get(f"{BASE_URL}/admin/system-wallet/transactions?bucket=fee_residual&limit=200",
-                    headers=_auth(admin_token), timeout=15)
-check("D.1 GET ?bucket=fee_residual -> 200", fr_r2.status_code == 200,
-      f"status={fr_r2.status_code}")
-fr_items2 = fr_r2.json().get("items", []) if fr_r2.ok else []
-all_fr = all(t.get("type") == "fee_residual" for t in fr_items2)
-check("D.2 bucket=fee_residual returns ONLY type=fee_residual",
-      all_fr,
-      f"count={len(fr_items2)} mismatches={[t.get('type') for t in fr_items2 if t.get('type')!='fee_residual'][:3]}")
-
-ds_r2 = session.get(f"{BASE_URL}/admin/system-wallet/transactions?bucket=direct_signup&limit=200",
-                    headers=_auth(admin_token), timeout=15)
-check("D.3 GET ?bucket=direct_signup -> 200", ds_r2.status_code == 200,
-      f"status={ds_r2.status_code}")
-ds_items2 = ds_r2.json().get("items", []) if ds_r2.ok else []
-all_ds = all(t.get("type") == "direct_signup_credit" for t in ds_items2)
-check("D.4 bucket=direct_signup returns ONLY type=direct_signup_credit (no fee_residual)",
-      all_ds,
-      f"count={len(ds_items2)} mismatches={[t.get('type') for t in ds_items2 if t.get('type')!='direct_signup_credit'][:3]}")
-print()
+def b(buckets, key):
+    return float(buckets.get(key) or 0)
 
 
-# ─── Scenario E — Drift remains 0 ──────────────────────────────
-print("=== Scenario E — /admin/ledger-alerts drift within +/- Rs 1 ===")
-la_r = session.get(f"{BASE_URL}/admin/ledger-alerts",
-                   headers=_auth(admin_token), timeout=15)
-check("E.0 GET /admin/ledger-alerts -> 200", la_r.status_code == 200,
-      f"status={la_r.status_code}")
-la = la_r.json() if la_r.ok else {}
-cur = la.get("current", {})
-print(f"  current snapshot: {cur}")
-drift = float(cur.get("drift") or 0)
-check("E.1 |drift| within +/- Rs 1", abs(drift) <= 1.0, f"drift={drift}")
-print()
+fr_delta = b(buckets_after, "fee_residual") - b(buckets_before, "fee_residual")
+ds_delta = b(buckets_after, "direct_signup") - b(buckets_before, "direct_signup")
+rc_delta = b(buckets_after, "referral_commission") - b(buckets_before, "referral_commission")
+log(f"  admin bucket deltas: fee_residual={fr_delta:.2f} direct_signup={ds_delta:.2f} referral_commission={rc_delta:.2f}")
+
+# Find sample l1_funding rows for testuser
+r = get("/admin/transactions", admin_tok)
+new_l1_rows = []
+if r.status_code == 200:
+    rows = [t for t in r.json() if t.get("type") == "l1_funding" and t.get("status") == "success"]
+    new_l1_rows = [t for t in rows if t.get("related_payout_recipient") == testuser_id]
+sample_l1 = None
+if new_l1_rows:
+    sample_l1 = {k: new_l1_rows[0].get(k) for k in
+                 ["id", "type", "amount", "source_bucket", "related_signup_id",
+                  "related_payout_recipient", "description"]}
+
+record(
+    "B.2 admin buckets net-debit when L1 fires",
+    (not l1_fired) or (fr_delta + ds_delta + rc_delta < 0),
+    f"sum_delta={fr_delta+ds_delta+rc_delta:.2f} l1_fired={l1_fired}",
+)
+
+record(
+    "B.3 l1_funding txn exists for testuser",
+    (not l1_fired) or (len(new_l1_rows) >= 1),
+    f"matching_rows={len(new_l1_rows)}; sample={json.dumps(sample_l1) if sample_l1 else 'none'}",
+)
+if new_l1_rows:
+    neg_ok = all(float(t.get("amount") or 0) < 0 for t in new_l1_rows)
+    has_src = all(t.get("source_bucket") for t in new_l1_rows)
+    has_sig = all(t.get("related_signup_id") for t in new_l1_rows)
+    record("B.3b l1_funding rows have negative amount", neg_ok, f"all_negative={neg_ok}")
+    record("B.3c l1_funding rows have source_bucket", has_src, f"all_have_source={has_src}")
+    record("B.3d l1_funding rows have related_signup_id", has_sig, f"all_have_signup={has_sig}")
+
+r = get("/admin/system-wallet/breakdown", admin_tok)
+bd_after = r.json() if r.status_code == 200 else {}
+infl_a = bd_after.get("inflow", {}).get("total", 0)
+outfl_a = bd_after.get("outflow", {}).get("total", 0)
+drift_after = abs(infl_a - outfl_a)
+l1d_after = bd_after.get("outflow", {}).get("l1_funding_debit")
+infl_b = (bd_before or {}).get("inflow", {}).get("total", 0)
+outfl_b = (bd_before or {}).get("outflow", {}).get("total", 0)
+drift_before = abs(infl_b - outfl_b)
+record(
+    "B.4 inflow~=outflow after live L1 cycle",
+    drift_after <= 1.0,
+    f"BEFORE drift={drift_before:.2f} AFTER drift={drift_after:.2f} "
+    f"inflow={infl_a} outflow={outfl_a} l1_funding_debit={l1d_after}"
+)
 
 
-# ─── Scenario F — Reconcile ────────────────────────────────────
-print("=== Scenario F — POST /admin/system-wallet/reconcile keeps buckets balanced ===")
-rec_r = session.post(f"{BASE_URL}/admin/system-wallet/reconcile",
-                     headers=_auth(admin_token), timeout=15)
-check("F.0 POST /admin/system-wallet/reconcile -> 200", rec_r.status_code == 200,
-      f"status={rec_r.status_code}")
-rec = rec_r.json() if rec_r.ok else {}
-after = rec.get("after", {})
-diff = rec.get("diff", {})
-print(f"  reconcile diff: {diff}")
-print(f"  reconcile after: direct_signup={after.get('direct_signup')}  "
-      f"fee_residual={after.get('fee_residual')}")
+# SCENARIO C — Idempotency
+log("\n========= SCENARIO C: Idempotency =========")
+l1_count_pre_restart, l1_total_pre_restart = count_l1_funding_txns()
+log(f"  l1_funding BEFORE restart: count={l1_count_pre_restart} total={l1_total_pre_restart}")
 
-fr_items3 = session.get(f"{BASE_URL}/admin/system-wallet/transactions?bucket=fee_residual&limit=1000",
-                        headers=_auth(admin_token), timeout=15).json().get("items", [])
-fr_sum = round(sum(float(t.get("amount") or 0) for t in fr_items3), 2)
-ds_items3 = session.get(f"{BASE_URL}/admin/system-wallet/transactions?bucket=direct_signup&limit=1000",
-                        headers=_auth(admin_token), timeout=15).json().get("items", [])
-ds_sum = round(sum(float(t.get("amount") or 0) for t in ds_items3), 2)
+try:
+    res = subprocess.run(["sudo", "supervisorctl", "restart", "backend"],
+                         check=False, timeout=30, capture_output=True, text=True)
+    log(f"  restart stdout: {res.stdout.strip()}")
+    log(f"  restart stderr: {res.stderr.strip()}")
+    log("  sleeping 12s for backfill to run")
+    time.sleep(12)
+except Exception as e:
+    log(f"  restart failed: {e}")
 
-check("F.1 fee_residual bucket value == SUM of its txns",
-      abs(float(after.get("fee_residual") or 0) - fr_sum) < 0.5,
-      f"bucket={after.get('fee_residual')}  sum_of_txns={fr_sum}")
-check("F.2 direct_signup bucket value == SUM of its txns",
-      abs(float(after.get("direct_signup") or 0) - ds_sum) < 0.5,
-      f"bucket={after.get('direct_signup')}  sum_of_txns={ds_sum}")
+# Re-login (token should still work but be safe)
+admin_tok2 = None
+for _ in range(5):
+    admin_tok2 = login(ADMIN_EMAIL, ADMIN_PASS)
+    if admin_tok2:
+        break
+    time.sleep(2)
+admin_tok = admin_tok2 or admin_tok
 
-la_r2 = session.get(f"{BASE_URL}/admin/ledger-alerts",
-                    headers=_auth(admin_token), timeout=15)
-drift2 = float(la_r2.json().get("current", {}).get("drift") or 0) if la_r2.ok else 999
-check("F.3 |drift| within +/- Rs 1 after reconcile", abs(drift2) <= 1.0, f"drift={drift2}")
-print()
+l1_count_post_restart, l1_total_post_restart = count_l1_funding_txns()
+log(f"  l1_funding AFTER restart : count={l1_count_post_restart} total={l1_total_post_restart}")
 
-
-# ─── Scenario G — EARN flow + USER referral flow ───────────────
-print("=== Scenario G — EARN flow + USER referral flow ===")
-
-admin_doc = get_admin_user(admin_token)
-admin_ref_code = admin_doc.get("referral_code") or "EARN"
-print(f"  admin referral_code = {admin_ref_code}")
-
-sfx3 = uuid.uuid4().hex[:6]
-G_email = f"earn_{sfx3}@test.app"
-G_name = f"EARN Scenario {sfx3}"
-G_pw = "TestEarn@123"
-regG = register(G_name, G_email, G_pw, referral_code=admin_ref_code)
-G_token = regG["token"]
-G_id = regG["user"]["id"]
-G_doc = find_user_by_id(admin_token, G_id)
-check("G.1 EARN-code signup -> no_referral_signup=True",
-      G_doc.get("no_referral_signup") is True,
-      f"flag={G_doc.get('no_referral_signup')}")
-
-G_sponsor_id = G_doc.get("sponsor_id")
-G_sponsor_before = find_user_by_id(admin_token, G_sponsor_id) if G_sponsor_id else None
-g_count_before = int((G_sponsor_before or {}).get("direct_referrals_count") or 0)
-g_sponsor_email = (G_sponsor_before or {}).get("email", "")
-print(f"  EARN placement sponsor: {g_sponsor_email}  count_before={g_count_before}")
-
-pay_fee(G_token)
-admin_approve(admin_token, G_id)
-
-G_sponsor_after = find_user_by_id(admin_token, G_sponsor_id)
-g_count_after = int((G_sponsor_after or {}).get("direct_referrals_count") or 0)
-print(f"  EARN placement sponsor count_after={g_count_after}")
-if g_sponsor_email.lower() == ADMIN_EMAIL.lower():
-    check("G.2 EARN placement sponsor is a downline (not admin)", False,
-          "no eligible downline; sponsor==admin")
-else:
-    check("G.2 EARN placement sponsor is a downline (not admin)", True, g_sponsor_email)
-    check("G.3 EARN signup increments placement-sponsor's direct_referrals_count by 1",
-          g_count_after == g_count_before + 1,
-          f"before={g_count_before} after={g_count_after}")
-
-# USER referral flow
-sfx4 = uuid.uuid4().hex[:6]
-U_email = f"userref_{sfx4}@test.app"
-U_name = f"UserRef Scenario {sfx4}"
-U_pw = "TestUR@123"
-
-testuser_before = find_user(admin_token, TEST_USER_EMAIL)
-tu_count_before = int(testuser_before.get("direct_referrals_count") or 0)
-snap_g_user_before = snapshot()
-print(f"  testuser count_before={tu_count_before}  "
-      f"fee_residual_before={snap_g_user_before['fee_residual']}")
-
-regU = register(U_name, U_email, U_pw, referral_code=TESTUSER_REF)
-U_token = regU["token"]
-U_id = regU["user"]["id"]
-U_doc = find_user_by_id(admin_token, U_id)
-check("G.4 USER-referral signup -> no_referral_signup=False",
-      U_doc.get("no_referral_signup") is not True,
-      f"flag={U_doc.get('no_referral_signup')}")
-check("G.5 USER-referral signup sponsor_id is set",
-      bool(U_doc.get("sponsor_id")),
-      f"sponsor_id={(U_doc.get('sponsor_id') or '')[:12]}")
-
-pay_fee(U_token)
-admin_approve(admin_token, U_id)
-
-testuser_after = find_user(admin_token, TEST_USER_EMAIL)
-tu_count_after = int(testuser_after.get("direct_referrals_count") or 0)
-
-co_r = session.get(f"{BASE_URL}/admin/system-wallet/transactions?bucket=referral_commission&limit=500",
-                   headers=_auth(admin_token), timeout=15)
-co_items = co_r.json().get("items", []) if co_r.ok else []
-co_for_U = [t for t in co_items
-            if (t.get("source_user_name") or "").startswith(U_name[:15])
-            or t.get("source_user_id") == U_id]
-check("G.6 USER-referral cascade fired (referral_commission rows exist for this signup)",
-      len(co_for_U) > 0,
-      f"rows_found={len(co_for_U)}")
-
-sponsor_of_U = U_doc.get("sponsor_id")
-if sponsor_of_U == TESTUSER_ID:
-    check("G.7 USER-referral incremented testuser.direct_referrals_count by 1",
-          tu_count_after == tu_count_before + 1,
-          f"before={tu_count_before} after={tu_count_after}")
-else:
-    spillover_sponsor = find_user_by_id(admin_token, sponsor_of_U)
-    print(f"  spillover applied: actual placement={spillover_sponsor.get('email') if spillover_sponsor else '?'}")
-    check("G.7 USER-referral sponsor_id has direct_referrals_count > 0 (spillover OK)",
-          int((spillover_sponsor or {}).get("direct_referrals_count") or 0) > 0,
-          f"actual={(spillover_sponsor or {}).get('direct_referrals_count')}")
-
-snap_g_user_after = snapshot()
-delta_fr_U = round(snap_g_user_after["fee_residual"] - snap_g_user_before["fee_residual"], 2)
-check("G.8 USER-referral signup also wrote a fee_residual entry (delta > 0)",
-      delta_fr_U > 0.01,
-      f"dFR={delta_fr_U}")
-print()
+record(
+    "C.1 l1_funding count unchanged after restart",
+    l1_count_post_restart == l1_count_pre_restart,
+    f"before={l1_count_pre_restart} after={l1_count_post_restart}",
+)
+record(
+    "C.2 l1_funding total unchanged after restart",
+    abs(l1_total_post_restart - l1_total_pre_restart) < 0.01,
+    f"before={l1_total_pre_restart:.2f} after={l1_total_post_restart:.2f}",
+)
 
 
-# ─── SUMMARY ───────────────────────────────────────────────────
-print("=" * 60)
-print(f"TOTAL: {len(PASS)} PASS  ·  {len(FAIL)} FAIL")
-if FAIL:
-    print("\nFAILED:")
-    for f in FAIL:
-        print(f"  - {f}")
-sys.exit(0 if not FAIL else 1)
+# Final
+log("\n========= SUMMARY =========")
+passed = sum(1 for _, ok, _ in results if ok)
+total = len(results)
+log(f"Passed: {passed}/{total}")
+for n, ok, d in results:
+    log(f"  [{'PASS' if ok else 'FAIL'}] {n}: {d}")
+
+critical_keys = [
+    "A.1 breakdown.inflow~=outflow",
+    "B.1 testuser wallet increased",
+    "B.3 l1_funding txn exists for testuser",
+    "B.4 inflow~=outflow after live L1 cycle",
+    "C.1 l1_funding count unchanged after restart",
+    "C.2 l1_funding total unchanged after restart",
+]
+crit_pass = all(any(n == k and ok for n, ok, _ in results) for k in critical_keys)
+log("")
+log(f"L1 minting bug FIXED: {'YES' if crit_pass else 'NO'}")
+if not crit_pass:
+    log("Reason: one or more critical scenarios failed — see above.")
+
+sys.exit(0 if crit_pass else 1)

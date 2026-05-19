@@ -571,14 +571,246 @@ metadata:
 
 test_plan:
   current_focus:
-    - "MLM Engine: Option B — L1 → placement parent (sponsor_id)"
-    - "Spillover: BFS placement when sponsor completed L1"
-    - "Idempotency: per-level PAYOUT:{signup_id}:{recipient_id}:L{level} key"
-    - "GET /api/admin/ledger-alerts — drift snapshot + alert list"
-    - "POST /api/admin/ledger-alerts/{id}/resolve"
+    - "L1 payout FUNDING — ledger no longer mints money on L1 cycle"
+    - "Backfill: historic L1 payouts retro-funded from admin buckets"
+    - "Money flow checker: drift ≤ ₹1 after multiple referral cycles"
+    - "Breakdown endpoint: l1_funding_debit appears correctly"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+l1_payout_funding_2026_02:
+  - task: "Scenario A — Static ledger health (breakdown inflow≈outflow + ledger-alerts)"
+    implemented: true
+    working: false
+    file: "backend/server.py (L3974-4111 breakdown; L5462-5494 ledger-alerts)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          Live test against https://vendor-network-app-1.preview.emergentagent.com/api.
+          GET /api/admin/system-wallet/breakdown:
+            inflow.total = ₹15,331.00
+            outflow.total = ₹2,832.00
+            outflow.l1_funding_debit = ₹0.00   (no historic L1 was backfilled)
+            balance.held_total = ₹15,331.00
+            DRIFT = ₹12,499.00  (NOT ≤ ₹1)  → FAIL
+
+          Root cause analysis (drift formula gap):
+            • inflow.total = registration_fee + utr_deposits + service_margin + shop_margin
+              = 1180 + 7000 + 0 + 2499 = ₹10,679 ... plus other inflow (test data inflated this to 15,331)
+            • outflow.total adds: referral_payout + gst_collected + cascade + direct_signup_credit
+              + fee_residual + withdrawals + l1_funding_debit
+            • UTR deposits (₹7000 in admin.direct_added) appear in inflow but have NO
+              matching outflow line → they're "held" in admin's direct_added bucket but
+              the breakdown formula never accounts for that hold.
+            • shopping_margin (₹2499) and service_margin behave similarly — they're added
+              to inflow but admin's holding of them isn't in outflow.
+          → The l1_funding_debit fix correctly OFFSETS the L1 cycle minting, but the
+          static breakdown identity is BROKEN by UTR deposits and shop/service margin
+          (they're inflow with no matching outflow), so abs(inflow-outflow) ≤ ₹1 cannot
+          hold in any environment that has had a UTR deposit or a shop sale.
+
+          GET /api/admin/ledger-alerts: 200 OK, returned 50 alerts in history (none
+          unresolved with |drift|>1 — drifts in alerts collection are old snapshots
+          with 0 or near-0 numbers; current snapshot drift = 0.0 per the alerts
+          payload, which contradicts breakdown drift — see Scenario D).
+
+  - task: "Scenario B — Live L1 cycle (admin buckets debited, l1_funding txn written)"
+    implemented: true
+    working: true
+    file: "backend/server.py (L797-850 L1 funding source)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Live test: 2 fresh signups under testuser@app.com (HLKFW2) → L1 cycle fired.
+          BEFORE: testuser wallet=₹0, pending_directs=5, admin fee_residual=₹863.55,
+                  direct_signup=₹1500, referral_commission=₹138.45.
+          settings: directs_required=6, payout_l1=₹400, reg_fee=₹118.
+          AFTER 2nd approval (pending→6 → L1 fired):
+            • testuser.wallet_balance: 0.00 → ₹337.84  (+₹337.84)
+              ≈ payout_l1 net of 18% GST (₹400 − 72) + bits of L2..cascade. ✅
+            • admin fee_residual: 863.55 → 559.50   (Δ −₹304.05, but L1 debit was
+              −₹400; the 2nd signup added back ~₹95.95 fee_residual, net = −304.05)
+            • admin referral_commission: 138.45 → 153.55 (+₹15.10, cascade credits)
+            • EXACTLY 1 l1_funding txn created for this cycle:
+              {
+                "id": "51d63ebb-e6ad-477e-934c-e9a89d3feafe",
+                "type": "l1_funding",
+                "amount": -400.0,                     ✅ negative
+                "source_bucket": "fee_residual",      ✅
+                "related_signup_id": "74c000de-...",  ✅ (the 6th signup that
+                                                          triggered the cycle)
+                "related_payout_recipient": "98c1bff0-...",  ✅ (testuser.id)
+                "description": "L1 payout funded from fee_residual (₹400.0 for
+                                cycle of 6 directs)"
+              }
+          ALL CORE BEHAVIOUR PASSES — the L1 minting bug IS fixed for new live cycles:
+            B.1 testuser wallet increased    PASS
+            B.2 admin buckets net-debit      PASS
+            B.3 l1_funding row exists        PASS
+            B.3b amount negative             PASS
+            B.3c source_bucket present       PASS
+            B.3d related_signup_id present   PASS
+
+          However: B.4 breakdown inflow~outflow AFTER the L1 cycle is STILL drifted
+          (12594.95 vs 12499.00 before — drift GREW by ₹95.95, the fee_residual portion
+          of the 2nd signup that wasn't immediately consumed). Combined with the
+          pre-existing structural drift from UTR/shop_margin, the breakdown identity
+          cannot be relied upon as "inflow≈outflow" today. See Scenario A for RCA.
+
+  - task: "Scenario C — Idempotency: backfill must NOT re-fund L1 payouts on restart"
+    implemented: true
+    working: false
+    file: "backend/server.py (L5768-5835 backfill + L579-680 _credit_payout)"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          CRITICAL BUG — backfill is NOT idempotent on restart.
+
+          REPRO:
+            • Created 1 live L1 cycle → 1 l1_funding txn (amount −₹400). BEFORE restart:
+              count(l1_funding) = 1, total = −₹400.
+            • `sudo supervisorctl restart backend` + 12s wait.
+            • AFTER restart: count(l1_funding) = 2, total = −₹800.  ❌
+            • The backfill re-funded the same L1 payout. Every subsequent restart will
+              keep duplicating these −₹400 debits, eventually zeroing admin buckets.
+
+          ROOT CAUSE:
+            backend/server.py:5789 reads `signup_id = tx.get("related_signup_id")` from
+            historic `referral_payout` rows.
+            BUT — the runtime _credit_payout helper at server.py:579-680 (specifically
+            L621-635 admin path and L651-665 user path) does NOT write a
+            `related_signup_id` field into the inserted `referral_payout` transaction.
+            It only writes per-level idempotency to `db.payout_keys` (L600-613), which
+            the backfill doesn't consult.
+
+            Consequence:
+              • signup_id = None on every live referral_payout row.
+              • Backfill's idempotency check at L5792-5796:
+                    already_funded = await db.transactions.find_one({
+                        "type": "l1_funding",
+                        "related_signup_id": signup_id,
+                        "related_payout_recipient": recipient,
+                    }) if signup_id else None
+                returns None whenever signup_id is None.
+              • Backfill proceeds to insert a fresh l1_funding row every startup.
+
+          FIX (MUST be done by main agent):
+            Either
+              (a) add `"related_signup_id": signup_id` to the txn doc in BOTH branches of
+                  _credit_payout (server.py:624-635 admin branch and 651-665 user branch)
+                  so future referral_payout rows are tagged, AND make the backfill
+                  idempotency check tolerant of signup_id=None by additionally matching
+                  on (recipient, amount, level=1) for older rows;
+              OR
+              (b) change the backfill query at L5776 to also store a stable
+                  per-payout marker (e.g. payout_keys collection entry "BACKFILL:<txn.id>")
+                  to mark already-backfilled L1 txns and check that marker first.
+
+          Until this is fixed, EVERY backend restart silently mints −₹400 of "phantom
+          debit" against admin's fee_residual / direct_signup / referral_commission
+          buckets, which is exactly the opposite of the bug the feature was meant to
+          fix.
+
+  - task: "Scenario D — Ledger alert smoke (GET /admin/ledger-alerts)"
+    implemented: true
+    working: true
+    file: "backend/server.py (L5462-5494)"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          GET /api/admin/ledger-alerts (admin token) → 200 OK, returns a dict with
+          keys {current, alerts, check_interval_seconds, drift_threshold}.
+          • current.drift reported as 0.0 (this is the internal
+            _compute_money_flow_snapshot which uses inflow vs withdrawals_out,
+            DIFFERENT from breakdown.inflow − breakdown.outflow).
+          • alerts count = 50 historic; none with |drift| > ₹1 unresolved.
+          Endpoint shape and gating intact.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      L1 PAYOUT FUNDING TEST RUN — live end-to-end on
+      https://vendor-network-app-1.preview.emergentagent.com/api.
+      Script: /app/backend_test.py. Logs captured in /tmp/test_run.log.
+
+      VERDICT: **L1 minting bug FIXED: NO** — 2 critical issues found:
+
+      ✅ The runtime L1 funding hook (server.py:797-850) works correctly:
+         when L1 fires, a properly-formed l1_funding txn is written
+         (amount negative, source_bucket, related_signup_id,
+         related_payout_recipient all populated) and the admin bucket(s)
+         are debited. Verified with live signup loop under testuser.
+
+      ❌ CRITICAL Bug C — backfill NOT idempotent on restart:
+         _credit_payout (server.py:579-680) does NOT write
+         `related_signup_id` into referral_payout txn rows. The backfill at
+         server.py:5768-5835 reads signup_id from those rows; when it's
+         None the idempotency check (`if signup_id else None`) is bypassed
+         and the backfill re-funds the same L1 payout EVERY backend restart.
+         Live proof: count(l1_funding) went 1 → 2 after `supervisorctl
+         restart backend`, total −₹400 → −₹800. Every restart accumulates
+         another phantom debit.
+
+      ❌ CRITICAL Bug A/B.4 — breakdown.inflow ≠ breakdown.outflow:
+         Static drift was ₹12,499 BEFORE my test (inflow ₹15,331,
+         outflow ₹2,832). The breakdown formula treats UTR deposits and
+         shopping_margin/service_margin as INFLOW but doesn't have a
+         matching OUTFLOW line for them — UTR money sits in admin's
+         direct_added bucket and is never offset. Same for shop_margin.
+         The l1_funding_debit line correctly offsets the L1 cycle minting
+         (₹−400 in my test), but the larger structural drift dominates.
+         The assertion `abs(inflow − outflow) ≤ ₹1` cannot hold today.
+
+      FIX SUGGESTIONS for main agent:
+        1. In _credit_payout (server.py:624-635 admin branch AND
+           L651-665 user branch), add `"related_signup_id": signup_id` to
+           the inserted txn doc. Then add a fallback idempotency check
+           in the backfill that matches on (user_id, level=1, amount/
+           gross_amount) when signup_id is None (or write a one-shot
+           backfill marker into payout_keys keyed by referral_payout.id).
+        2. Add `to_admin_direct_added` and `to_admin_shop_margin` /
+           `to_admin_service_margin` lines to the OUTFLOW dict in
+           get_system_wallet_breakdown (server.py:4087-4099) so the
+           inflow≈outflow identity actually holds. Today UTR deposits
+           and shop margins land in admin buckets with no matching
+           outflow line.
+
+      WORKING:
+        • A.2 ledger-alerts shape           PASS
+        • D.1 ledger-alerts dict response   PASS
+        • B.1 testuser wallet increased     PASS
+        • B.2 admin buckets net-debit       PASS
+        • B.3 l1_funding txn for testuser   PASS (with all required fields)
+
+      FAILING:
+        • A.1 breakdown inflow~=outflow             FAIL (drift ₹12,499)
+        • B.4 inflow~=outflow after L1 cycle        FAIL (drift ₹12,594.95)
+        • C.1 l1_funding count stable on restart    FAIL (1 → 2)
+        • C.2 l1_funding total stable on restart    FAIL (−₹400 → −₹800)
+
+      Test runner: /app/backend_test.py (re-runnable). Critical: please
+      do NOT call this "DONE" until at least the idempotency bug (C) is
+      resolved — restart-loop will keep silently double-debiting admin
+      buckets.
+
+
 
 mlm_engine_option_b_2026_05_18:
   - task: "Signup separates sponsor_id (placement) from referral_owner_id (inviter audit)"
