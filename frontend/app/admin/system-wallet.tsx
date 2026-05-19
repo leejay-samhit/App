@@ -58,6 +58,7 @@ type Breakdown = {
     to_admin_cascade_overflow: number;
     to_admin_gst_collected: number;
     user_withdrawals_settled: number;
+    l1_funding_debit: number;
     total: number;
   };
   balance: { in_admin_wallet: number; in_user_wallets: number; held_total: number };

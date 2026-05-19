@@ -802,6 +802,53 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         fresh = await db.users.find_one({"id": sponsor_id})
         await _credit_payout(fresh, payout_l1, 1, user["name"], signup_id=user["id"])
 
+        # ─── L1 FUNDING SOURCE (ledger integrity) ───────────────────────
+        # L1 payout (e.g. ₹400) is much larger than the ₹118 fee, so the
+        # money credited to the upline must come from somewhere accounted
+        # for — otherwise it's "minted from thin air" and Held > Inflow.
+        # We fund it from admin's `fee_residual` bucket which has been
+        # accumulating the leftover from each of the `directs_required`
+        # contributing signups (~₹95 each × 5 = ~₹475, enough to cover a
+        # ₹400 L1). Falls back to `direct_signup` if fee_residual is
+        # short; finally `referral_commission` as last resort.
+        admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+        if admin_doc:
+            remaining_to_fund = float(payout_l1)
+            for source_bucket in ("fee_residual", "direct_signup", "referral_commission"):
+                if remaining_to_fund <= 0.01:
+                    break
+                # Re-read admin doc each iteration since prior $inc may have changed it
+                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+                available = float((admin_doc.get("wallet_buckets") or {}).get(source_bucket) or 0)
+                if available <= 0:
+                    continue
+                debit = round(min(available, remaining_to_fund), 2)
+                await credit_admin_bucket(source_bucket, -debit, also_total_earned=False)
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": admin_doc["id"],
+                    "type": "l1_funding",
+                    "amount": -debit,
+                    "status": "success",
+                    "description": (
+                        f"L1 payout funded from {source_bucket} "
+                        f"(₹{debit} for cycle of {directs_required} directs)"
+                    ),
+                    "source_bucket": source_bucket,
+                    "related_signup_id": user["id"],
+                    "related_payout_recipient": sponsor_id,
+                    "created_at": now_utc().isoformat(),
+                })
+                remaining_to_fund -= debit
+            # If fee_residual + direct_signup + referral_commission combined
+            # are insufficient (only possible if admin debited them earlier),
+            # log a residual shortfall — admin can top-up via UTR direct_added.
+            if remaining_to_fund > 0.01:
+                logger.warning(
+                    f"L1 funding shortfall: ₹{remaining_to_fund} unfunded for "
+                    f"cycle to {sponsor_id} — admin should top-up direct_added."
+                )
+
     # Walk up levels 2..10 along the TREE (sponsor_id chain). The placement
     # parent (sponsor_id) already received the L1 cycle credit above, so we
     # start the cascade at the placement parent's sponsor (grandparent of
@@ -4003,9 +4050,16 @@ async def get_system_wallet_breakdown(
     direct_signup_credit = await _sum({"type": "direct_signup_credit", "status": "success"})
     fee_residual = await _sum({"type": "fee_residual", "status": "success"})
     user_withdrawals_done = abs(await _sum({"type": "withdrawal", "status": "success"}))
+    # L1 funding debits — these are NEGATIVE amounts subtracted from admin
+    # buckets to pay L1 payouts (which exceed the per-signup fee). Adding
+    # them keeps Inflow == Outflow because the L1 user-wallet credit was
+    # already counted in `user_wallets_paid` and these debits zero out the
+    # phantom-money inflation.
+    l1_funding_debit = await _sum({"type": "l1_funding", "status": "success"})  # negative number
     outflow_total = round(
         user_wallets_paid + gst_collected + cascade_overflow
-        + direct_signup_credit + fee_residual + user_withdrawals_done,
+        + direct_signup_credit + fee_residual + user_withdrawals_done
+        + l1_funding_debit,  # adds a negative → reduces outflow
         2,
     )
 
@@ -4037,6 +4091,11 @@ async def get_system_wallet_breakdown(
             "to_admin_cascade_overflow": round(cascade_overflow, 2),
             "to_admin_gst_collected":    round(gst_collected, 2),
             "user_withdrawals_settled":  round(user_withdrawals_done, 2),
+            # Negative number — funds withdrawn from admin buckets to pay
+            # L1 cycles (which exceed the ₹118 fee). Shown as a separate
+            # offsetting line so admins understand WHY their direct_signup /
+            # fee_residual buckets aren't simply "deposits in − payouts out".
+            "l1_funding_debit":          round(l1_funding_debit, 2),
             "total":                     outflow_total,
         },
         "balance": {
@@ -5705,6 +5764,75 @@ async def _background_init():
                 logger.info(f"direct_referrals_count backfill: corrected {fixed} sponsors")
         except Exception as _drc_err:
             logger.warning(f"direct_referrals_count backfill failed: {str(_drc_err)[:200]}")
+
+        # ── One-shot backfill: source-fund any L1 payouts (level=1, type=
+        # referral_payout) that fired BEFORE the L1 funding fix existed.
+        # Each such payout minted ₹400 (or whatever payout_l1 was) from
+        # thin air; we retro-actively debit the equivalent gross amount
+        # from admin's residual/direct_signup/referral_commission buckets
+        # so Held == Inflow again. Idempotent via existence of a matching
+        # `l1_funding` txn for that signup+recipient.
+        try:
+            past_l1s = await db.transactions.find({
+                "type": "referral_payout",
+                "level": 1,
+                "status": "success",
+            }, {"_id": 0, "id": 1, "user_id": 1, "gross_amount": 1, "amount": 1, "related_signup_id": 1}).to_list(100000)
+            funded_count = 0
+            funded_total = 0.0
+            shortfall_total = 0.0
+            admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+            for tx in past_l1s:
+                gross = float(tx.get("gross_amount") or tx.get("amount") or 0)
+                if gross <= 0:
+                    continue
+                signup_id = tx.get("related_signup_id")
+                recipient = tx.get("user_id")
+                # Idempotency check — already funded?
+                already_funded = await db.transactions.find_one({
+                    "type": "l1_funding",
+                    "related_signup_id": signup_id,
+                    "related_payout_recipient": recipient,
+                }) if signup_id else None
+                if already_funded:
+                    continue
+                if not admin_doc:
+                    break
+                remaining = float(gross)
+                for source_bucket in ("fee_residual", "direct_signup", "referral_commission"):
+                    if remaining <= 0.01:
+                        break
+                    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+                    available = float((admin_doc.get("wallet_buckets") or {}).get(source_bucket) or 0)
+                    if available <= 0:
+                        continue
+                    debit = round(min(available, remaining), 2)
+                    await credit_admin_bucket(source_bucket, -debit, also_total_earned=False)
+                    await db.transactions.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "user_id": admin_doc["id"],
+                        "type": "l1_funding",
+                        "amount": -debit,
+                        "status": "success",
+                        "description": f"[Backfill] L1 payout funded from {source_bucket}",
+                        "source_bucket": source_bucket,
+                        "related_signup_id": signup_id,
+                        "related_payout_recipient": recipient,
+                        "created_at": now_utc().isoformat(),
+                    })
+                    remaining -= debit
+                if remaining > 0.01:
+                    shortfall_total += remaining
+                funded_count += 1
+                funded_total += (gross - remaining)
+            if funded_count:
+                logger.info(
+                    f"L1 funding backfill: sourced {funded_count} historic L1 payouts, "
+                    f"₹{funded_total:.2f} debited from admin buckets, "
+                    f"shortfall ₹{shortfall_total:.2f} (will require admin UTR top-up)"
+                )
+        except Exception as _l1bf_err:
+            logger.warning(f"L1 funding backfill failed: {str(_l1bf_err)[:200]}")
         try:
             await seed_admin()
         except Exception as _e:
