@@ -1,11 +1,13 @@
 """
-L1 Payout Funding & Ledger Integrity verification.
+L1 Payout Funding & Ledger Integrity — SECOND PASS verification.
 
 Scenarios:
-  A — Static ledger health (inflow ≈ outflow, no unresolved alerts)
-  B — Live L1 cycle (signup loop until L1 fires; admin buckets debited; recipient wallet credited; l1_funding txn recorded)
-  C — Idempotency (restart backend; backfill must not re-debit)
-  D — Ledger alert smoke (endpoint returns dict)
+  A — Static ledger health: |inflow.total − outflow.total| ≤ ₹2
+  B — Live L1 cycle (signup loop until L1 fires; idempotent — only ONE new
+      l1_funding row per L1 cycle; admin debited; testuser credited)
+  C — Idempotency: restart backend TWICE and confirm count(l1_funding) doesn't
+      grow and no new "L1 funding backfill" log lines reference source txn ids
+  D — Ledger alerts: no UNRESOLVED alert with |drift| > 100
 """
 import os
 import sys
@@ -25,7 +27,7 @@ if not BASE:
         with open("/app/frontend/.env") as f:
             for line in f:
                 line = line.strip()
-                if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
+                if line.startswith("EXPO_PUBLIC_BACKEND_URL=") or line.startswith("REACT_APP_BACKEND_URL="):
                     BASE = line.split("=", 1)[1].strip().strip('"').strip("'")
                     break
     except Exception:
@@ -70,6 +72,15 @@ def rand_suffix(n=8) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
+def get(path: str, tok: str, params=None):
+    return requests.get(f"{API}{path}", headers=headers(tok), params=params, timeout=TIMEOUT)
+
+
+def post(path: str, tok: Optional[str], body=None):
+    h = headers(tok) if tok else {"Content-Type": "application/json"}
+    return requests.post(f"{API}{path}", headers=h, json=body or {}, timeout=TIMEOUT)
+
+
 log(f"==> API base: {API}")
 
 admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
@@ -83,68 +94,82 @@ if not testuser_tok:
     sys.exit(1)
 
 
-def get(path: str, tok: str, params=None):
-    return requests.get(f"{API}{path}", headers=headers(tok), params=params, timeout=TIMEOUT)
-
-
-def post(path: str, tok: Optional[str], body=None):
-    h = headers(tok) if tok else {"Content-Type": "application/json"}
-    return requests.post(f"{API}{path}", headers=h, json=body or {}, timeout=TIMEOUT)
-
-
-# SCENARIO A
+# ════════════════════════════════════════════════════════════════════
+# SCENARIO A — Static ledger health
+# ════════════════════════════════════════════════════════════════════
 log("\n========= SCENARIO A: Static ledger health =========")
 bd_before = None
+A_OK = True
 try:
     r = get("/admin/system-wallet/breakdown", admin_tok)
     if r.status_code != 200:
         record("A.breakdown_200", False, f"status={r.status_code} body={r.text[:300]}")
+        A_OK = False
     else:
         bd_before = r.json()
-        infl = bd_before["inflow"]["total"]
-        outfl = bd_before["outflow"]["total"]
+        infl = float(bd_before["inflow"]["total"])
+        outfl = float(bd_before["outflow"]["total"])
         l1d = bd_before["outflow"].get("l1_funding_debit")
         held = bd_before["balance"]["held_total"]
         drift = abs(infl - outfl)
+        ok = drift <= 2.0
         record(
-            "A.1 breakdown.inflow~=outflow",
-            drift <= 1.0,
-            f"inflow={infl}, outflow={outfl}, drift={drift:.2f}, l1_funding_debit={l1d}, held_total={held}",
+            "A.1 breakdown |inflow-outflow| <= ₹2",
+            ok,
+            f"inflow=₹{infl:.2f}, outflow=₹{outfl:.2f}, drift=₹{drift:.2f}, "
+            f"l1_funding_debit={l1d}, held_total=₹{held}",
         )
+        A_OK = A_OK and ok
+        # detail
+        log(f"  inflow detail: {json.dumps(bd_before['inflow'])}")
+        log(f"  outflow detail: {json.dumps(bd_before['outflow'])}")
 except Exception as e:
     record("A.breakdown", False, f"exception {e}")
+    A_OK = False
 
+
+# ════════════════════════════════════════════════════════════════════
+# SCENARIO D — Ledger alert smoke + drift threshold check
+# ════════════════════════════════════════════════════════════════════
+log("\n========= SCENARIO D: Ledger alerts (re-read) =========")
+D_OK = True
 try:
     r = get("/admin/ledger-alerts", admin_tok)
     if r.status_code != 200:
-        record("A.2 ledger-alerts_200", False, f"status={r.status_code}")
+        record("D.1 ledger-alerts_200", False, f"status={r.status_code}")
+        D_OK = False
     else:
         data = r.json()
-        alerts = data.get("alerts", [])
-        unresolved_big = [a for a in alerts if not a.get("resolved", False) and abs(a.get("drift", 0)) > 1.0]
-        snap = data.get("current") or {}
+        is_dict_or_list = isinstance(data, (dict, list))
+        record("D.1 ledger-alerts returns 200 dict/list", is_dict_or_list,
+               f"type={type(data).__name__}")
+        alerts = data.get("alerts", []) if isinstance(data, dict) else data
+        big_unresolved = [
+            a for a in (alerts or [])
+            if not a.get("resolved", False) and abs(float(a.get("drift") or 0)) > 100.0
+        ]
+        ok2 = len(big_unresolved) == 0
+        snap = (data.get("current") if isinstance(data, dict) else {}) or {}
         record(
-            "A.2 no unresolved drift alerts >1",
-            len(unresolved_big) == 0,
-            f"alerts_total={len(alerts)} unresolved_drift_gt_1={len(unresolved_big)} current_drift={snap.get('drift')}",
+            "D.2 no UNRESOLVED alert with |drift|>100",
+            ok2,
+            f"alerts_total={len(alerts or [])} big_unresolved={len(big_unresolved)} "
+            f"current_drift={snap.get('drift')}",
         )
+        if big_unresolved:
+            for a in big_unresolved[:3]:
+                log(f"  big-unresolved alert: drift=₹{a.get('drift')} at {a.get('checked_at')}")
+        D_OK = D_OK and ok2
 except Exception as e:
-    record("A.ledger-alerts", False, f"exception {e}")
+    record("D.ledger-alerts", False, f"exception {e}")
+    D_OK = False
 
 
-# SCENARIO D — smoke
-log("\n========= SCENARIO D: Ledger alert smoke =========")
-try:
-    r = get("/admin/ledger-alerts", admin_tok)
-    is_dict_or_list = r.status_code == 200 and isinstance(r.json(), (dict, list))
-    record("D.1 ledger-alerts returns 200 dict/list", is_dict_or_list,
-           f"status={r.status_code} type={type(r.json()).__name__ if r.status_code==200 else 'na'}")
-except Exception as e:
-    record("D.1 ledger-alerts smoke", False, f"exception {e}")
-
-
-# SCENARIO B
+# ════════════════════════════════════════════════════════════════════
+# SCENARIO B — Live L1 cycle (idempotent)
+# ════════════════════════════════════════════════════════════════════
 log("\n========= SCENARIO B: Live L1 cycle =========")
+B_OK = True
 
 r = get("/auth/me", testuser_tok)
 me = r.json() if r.status_code == 200 else {}
@@ -152,7 +177,8 @@ testuser_id = me.get("id")
 testuser_ref = me.get("referral_code")
 testuser_wallet_before = float(me.get("wallet_balance") or 0)
 testuser_pending_before = int(me.get("pending_directs") or 0)
-log(f"  testuser id={testuser_id} ref={testuser_ref} wallet={testuser_wallet_before} pending_directs={testuser_pending_before}")
+log(f"  testuser id={testuser_id} ref={testuser_ref} wallet=₹{testuser_wallet_before} "
+    f"pending_directs={testuser_pending_before}")
 
 r = get("/admin/system-wallet", admin_tok)
 admin_wallet_before = r.json() if r.status_code == 200 else {}
@@ -178,22 +204,22 @@ def count_l1_funding_txns() -> Tuple[int, float]:
 
 
 l1_count_pre, l1_total_pre = count_l1_funding_txns()
-log(f"  l1_funding txns BEFORE: count={l1_count_pre} total={l1_total_pre}")
+log(f"  l1_funding txns BEFORE: count={l1_count_pre} total=₹{l1_total_pre:.2f}")
 
 need = max(0, directs_required - testuser_pending_before)
 to_create = need + 1 if need > 0 else 1
 log(f"  Will create {to_create} fresh signups under testuser (need {need} more to fire L1)")
 
 created_user_ids: List[str] = []
-created_emails: List[str] = []
 
 if not testuser_ref:
     record("B.referral_code_present", False, "testuser has no referral_code")
+    B_OK = False
 else:
     for i in range(to_create):
         sfx = rand_suffix(6)
-        name = f"L1Test {sfx}"
-        email = f"l1test_{sfx}@test.app"
+        name = f"L1Test2 {sfx}"
+        email = f"l1test2_{sfx}@test.app"
         phone = f"9{random.randint(10**8, 10**9 - 1)}"
         password = "Test@1234"
 
@@ -213,7 +239,6 @@ else:
                     new_id = u.get("id")
                     break
         created_user_ids.append(new_id)
-        created_emails.append(email)
 
         new_tok = login(email, password)
         if not new_tok:
@@ -229,11 +254,12 @@ else:
             continue
         log(f"  signup #{i+1} done id={new_id} email={email}")
 
+# Snapshot AFTER
 r = get("/auth/me", testuser_tok)
 me_after = r.json() if r.status_code == 200 else {}
 testuser_wallet_after = float(me_after.get("wallet_balance") or 0)
 testuser_pending_after = int(me_after.get("pending_directs") or 0)
-log(f"  testuser AFTER: wallet={testuser_wallet_after} pending_directs={testuser_pending_after}")
+log(f"  testuser AFTER: wallet=₹{testuser_wallet_after} pending_directs={testuser_pending_after}")
 
 r = get("/admin/system-wallet", admin_tok)
 admin_wallet_after = r.json() if r.status_code == 200 else {}
@@ -241,22 +267,34 @@ buckets_after = (admin_wallet_after.get("buckets") or {})
 log(f"  admin buckets AFTER: {buckets_after}")
 
 wallet_delta = testuser_wallet_after - testuser_wallet_before
+ok_b1 = wallet_delta > 0
 record(
     "B.1 testuser wallet increased",
-    wallet_delta > 0,
-    f"wallet_delta={wallet_delta:.2f}, payout_l1_gross=₹{payout_l1}",
+    ok_b1,
+    f"wallet_delta=₹{wallet_delta:.2f}, payout_l1_gross=₹{payout_l1}",
 )
 l1_fired = wallet_delta >= (payout_l1 * 0.5)
 
-
-def b(buckets, key):
-    return float(buckets.get(key) or 0)
-
+def b(bb, key):
+    return float(bb.get(key) or 0)
 
 fr_delta = b(buckets_after, "fee_residual") - b(buckets_before, "fee_residual")
 ds_delta = b(buckets_after, "direct_signup") - b(buckets_before, "direct_signup")
 rc_delta = b(buckets_after, "referral_commission") - b(buckets_before, "referral_commission")
-log(f"  admin bucket deltas: fee_residual={fr_delta:.2f} direct_signup={ds_delta:.2f} referral_commission={rc_delta:.2f}")
+log(f"  admin bucket deltas: fee_residual=₹{fr_delta:.2f} direct_signup=₹{ds_delta:.2f} "
+    f"referral_commission=₹{rc_delta:.2f}")
+
+ok_b2 = (not l1_fired) or (fr_delta + ds_delta + rc_delta < 0)
+record(
+    "B.2 admin buckets net-debit when L1 fires",
+    ok_b2,
+    f"sum_delta=₹{(fr_delta+ds_delta+rc_delta):.2f} l1_fired={l1_fired}",
+)
+
+# Count NEW l1_funding rows after the live cycle
+l1_count_after_live, l1_total_after_live = count_l1_funding_txns()
+new_count = l1_count_after_live - l1_count_pre
+log(f"  l1_funding txns AFTER live cycle: count={l1_count_after_live} delta={new_count}")
 
 # Find sample l1_funding rows for testuser
 r = get("/admin/transactions", admin_tok)
@@ -268,84 +306,174 @@ sample_l1 = None
 if new_l1_rows:
     sample_l1 = {k: new_l1_rows[0].get(k) for k in
                  ["id", "type", "amount", "source_bucket", "related_signup_id",
-                  "related_payout_recipient", "description"]}
+                  "related_payout_recipient", "related_payout_txn_id", "description"]}
 
-record(
-    "B.2 admin buckets net-debit when L1 fires",
-    (not l1_fired) or (fr_delta + ds_delta + rc_delta < 0),
-    f"sum_delta={fr_delta+ds_delta+rc_delta:.2f} l1_fired={l1_fired}",
-)
-
+ok_b3 = (not l1_fired) or (len(new_l1_rows) >= 1)
 record(
     "B.3 l1_funding txn exists for testuser",
-    (not l1_fired) or (len(new_l1_rows) >= 1),
+    ok_b3,
     f"matching_rows={len(new_l1_rows)}; sample={json.dumps(sample_l1) if sample_l1 else 'none'}",
 )
+B_OK = B_OK and ok_b1 and ok_b2 and ok_b3
+
 if new_l1_rows:
     neg_ok = all(float(t.get("amount") or 0) < 0 for t in new_l1_rows)
     has_src = all(t.get("source_bucket") for t in new_l1_rows)
     has_sig = all(t.get("related_signup_id") for t in new_l1_rows)
     record("B.3b l1_funding rows have negative amount", neg_ok, f"all_negative={neg_ok}")
     record("B.3c l1_funding rows have source_bucket", has_src, f"all_have_source={has_src}")
-    record("B.3d l1_funding rows have related_signup_id", has_sig, f"all_have_signup={has_sig}")
+    record("B.3d l1_funding rows have related_signup_id (NEW FIX)", has_sig,
+           f"all_have_signup={has_sig}")
+    B_OK = B_OK and neg_ok and has_src and has_sig
 
+# Breakdown identity after L1 cycle
 r = get("/admin/system-wallet/breakdown", admin_tok)
 bd_after = r.json() if r.status_code == 200 else {}
-infl_a = bd_after.get("inflow", {}).get("total", 0)
-outfl_a = bd_after.get("outflow", {}).get("total", 0)
+infl_a = float(bd_after.get("inflow", {}).get("total", 0))
+outfl_a = float(bd_after.get("outflow", {}).get("total", 0))
 drift_after = abs(infl_a - outfl_a)
 l1d_after = bd_after.get("outflow", {}).get("l1_funding_debit")
-infl_b = (bd_before or {}).get("inflow", {}).get("total", 0)
-outfl_b = (bd_before or {}).get("outflow", {}).get("total", 0)
-drift_before = abs(infl_b - outfl_b)
+ok_b4 = drift_after <= 2.0
 record(
-    "B.4 inflow~=outflow after live L1 cycle",
-    drift_after <= 1.0,
-    f"BEFORE drift={drift_before:.2f} AFTER drift={drift_after:.2f} "
-    f"inflow={infl_a} outflow={outfl_a} l1_funding_debit={l1d_after}"
+    "B.4 |inflow-outflow| <= ₹2 after live L1 cycle",
+    ok_b4,
+    f"AFTER drift=₹{drift_after:.2f} inflow=₹{infl_a:.2f} outflow=₹{outfl_a:.2f} "
+    f"l1_funding_debit={l1d_after}",
 )
+B_OK = B_OK and ok_b4
 
 
-# SCENARIO C — Idempotency
-log("\n========= SCENARIO C: Idempotency =========")
-l1_count_pre_restart, l1_total_pre_restart = count_l1_funding_txns()
-log(f"  l1_funding BEFORE restart: count={l1_count_pre_restart} total={l1_total_pre_restart}")
+# ════════════════════════════════════════════════════════════════════
+# SCENARIO C — Idempotency on restart
+# ════════════════════════════════════════════════════════════════════
+log("\n========= SCENARIO C: Idempotency on restart =========")
+C_OK = True
 
-try:
-    res = subprocess.run(["sudo", "supervisorctl", "restart", "backend"],
-                         check=False, timeout=30, capture_output=True, text=True)
-    log(f"  restart stdout: {res.stdout.strip()}")
-    log(f"  restart stderr: {res.stderr.strip()}")
-    log("  sleeping 12s for backfill to run")
-    time.sleep(12)
-except Exception as e:
-    log(f"  restart failed: {e}")
+# Capture initial state for the two restart cycles
+l1_count_N0, l1_total_N0 = count_l1_funding_txns()
+log(f"  N0: l1_funding count={l1_count_N0} total=₹{l1_total_N0:.2f}")
 
-# Re-login (token should still work but be safe)
+# Take a snapshot of the existing source ids (l1_funding rows already keyed by source)
+r = get("/admin/transactions", admin_tok)
+existing_l1_source_ids: set = set()
+existing_l1_ids: set = set()
+if r.status_code == 200:
+    for t in r.json():
+        if t.get("type") == "l1_funding" and t.get("status") == "success":
+            existing_l1_ids.add(t.get("id"))
+            sid = t.get("related_payout_txn_id") or t.get("related_signup_id")
+            if sid:
+                existing_l1_source_ids.add(sid)
+log(f"  existing l1_funding source ids tracked: {len(existing_l1_source_ids)}")
+
+
+def truncate_backend_log():
+    """Clear the backend err log so we can monitor only NEW backfill lines."""
+    try:
+        subprocess.run(["sudo", "truncate", "-s", "0", "/var/log/supervisor/backend.out.log"],
+                       check=False, timeout=10, capture_output=True, text=True)
+        subprocess.run(["sudo", "truncate", "-s", "0", "/var/log/supervisor/backend.err.log"],
+                       check=False, timeout=10, capture_output=True, text=True)
+    except Exception as e:
+        log(f"  (could not truncate logs: {e})")
+
+
+def grep_backend_log_for_backfill() -> List[str]:
+    """Return any 'L1 funding backfill' lines from current backend logs."""
+    hits: List[str] = []
+    for p in ("/var/log/supervisor/backend.out.log", "/var/log/supervisor/backend.err.log"):
+        try:
+            res = subprocess.run(["grep", "-h", "L1 funding backfill", p],
+                                 check=False, timeout=10, capture_output=True, text=True)
+            if res.stdout:
+                for line in res.stdout.splitlines():
+                    hits.append(line)
+        except Exception:
+            pass
+    return hits
+
+
+def do_restart_and_wait(label: str):
+    log(f"  -> {label}: truncating logs and restarting backend...")
+    truncate_backend_log()
+    try:
+        res = subprocess.run(["sudo", "supervisorctl", "restart", "backend"],
+                             check=False, timeout=30, capture_output=True, text=True)
+        log(f"     restart stdout: {res.stdout.strip()}")
+        log(f"     restart stderr: {res.stderr.strip()}")
+    except Exception as e:
+        log(f"     restart failed: {e}")
+    # wait 30 seconds for backfill
+    log(f"     sleeping 32s for backfill to run")
+    time.sleep(32)
+
+
+# RESTART #1
+do_restart_and_wait("RESTART #1")
 admin_tok2 = None
-for _ in range(5):
+for _ in range(8):
     admin_tok2 = login(ADMIN_EMAIL, ADMIN_PASS)
     if admin_tok2:
         break
     time.sleep(2)
 admin_tok = admin_tok2 or admin_tok
 
-l1_count_post_restart, l1_total_post_restart = count_l1_funding_txns()
-log(f"  l1_funding AFTER restart : count={l1_count_post_restart} total={l1_total_post_restart}")
+l1_count_r1, l1_total_r1 = count_l1_funding_txns()
+log(f"  AFTER RESTART #1: count={l1_count_r1} total=₹{l1_total_r1:.2f}")
+backfill_lines_r1 = grep_backend_log_for_backfill()
+log(f"  backfill log lines after R1: {len(backfill_lines_r1)}")
+for line in backfill_lines_r1[:5]:
+    log(f"    > {line[:240]}")
 
+ok_c1a = l1_count_r1 == l1_count_N0
+ok_c2a = abs(l1_total_r1 - l1_total_N0) < 0.01
+record("C.1a l1_funding count unchanged after restart #1", ok_c1a,
+       f"N0={l1_count_N0} after={l1_count_r1}")
+record("C.2a l1_funding total unchanged after restart #1", ok_c2a,
+       f"N0=₹{l1_total_N0:.2f} after=₹{l1_total_r1:.2f}")
+C_OK = C_OK and ok_c1a and ok_c2a
+
+# RESTART #2 (paranoia)
+do_restart_and_wait("RESTART #2")
+admin_tok2 = None
+for _ in range(8):
+    admin_tok2 = login(ADMIN_EMAIL, ADMIN_PASS)
+    if admin_tok2:
+        break
+    time.sleep(2)
+admin_tok = admin_tok2 or admin_tok
+
+l1_count_r2, l1_total_r2 = count_l1_funding_txns()
+log(f"  AFTER RESTART #2: count={l1_count_r2} total=₹{l1_total_r2:.2f}")
+backfill_lines_r2 = grep_backend_log_for_backfill()
+log(f"  backfill log lines after R2: {len(backfill_lines_r2)}")
+for line in backfill_lines_r2[:5]:
+    log(f"    > {line[:240]}")
+
+ok_c1b = l1_count_r2 == l1_count_N0
+ok_c2b = abs(l1_total_r2 - l1_total_N0) < 0.01
+record("C.1b l1_funding count unchanged after restart #2", ok_c1b,
+       f"N0={l1_count_N0} after_r2={l1_count_r2}")
+record("C.2b l1_funding total unchanged after restart #2", ok_c2b,
+       f"N0=₹{l1_total_N0:.2f} after_r2=₹{l1_total_r2:.2f}")
+C_OK = C_OK and ok_c1b and ok_c2b
+
+# Check that backfill log lines (if any) report "sourced 0 historic" — i.e. no
+# new funding occurred. The current code only logs when funded_count > 0,
+# so the absence of "L1 funding backfill" lines is itself the success signal.
+# However if a line IS present, it would mean the backfill funded something.
+ok_c3 = (len(backfill_lines_r1) == 0) and (len(backfill_lines_r2) == 0)
 record(
-    "C.1 l1_funding count unchanged after restart",
-    l1_count_post_restart == l1_count_pre_restart,
-    f"before={l1_count_pre_restart} after={l1_count_post_restart}",
+    "C.3 NO 'L1 funding backfill' log line after restart (means backfill skipped all)",
+    ok_c3,
+    f"r1_lines={len(backfill_lines_r1)} r2_lines={len(backfill_lines_r2)}",
 )
-record(
-    "C.2 l1_funding total unchanged after restart",
-    abs(l1_total_post_restart - l1_total_pre_restart) < 0.01,
-    f"before={l1_total_pre_restart:.2f} after={l1_total_post_restart:.2f}",
-)
+C_OK = C_OK and ok_c3
 
 
-# Final
+# ════════════════════════════════════════════════════════════════════
+# FINAL SUMMARY
+# ════════════════════════════════════════════════════════════════════
 log("\n========= SUMMARY =========")
 passed = sum(1 for _, ok, _ in results if ok)
 total = len(results)
@@ -353,18 +481,16 @@ log(f"Passed: {passed}/{total}")
 for n, ok, d in results:
     log(f"  [{'PASS' if ok else 'FAIL'}] {n}: {d}")
 
-critical_keys = [
-    "A.1 breakdown.inflow~=outflow",
-    "B.1 testuser wallet increased",
-    "B.3 l1_funding txn exists for testuser",
-    "B.4 inflow~=outflow after live L1 cycle",
-    "C.1 l1_funding count unchanged after restart",
-    "C.2 l1_funding total unchanged after restart",
-]
-crit_pass = all(any(n == k and ok for n, ok, _ in results) for k in critical_keys)
 log("")
-log(f"L1 minting bug FIXED: {'YES' if crit_pass else 'NO'}")
-if not crit_pass:
-    log("Reason: one or more critical scenarios failed — see above.")
+log(f"Scenario A (breakdown identity)     : {'PASS' if A_OK else 'FAIL'}")
+log(f"Scenario B (live L1 cycle)          : {'PASS' if B_OK else 'FAIL'}")
+log(f"Scenario C (restart idempotency)    : {'PASS' if C_OK else 'FAIL'}")
+log(f"Scenario D (ledger alerts)          : {'PASS' if D_OK else 'FAIL'}")
 
-sys.exit(0 if crit_pass else 1)
+critical_ok = A_OK and B_OK and C_OK and D_OK
+log("")
+log(f"L1 minting bug FIXED & IDEMPOTENT: {'YES' if critical_ok else 'NO'}")
+if not critical_ok:
+    log("Reason: one or more scenarios failed — see above.")
+
+sys.exit(0 if critical_ok else 1)

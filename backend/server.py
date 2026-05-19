@@ -627,10 +627,13 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
             "type": "referral_payout",
             "level": level,
             "amount": gross,
+            "gross_amount": gross,
             "status": "success",
             "description": f"Level {level} payout from {src_short}" if src_short else f"Level {level} referral payout",
             "source_user_name": src_short or None,
             "reference_number": base_ref,
+            "related_signup_id": signup_id,
+            "related_payout_recipient": sponsor_user["id"],
             "created_at": ts,
         })
         await _create_notification(sponsor_user["id"], "payout", f"₹{int(gross)} credited!", f"Level {level} referral payout")
@@ -661,6 +664,8 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
         "description": user_desc,
         "source_user_name": src_short or None,
         "reference_number": base_ref,
+        "related_signup_id": signup_id,
+        "related_payout_recipient": sponsor_user["id"],
         "created_at": ts,
     })
     await _create_notification(
@@ -4056,10 +4061,20 @@ async def get_system_wallet_breakdown(
     # already counted in `user_wallets_paid` and these debits zero out the
     # phantom-money inflation.
     l1_funding_debit = await _sum({"type": "l1_funding", "status": "success"})  # negative number
+    # ─── Admin-held inflows mirrored as outflow lines ──────────────────
+    # UTR deposits, shop_margin, service_margin all land in DEDICATED admin
+    # wallet buckets (direct_added, shopping_margin, service_margin). They
+    # are simultaneously an inflow (money into platform) AND held in admin
+    # wallet — so to make the breakdown identity `inflow == outflow` hold,
+    # we mirror them as offsetting outflow rows (admin-held buckets).
+    admin_direct_added = round(utr_deposits, 2)
+    admin_shop_margin_held = round(shop_margin, 2)
+    admin_service_margin_held = round(service_margin, 2)
     outflow_total = round(
         user_wallets_paid + gst_collected + cascade_overflow
         + direct_signup_credit + fee_residual + user_withdrawals_done
-        + l1_funding_debit,  # adds a negative → reduces outflow
+        + l1_funding_debit  # adds a negative → reduces outflow
+        + admin_direct_added + admin_shop_margin_held + admin_service_margin_held,
         2,
     )
 
@@ -4090,6 +4105,9 @@ async def get_system_wallet_breakdown(
             "to_admin_fee_residual":     round(fee_residual, 2),
             "to_admin_cascade_overflow": round(cascade_overflow, 2),
             "to_admin_gst_collected":    round(gst_collected, 2),
+            "to_admin_direct_added":     admin_direct_added,
+            "to_admin_shop_margin":      admin_shop_margin_held,
+            "to_admin_service_margin":   admin_service_margin_held,
             "user_withdrawals_settled":  round(user_withdrawals_done, 2),
             # Negative number — funds withdrawn from admin buckets to pay
             # L1 cycles (which exceed the ₹118 fee). Shown as a separate
@@ -5788,12 +5806,24 @@ async def _background_init():
                     continue
                 signup_id = tx.get("related_signup_id")
                 recipient = tx.get("user_id")
+                source_tx_id = tx.get("id")
                 # Idempotency check — already funded?
-                already_funded = await db.transactions.find_one({
-                    "type": "l1_funding",
-                    "related_signup_id": signup_id,
-                    "related_payout_recipient": recipient,
-                }) if signup_id else None
+                # Primary key: (related_signup_id, related_payout_recipient).
+                # Fallback for legacy rows (signup_id=None): match on
+                # `related_payout_txn_id` to prevent double-debit on every
+                # restart when the original referral_payout row has no
+                # signup_id stamped.
+                if signup_id:
+                    already_funded = await db.transactions.find_one({
+                        "type": "l1_funding",
+                        "related_signup_id": signup_id,
+                        "related_payout_recipient": recipient,
+                    })
+                else:
+                    already_funded = await db.transactions.find_one({
+                        "type": "l1_funding",
+                        "related_payout_txn_id": source_tx_id,
+                    }) if source_tx_id else None
                 if already_funded:
                     continue
                 if not admin_doc:
@@ -5818,6 +5848,7 @@ async def _background_init():
                         "source_bucket": source_bucket,
                         "related_signup_id": signup_id,
                         "related_payout_recipient": recipient,
+                        "related_payout_txn_id": source_tx_id,
                         "created_at": now_utc().isoformat(),
                     })
                     remaining -= debit

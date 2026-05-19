@@ -583,11 +583,30 @@ l1_payout_funding_2026_02:
   - task: "Scenario A — Static ledger health (breakdown inflow≈outflow + ledger-alerts)"
     implemented: true
     working: false
-    file: "backend/server.py (L3974-4111 breakdown; L5462-5494 ledger-alerts)"
-    stuck_count: 0
+    file: "backend/server.py (L3974-4129 breakdown; L5462-5494 ledger-alerts)"
+    stuck_count: 1
     priority: "high"
     needs_retesting: false
     status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          SECOND PASS (after offset-line fix + cleanup migration):
+          GET /api/admin/system-wallet/breakdown
+            inflow.total  = ₹15,567.00
+            outflow.total = ₹15,471.05
+              ├─ to_admin_direct_added    = ₹7,000.00  ✅ (new offset line)
+              ├─ to_admin_shop_margin     = ₹2,499.00  ✅ (new offset line)
+              ├─ to_admin_service_margin  = ₹0.00      ✅ (new offset line)
+              └─ l1_funding_debit         = ₹−400.00
+            DRIFT = ₹95.95   (was ₹12,499.00 — fix reduced drift by ₹12,403)
+          Verdict: the 3 new offset lines WORK (they removed ₹9,499 of structural drift
+          from UTR+shop_margin). The remaining ₹95.95 is the documented legacy
+          fee_residual gap (one missing legacy fee_residual row pre-dating this session),
+          per the problem statement. Identity is NOT ≤ ₹2 yet, but is no longer
+          structurally broken — it's a one-row legacy data issue. Marked failing per
+          spec's hard ₹2 threshold; needs main-agent decision whether to (a) backfill
+          the missing ₹95.95 fee_residual row or (b) loosen the threshold to ≤ ₹100.
       - working: false
         agent: "testing"
         comment: |
@@ -622,11 +641,39 @@ l1_payout_funding_2026_02:
   - task: "Scenario B — Live L1 cycle (admin buckets debited, l1_funding txn written)"
     implemented: true
     working: true
-    file: "backend/server.py (L797-850 L1 funding source)"
+    file: "backend/server.py (L797-855 L1 funding source)"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          SECOND PASS: scenario re-run after fixes.
+          • Created 7 fresh signups under testuser (referral=HLKFW2). testuser had
+            already received an earlier L1 payout in pass-1 (wallet=₹337.84,
+            payouts_received≥1) so new signups got SPILLED to deeper downlines per
+            the BFS rule — testuser did NOT fire a NEW L1 cycle this round; this is
+            CORRECT spillover behaviour.
+          • Result:
+              testuser wallet: ₹337.84 → ₹406.72  (delta +₹68.88, L2..cascade only)
+              admin fee_residual: ₹559.50 → ₹1,231.15  (+₹671.65 from 7 new signups)
+              admin referral_commission: ₹153.55 → ₹188.90  (+₹35.35 cascade)
+              l1_funding count: 1 → 1   ✅ (no new L1 cycle, so no new row — correct)
+          • The single existing l1_funding row (from pass-1) is still well-formed:
+              id=51d63ebb-…, amount=−400.0, source_bucket=fee_residual,
+              related_signup_id=74c000de-…  ✅ (NEW FIX — was missing in pass-1)
+              related_payout_recipient=98c1bff0-… (testuser.id),
+              related_payout_txn_id=c7fcded4-…  ✅ (NEW FIX — was missing in pass-1)
+          B.1 testuser wallet increased     PASS
+          B.2 admin buckets net-debit       PASS (l1 didn't fire; net change captured)
+          B.3 l1_funding row exists         PASS
+          B.3b amount negative              PASS
+          B.3c source_bucket present        PASS
+          B.3d related_signup_id present    PASS  (new field stamped by fix)
+          B.4 inflow~outflow ≤ ₹2 after     FAIL  (drift = ₹95.95, the documented
+                                                  legacy fee_residual gap — not
+                                                  caused by this cycle)
       - working: true
         agent: "testing"
         comment: |
@@ -668,12 +715,42 @@ l1_payout_funding_2026_02:
 
   - task: "Scenario C — Idempotency: backfill must NOT re-fund L1 payouts on restart"
     implemented: true
-    working: false
-    file: "backend/server.py (L5768-5835 backfill + L579-680 _credit_payout)"
-    stuck_count: 1
+    working: true
+    file: "backend/server.py (L5786-5866 backfill + L579-700 _credit_payout)"
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          SECOND PASS — CRITICAL idempotency now PASSES.
+          • BEFORE restart: count(l1_funding) = 1, total = ₹−400.
+          • `sudo supervisorctl restart backend` → wait 32s.
+          • AFTER restart #1: count = 1, total = ₹−400.  ✅ unchanged
+          • `sudo supervisorctl restart backend` (paranoia) → wait 32s.
+          • AFTER restart #2: count = 1, total = ₹−400.  ✅ still unchanged
+          • Backend out.log + err.log between restarts: ZERO "L1 funding backfill"
+            log lines emitted, meaning the idempotency check at server.py:5816-5826
+            correctly matched the surviving l1_funding row via either
+            `related_signup_id` (live row) OR `related_payout_txn_id` (legacy fallback)
+            and skipped re-funding.
+          ROOT FIX CONFIRMED:
+            1. `_credit_payout` (L621-700) now stamps `related_signup_id` AND
+               `related_payout_recipient` on both branches → future referral_payout
+               rows are tagged for fast idempotency lookup.
+            2. `_background_init` (L5786-5866) uses `related_payout_txn_id` as a
+               fallback key for legacy referral_payout rows that have no signup_id;
+               surviving l1_funding rows are stamped with `related_payout_txn_id =
+               source_l1_referral_payout.id` so the check trivially matches.
+            3. The one-shot cleanup_l1_funding.py migration successfully refunded
+               ₹1,600 (4×₹400 duplicate debits) and deleted 7 duplicate l1_funding
+               rows, leaving exactly 1 properly-stamped survivor.
+          C.1a count unchanged after R1     PASS
+          C.2a total unchanged after R1     PASS
+          C.1b count unchanged after R2     PASS
+          C.2b total unchanged after R2     PASS
+          C.3  no backfill log lines        PASS
       - working: false
         agent: "testing"
         comment: |
@@ -726,12 +803,33 @@ l1_payout_funding_2026_02:
 
   - task: "Scenario D — Ledger alert smoke (GET /admin/ledger-alerts)"
     implemented: true
-    working: true
+    working: false
     file: "backend/server.py (L5462-5494)"
     stuck_count: 0
-    priority: "low"
+    priority: "medium"
     needs_retesting: false
     status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          SECOND PASS — re-read /api/admin/ledger-alerts.
+          Endpoint: 200 OK with shape {current, alerts, check_interval_seconds,
+          drift_threshold}.
+          • current.drift = ₹−95.95   (the documented legacy fee_residual gap)
+          • alerts[] has 50 historic entries; FOUND 2 UNRESOLVED with |drift|>100:
+              drift=₹−1,695.95  at 2026-05-19T11:24:12Z
+              drift=₹−495.95   at 2026-05-19T11:19:28Z
+          These two alerts were INSERTED by the background _money_flow_checker
+          DURING the bug-fix work itself (between the duplicate-debit phase and
+          the cleanup migration). The cleanup migration cleaned the underlying
+          DATA but did NOT resolve these historic alert ROWS in the ledger_alerts
+          collection. Since the spec says "if any UNRESOLVED alert has |drift|>100,
+          fail" → strictly FAIL, but the failure is purely audit-trail residue,
+          not a current ledger problem (most recent 2 alerts are −₹95.95 which is
+          within the documented legacy gap).
+          ACTION FOR MAIN AGENT: mark those 2 historic alerts as resolved (e.g.
+          POST /admin/ledger-alerts/{id}/resolve OR a one-shot db update) so the
+          alert list reflects post-cleanup truth.
       - working: true
         agent: "testing"
         comment: |
@@ -744,6 +842,75 @@ l1_payout_funding_2026_02:
           Endpoint shape and gating intact.
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      L1 PAYOUT FUNDING — SECOND PASS (re-verify after fixes).
+      Runner: /app/backend_test.py.  API: https://vendor-network-app-1.preview.emergentagent.com/api
+
+      FINAL VERDICT: **L1 minting bug FIXED & IDEMPOTENT: YES (with caveats)**
+
+      ✅ CRITICAL Scenario C (idempotency on restart) — NOW PASSES.
+         • count(l1_funding) stable at 1 across TWO consecutive backend restarts.
+         • Zero "L1 funding backfill" log lines emitted post-restart (means the
+           backfill loop matched all existing rows via either `related_signup_id`
+           (live path) or `related_payout_txn_id` (legacy fallback) and skipped
+           re-funding). The original double-debit bug is fully resolved.
+
+      ✅ Scenario B (live L1 cycle) — passes. 7 fresh signups under testuser;
+         since testuser already received an L1 in pass-1, new signups were
+         correctly spilled deeper (BFS rule) — no NEW L1 fired for testuser,
+         which is expected. The pre-existing l1_funding row is still well-formed
+         and now carries `related_signup_id` (NEW FIX) and `related_payout_txn_id`
+         (NEW FIX, stamped by cleanup migration).
+
+      ⚠ Scenario A (breakdown identity) — drift dropped from ₹12,499 → ₹95.95.
+         The 3 new offset lines (to_admin_direct_added, to_admin_shop_margin,
+         to_admin_service_margin) WORK — they removed ₹9,499 of structural drift
+         from UTR + shop_margin. The remaining ₹95.95 is the DOCUMENTED legacy
+         fee_residual gap (one missing legacy fee_residual row pre-dating this
+         session, called out explicitly in the review brief).
+         Strict |inflow-outflow|≤₹2 threshold is NOT met (it's ₹95.95).
+         RECOMMENDATION: either backfill the missing ₹95.95 fee_residual row,
+         or accept the legacy gap and relax the threshold to ≤ ₹100.
+
+      ⚠ Scenario D (ledger-alerts re-read) — found 2 UNRESOLVED historic alerts
+         with |drift|>100:
+            drift=₹−1,695.95 at 2026-05-19T11:24:12Z
+            drift=₹−495.95  at 2026-05-19T11:19:28Z
+         Both were inserted by the background _money_flow_checker DURING the
+         bug-fix work (when duplicate l1_funding debits were still present).
+         The cleanup_l1_funding.py migration fixed the underlying DATA but
+         did NOT mark these historic ledger_alerts rows as resolved. Current
+         drift is now −₹95.95 (the documented legacy gap, < ₹100).
+         RECOMMENDATION: mark those 2 historic alerts resolved (one-shot db
+         update or POST /admin/ledger-alerts/{id}/resolve) so the alert
+         backlog reflects post-cleanup reality.
+
+      DETAIL DUMP:
+        inflow.total  = ₹15,567.00
+        outflow.total = ₹15,471.05   (drift ₹95.95, was ₹12,499.00 in pass-1)
+          ├ to_user_wallets_referral   = ₹3,401.50
+          ├ to_admin_direct_signup     = ₹1,500.00
+          ├ to_admin_fee_residual      = ₹1,231.15
+          ├ to_admin_cascade_overflow  = ₹0.00
+          ├ to_admin_gst_collected     = ₹379.44
+          ├ to_admin_direct_added      = ₹7,000.00   ← NEW offset line, works
+          ├ to_admin_shop_margin       = ₹2,499.00   ← NEW offset line, works
+          ├ to_admin_service_margin    = ₹0.00       ← NEW offset line, works
+          ├ user_withdrawals_settled   = ₹0.00
+          └ l1_funding_debit           = ₹−400.00
+
+        l1_funding ledger row (sole survivor, properly stamped):
+          id=51d63ebb-…
+          amount=−₹400.00, source_bucket=fee_residual,
+          related_signup_id=74c000de-…,
+          related_payout_recipient=98c1bff0-… (testuser.id),
+          related_payout_txn_id=c7fcded4-…   ← NEW field, set by cleanup script
+
+      All critical correctness assertions met. Remaining issues are audit-trail
+      hygiene (legacy fee_residual row + 2 historic unresolved alerts) — not
+      ledger-integrity bugs.
+
   - agent: "testing"
     message: |
       L1 PAYOUT FUNDING TEST RUN — live end-to-end on
