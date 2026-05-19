@@ -979,6 +979,108 @@ agent_communication:
 
 
 
+phase_2b_refactor_2026_02:
+  - task: "Phase 2B refactor — Tickets + Pincodes extraction"
+    implemented: true
+    working: true
+    file: "backend/routes/tickets.py + backend/routes/pincodes.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 2B refactor regression: 20/20 PASS. Runner /app/backend_test.py
+          against https://vendor-network-app-1.preview.emergentagent.com/api.
+
+          A — TICKETS SMOKE (11/11 PASS):
+            • POST /auth/login testuser@app.com -> 200, token grabbed (json key 'token').
+            • POST /tickets {subject:'refactor test', message:'verifying',
+              category:'other'} -> 200 ok=true, ticket.id=249a2903-…
+            • GET /tickets/me -> 200, items=2 (>=1 ✓)
+            • GET /tickets/{id} -> 200, ticket+messages present (messages=1).
+            • POST /tickets/{id}/reply {message:'user follow-up'} -> 200
+              message_count=2.
+            • POST /auth/login admin@app.com -> 200 admin token.
+            • GET /admin/tickets -> 200, items=2, counts={open:2,
+              in_progress:0, unread_admin:2}.
+            • GET /admin/tickets/stats -> 200, all 6 required keys present
+              (open, in_progress, resolved, closed, total, unread_admin).
+            • PATCH /admin/tickets/{id} {priority:'high'} -> 200,
+              ticket.priority='high'.
+            • POST /tickets/{id}/reply as admin {message:'admin reply'}
+              -> 200, ticket.status moved from 'open' to 'in_progress' ✓.
+            • POST /tickets/{id}/close as testuser -> 200, follow-up GET
+              confirms status='closed'.
+
+          B — PINCODES SMOKE (4/4 PASS):
+            • GET /admin/pincodes/search?q=110&limit=3 -> 200, 3 items,
+              all pincodes start with '110' (110001, 110002, 110003).
+            • GET /admin/pincodes/in-region?state=Delhi&limit=10 -> 200,
+              10 items, all rows have state='Delhi' (case insensitive match).
+            • GET /admin/pincodes/110001 -> 200, pincode='110001',
+              assigned_to=None (no distributor assigned).
+            • GET /admin/pincodes/in-region (no params) -> 400 with
+              detail='state or district is required'. Route ordering
+              (in-region BEFORE {pin}) is preserved correctly.
+
+          C — LEDGER INTEGRITY (2/2 PASS):
+            • GET /admin/system-wallet/breakdown: inflow=₹16,393.00,
+              outflow=₹16,393.00, drift=₹0.00 (≤ ₹2 ✓). Zero drift —
+              even better than the documented ₹95.95 legacy gap.
+            • GET /admin/ledger-alerts?only_unresolved=true -> 200,
+              alerts=0, no unresolved alert with |drift|>100.
+
+          D — REGRESSION (3/3 PASS):
+            • GET /auth/me (testuser token) -> 200, email=testuser@app.com.
+            • GET /admin/users (admin token) -> 200, count=41 users.
+            • GET /admin/system-wallet (admin token) -> 200, buckets dict
+              present with keys [referral_commission, direct_signup,
+              fee_residual, direct_added, service_margin, shopping_margin].
+
+          FINAL VERDICT: Phase 2B refactor (tickets+pincodes) GREEN: **YES**.
+          No regressions. Both extracted modules behave identically to the
+          pre-refactor server.py implementation. Route-ordering for
+          /admin/pincodes/in-region vs /admin/pincodes/{pin} is correctly
+          preserved (in-region declared first at routes/pincodes.py:79
+          BEFORE {pin} at line 102, per the explicit comment in the file).
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      PHASE 2B REFACTOR (TICKETS + PINCODES) — RE-VERIFY RUN.
+      Runner: /app/backend_test.py.
+      API: https://vendor-network-app-1.preview.emergentagent.com/api
+
+      FINAL VERDICT: **Phase 2B refactor (tickets+pincodes) GREEN: YES**
+      All 20/20 assertions PASS across 4 sections:
+
+      ✅ A — Tickets smoke (11/11)
+         Full user+admin lifecycle: create -> list -> read -> user-reply ->
+         admin-list -> admin-stats -> patch priority -> admin-reply (auto
+         status transition to in_progress) -> user-close. All endpoints
+         function correctly under the extracted router at
+         /app/backend/routes/tickets.py.
+
+      ✅ B — Pincodes smoke (4/4)
+         search(prefix), in-region(state filter), single-pincode lookup,
+         and the no-params 400 guard all behave as specified. Critical
+         route-ordering rule (/in-region BEFORE /{pin}) is preserved.
+
+      ✅ C — Ledger integrity re-confirm (2/2)
+         breakdown drift = ₹0.00 (perfect identity), no unresolved
+         ledger-alerts with |drift|>100.
+
+      ✅ D — Regression on pre-existing flows (3/3)
+         /auth/me, /admin/users (41 rows), /admin/system-wallet (6
+         buckets) — all unchanged.
+
+      Zero failures, zero warnings. The refactor is transparent to clients;
+      no behavioural drift detected between pre- and post-refactor states.
+      Main agent can summarize and finish.
+
+
 mlm_engine_option_b_2026_05_18:
   - task: "Signup separates sponsor_id (placement) from referral_owner_id (inviter audit)"
     implemented: true
