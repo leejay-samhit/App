@@ -13,6 +13,7 @@ import { GradientCard } from "../../src/gradient-card";
 /** Buckets shown in the UI — keep order aligned with business priority. */
 type BucketKey =
   | "direct_signup"
+  | "fee_residual"
   | "referral_commission"
   | "gst_collected"
   | "direct_added"
@@ -20,7 +21,8 @@ type BucketKey =
   | "shopping_margin";
 
 const BUCKETS: { key: BucketKey; label: string; icon: any; color: string; desc: string; cta?: string }[] = [
-  { key: "direct_signup",       label: "Direct Joins & Realignments", icon: "user-plus",         color: "#2E7D52", desc: "No-referral signups · admin direct credit", cta: "View transactions" },
+  { key: "direct_signup",       label: "Direct Joins & Realignments", icon: "user-plus",         color: "#2E7D52", desc: "No-referral + EARN signups (₹100 each)", cta: "View transactions" },
+  { key: "fee_residual",        label: "Fee Residual",                 icon: "shuffle",          color: "#0EA5A4", desc: "Leftover when with-ref cascade < fee",     cta: "View transactions" },
   { key: "referral_commission", label: "Referral Commission (L1..L10)", icon: "git-branch",      color: "#7C3AED", desc: "Admin earnings from the 1+10 cascade",      cta: "View transactions" },
   { key: "gst_collected",       label: "GST Collected (18%)",          icon: "percent",          color: "#B3261E", desc: "GST routed from payouts & signups",        cta: "View transactions" },
   { key: "direct_added",        label: "Direct-Added (UTR)",           icon: "arrow-down-circle", color: "#0B66C2", desc: "Manual UTR-verified bank deposits" },
@@ -52,6 +54,7 @@ type Breakdown = {
   outflow: {
     to_user_wallets_referral: number;
     to_admin_direct_signup: number;
+    to_admin_fee_residual: number;
     to_admin_cascade_overflow: number;
     to_admin_gst_collected: number;
     user_withdrawals_settled: number;
@@ -248,7 +251,8 @@ export default function AdminSystemWallet() {
             {/* Outflow */}
             <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>📤 REDISTRIBUTED · where it went</Text>
             <BreakdownRow label="To user wallets (L1-L10 net)" value={breakdown.outflow.to_user_wallets_referral} hint="Sum of net referral payouts credited to user wallets" />
-            <BreakdownRow label="Admin · direct signup" value={breakdown.outflow.to_admin_direct_signup} hint="₹100 per no-ref signup" />
+            <BreakdownRow label="Admin · direct signup" value={breakdown.outflow.to_admin_direct_signup} hint="₹100 per no-ref / EARN signup" />
+            <BreakdownRow label="Admin · fee residual" value={breakdown.outflow.to_admin_fee_residual} hint="Leftover from with-ref signups when cascade < fee" />
             <BreakdownRow label="Admin · cascade overflow" value={breakdown.outflow.to_admin_cascade_overflow} hint="Uncascaded L2..L10 when upline chain ends early" />
             <BreakdownRow label="Admin · GST collected" value={breakdown.outflow.to_admin_gst_collected} hint="18% routed to regulatory bucket" />
             <BreakdownRow label="User withdrawals (settled)" value={breakdown.outflow.user_withdrawals_settled} hint="Cash that left to bank/UPI" />
@@ -429,13 +433,16 @@ function TxnRow({ txn }: { txn: Txn }) {
   const dt = new Date(txn.created_at);
   const isCascade = txn.type === "cascade_overflow";
   const isDirect = txn.type === "direct_signup_credit";
+  const isFeeResidual = txn.type === "fee_residual";
   const isGst = txn.type === "gst_collected";
 
   // Color + chip label
   const meta = isCascade
     ? { color: "#A855F7", label: `L${txn.level} overflow` }
     : isDirect
-    ? { color: "#2E7D52", label: "Direct join" }
+    ? { color: "#2E7D52", label: "Direct join (₹100)" }
+    : isFeeResidual
+    ? { color: "#0EA5A4", label: "Fee residual" }
     : isGst
     ? { color: "#B3261E", label: "GST 18%" }
     : txn.type === "referral_payout"

@@ -732,6 +732,16 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     # admin wallet exactly equal to the actual revenue inflow.
     if user.get("no_referral_signup"):
         placement_sponsor = await db.users.find_one({"id": sponsor_id}) if sponsor_id else None
+        # Bump the placement sponsor's direct_referrals_count so the matrix
+        # tree view reflects this new direct (without firing the cascade).
+        # NOTE: pending_directs is intentionally NOT incremented here — the
+        # L1 cycle counter belongs to USER-referral flow only. EARN / no-ref
+        # signups feed admin's `direct_signup` bucket directly.
+        if sponsor_id and placement_sponsor and placement_sponsor.get("email") != ADMIN_EMAIL.lower():
+            await db.users.update_one(
+                {"id": sponsor_id},
+                {"$inc": {"direct_referrals_count": 1}},
+            )
         await _credit_no_ref_signup_to_admin(user, placement_sponsor)
         return  # ← stop here. No cascade. No overflow.
 
@@ -849,11 +859,15 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     if residual > 0.01:
         admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin_user:
-            await credit_admin_bucket("direct_signup", residual, also_total_earned=True)
+            # Fee residual goes to its OWN dedicated bucket (`fee_residual`)
+            # so it doesn't inflate the Direct Joins tile. Admin's overall
+            # wallet_balance still receives this money — it's just labelled
+            # separately for accounting clarity.
+            await credit_admin_bucket("fee_residual", residual, also_total_earned=True)
             await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": admin_user["id"],
-                "type": "direct_signup_credit",
+                "type": "fee_residual",
                 "amount": residual,
                 "status": "success",
                 "description": (
@@ -3982,10 +3996,16 @@ async def get_system_wallet_breakdown(
     user_wallets_paid = await _sum({"type": "referral_payout", "status": "success"})
     gst_collected = await _sum({"type": "gst_collected", "status": "success"})
     cascade_overflow = await _sum({"type": "cascade_overflow", "status": "success"})
+    # PURE direct-signup credits ONLY (no-ref + EARN flows: ₹100 each).
+    # Fee-residuals from with-ref signups are tracked separately so the UI's
+    # "Direct Joins" tab shows the right ledger value (matches no_ref_count
+    # × ₹100) without inflating it with leftover commission pool slop.
     direct_signup_credit = await _sum({"type": "direct_signup_credit", "status": "success"})
+    fee_residual = await _sum({"type": "fee_residual", "status": "success"})
     user_withdrawals_done = abs(await _sum({"type": "withdrawal", "status": "success"}))
     outflow_total = round(
-        user_wallets_paid + gst_collected + cascade_overflow + direct_signup_credit + user_withdrawals_done,
+        user_wallets_paid + gst_collected + cascade_overflow
+        + direct_signup_credit + fee_residual + user_withdrawals_done,
         2,
     )
 
@@ -4013,6 +4033,7 @@ async def get_system_wallet_breakdown(
         "outflow": {
             "to_user_wallets_referral":  round(user_wallets_paid, 2),
             "to_admin_direct_signup":    round(direct_signup_credit, 2),
+            "to_admin_fee_residual":     round(fee_residual, 2),
             "to_admin_cascade_overflow": round(cascade_overflow, 2),
             "to_admin_gst_collected":    round(gst_collected, 2),
             "user_withdrawals_settled":  round(user_withdrawals_done, 2),
@@ -4113,6 +4134,7 @@ async def reconcile_system_wallet(
 # income types are added so the books always balance after a reconcile.
 _BUCKET_TXN_TYPES: Dict[str, List[str]] = {
     "direct_signup":       ["direct_signup_credit"],
+    "fee_residual":        ["fee_residual"],
     "referral_commission": ["referral_payout", "cascade_overflow"],
     "gst_collected":       ["gst_collected"],
     # admin_credit/admin_debit are signed (positive=credit, negative=debit)
@@ -4688,18 +4710,24 @@ async def admin_cleanup_legacy_refunds(
         # Defensive: skip if a fee-residual credit ALREADY exists for this
         # signup (regardless of when written) — prevents double-credit if
         # this endpoint is called twice or if the new signup flow already
-        # wrote the residual.
+        # wrote the residual. Match both legacy (direct_signup_credit with
+        # "Fee residual" desc) and new (`fee_residual`) txn types.
         existing_residual = await db.transactions.find_one({
-            "type": "direct_signup_credit",
-            "related_signup_id": u["id"],
-            "description": {"$regex": "[Ff]ee residual"},
+            "$or": [
+                {"type": "fee_residual", "related_signup_id": u["id"]},
+                {
+                    "type": "direct_signup_credit",
+                    "related_signup_id": u["id"],
+                    "description": {"$regex": "[Ff]ee residual"},
+                },
+            ],
         })
         if residual > 0.01 and not existing_residual:
-            await credit_admin_bucket("direct_signup", residual, also_total_earned=True)
+            await credit_admin_bucket("fee_residual", residual, also_total_earned=True)
             await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": admin_doc["id"],
-                "type": "direct_signup_credit",
+                "type": "fee_residual",
                 "amount": residual,
                 "status": "success",
                 "description": (
@@ -4951,7 +4979,7 @@ async def seed_admin():
 # ============================================================
 # SYSTEM WALLET — admin's wallet broken down into 4 categorised buckets
 # ============================================================
-SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_signup", "direct_added", "service_margin", "shopping_margin", "gst_collected")
+SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_signup", "fee_residual", "direct_added", "service_margin", "shopping_margin", "gst_collected")
 
 
 async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: bool = True):

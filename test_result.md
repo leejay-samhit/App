@@ -2687,6 +2687,81 @@ agent_communication:
 
   - agent: "testing"
     message: |
+      3-fix regression (2026-05-19) for no-ref direct-count + fee_residual
+      bucket separation: 40/40 PASS. Runner: /app/backend_test.py.
+
+      ✅ A — No-ref signup increments placement sponsor's direct_referrals_count
+        • Registered noref_<sfx>@test.app (no referral_code), paid fee, admin
+          approved. Placement sponsor = aarav@demo.app (downline, NOT admin)
+          chosen by the 4→3→2→1→0 walk. count went 4→5 (+1 exactly), as the
+          new branch at server.py:740-744 (in _trigger_referral_commissions,
+          BEFORE _credit_no_ref_signup_to_admin) now bumps it.
+        • Verified user.no_referral_signup=True and sponsor_id is set.
+
+      ✅ B — With-ref signup writes fee_residual (NOT direct_signup_credit)
+        • Registered withref_<sfx>@test.app under testuser's code, paid fee,
+          admin approved.
+        • Exactly ONE txn of type="fee_residual" written with
+            related_signup_id == new_user.id,
+            description="Fee residual ₹95.95 from <name>'s signup
+                         (₹118 fee − ₹22 cascade)",
+            amount=₹95.95.
+        • NO direct_signup_credit txn linked to this signup.
+        • admin.wallet_buckets.fee_residual increased by exactly ₹95.95;
+          admin.wallet_buckets.direct_signup UNCHANGED (Δ=₹0).
+        • admin.wallet_balance increased by Δfee_residual + Δcascade overflow
+          (Δ=₹108.16 = 95.95 residual + 12.21 cascade-overflow GST etc).
+        • bucket=direct_signup is now PURE: contains only direct_signup_credit
+          txns (0 fee_residual rows leaked through).
+
+      ✅ C — Breakdown endpoint exposes both buckets separately
+        • GET /admin/system-wallet/breakdown → 200. outflow object includes:
+            to_user_wallets_referral, to_admin_direct_signup (₹1400),
+            to_admin_fee_residual (₹767.60) ← NEW FIELD, to_admin_cascade_overflow,
+            to_admin_gst_collected, user_withdrawals_settled. All 6 numeric & ≥0.
+        • outflow.total = sum of 6 components (verified: ₹2596 == ₹2596).
+        • outflow.total (₹2596) == inflow.registration_fee_total (₹2596) within
+          ₹0.50 — this is the correct invariant (the registration fee is what
+          gets split into the 6 outflow categories).
+        • balance.held_total (₹15095) == inflow.total − withdrawals (books balance).
+
+        ⚠ NOTE on the brief's literal check: the review request says
+        "inflow.total == outflow.total within ₹1", but inflow.total includes
+        utr_deposits + shop_margin + service_margin which go DIRECTLY into
+        admin's wallet without redistribution — so they appear in `balance`
+        but NOT in `outflow`. The actual mathematically meaningful invariant
+        is `inflow.registration_fee_total == outflow.total` (which DOES hold),
+        AND `balance.held_total == inflow.total` when no withdrawals (which
+        also DOES hold, confirmed via drift=0 in scenarios E/F). NOT a bug.
+
+      ✅ D — Bucket detail endpoint
+        • ?bucket=fee_residual → 200, 8 items, ALL type=fee_residual.
+        • ?bucket=direct_signup → 200, 14 items, ALL type=direct_signup_credit
+          (no fee_residual mixed in). Bucket isolation is clean.
+
+      ✅ E — Drift remains 0
+        • GET /admin/ledger-alerts.current = {inflow:15095, withdrawals_out:0,
+          expected_held:15095, held:15095, drift:0.0}. |drift| ≤ ₹1 ✓.
+
+      ✅ F — Reconcile keeps buckets balanced
+        • POST /admin/system-wallet/reconcile → 200 with diff={all zeros}.
+        • After reconcile: direct_signup = SUM(direct_signup_credit txns) = ₹1400.
+        • After reconcile: fee_residual = SUM(fee_residual txns) = ₹767.60.
+        • |drift| still 0.0 after reconcile.
+
+      ✅ G — EARN code + USER referral flow not broken
+        • EARN-code signup → no_referral_signup=True, placement = testuser
+          (downline), direct_referrals_count went 4→5 (+1 exactly).
+        • USER-referral signup → no_referral_signup=False; cascade fired
+          (16 referral_commission rows for this signup); testuser's
+          direct_referrals_count went 5→6 (+1 exactly); fee_residual ALSO
+          written for the residual (Δfee_residual=₹95.95). Cascade +
+          residual + direct-count all work together correctly.
+
+      All 7 scenarios PASS. Production-ready.
+
+  - agent: "testing"
+    message: |
       Treasury fixes regression: 28/30 PASS (2 "failures" are test-script
       assertion bugs, not backend bugs). Runner /app/treasury_test.py.
 
