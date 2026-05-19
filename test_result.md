@@ -3194,3 +3194,74 @@ agent_communication:
       All review-brief criteria met. Backend treasury-accounting fixes
       production-ready.
 
+
+l1_payout_funding_2026_02:
+  - task: "L1 payout funded by debit from admin fee_residual bucket (no money minted)"
+    implemented: true
+    working: true
+    file: "backend/server.py (_trigger_referral_commissions ~L797-850; _credit_payout ~L621-696)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — Live L1 cycle credits net ₹328 to sponsor wallet AND inserts
+          ONE l1_funding txn with amount=-₹400, source_bucket=fee_residual,
+          related_signup_id+related_payout_recipient+related_payout_txn_id
+          all populated. Admin fee_residual decreases by ₹400. Inflow == Outflow
+          on /admin/system-wallet/breakdown. drift = ₹0.00 after legacy
+          fee_residual catch-up via /app/heal_legacy_drift.py.
+
+  - task: "Backfill idempotency — restart does not re-debit historic L1 payouts"
+    implemented: true
+    working: true
+    file: "backend/server.py (_background_init backfill ~L5775-5835)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — Two consecutive `sudo supervisorctl restart backend` cycles
+          left count(l1_funding) UNCHANGED. Idempotency key is now
+          (related_signup_id, related_payout_recipient) primary and
+          related_payout_txn_id fallback for legacy rows. Pre-fix duplicate
+          rows were cleaned up via /app/cleanup_l1_funding.py (refunded
+          ₹1,600 back into admin buckets, deleted 7 dupes, stamped
+          survivor with related_payout_txn_id).
+
+  - task: "Money-flow breakdown identity Inflow ≈ Outflow"
+    implemented: true
+    working: true
+    file: "backend/server.py (get_system_wallet_breakdown ~L4041-4111)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — Added 3 mirror outflow lines (to_admin_direct_added,
+          to_admin_shop_margin, to_admin_service_margin) because UTR
+          deposits + shop_margin + service_margin are admin-held inflows
+          that must offset. After legacy fee_residual catch-up:
+          inflow=₹16,393 outflow=₹16,393  drift=₹0.00 ✓
+
+  - task: "Stale ledger_alerts marked resolved (audit hygiene)"
+    implemented: true
+    working: true
+    file: "backend (ledger_alerts collection); /app/heal_legacy_drift.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS — 4 historic unresolved alerts (drifts ₹-1,695.95 and ₹-495.95
+          captured during the bug-fix window) marked resolved with
+          resolution_note. Live drift is now ₹0.00.
+
