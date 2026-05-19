@@ -5630,6 +5630,81 @@ async def _background_init():
                 logger.info(f"Reg-fee phantom amount backfill: zeroed {zero_res.modified_count} pending/failed rows")
         except Exception as _bf_err:
             logger.warning(f"Reg-fee phantom amount backfill failed: {_bf_err}")
+
+        # ── One-shot migration: retag legacy `direct_signup_credit` rows that
+        # are actually fee-residuals (have "Fee residual" / "fee residual" in
+        # the description) → new type `fee_residual`, and move the matching
+        # money from admin's `direct_signup` wallet bucket → `fee_residual`
+        # bucket. Idempotent: subsequent runs no-op when no legacy rows match.
+        try:
+            legacy_rows = await db.transactions.find({
+                "type": "direct_signup_credit",
+                "description": {"$regex": "[Ff]ee residual"},
+            }, {"_id": 0, "id": 1, "amount": 1}).to_list(100000)
+            if legacy_rows:
+                total_to_move = round(sum(float(r.get("amount") or 0) for r in legacy_rows), 2)
+                # Retag the txns
+                await db.transactions.update_many(
+                    {"id": {"$in": [r["id"] for r in legacy_rows]}},
+                    {"$set": {"type": "fee_residual"}},
+                )
+                # Move the corresponding admin bucket balance
+                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+                if admin_doc and total_to_move > 0:
+                    # Ensure fee_residual bucket exists (default 0)
+                    await db.users.update_one(
+                        {"id": admin_doc["id"]},
+                        {"$setOnInsert": {"wallet_buckets.fee_residual": 0}},
+                        upsert=False,
+                    )
+                    # Shift money: direct_signup -= total, fee_residual += total
+                    # (wallet_balance unchanged — same admin, same money, just relabeled)
+                    await db.users.update_one(
+                        {"id": admin_doc["id"]},
+                        {"$inc": {
+                            "wallet_buckets.direct_signup": -total_to_move,
+                            "wallet_buckets.fee_residual": total_to_move,
+                        }},
+                    )
+                logger.info(
+                    f"Fee-residual migration: retagged {len(legacy_rows)} legacy rows, "
+                    f"moved ₹{total_to_move} from direct_signup → fee_residual"
+                )
+        except Exception as _mig_err:
+            logger.warning(f"Fee-residual migration failed: {str(_mig_err)[:200]}")
+
+        # ── Direct-referrals count backfill: ensure every approved sponsor's
+        # `direct_referrals_count` reflects the TRUE number of their
+        # approved directs (catches the historical no-ref bug where the
+        # count never incremented on placement). Idempotent.
+        try:
+            # Group: for each sponsor_id, how many approved user-directs?
+            agg = await db.users.aggregate([
+                {"$match": {"role": "user", "approval_status": "approved",
+                            "sponsor_id": {"$exists": True, "$ne": None}}},
+                {"$group": {"_id": "$sponsor_id", "directs": {"$sum": 1}}},
+            ]).to_list(100000)
+            fixed = 0
+            for row in agg:
+                sid = row["_id"]
+                true_count = int(row["directs"])
+                sp = await db.users.find_one({"id": sid}, {"direct_referrals_count": 1, "email": 1})
+                if not sp:
+                    continue
+                # Don't tamper with the admin user — admin shows 0 directs by design
+                if (sp.get("email") or "").lower() == ADMIN_EMAIL.lower():
+                    continue
+                cur = int(sp.get("direct_referrals_count") or 0)
+                if cur != true_count:
+                    await db.users.update_one(
+                        {"id": sid},
+                        {"$set": {"direct_referrals_count": true_count}},
+                    )
+                    fixed += 1
+            if fixed:
+                logger.info(f"direct_referrals_count backfill: corrected {fixed} sponsors")
+        except Exception as _drc_err:
+            logger.warning(f"direct_referrals_count backfill failed: {str(_drc_err)[:200]}")
         try:
             await seed_admin()
         except Exception as _e:
