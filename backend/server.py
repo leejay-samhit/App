@@ -4256,6 +4256,26 @@ async def get_system_wallet_transactions(
 
     limit = max(10, min(int(limit or 200), 1000))
 
+    # ─── Virtual: admin_wallet (NOT a real bucket; combines 4 sources) ─
+    # The redesigned Treasury UI rolls direct_signup + fee_residual +
+    # referral_commission + gst_collected into a single "Admin Wallet"
+    # row. The drilldown surfaces ALL of those underlying txns together
+    # so each one is auditable with its remarks / gross-GST-net split.
+    if bucket == "admin_wallet":
+        types = (
+            _BUCKET_TXN_TYPES["direct_signup"]
+            + _BUCKET_TXN_TYPES["fee_residual"]
+            + _BUCKET_TXN_TYPES["referral_commission"]
+            + _BUCKET_TXN_TYPES["gst_collected"]
+            + ["l1_funding"]  # debits (negative amounts) that explain admin bucket drains
+        )
+        rows = await db.transactions.find(
+            {"user_id": a["id"], "type": {"$in": list(set(types))}, "status": "success"},
+            {"_id": 0, "password_hash": 0},
+        ).sort("created_at", -1).limit(limit).to_list(limit)
+        subtotal = round(sum(float(r.get("amount") or 0) for r in rows), 2)
+        return {"bucket": bucket, "subtotal": subtotal, "count": len(rows), "items": rows}
+
     # ─── Virtual: user_payouts (NOT a per-admin bucket) ──────────────────
     if bucket == "user_payouts":
         # All referral payouts credited to NON-admin users + all settled

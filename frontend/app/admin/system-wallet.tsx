@@ -19,7 +19,8 @@ type BucketKey =
   | "direct_added"
   | "service_margin"
   | "shopping_margin"
-  | "user_payouts";
+  | "user_payouts"
+  | "admin_wallet";
 
 /** Top-level treasury rows shown on the System Wallet home — 6 lines that
  *  together tally the bank balance. GST is INSIDE Admin Wallet (no separate
@@ -35,6 +36,7 @@ const BUCKETS: { key: BucketKey; label: string; icon: any; color: string; desc: 
   { key: "service_margin",      label: "Service Margin",               icon: "briefcase",        color: "#E57A44", desc: "Platform fee from service bookings",        cta: "View service txns" },
   { key: "shopping_margin",     label: "Sales Margin (Shop)",          icon: "shopping-bag",     color: "#1E40AF", desc: "Commission from shop orders",               cta: "View shop txns" },
   { key: "user_payouts",        label: "Total Paid to Users",          icon: "users",            color: "#2E7D52", desc: "Referral payouts + settled withdrawals (with UTR)", cta: "View payouts & withdrawals" },
+  { key: "admin_wallet",        label: "Admin Wallet · full ledger",   icon: "credit-card",      color: "#7C3AED", desc: "Direct joins + Residual + Referral + GST + L1 fundings", cta: "View ledger" },
 ];
 
 type Deposit = { id: string; amount: number; utr: string; bank_ref?: string; remarks?: string; deposited_by_email?: string; created_at: string };
@@ -255,7 +257,7 @@ export default function AdminSystemWallet() {
                   style={[styles.bucketRow, { borderLeftColor: r.color }]}
                   activeOpacity={0.7}
                   onPress={() => {
-                    if (r.key === "admin_wallet") openBucket("referral_commission");
+                    if (r.key === "admin_wallet") openBucket("admin_wallet");
                     else if (r.key === "gst_info") openBucket("gst_collected");
                     else if (r.key === "service_margin") openBucket("service_margin");
                     else if (r.key === "shopping_margin") openBucket("shopping_margin");
@@ -475,8 +477,14 @@ function TxnRow({ txn }: { txn: Txn }) {
   const isDirect = txn.type === "direct_signup_credit";
   const isFeeResidual = txn.type === "fee_residual";
   const isGst = txn.type === "gst_collected";
+  const isL1Funding = txn.type === "l1_funding";
+  const isSystemDeposit = txn.type === "system_deposit";
+  const isWithdrawal = txn.type === "withdrawal";
+  const isShop = txn.type === "shop_commission" || txn.type === "shopping_margin" || txn.type === "shop_commission_reversal";
+  const isService = txn.type === "service_commission" || txn.type === "service_margin" || txn.type === "service_commission_reversal";
+  const isReversal = txn.type === "shop_commission_reversal" || txn.type === "service_commission_reversal";
 
-  // Color + chip label
+  // Color + chip label — covers every txn type appearing in any drilldown.
   const meta = isCascade
     ? { color: "#A855F7", label: `L${txn.level} overflow` }
     : isDirect
@@ -485,9 +493,28 @@ function TxnRow({ txn }: { txn: Txn }) {
     ? { color: "#0EA5A4", label: "Fee residual" }
     : isGst
     ? { color: "#B3261E", label: "GST 18%" }
+    : isL1Funding
+    ? { color: "#7C3AED", label: "L1 funding (debit)" }
+    : isSystemDeposit
+    ? { color: "#0B66C2", label: "UTR top-up" }
+    : isWithdrawal
+    ? { color: "#0F766E", label: "Withdrawal" }
+    : isReversal
+    ? { color: "#9CA3AF", label: txn.type.includes("shop") ? "Shop reversal" : "Service reversal" }
+    : isShop
+    ? { color: "#1E40AF", label: "Sales margin" }
+    : isService
+    ? { color: "#E57A44", label: "Service margin" }
     : txn.type === "referral_payout"
     ? { color: "#7C3AED", label: `Level ${txn.level || "?"} payout` }
     : { color: colors.primary, label: txn.type };
+
+  // Build invoice URL. The HTML view opens in the in-app browser via Linking.
+  // Backend route: GET /api/transactions/{id}/invoice (HTML), /invoice.pdf (PDF).
+  const base = (process.env.EXPO_PUBLIC_BACKEND_URL || "").replace(/\/$/, "");
+  const invoiceHtmlUrl = base ? `${base}/api/transactions/${txn.id}/invoice` : null;
+
+  const isDebit = Number(txn.amount) < 0;
 
   return (
     <View style={styles.txnRow}>
@@ -500,20 +527,37 @@ function TxnRow({ txn }: { txn: Txn }) {
           {txn.source_user_name ? (
             <Text style={styles.txnSource} numberOfLines={1}>· {txn.source_user_name}</Text>
           ) : null}
+          {(txn as any).recipient_email ? (
+            <Text style={styles.txnSource} numberOfLines={1}>→ {(txn as any).recipient_email}</Text>
+          ) : null}
         </View>
-        <Text style={styles.txnDesc} numberOfLines={3}>{txn.description || "—"}</Text>
+        <Text style={styles.txnDesc} numberOfLines={4}>{txn.description || "—"}</Text>
         {(txn.gross_amount || txn.gst_amount) ? (
           <Text style={styles.txnSplit}>
-            Gross {formatINR(txn.gross_amount || 0)} − GST {formatINR(txn.gst_amount || 0)} = Net {formatINR(txn.amount)}
+            Gross {formatINR(txn.gross_amount || 0)} − GST {formatINR(txn.gst_amount || 0)} = Net {formatINR(Math.abs(Number(txn.amount)))}
           </Text>
         ) : null}
         {txn.placement_sponsor_name ? (
           <Text style={styles.txnPlacement}>Placed under: {txn.placement_sponsor_name}{txn.placement_sponsor_email ? ` (${txn.placement_sponsor_email})` : ""}</Text>
         ) : null}
         <Text style={styles.txnMeta}>{dt.toLocaleString()} · ref {txn.reference_number || "—"}</Text>
+        {invoiceHtmlUrl ? (
+          <TouchableOpacity
+            onPress={() => {
+              import("react-native").then(({ Linking }) => Linking.openURL(invoiceHtmlUrl));
+            }}
+            style={styles.invoiceLink}
+            testID={`invoice-${txn.id}`}
+          >
+            <Feather name="file-text" size={11} color={colors.primary} />
+            <Text style={styles.invoiceLinkText}>View invoice / statement</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
       <View style={{ alignItems: "flex-end" }}>
-        <Text style={[styles.txnAmount, { color: meta.color }]}>+{formatINR(txn.amount)}</Text>
+        <Text style={[styles.txnAmount, { color: isDebit ? "#B3261E" : meta.color }]}>
+          {isDebit ? "" : "+"}{formatINR(txn.amount)}
+        </Text>
       </View>
     </View>
   );
@@ -558,6 +602,8 @@ const styles = StyleSheet.create({
   reconcileBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 12, backgroundColor: colors.surface, borderRadius: radii.button, borderWidth: 1, borderColor: colors.primary + "55", marginTop: 12 },
   reconcileBtnText: { fontSize: 13, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
   helpText: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 8, marginBottom: 4 },
+  invoiceLink: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6, alignSelf: "flex-start", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: colors.brand100, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.primary + "55" },
+  invoiceLinkText: { fontSize: 10, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
 
   empty: { padding: 30, alignItems: "center", gap: 6 },
   emptyText: { fontSize: 12, color: colors.textMuted },

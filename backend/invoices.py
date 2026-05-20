@@ -290,6 +290,20 @@ def invoice_html(
             f"<tr><td>CGST @ {gst['gst_pct']/2:.1f}%</td><td class='r'>₹ {gst['cgst']:.2f}</td></tr>"
             f"<tr><td>SGST @ {gst['gst_pct']/2:.1f}%</td><td class='r'>₹ {gst['sgst']:.2f}</td></tr>"
         )
+    # Pre-compute labels and values OUTSIDE the f-string (Python 3.11
+    # doesn't allow conditional expressions in format specifiers, e.g.
+    # `{x if cond else y:.2f}` raises "Invalid format specifier").
+    _is_level_payout = (tx.get("type") or "") in ("referral_payout", "level_payout") and not suppress_gst
+    _total_label = (
+        "Total payable" if d["is_tax_invoice"]
+        else ("Net credited to wallet" if _is_level_payout else "Net payment")
+    )
+    _total_value = float(gst["taxable"] if _is_level_payout else gst["gross"])
+    _gross_note = (
+        f"<tr><td style='font-size:10px;color:#666'>Gross payout (before GST)</td>"
+        f"<td class='r' style='font-size:10px;color:#666'>₹ {gst['gross']:.2f}</td></tr>"
+        if _is_level_payout else ""
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/>
 <title>{d['title']} · {d['invoice_no']}</title>
@@ -356,7 +370,8 @@ body{{margin:0;padding:24px;color:#1c2520;background:#fff}}
     <table class="summ">
       {"" if suppress_gst else f"<tr><td>Taxable value</td><td class='r'>₹ {gst['taxable']:.2f}</td></tr>"}
       {gst_rows}
-      <tr class="total"><td>{'Total payable' if d['is_tax_invoice'] else 'Net payment'}</td><td class="r">₹ {gst['gross']:.2f}</td></tr>
+      <tr class="total"><td>{_total_label}</td><td class="r">₹ {_total_value:.2f}</td></tr>
+      {_gross_note}
     </table>
     <div class="foot">{d['footer_note']}</div>
   </div>
