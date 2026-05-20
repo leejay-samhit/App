@@ -18,16 +18,23 @@ type BucketKey =
   | "gst_collected"
   | "direct_added"
   | "service_margin"
-  | "shopping_margin";
+  | "shopping_margin"
+  | "user_payouts";
+
+/** Top-level treasury rows shown on the System Wallet home — 6 lines that
+ *  together tally the bank balance. GST is INSIDE Admin Wallet (no separate
+ *  bucket subtraction); the GST line is informational drilldown only. */
+type TreasuryRowKey = "admin_wallet" | "gst_info" | "service_margin" | "shopping_margin" | "direct_added" | "paid_to_users";
 
 const BUCKETS: { key: BucketKey; label: string; icon: any; color: string; desc: string; cta?: string }[] = [
   { key: "direct_signup",       label: "Direct Joins & Realignments", icon: "user-plus",         color: "#2E7D52", desc: "No-referral + EARN signups (₹100 each)", cta: "View transactions" },
   { key: "fee_residual",        label: "Fee Residual",                 icon: "shuffle",          color: "#0EA5A4", desc: "Leftover when with-ref cascade < fee",     cta: "View transactions" },
-  { key: "referral_commission", label: "Referral Commission (L1..L10)", icon: "git-branch",      color: "#7C3AED", desc: "Admin earnings from the 1+10 cascade",      cta: "View transactions" },
-  { key: "gst_collected",       label: "GST Collected (18%)",          icon: "percent",          color: "#B3261E", desc: "GST routed from payouts & signups",        cta: "View transactions" },
-  { key: "direct_added",        label: "Direct-Added (UTR)",           icon: "arrow-down-circle", color: "#0B66C2", desc: "Manual UTR-verified bank deposits" },
-  { key: "service_margin",      label: "Service Margin",               icon: "briefcase",        color: "#E57A44", desc: "Platform fee from service bookings" },
-  { key: "shopping_margin",     label: "Shopping Margin",              icon: "shopping-bag",     color: "#1E40AF", desc: "Commission from shop orders" },
+  { key: "referral_commission", label: "Admin Wallet (cascade + GST)", icon: "credit-card",      color: "#7C3AED", desc: "Direct joins + Residual + Referral + GST",  cta: "View ledger" },
+  { key: "gst_collected",       label: "GST Collected (info)",         icon: "percent",          color: "#B3261E", desc: "Already part of Admin Wallet (compliance)", cta: "View GST txns" },
+  { key: "direct_added",        label: "Direct-Added (UTR)",           icon: "arrow-down-circle", color: "#0B66C2", desc: "Manual UTR-verified bank deposits",         cta: "View UTR deposits" },
+  { key: "service_margin",      label: "Service Margin",               icon: "briefcase",        color: "#E57A44", desc: "Platform fee from service bookings",        cta: "View service txns" },
+  { key: "shopping_margin",     label: "Sales Margin (Shop)",          icon: "shopping-bag",     color: "#1E40AF", desc: "Commission from shop orders",               cta: "View shop txns" },
+  { key: "user_payouts",        label: "Total Paid to Users",          icon: "users",            color: "#2E7D52", desc: "Referral payouts + settled withdrawals (with UTR)", cta: "View payouts & withdrawals" },
 ];
 
 type Deposit = { id: string; amount: number; utr: string; bank_ref?: string; remarks?: string; deposited_by_email?: string; created_at: string };
@@ -199,30 +206,90 @@ export default function AdminSystemWallet() {
           </View>
         </View>
 
-        <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 18 }}>
-          <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>TOTAL ADMIN FUNDS</Text>
+        <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 12 }}>
+          <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>BANK BALANCE TALLY</Text>
           <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>
             {formatINR(
-              Number(data?.buckets?.direct_signup || 0) +
-              Number(data?.buckets?.direct_added || 0) +
-              Number(data?.buckets?.service_margin || 0) +
-              Number(data?.buckets?.shopping_margin || 0)
+              // Admin wallet (includes GST) + the three margin / UTR buckets + everything held in user wallets/withdrawals
+              ((Number(data?.buckets?.direct_signup || 0) +
+                Number(data?.buckets?.fee_residual || 0) +
+                Number(data?.buckets?.referral_commission || 0) +
+                Number(data?.buckets?.gst_collected || 0))
+              + Number(data?.buckets?.service_margin || 0)
+              + Number(data?.buckets?.shopping_margin || 0)
+              + Number(data?.buckets?.direct_added || 0)
+              + Number(breakdown?.balance?.in_user_wallets || 0)
+              + Number(breakdown?.outflow?.user_withdrawals_settled || 0))
             )}
           </Text>
           <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>
-            Spendable treasury (excludes admin referral earnings and GST collected, which are accounted separately).
+            Sum of all 6 lines below = total money in the system (= bank inflow with drift ≤ ₹1).
           </Text>
-          <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
-            <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", borderRadius: 10, paddingVertical: 8, paddingHorizontal: 10 }}>
-              <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.6 }}>ADMIN REFERRAL EARNINGS</Text>
-              <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 3 }}>{formatINR(data?.buckets?.referral_commission || 0)}</Text>
-            </View>
-            <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", borderRadius: 10, paddingVertical: 8, paddingHorizontal: 10 }}>
-              <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.6 }}>GST COLLECTED</Text>
-              <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 3 }}>{formatINR(data?.buckets?.gst_collected || 0)}</Text>
-            </View>
-          </View>
         </GradientCard>
+
+        {/* ─── Treasury · 6 cash-management lines ─── */}
+        {(() => {
+          const adminWallet =
+            Number(data?.buckets?.direct_signup || 0) +
+            Number(data?.buckets?.fee_residual || 0) +
+            Number(data?.buckets?.referral_commission || 0) +
+            Number(data?.buckets?.gst_collected || 0);
+          const usersHeld = Number(breakdown?.balance?.in_user_wallets || 0);
+          const withdrawn = Number(breakdown?.outflow?.user_withdrawals_settled || 0);
+          const paidToUsers = usersHeld + withdrawn;
+          const rows: { key: TreasuryRowKey; label: string; icon: any; color: string; value: number; sub: string; cta?: string }[] = [
+            { key: "admin_wallet",   label: "Admin Wallet",      icon: "credit-card",       color: "#7C3AED", value: adminWallet,                       sub: "Direct joins + Fee residual + Referral commission + GST", cta: "View ledger" },
+            { key: "gst_info",       label: "GST Collected (info)", icon: "percent",        color: "#B3261E", value: Number(data?.buckets?.gst_collected || 0), sub: "Already inside Admin Wallet — shown for compliance", cta: "View GST txns" },
+            { key: "service_margin", label: "Service Margin",    icon: "briefcase",         color: "#E57A44", value: Number(data?.buckets?.service_margin || 0),  sub: "Platform fees from service bookings", cta: "View service txns" },
+            { key: "shopping_margin",label: "Sales Margin (Shop)", icon: "shopping-bag",    color: "#1E40AF", value: Number(data?.buckets?.shopping_margin || 0), sub: "Commission from shop orders", cta: "View shop txns" },
+            { key: "direct_added",   label: "Direct Added (UTR)", icon: "arrow-down-circle",color: "#0B66C2", value: Number(data?.buckets?.direct_added || 0),   sub: "Manual UTR bank deposits to system wallet", cta: "View UTR deposits" },
+            { key: "paid_to_users",  label: "Total Paid to Users",icon: "users",             color: "#2E7D52", value: paidToUsers,                       sub: `Held in user wallets · ${formatINR(usersHeld)}    |    Withdrawn · ${formatINR(withdrawn)}`, cta: "View payouts & withdrawals" },
+          ];
+          const sumAll = rows.filter((r) => r.key !== "gst_info").reduce((s, r) => s + r.value, 0);
+          return (
+            <View style={{ marginBottom: 6 }}>
+              <Text style={styles.sectionLabel}>Treasury · 6 lines = bank balance</Text>
+              {rows.map((r) => (
+                <TouchableOpacity
+                  key={r.key}
+                  style={[styles.bucketRow, { borderLeftColor: r.color }]}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    if (r.key === "admin_wallet") openBucket("referral_commission");
+                    else if (r.key === "gst_info") openBucket("gst_collected");
+                    else if (r.key === "service_margin") openBucket("service_margin");
+                    else if (r.key === "shopping_margin") openBucket("shopping_margin");
+                    else if (r.key === "direct_added") openBucket("direct_added");
+                    else if (r.key === "paid_to_users") openBucket("user_payouts");
+                  }}
+                  testID={`treasury-${r.key}`}
+                >
+                  <View style={[styles.bucketIcon, { backgroundColor: r.color + "22" }]}>
+                    <Feather name={r.icon} size={20} color={r.color} />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.bucketLabel}>{r.label}</Text>
+                    <Text style={styles.bucketDesc}>{r.sub}</Text>
+                  </View>
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Text style={[styles.bucketAmount, r.key === "gst_info" && { color: colors.textMuted, fontWeight: "600" }]}>{formatINR(r.value)}</Text>
+                    <View style={styles.bucketCta}>
+                      <Text style={styles.bucketCtaText}>{r.cta || "Details"}</Text>
+                      <Feather name="chevron-right" size={14} color={colors.primary} />
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              ))}
+              <View style={[styles.breakdownTotal, { marginTop: 4 }]}>
+                <Text style={[styles.breakdownTotalLabel, { fontSize: 13 }]}>Sum (excl. GST informational)</Text>
+                <Text style={styles.breakdownTotalAmount}>{formatINR(sumAll)}</Text>
+              </View>
+              <Text style={styles.helpText}>
+                GST is part of Admin Wallet — shown above only for compliance reporting, not added again to the sum.
+              </Text>
+            </View>
+          );
+        })()}
 
         {/* ─── Money Flow Breakdown — every rupee accounted for ─── */}
         <TouchableOpacity
@@ -280,34 +347,6 @@ export default function AdminSystemWallet() {
             </View>
           </View>
         ) : null}
-
-        <Text style={styles.sectionLabel}>Earnings & Routing</Text>
-        {BUCKETS.map((b) => (
-          <TouchableOpacity
-            key={b.key}
-            style={[styles.bucketRow, { borderLeftColor: b.color }]}
-            activeOpacity={b.cta ? 0.7 : 1}
-            onPress={() => b.cta && openBucket(b.key)}
-            testID={`bucket-${b.key}`}
-          >
-            <View style={[styles.bucketIcon, { backgroundColor: b.color + "22" }]}>
-              <Feather name={b.icon} size={20} color={b.color} />
-            </View>
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <Text style={styles.bucketLabel}>{b.label}</Text>
-              <Text style={styles.bucketDesc}>{b.desc}</Text>
-            </View>
-            <View style={{ alignItems: "flex-end" }}>
-              <Text style={styles.bucketAmount}>{formatINR(data?.buckets[b.key] || 0)}</Text>
-              {b.cta ? (
-                <View style={styles.bucketCta}>
-                  <Text style={styles.bucketCtaText}>Details</Text>
-                  <Feather name="chevron-right" size={14} color={colors.primary} />
-                </View>
-              ) : null}
-            </View>
-          </TouchableOpacity>
-        ))}
 
         <TouchableOpacity style={styles.depositBtn} onPress={() => setDepositOpen(true)}>
           <Feather name="plus-circle" size={18} color={colors.primaryFg} />

@@ -196,18 +196,51 @@ def _make_invoice_data(
     amt = abs(float(tx.get("amount") or 0))
 
     is_no_gst = (tx.get("type") or "") in NO_GST_INVOICE_TYPES
+    # If the txn was written with explicit gross / gst snapshots (referral
+    # payouts in particular), use THOSE — that's the ground truth captured
+    # at credit-time. Recomputing from `amount` (net) gives a wrong gross
+    # because round-trip 18% math doesn't reverse cleanly (₹328 × 1.18 ≠ ₹400).
+    stored_gross = tx.get("gross_amount")
+    stored_gst = tx.get("gst_amount")
+    stored_pct = tx.get("gst_pct")
+    has_stored_split = (stored_gross is not None and stored_gst is not None)
+
     if is_no_gst:
         # Internal-app movement (UTR deposit, wallet adjustment, peer transfer,
         # withdrawal). NO GST inflation — gross == net == the actual txn amount.
-        # We still call compute_gst() for shape consistency but treat amount as
-        # gst-inclusive so taxable + GST = gross = amount.
         gst = compute_gst(amt, gst_inclusive=True, gst_pct=gst_pct, inter_state=inter_state)
         title = "PAYMENT STATEMENT"
+    elif has_stored_split:
+        # Use the stored split written by _credit_payout — the gross, gst, and
+        # net are authoritative and reflect what actually moved in the ledger.
+        gross_v = float(stored_gross)
+        gst_v = float(stored_gst)
+        taxable_v = round(gross_v - gst_v, 2)
+        pct = float(stored_pct) if stored_pct is not None else gst_pct
+        if inter_state:
+            cgst_v = sgst_v = 0.0
+            igst_v = gst_v
+        else:
+            cgst_v = round(gst_v / 2.0, 2)
+            sgst_v = round(gst_v - cgst_v, 2)
+            igst_v = 0.0
+        gst = {
+            "gross": gross_v,
+            "taxable": taxable_v,
+            "cgst": cgst_v,
+            "sgst": sgst_v,
+            "igst": igst_v,
+            "gst_total": gst_v,
+            "gst_pct": pct,
+        }
+        title = "TAX INVOICE" if is_tax else "PAYMENT STATEMENT"
     elif is_tax:
         gst = compute_gst(amt, gst_inclusive=gst_inclusive, gst_pct=gst_pct, inter_state=inter_state)
         title = "TAX INVOICE"
     else:
-        # Commission / statement — show informational GST split (recipient may have own liability)
+        # Commission / statement — fallback for txns without stored split.
+        # Treat amount as GST-EXCLUSIVE gross (matches level-payout semantics:
+        # configured payout_l1=₹400 IS the gross, GST ₹72 carved out = net ₹328).
         gst = compute_gst(amt, gst_inclusive=False, gst_pct=gst_pct, inter_state=inter_state)
         title = "PAYMENT STATEMENT"
 

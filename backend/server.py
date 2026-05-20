@@ -884,15 +884,21 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         await _credit_cascade_overflow_to_admin(user["name"], missing_levels, level_payouts)
 
     # ── Fee-residual safety net ────────────────────────────────────────
-    # When configured cascade payouts (incl. L1 + L2..L10 + their GST and
+    # When configured cascade payouts (incl. L2..L10 + their GST and
     # overflow) sum to LESS than the registration fee, the difference
     # would otherwise vanish from the books — the user paid ₹118 but
     # only e.g. ₹22 was credited internally, creating a permanent drift.
-    # We route that residual to admin's `direct_signup` bucket so 100%
+    # We route that residual to admin's `fee_residual` bucket so 100%
     # of every paid fee is always accounted for in some wallet.
+    #
+    # NOTE: L1 payouts are EXCLUDED from this sum — they're funded
+    # SEPARATELY from the accumulated fee_residual pool via `l1_funding`
+    # txns. If we included L1 here, the 6th signup (that triggers L1)
+    # would see cascade > fee and skip the residual write, silently
+    # losing its own ₹95.95 contribution to the pool.
     fee_paid = float(settings.get("registration_fee") or 0)
     total_credited_for_signup = 0.0
-    # Sum every payout txn linked to this signup that we just wrote.
+    # Sum every L2..L10 payout txn linked to this signup that we just wrote.
     async for txn in db.transactions.find({
         "$or": [
             {"related_signup_id": user["id"]},
@@ -900,7 +906,12 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
                 "referral_payout", "gst_collected", "cascade_overflow",
             ]}, "status": "success", "created_at": {"$gte": user.get("created_at", "")}},
         ],
-    }, {"_id": 0, "type": 1, "amount": 1, "gross_amount": 1}):
+    }, {"_id": 0, "type": 1, "amount": 1, "gross_amount": 1, "level": 1}):
+        # SKIP L1 — it's funded from the existing fee_residual pool, not
+        # from THIS signup's fee. Including it would zero out the residual
+        # for L1-cycle signups and silently lose ₹95.95 per cycle.
+        if int(txn.get("level") or 0) == 1:
+            continue
         if txn.get("type") == "referral_payout":
             # gross = net credited to user + GST routed to admin
             total_credited_for_signup += float(txn.get("gross_amount") or txn.get("amount") or 0)
@@ -4233,14 +4244,52 @@ async def get_system_wallet_transactions(
     Powers the per-tab detail view (Direct Joins, Referral Commission, GST
     Collected, etc.) in /admin/system-wallet. Each row has the source user
     info plus the original gross / GST / net split where applicable.
+
+    Special virtual bucket: `user_payouts` — combined view of every L1..L10
+    referral payout credited to USER wallets PLUS every withdrawal settled
+    (with UTR / payout ref). Used by the "Total Paid to Users" drilldown
+    on the System Wallet treasury screen.
     """
     a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not a:
         raise HTTPException(status_code=404, detail="Admin not found")
+
+    limit = max(10, min(int(limit or 200), 1000))
+
+    # ─── Virtual: user_payouts (NOT a per-admin bucket) ──────────────────
+    if bucket == "user_payouts":
+        # All referral payouts credited to NON-admin users + all settled
+        # withdrawals, newest first. Joined with user email/name for display.
+        cursor = db.transactions.find(
+            {
+                "$or": [
+                    {"type": "referral_payout", "user_id": {"$ne": a["id"]}, "status": "success"},
+                    {"type": "withdrawal", "status": "success"},
+                ],
+            },
+            {"_id": 0, "password_hash": 0},
+        ).sort("created_at", -1).limit(limit)
+        rows: List[Dict[str, Any]] = await cursor.to_list(limit)
+        # Enrich with user email/name (best-effort, batched)
+        uids = list({r.get("user_id") for r in rows if r.get("user_id")})
+        users_map: Dict[str, Dict[str, Any]] = {}
+        if uids:
+            async for u in db.users.find(
+                {"id": {"$in": uids}}, {"_id": 0, "id": 1, "email": 1, "name": 1, "phone": 1},
+            ):
+                users_map[u["id"]] = u
+        for r in rows:
+            u = users_map.get(r.get("user_id") or "")
+            if u:
+                r["recipient_email"] = u.get("email")
+                r["recipient_name"] = u.get("name")
+                r["recipient_phone"] = u.get("phone")
+        subtotal = round(sum(float(r.get("amount") or 0) for r in rows), 2)
+        return {"bucket": bucket, "subtotal": subtotal, "count": len(rows), "items": rows}
+
     types = _BUCKET_TXN_TYPES.get(bucket)
     if not types:
         raise HTTPException(status_code=400, detail=f"Unknown bucket: {bucket}")
-    limit = max(10, min(int(limit or 200), 1000))
     rows = await db.transactions.find(
         {"user_id": a["id"], "type": {"$in": types}, "status": "success"},
         {"_id": 0, "password_hash": 0},
