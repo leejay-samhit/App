@@ -211,43 +211,38 @@ export default function AdminSystemWallet() {
         <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 12 }}>
           <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>BANK BALANCE TALLY</Text>
           <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>
-            {formatINR(
-              // Admin wallet (includes GST) + the three margin / UTR buckets + everything held in user wallets/withdrawals
-              ((Number(data?.buckets?.direct_signup || 0) +
-                Number(data?.buckets?.fee_residual || 0) +
-                Number(data?.buckets?.referral_commission || 0) +
-                Number(data?.buckets?.gst_collected || 0))
-              + Number(data?.buckets?.service_margin || 0)
-              + Number(data?.buckets?.shopping_margin || 0)
-              + Number(data?.buckets?.direct_added || 0)
-              + Number(breakdown?.balance?.in_user_wallets || 0)
-              + Number(breakdown?.outflow?.user_withdrawals_settled || 0))
-            )}
+            {formatINR(Number(breakdown?.inflow?.total || 0))}
           </Text>
           <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>
-            Sum of all 6 lines below = total money in the system (= bank inflow with drift ≤ ₹1).
+            Total money in the system. The 5 lines below sum to this exact value (GST is informational — already inside Admin Wallet).
           </Text>
         </GradientCard>
 
         {/* ─── Treasury · 6 cash-management lines ─── */}
         {(() => {
-          const adminWallet =
-            Number(data?.buckets?.direct_signup || 0) +
-            Number(data?.buckets?.fee_residual || 0) +
-            Number(data?.buckets?.referral_commission || 0) +
-            Number(data?.buckets?.gst_collected || 0);
-          const usersHeld = Number(breakdown?.balance?.in_user_wallets || 0);
+          // ALL values below come from the breakdown endpoint so the SUM of
+          // the 6 visible rows always equals Total Inflow (drift ≤ ₹1).
+          // GST is INSIDE Admin Wallet — surfaced as info-only row, NOT added
+          // to the tally a second time.
+          const adminWallet = Number(breakdown?.outflow?.to_admin_retained || 0);
+          const referralPayouts = Number(breakdown?.outflow?.to_user_wallets_referral || 0);
           const withdrawn = Number(breakdown?.outflow?.user_withdrawals_settled || 0);
-          const paidToUsers = usersHeld + withdrawn;
+          // "Total Paid to Users" = total ever credited to user wallets via
+          // L1..L10 referral payouts + total settled withdrawals. This is
+          // the canonical "ever paid out to users" figure used in the tally.
+          const paidToUsers = referralPayouts + withdrawn;
+          const usersHeld = Number(breakdown?.balance?.in_user_wallets || 0);
           const rows: { key: TreasuryRowKey; label: string; icon: any; color: string; value: number; sub: string; cta?: string }[] = [
-            { key: "admin_wallet",   label: "Admin Wallet",      icon: "credit-card",       color: "#7C3AED", value: adminWallet,                       sub: "Direct joins + Fee residual + Referral commission + GST", cta: "View ledger" },
-            { key: "gst_info",       label: "GST Collected (info)", icon: "percent",        color: "#B3261E", value: Number(data?.buckets?.gst_collected || 0), sub: "Already inside Admin Wallet — shown for compliance", cta: "View GST txns" },
-            { key: "service_margin", label: "Service Margin",    icon: "briefcase",         color: "#E57A44", value: Number(data?.buckets?.service_margin || 0),  sub: "Platform fees from service bookings", cta: "View service txns" },
-            { key: "shopping_margin",label: "Sales Margin (Shop)", icon: "shopping-bag",    color: "#1E40AF", value: Number(data?.buckets?.shopping_margin || 0), sub: "Commission from shop orders", cta: "View shop txns" },
-            { key: "direct_added",   label: "Direct Added (UTR)", icon: "arrow-down-circle",color: "#0B66C2", value: Number(data?.buckets?.direct_added || 0),   sub: "Manual UTR bank deposits to system wallet", cta: "View UTR deposits" },
-            { key: "paid_to_users",  label: "Total Paid to Users",icon: "users",             color: "#2E7D52", value: paidToUsers,                       sub: `Held in user wallets · ${formatINR(usersHeld)}    |    Withdrawn · ${formatINR(withdrawn)}`, cta: "View payouts & withdrawals" },
+            { key: "admin_wallet",   label: "Admin Wallet",        icon: "credit-card",        color: "#7C3AED", value: adminWallet,                                                              sub: "Direct joins + cascade + L1 funding netted",          cta: "View ledger" },
+            { key: "gst_info",       label: "GST Collected (info)",icon: "percent",            color: "#B3261E", value: Number(breakdown?.outflow?.to_admin_gst_collected || 0),                  sub: "Already inside Admin Wallet — shown for compliance", cta: "View GST txns" },
+            { key: "service_margin", label: "Service Margin",      icon: "briefcase",          color: "#E57A44", value: Number(breakdown?.outflow?.to_admin_service_margin || 0),                 sub: "Platform fees from service bookings",                 cta: "View service txns" },
+            { key: "shopping_margin",label: "Sales Margin (Shop)", icon: "shopping-bag",       color: "#1E40AF", value: Number(breakdown?.outflow?.to_admin_shop_margin || 0),                    sub: "Commission from shop orders",                         cta: "View shop txns" },
+            { key: "direct_added",   label: "Direct Added (UTR)",  icon: "arrow-down-circle",  color: "#0B66C2", value: Number(breakdown?.outflow?.to_admin_direct_added || 0),                   sub: "Manual UTR bank deposits to system wallet",          cta: "View UTR deposits" },
+            { key: "paid_to_users",  label: "Total Paid to Users", icon: "users",              color: "#2E7D52", value: paidToUsers,                                                              sub: `Held in user wallets · ${formatINR(usersHeld)}    |    Withdrawn · ${formatINR(withdrawn)}`, cta: "View payouts & withdrawals" },
           ];
           const sumAll = rows.filter((r) => r.key !== "gst_info").reduce((s, r) => s + r.value, 0);
+          const inflow = Number(breakdown?.inflow?.total || 0);
+          const tallyOK = Math.abs(sumAll - inflow) <= 1;
           return (
             <View style={{ marginBottom: 6 }}>
               <Text style={styles.sectionLabel}>Treasury · 6 lines = bank balance</Text>
@@ -282,12 +277,14 @@ export default function AdminSystemWallet() {
                   </View>
                 </TouchableOpacity>
               ))}
-              <View style={[styles.breakdownTotal, { marginTop: 4 }]}>
+              <View style={[styles.breakdownTotal, { marginTop: 4, backgroundColor: tallyOK ? colors.brand100 : "#FFE4E4" }]}>
                 <Text style={[styles.breakdownTotalLabel, { fontSize: 13 }]}>Sum (excl. GST informational)</Text>
-                <Text style={styles.breakdownTotalAmount}>{formatINR(sumAll)}</Text>
+                <Text style={[styles.breakdownTotalAmount, !tallyOK && { color: "#B3261E" }]}>{formatINR(sumAll)}</Text>
               </View>
               <Text style={styles.helpText}>
-                GST is part of Admin Wallet — shown above only for compliance reporting, not added again to the sum.
+                {tallyOK
+                  ? `✓ Tally matches inflow (${formatINR(inflow)}). GST is part of Admin Wallet — shown only for compliance.`
+                  : `⚠ Tally ${formatINR(sumAll)} differs from inflow ${formatINR(inflow)} by ${formatINR(Math.abs(sumAll - inflow))}.`}
               </Text>
             </View>
           );

@@ -4080,10 +4080,23 @@ async def get_system_wallet_breakdown(
     admin_direct_added = round(utr_deposits, 2)
     admin_shop_margin_held = round(shop_margin, 2)
     admin_service_margin_held = round(service_margin, 2)
+    # ─── CONSOLIDATED ADMIN-RETAINED LINE ──────────────────────────────
+    # User-facing simplification (per Feb-2026 review):
+    # Collapse direct_signup + fee_residual + cascade_overflow + GST into
+    # ONE consolidated "Admin Wallet" figure that ALREADY nets the L1
+    # funding debit. GST lives INSIDE this number (it's part of admin's
+    # bank balance — the GST line on the UI is informational only and
+    # NOT added to the tally a second time).
+    #
+    # This guarantees:    Inflow == Outflow == Visible 6-line Tally
+    admin_retained = round(
+        direct_signup_credit + fee_residual + cascade_overflow
+        + gst_collected + l1_funding_debit,
+        2,
+    )
+
     outflow_total = round(
-        user_wallets_paid + gst_collected + cascade_overflow
-        + direct_signup_credit + fee_residual + user_withdrawals_done
-        + l1_funding_debit  # adds a negative → reduces outflow
+        user_wallets_paid + admin_retained + user_withdrawals_done
         + admin_direct_added + admin_shop_margin_held + admin_service_margin_held,
         2,
     )
@@ -4110,20 +4123,22 @@ async def get_system_wallet_breakdown(
             "total": inflow_total,
         },
         "outflow": {
+            # ─── User-facing simplified outflow (Inflow == Outflow) ────
             "to_user_wallets_referral":  round(user_wallets_paid, 2),
-            "to_admin_direct_signup":    round(direct_signup_credit, 2),
-            "to_admin_fee_residual":     round(fee_residual, 2),
-            "to_admin_cascade_overflow": round(cascade_overflow, 2),
+            "to_admin_retained":         admin_retained,
             "to_admin_gst_collected":    round(gst_collected, 2),
             "to_admin_direct_added":     admin_direct_added,
             "to_admin_shop_margin":      admin_shop_margin_held,
             "to_admin_service_margin":   admin_service_margin_held,
             "user_withdrawals_settled":  round(user_withdrawals_done, 2),
-            # Negative number — funds withdrawn from admin buckets to pay
-            # L1 cycles (which exceed the ₹118 fee). Shown as a separate
-            # offsetting line so admins understand WHY their direct_signup /
-            # fee_residual buckets aren't simply "deposits in − payouts out".
-            "l1_funding_debit":          round(l1_funding_debit, 2),
+            # ─── Audit-level legacy sub-breakdown (still exposed so the
+            #     drill-downs in /admin/system-wallet/transactions can map
+            #     bucket keys correctly; UI no longer surfaces them as
+            #     separate Treasury lines). ───────────────────────────────
+            "_legacy_to_admin_direct_signup":    round(direct_signup_credit, 2),
+            "_legacy_to_admin_fee_residual":     round(fee_residual, 2),
+            "_legacy_to_admin_cascade_overflow": round(cascade_overflow, 2),
+            "_legacy_l1_funding_debit":          round(l1_funding_debit, 2),
             "total":                     outflow_total,
         },
         "balance": {
