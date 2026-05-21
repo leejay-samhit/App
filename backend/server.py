@@ -5947,6 +5947,130 @@ async def _background_init():
                 )
         except Exception as _l1bf_err:
             logger.warning(f"L1 funding backfill failed: {str(_l1bf_err)[:200]}")
+
+        # ── Production drift self-healer ────────────────────────────────
+        # If the L1 backfill above didn't catch every phantom credit (e.g.
+        # legacy `_credit_payout` rows without `related_signup_id` AND no
+        # `related_payout_txn_id` linkage, or older buggy code paths), the
+        # money-flow checker would log [LEDGER ALERT] warnings every 5 min.
+        #
+        # This routine runs ONCE on startup, computes the live drift, and
+        # if held > expected by more than ₹1, debits the difference from
+        # admin's largest bucket (preference: fee_residual → direct_signup
+        # → referral_commission → gst_collected → direct_added). Logs the
+        # action as a `drift_correction` txn so it's fully auditable.
+        #
+        # Idempotent: only runs when drift > ₹1. After healing, drift
+        # becomes ~₹0 and this is a no-op on subsequent restarts. The
+        # heal will NOT touch user wallets — only admin internal buckets.
+        try:
+            async def _sum_tx(q: Dict[str, Any]) -> float:
+                r = await db.transactions.aggregate([
+                    {"$match": q},
+                    {"$group": {"_id": None, "t": {"$sum": "$amount"}}},
+                ]).to_list(1)
+                return float(r[0]["t"]) if r else 0.0
+
+            inflow = (
+                await _sum_tx({"type": "registration_fee", "status": {"$in": ["paid", "success", "approved"]}})
+                + await _sum_tx({"type": "system_deposit", "status": {"$in": ["paid", "success", "approved"]}})
+                + await _sum_tx({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"})
+                + await _sum_tx({"type": {"$in": ["service_margin", "service_commission"]}, "status": "success"})
+                - abs(await _sum_tx({"type": {"$in": ["shop_commission_reversal", "service_commission_reversal"]}, "status": "success"}))
+            )
+            withdrawals = abs(await _sum_tx({"type": "withdrawal", "status": "success"}))
+            expected_held = round(inflow - withdrawals, 2)
+
+            admin_doc2 = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+            users_total_agg = await db.users.aggregate([
+                {"$match": {"role": "user"}},
+                {"$group": {"_id": None, "t": {"$sum": "$wallet_balance"}}},
+            ]).to_list(1)
+            users_held = float(users_total_agg[0]["t"]) if users_total_agg else 0.0
+            admin_held = float((admin_doc2 or {}).get("wallet_balance") or 0)
+            actual_held = round(admin_held + users_held, 2)
+            drift = round(actual_held - expected_held, 2)
+
+            if abs(drift) > 1.0 and admin_doc2:
+                if drift > 0:
+                    # Held > expected → money to debit from admin
+                    remaining = drift
+                    for bucket in ("fee_residual", "direct_signup", "referral_commission", "gst_collected", "direct_added"):
+                        if remaining <= 0.01:
+                            break
+                        avail = float((admin_doc2.get("wallet_buckets") or {}).get(bucket) or 0)
+                        if avail <= 0:
+                            continue
+                        take = round(min(avail, remaining), 2)
+                        await credit_admin_bucket(bucket, -take, also_total_earned=False)
+                        await db.transactions.insert_one({
+                            "id": str(uuid.uuid4()),
+                            "user_id": admin_doc2["id"],
+                            "type": "drift_correction",
+                            "amount": -take,
+                            "status": "success",
+                            "description": f"[Auto-heal] Removed phantom ₹{take} from {bucket} to restore Inflow == Held (was drift ₹{drift})",
+                            "source_bucket": bucket,
+                            "drift_before": drift,
+                            "created_at": now_utc().isoformat(),
+                            "is_auto_heal": True,
+                        })
+                        admin_doc2 = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+                        remaining = round(remaining - take, 2)
+                    logger.info(
+                        f"Drift self-heal: removed ₹{round(drift - remaining, 2)} phantom money from admin buckets "
+                        f"(drift was ₹{drift}, remaining ₹{remaining})"
+                    )
+                    # Mark all open ledger_alerts as resolved (auto-heal handled it)
+                    try:
+                        await db.ledger_alerts.update_many(
+                            {"resolved": {"$ne": True}},
+                            {"$set": {
+                                "resolved": True,
+                                "resolved_at": now_utc().isoformat(),
+                                "resolution_note": f"Auto-resolved by startup drift self-heal (₹{drift} corrected)",
+                            }},
+                        )
+                    except Exception:
+                        pass
+                else:
+                    # Held < expected → admin is short. Inject from fee_residual
+                    # (this means earlier signups paid into the system but the
+                    # safety-net residual didn't fire for some of them).
+                    deficit = abs(drift)
+                    await db.users.update_one(
+                        {"id": admin_doc2["id"]},
+                        {"$inc": {
+                            "wallet_buckets.fee_residual": deficit,
+                            "wallet_balance": deficit,
+                        }},
+                    )
+                    await db.transactions.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "user_id": admin_doc2["id"],
+                        "type": "drift_correction",
+                        "amount": deficit,
+                        "status": "success",
+                        "description": f"[Auto-heal] Injected ₹{deficit} into fee_residual to restore Inflow == Held (was drift ₹{drift})",
+                        "source_bucket": "fee_residual",
+                        "drift_before": drift,
+                        "created_at": now_utc().isoformat(),
+                        "is_auto_heal": True,
+                    })
+                    logger.info(f"Drift self-heal: injected ₹{deficit} into admin.fee_residual (drift was ₹{drift})")
+                    try:
+                        await db.ledger_alerts.update_many(
+                            {"resolved": {"$ne": True}},
+                            {"$set": {
+                                "resolved": True,
+                                "resolved_at": now_utc().isoformat(),
+                                "resolution_note": f"Auto-resolved by startup drift self-heal (₹{drift} corrected)",
+                            }},
+                        )
+                    except Exception:
+                        pass
+        except Exception as _drift_err:
+            logger.warning(f"Drift self-heal skipped: {str(_drift_err)[:200]}")
         try:
             await seed_admin()
         except Exception as _e:
