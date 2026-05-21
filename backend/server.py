@@ -4235,8 +4235,15 @@ async def reconcile_system_wallet(
 # each bucket from its ledger types). Keep this in sync whenever new admin
 # income types are added so the books always balance after a reconcile.
 _BUCKET_TXN_TYPES: Dict[str, List[str]] = {
+    # Each bucket's recompute = sum(amount) across these txn types. Include
+    # debit-emitting types (e.g. `l1_funding`) INSIDE the bucket they debit
+    # so reconcile produces the correct post-debit balance.
+    #
+    # `drift_correction` txns are intentionally EXCLUDED here — they are
+    # pure audit entries that represent the auto-heal action itself, NOT
+    # a separate debit. Including them would double-count after reconcile.
     "direct_signup":       ["direct_signup_credit"],
-    "fee_residual":        ["fee_residual"],
+    "fee_residual":        ["fee_residual", "l1_funding"],
     "referral_commission": ["referral_payout", "cascade_overflow"],
     "gst_collected":       ["gst_collected"],
     # admin_credit/admin_debit are signed (positive=credit, negative=debit)
@@ -5992,83 +5999,47 @@ async def _background_init():
             drift = round(actual_held - expected_held, 2)
 
             if abs(drift) > 1.0 and admin_doc2:
-                if drift > 0:
-                    # Held > expected → money to debit from admin
-                    remaining = drift
-                    for bucket in ("fee_residual", "direct_signup", "referral_commission", "gst_collected", "direct_added"):
-                        if remaining <= 0.01:
-                            break
-                        avail = float((admin_doc2.get("wallet_buckets") or {}).get(bucket) or 0)
-                        if avail <= 0:
-                            continue
-                        take = round(min(avail, remaining), 2)
-                        await credit_admin_bucket(bucket, -take, also_total_earned=False)
-                        await db.transactions.insert_one({
-                            "id": str(uuid.uuid4()),
+                # Strategy: instead of explicitly debiting and inserting a
+                # `drift_correction` txn (which would double-count next time
+                # reconcile sums the bucket), RESET each admin bucket to the
+                # authoritative `sum(its real txns)` value. This naturally
+                # removes phantom inflation AND fills genuine shortfalls,
+                # keeping bucket == txn_sum invariant (which reconcile also
+                # enforces). The single backend.err.log line below IS the
+                # audit trail.
+                new_buckets: Dict[str, float] = {b: 0.0 for b in (admin_doc2.get("wallet_buckets") or {})}
+                for bucket, types in _BUCKET_TXN_TYPES.items():
+                    agg = await db.transactions.aggregate([
+                        {"$match": {
                             "user_id": admin_doc2["id"],
-                            "type": "drift_correction",
-                            "amount": -take,
-                            "status": "success",
-                            "description": f"[Auto-heal] Removed phantom ₹{take} from {bucket} to restore Inflow == Held (was drift ₹{drift})",
-                            "source_bucket": bucket,
-                            "drift_before": drift,
-                            "created_at": now_utc().isoformat(),
-                            "is_auto_heal": True,
-                        })
-                        admin_doc2 = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-                        remaining = round(remaining - take, 2)
-                    logger.info(
-                        f"Drift self-heal: removed ₹{round(drift - remaining, 2)} phantom money from admin buckets "
-                        f"(drift was ₹{drift}, remaining ₹{remaining})"
-                    )
-                    # Mark all open ledger_alerts as resolved (auto-heal handled it)
-                    try:
-                        await db.ledger_alerts.update_many(
-                            {"resolved": {"$ne": True}},
-                            {"$set": {
-                                "resolved": True,
-                                "resolved_at": now_utc().isoformat(),
-                                "resolution_note": f"Auto-resolved by startup drift self-heal (₹{drift} corrected)",
-                            }},
-                        )
-                    except Exception:
-                        pass
-                else:
-                    # Held < expected → admin is short. Inject from fee_residual
-                    # (this means earlier signups paid into the system but the
-                    # safety-net residual didn't fire for some of them).
-                    deficit = abs(drift)
-                    await db.users.update_one(
-                        {"id": admin_doc2["id"]},
-                        {"$inc": {
-                            "wallet_buckets.fee_residual": deficit,
-                            "wallet_balance": deficit,
+                            "type": {"$in": types},
+                            "status": {"$in": ["success", "paid", "credited", "approved"]},
+                        }},
+                        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+                    ]).to_list(1)
+                    new_buckets[bucket] = round(float(agg[0]["total"] if agg else 0), 2)
+                new_total = round(sum(new_buckets.values()), 2)
+                await db.users.update_one(
+                    {"id": admin_doc2["id"]},
+                    {"$set": {"wallet_buckets": new_buckets, "wallet_balance": new_total}},
+                )
+                logger.info(
+                    f"Drift self-heal: drift was ₹{drift} | admin wallet_balance "
+                    f"{admin_doc2.get('wallet_balance', 0):.2f} → {new_total:.2f} "
+                    f"(buckets reset to ledger sum)"
+                )
+                # Mark all open ledger_alerts as resolved (auto-heal handled it)
+                try:
+                    await db.ledger_alerts.update_many(
+                        {"resolved": {"$ne": True}},
+                        {"$set": {
+                            "resolved": True,
+                            "resolved_at": now_utc().isoformat(),
+                            "resolution_note": f"Auto-resolved by startup drift self-heal (₹{drift} corrected)",
                         }},
                     )
-                    await db.transactions.insert_one({
-                        "id": str(uuid.uuid4()),
-                        "user_id": admin_doc2["id"],
-                        "type": "drift_correction",
-                        "amount": deficit,
-                        "status": "success",
-                        "description": f"[Auto-heal] Injected ₹{deficit} into fee_residual to restore Inflow == Held (was drift ₹{drift})",
-                        "source_bucket": "fee_residual",
-                        "drift_before": drift,
-                        "created_at": now_utc().isoformat(),
-                        "is_auto_heal": True,
-                    })
-                    logger.info(f"Drift self-heal: injected ₹{deficit} into admin.fee_residual (drift was ₹{drift})")
-                    try:
-                        await db.ledger_alerts.update_many(
-                            {"resolved": {"$ne": True}},
-                            {"$set": {
-                                "resolved": True,
-                                "resolved_at": now_utc().isoformat(),
-                                "resolution_note": f"Auto-resolved by startup drift self-heal (₹{drift} corrected)",
-                            }},
-                        )
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
         except Exception as _drift_err:
             logger.warning(f"Drift self-heal skipped: {str(_drift_err)[:200]}")
         try:
