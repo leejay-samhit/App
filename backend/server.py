@@ -4112,20 +4112,23 @@ async def get_system_wallet_breakdown(
     )
 
     # ─── HONEST MONEY-FLOW IDENTITY ──────────────────────────────────
-    # Inflow = Cash currently held internally + Cash withdrawn to bank.
-    # `redistributed_total` is the INTERNAL allocation (no withdrawals)
-    # and sums to (Inflow − Withdrawals). The settled-withdrawals line
-    # is shown separately as "left platform" so users see the full
-    # picture without double-counting.
+    # `to_user_wallets_referral_net` is the LIFETIME net credit to non-admin
+    # users — it INCLUDES amounts subsequently withdrawn to bank (the credit
+    # event already happened; withdrawal is a wallet→bank movement, not a
+    # new redistribution event). Therefore `redistributed_total` mathematically
+    # equals `inflow_total` (every rupee in has been allocated somewhere on
+    # the ledger), and `outflow_total == redistributed_total == inflow_total`.
+    #
+    # Withdrawals are surfaced as a SEPARATE "left platform" line in the UI
+    # (used to compute Bank Tally = inflow − withdrawn = currently held on
+    # platform). They are NOT added a second time to `outflow.total`.
     redistributed_total = round(
         to_users_referral_net + admin_retained
         + admin_direct_added + admin_shop_margin_held + admin_service_margin_held,
         2,
     )
-    # `outflow_total` retains the legacy semantics (sums to inflow when
-    # withdrawals are included) for backwards-compat with reconcile /
-    # money-flow-checker. It now correctly equals Inflow.
-    outflow_total = round(redistributed_total + user_withdrawals_done, 2)
+    # `outflow_total` == `inflow_total` (identity: every rupee in is allocated).
+    outflow_total = redistributed_total
 
     # ─── BALANCE CHECK ───
     a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})

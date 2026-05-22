@@ -3427,12 +3427,50 @@ money_flow_breakdown_ui_2026_05:
 system_wallet_breakdown_regression_2026_05_22:
   - task: "/api/admin/system-wallet/breakdown — payload + identities regression after UI rebuild"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py (get_system_wallet_breakdown)"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          RE-VERIFY after double-counting fix: 10/10 PASS.
+          Runner: /app/breakdown_reverify.py against
+          https://vendor-network-app-1.preview.emergentagent.com/api.
+
+          ─ PAYLOAD SHAPE (PASS) ─
+          All 30 required keys still present:
+          inflow(9), outflow(15), balance(3), settings(3). No regression.
+
+          ─ LIVE NUMBERS (matches brief exactly) ─
+            inflow.total             = ₹14,750.00
+            outflow.total            = ₹14,750.00   (was ₹14,850 pre-fix)
+            redistributed_total      = ₹14,750.00
+            user_withdrawals_settled = ₹100.00
+            balance.held_total       = ₹14,650.00
+            in_admin_wallet          = ₹13,886.34
+            in_user_wallets          = ₹763.66
+
+          ─ IDENTITY CHECKS (4/4 PASS, all within ₹1) ─
+          ✅ A) inflow.total == outflow.total
+                 14,750 == 14,750     (diff ₹0.00)   PASS — was FAIL pre-fix
+          ✅ B) inflow.total == held_total + user_withdrawals_settled
+                 14,750 == 14,650 + 100  (diff ₹0.00)  PASS
+          ✅ C) outflow.redistributed_total == outflow.total
+                 14,750 == 14,750     (diff ₹0.00)   PASS — equal by new definition
+          ✅ D) held_total == in_admin_wallet + in_user_wallets
+                 14,650 == 13,886.34 + 763.66  (diff ₹0.00)  PASS
+
+          The fix (outflow.total := redistributed_total, dropping the +
+          user_withdrawals_settled term) is correct. Withdrawals are now
+          surfaced as a separate "left platform" line via
+          outflow.user_withdrawals_settled (still ₹100), not double-counted
+          in outflow.total. The semantic
+          `inflow.total == outflow.total == redistributed_total` holds
+          exactly, and the new UI's `inflow == held + withdrawn` identity
+          also holds exactly. Payload shape preserved (frontend unaffected).
       - working: false
         agent: "testing"
         comment: |
@@ -3536,6 +3574,27 @@ agent_communication:
   - agent: "testing"
     message: |
       SYSTEM WALLET BREAKDOWN REGRESSION (post UI rebuild) — 18/19 PASS.
+
+
+  - agent: "testing"
+    message: |
+      SYSTEM WALLET BREAKDOWN RE-VERIFY (post double-counting fix) — 10/10 PASS.
+      Runner: /app/breakdown_reverify.py.
+
+      ✅ All 30 payload keys preserved across inflow(9)/outflow(15)/balance(3)/settings(3).
+      ✅ Identity A: inflow.total == outflow.total           14,750 == 14,750  (was FAIL ₹100)
+      ✅ Identity B: inflow == held + withdrawn              14,750 == 14,650+100
+      ✅ Identity C: redistributed_total == outflow.total    14,750 == 14,750
+      ✅ Identity D: held == in_admin_wallet + in_user_wallets  14,650 == 13886.34+763.66
+
+      Live numbers match the brief exactly: inflow ₹14,750, outflow ₹14,750,
+      redistributed_total ₹14,750, withdrawn ₹100, held ₹14,650.
+
+      The fix is correct: outflow.total now equals redistributed_total (no longer
+      adds user_withdrawals_settled), so the double-counting bug is gone. The
+      semantic `inflow.total == outflow.total == redistributed_total` holds, and
+      withdrawals remain available as a separate "left platform" line via
+      outflow.user_withdrawals_settled. Payload shape unchanged → frontend safe.
 
       ✅ PAYLOAD SHAPE: All 30 required keys present across inflow (9),
          outflow (15), balance (3), settings (3). No keys missing — the
