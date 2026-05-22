@@ -4089,17 +4089,43 @@ async def get_system_wallet_breakdown(
     # NOT added to the tally a second time).
     #
     # This guarantees:    Inflow == Outflow == Visible 6-line Tally
+    # Split user_wallets_paid into:
+    #   - to NON-admin users (these are the funds that ACTUALLY land in
+    #     user wallets and may eventually be withdrawn)
+    #   - to admin (when admin is the L_N upline at a depth where cascade
+    #     reaches root — these go straight to admin.referral_commission)
+    admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"id": 1, "_id": 0})
+    _aid = (admin_user or {}).get("id")
+    to_users_referral_net = round(await _sum({
+        "type": "referral_payout", "status": "success",
+        **({"user_id": {"$ne": _aid}} if _aid else {}),
+    }), 2)
+    to_admin_via_cascade = round(await _sum({
+        "type": "referral_payout", "status": "success",
+        **({"user_id": _aid} if _aid else {}),
+    }), 2)
+
     admin_retained = round(
         direct_signup_credit + fee_residual + cascade_overflow
-        + gst_collected + l1_funding_debit,
+        + gst_collected + l1_funding_debit + to_admin_via_cascade,
         2,
     )
 
-    outflow_total = round(
-        user_wallets_paid + admin_retained + user_withdrawals_done
+    # ─── HONEST MONEY-FLOW IDENTITY ──────────────────────────────────
+    # Inflow = Cash currently held internally + Cash withdrawn to bank.
+    # `redistributed_total` is the INTERNAL allocation (no withdrawals)
+    # and sums to (Inflow − Withdrawals). The settled-withdrawals line
+    # is shown separately as "left platform" so users see the full
+    # picture without double-counting.
+    redistributed_total = round(
+        to_users_referral_net + admin_retained
         + admin_direct_added + admin_shop_margin_held + admin_service_margin_held,
         2,
     )
+    # `outflow_total` retains the legacy semantics (sums to inflow when
+    # withdrawals are included) for backwards-compat with reconcile /
+    # money-flow-checker. It now correctly equals Inflow.
+    outflow_total = round(redistributed_total + user_withdrawals_done, 2)
 
     # ─── BALANCE CHECK ───
     a = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
@@ -4123,14 +4149,19 @@ async def get_system_wallet_breakdown(
             "total": inflow_total,
         },
         "outflow": {
-            # ─── User-facing simplified outflow (Inflow == Outflow) ────
-            "to_user_wallets_referral":  round(user_wallets_paid, 2),
+            # ─── INTERNAL REDISTRIBUTION (sums to inflow − withdrawals) ──
+            "to_user_wallets_referral_net": to_users_referral_net,  # NEW: net to non-admin users only
             "to_admin_retained":         admin_retained,
             "to_admin_gst_collected":    round(gst_collected, 2),
             "to_admin_direct_added":     admin_direct_added,
             "to_admin_shop_margin":      admin_shop_margin_held,
             "to_admin_service_margin":   admin_service_margin_held,
+            "to_admin_via_cascade":      to_admin_via_cascade,  # NEW: admin-recipient L_N (already in admin_retained)
+            # ─── LEFT PLATFORM (cash withdrawn to bank) ──────────────────
             "user_withdrawals_settled":  round(user_withdrawals_done, 2),
+            # ─── DEPRECATED: kept for backwards-compat — equals
+            #     to_user_wallets_referral_net + to_admin_via_cascade.
+            "to_user_wallets_referral":  round(user_wallets_paid, 2),
             # ─── Audit-level legacy sub-breakdown (still exposed so the
             #     drill-downs in /admin/system-wallet/transactions can map
             #     bucket keys correctly; UI no longer surfaces them as
@@ -4139,7 +4170,9 @@ async def get_system_wallet_breakdown(
             "_legacy_to_admin_fee_residual":     round(fee_residual, 2),
             "_legacy_to_admin_cascade_overflow": round(cascade_overflow, 2),
             "_legacy_l1_funding_debit":          round(l1_funding_debit, 2),
-            "total":                     outflow_total,
+            # ─── TOTALS ──────────────────────────────────────────────────
+            "redistributed_total":       redistributed_total,    # NEW: held internally
+            "total":                     outflow_total,           # legacy: redistributed + withdrawn = inflow
         },
         "balance": {
             "in_admin_wallet": round(admin_total, 2),

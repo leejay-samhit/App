@@ -61,14 +61,24 @@ type Breakdown = {
     total: number;
   };
   outflow: {
-    to_user_wallets_referral: number;
-    to_admin_direct_signup: number;
-    to_admin_fee_residual: number;
-    to_admin_cascade_overflow: number;
-    to_admin_gst_collected: number;
+    // Internal redistribution (cash still on platform)
+    to_user_wallets_referral_net: number;        // paid to NON-admin users only
+    to_admin_retained: number;                    // consolidated admin pool (incl. GST & L1 funding netted)
+    to_admin_gst_collected: number;               // informational only — already inside admin_retained
+    to_admin_direct_added: number;
+    to_admin_shop_margin: number;
+    to_admin_service_margin: number;
+    to_admin_via_cascade: number;                 // already inside admin_retained
+    // Left platform
     user_withdrawals_settled: number;
-    l1_funding_debit: number;
-    total: number;
+    // Legacy / backwards-compat
+    to_user_wallets_referral: number;             // = referral_net + via_cascade (gross to all)
+    _legacy_to_admin_direct_signup: number;
+    _legacy_to_admin_fee_residual: number;
+    _legacy_to_admin_cascade_overflow: number;
+    _legacy_l1_funding_debit: number;
+    redistributed_total: number;                  // cash still on platform = inflow − withdrawn
+    total: number;                                // = redistributed + withdrawn = inflow
   };
   balance: { in_admin_wallet: number; in_user_wallets: number; held_total: number };
   settings: { registration_fee: number; directs_required: number; level_payouts: number[] };
@@ -211,10 +221,13 @@ export default function AdminSystemWallet() {
         <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 12 }}>
           <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>BANK BALANCE TALLY</Text>
           <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>
-            {formatINR(Number(breakdown?.inflow?.total || 0))}
+            {formatINR(
+              // Bank tally = Inflow − Withdrawals (cash actually still on platform)
+              Math.max(0, Number(breakdown?.inflow?.total || 0) - Number(breakdown?.outflow?.user_withdrawals_settled || 0))
+            )}
           </Text>
           <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>
-            Total money in the system. The 5 lines below sum to this exact value (GST is informational — already inside Admin Wallet).
+            Total inflow {formatINR(breakdown?.inflow?.total || 0)} − Withdrawn {formatINR(breakdown?.outflow?.user_withdrawals_settled || 0)} = Currently held on platform.
           </Text>
         </GradientCard>
 
@@ -315,27 +328,96 @@ export default function AdminSystemWallet() {
               <Text style={styles.breakdownTotalAmount}>{formatINR(breakdown.inflow.total)}</Text>
             </View>
 
-            {/* Outflow */}
-            <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>📤 REDISTRIBUTED · where it went</Text>
-            <BreakdownRow label="To user wallets (L1-L10 net)" value={breakdown.outflow.to_user_wallets_referral} hint="Sum of net referral payouts credited to user wallets" />
-            <BreakdownRow label="Admin · direct signup" value={breakdown.outflow.to_admin_direct_signup} hint="₹100 per no-ref / EARN signup" />
-            <BreakdownRow label="Admin · fee residual" value={breakdown.outflow.to_admin_fee_residual} hint="Leftover from with-ref signups when cascade < fee" />
-            <BreakdownRow label="Admin · cascade overflow" value={breakdown.outflow.to_admin_cascade_overflow} hint="Uncascaded L2..L10 when upline chain ends early" />
-            <BreakdownRow label="Admin · GST collected" value={breakdown.outflow.to_admin_gst_collected} hint="18% routed to regulatory bucket" />
-            <BreakdownRow label="User withdrawals (settled)" value={breakdown.outflow.user_withdrawals_settled} hint="Cash that left to bank/UPI" />
-            <View style={styles.breakdownTotal}>
-              <Text style={styles.breakdownTotalLabel}>Total redistributed</Text>
-              <Text style={styles.breakdownTotalAmount}>{formatINR(breakdown.outflow.total)}</Text>
-            </View>
+            {/* ─── HELD ON PLATFORM (Admin + Users currently) ─── */}
+            {(() => {
+              const adminHeld   = Number(breakdown.balance.in_admin_wallet || 0);
+              const usersHeld   = Number(breakdown.balance.in_user_wallets || 0);
+              const withdrawn   = Number(breakdown.outflow.user_withdrawals_settled || 0);
+              const heldTotal   = adminHeld + usersHeld;
+              const inflowTotal = Number(breakdown.inflow.total || 0);
+              const identityOK  = Math.abs(inflowTotal - (heldTotal + withdrawn)) <= 1;
+              return (
+                <>
+                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏦 HELD ON PLATFORM · cash currently here</Text>
+                  <BreakdownRow label="Admin wallet (all buckets)" value={adminHeld} hint="direct_signup + fee_residual + cascade + GST + UTR + margins − L1 funding" />
+                  <BreakdownRow label="User wallets (across all users)" value={usersHeld} hint="Net referral payouts still sitting in user wallets (un-withdrawn)" />
+                  <View style={styles.breakdownTotal}>
+                    <Text style={styles.breakdownTotalLabel}>Held total (on platform)</Text>
+                    <Text style={styles.breakdownTotalAmount}>{formatINR(heldTotal)}</Text>
+                  </View>
 
-            {/* Held */}
-            <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏦 CURRENTLY HELD</Text>
-            <BreakdownRow label="In admin wallet" value={breakdown.balance.in_admin_wallet} hint="Sum of all admin buckets" />
-            <BreakdownRow label="In user wallets" value={breakdown.balance.in_user_wallets} hint="Across all paid users" />
-            <View style={styles.breakdownTotal}>
-              <Text style={styles.breakdownTotalLabel}>Held total</Text>
-              <Text style={styles.breakdownTotalAmount}>{formatINR(breakdown.balance.held_total)}</Text>
-            </View>
+                  {/* ─── LEFT PLATFORM (Withdrawn to Bank) ─── */}
+                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏧 LEFT PLATFORM · withdrawn to bank</Text>
+                  <BreakdownRow label="User withdrawals (settled with UTR)" value={withdrawn} hint="Money that physically left platform via bank transfer / UPI" />
+                  <View style={styles.breakdownTotal}>
+                    <Text style={styles.breakdownTotalLabel}>Withdrawn total</Text>
+                    <Text style={styles.breakdownTotalAmount}>{formatINR(withdrawn)}</Text>
+                  </View>
+
+                  {/* ─── IDENTITY CHECK (Inflow = Held + Withdrawn) ─── */}
+                  <View style={[styles.identityBox, identityOK ? styles.identityOK : styles.identityBad]}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                      <Feather name={identityOK ? "check-circle" : "alert-triangle"} size={14} color={identityOK ? "#0F766E" : "#B3261E"} />
+                      <Text style={[styles.identityTitle, { color: identityOK ? "#0F766E" : "#B3261E" }]}>
+                        {identityOK ? "Books balanced" : "Drift detected"}
+                      </Text>
+                    </View>
+                    <Text style={styles.identityFormula}>
+                      Inflow {formatINR(inflowTotal)}  =  Held {formatINR(heldTotal)}  +  Withdrawn {formatINR(withdrawn)}
+                    </Text>
+                    {!identityOK ? (
+                      <Text style={styles.identityDrift}>Drift · {formatINR(Math.abs(inflowTotal - (heldTotal + withdrawn)))} — tap "Reconcile books" below.</Text>
+                    ) : null}
+                  </View>
+
+                  {/* ─── USER WALLET RECONCILIATION (cumulative-vs-current) ─── */}
+                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>👥 USER WALLET RECONCILIATION</Text>
+                  {(() => {
+                    const everCreditedNet = Number(breakdown.outflow.to_user_wallets_referral_net || 0);
+                    const otherDelta = everCreditedNet - (usersHeld + withdrawn);
+                    const recoCheckOK = Math.abs(otherDelta) <= 1;
+                    return (
+                      <>
+                        <BreakdownRow label="Ever net-credited to user wallets (cumulative)" value={everCreditedNet} hint="L1-L10 referral payouts to non-admin users (lifetime)" />
+                        <BreakdownRow label="  ─ Currently held in user wallets" value={usersHeld} hint="Un-withdrawn balance still on platform" />
+                        <BreakdownRow label="  ─ Withdrawn by users to bank (UTR)" value={withdrawn} hint="Settled withdrawal requests" />
+                        {!recoCheckOK ? (
+                          <BreakdownRow
+                            label={otherDelta > 0 ? "  ─ Other debits (purchases / adjustments)" : "  ─ Other credits (refunds / bonuses)"}
+                            value={Math.abs(otherDelta)}
+                            hint={otherDelta > 0 ? "Users spent on shop / services or admin adjustments" : "Refunds / bonuses credited outside referral cascade"}
+                          />
+                        ) : null}
+                        <View style={[styles.identityBox, recoCheckOK ? styles.identityOK : styles.identityBad, { marginTop: 6 }]}>
+                          <Text style={[styles.identityTitle, { color: recoCheckOK ? "#0F766E" : "#0B66C2" }]}>
+                            {recoCheckOK ? "✓ User wallets reconciled" : "ℹ User wallets reconciled with adjustments"}
+                          </Text>
+                          <Text style={styles.identityFormula}>
+                            {formatINR(everCreditedNet)} credited = {formatINR(usersHeld)} held + {formatINR(withdrawn)} withdrawn{!recoCheckOK ? ` ${otherDelta > 0 ? "+" : "−"} ${formatINR(Math.abs(otherDelta))} adj.` : ""}
+                          </Text>
+                        </View>
+                      </>
+                    );
+                  })()}
+
+                  {/* ─── ADMIN-WALLET COMPOSITION (full audit trail) ─── */}
+                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏛️ ADMIN WALLET COMPOSITION</Text>
+                  <BreakdownRow label="Direct signup (₹100 per no-ref / EARN)" value={breakdown.outflow._legacy_to_admin_direct_signup || 0} />
+                  <BreakdownRow label="Fee residual (with-ref leftovers)" value={breakdown.outflow._legacy_to_admin_fee_residual || 0} />
+                  <BreakdownRow label="Cascade overflow (chain ended early)" value={breakdown.outflow._legacy_to_admin_cascade_overflow || 0} />
+                  <BreakdownRow label="L_N to admin (cascade reached root)" value={breakdown.outflow.to_admin_via_cascade || 0} />
+                  <BreakdownRow label="GST collected (18%)" value={breakdown.outflow.to_admin_gst_collected} hint="Regulatory hold — already inside admin wallet" />
+                  <BreakdownRow label="L1 funding debit" value={breakdown.outflow._legacy_l1_funding_debit || 0} hint="Negative — funds admin paid out for L1 cycles" />
+                  <BreakdownRow label="UTR direct-added" value={breakdown.outflow.to_admin_direct_added || 0} />
+                  <BreakdownRow label="Service margin held" value={breakdown.outflow.to_admin_service_margin || 0} />
+                  <BreakdownRow label="Shop margin held" value={breakdown.outflow.to_admin_shop_margin || 0} />
+                  <View style={styles.breakdownTotal}>
+                    <Text style={styles.breakdownTotalLabel}>Admin wallet total (consolidated)</Text>
+                    <Text style={styles.breakdownTotalAmount}>{formatINR(adminHeld)}</Text>
+                  </View>
+                </>
+              );
+            })()}
 
             {/* Config */}
             <View style={styles.breakdownNote}>
@@ -585,6 +667,14 @@ const styles = StyleSheet.create({
   breakdownTotalAmount: { fontSize: 15, fontWeight: "900", color: colors.primary, fontVariant: ["tabular-nums"], letterSpacing: -0.3 },
   breakdownNote: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 14, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
   breakdownNoteText: { flex: 1, fontSize: 10, color: colors.textMuted, fontStyle: "italic", lineHeight: 14 },
+
+  // Identity-check box (Inflow = Held + Withdrawn)
+  identityBox: { padding: 10, borderRadius: 10, marginTop: 8, borderWidth: 1 },
+  identityOK:  { backgroundColor: "#E6F8F1", borderColor: "#0F766E55" },
+  identityBad: { backgroundColor: "#FFE4E4", borderColor: "#B3261E55" },
+  identityTitle:   { fontSize: 12, fontWeight: "900", letterSpacing: 0.3 },
+  identityFormula: { fontSize: 12, fontWeight: "700", color: colors.textMain, fontVariant: ["tabular-nums"], lineHeight: 18 },
+  identityDrift:   { fontSize: 11, fontWeight: "700", color: "#B3261E", marginTop: 4 },
 
   bucketRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderLeftWidth: 4, borderRadius: 14, padding: 14, marginBottom: 8 },
   bucketIcon: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },

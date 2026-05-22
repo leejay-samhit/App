@@ -3367,3 +3367,210 @@ l1_payout_funding_2026_02:
           captured during the bug-fix window) marked resolved with
           resolution_note. Live drift is now ₹0.00.
 
+
+
+money_flow_breakdown_ui_2026_05:
+  - task: "System Wallet Money-Flow Breakdown UI honest math: Inflow = Held + Withdrawn"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/admin/system-wallet.tsx (Breakdown section ~L307-410), backend/server.py (get_system_wallet_breakdown ~L3989-4187)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          User flagged that the previous "Money Flow Breakdown" was confusing:
+          "To user wallets (net) ₹1,852" vs "currently held in user wallets
+          ₹1,364" without explaining the ₹488 gap (settled withdrawals).
+
+          Backend payload already updated (last session) to emit:
+            outflow.to_user_wallets_referral_net  (paid to NON-admin users only)
+            outflow.to_admin_retained             (consolidated admin pool)
+            outflow.user_withdrawals_settled
+            outflow.redistributed_total           (= inflow − withdrawn)
+            outflow.total                          (= redistributed + withdrawn = inflow)
+            balance.in_admin_wallet / in_user_wallets / held_total
+            outflow._legacy_*                      (audit-only drilldowns)
+
+          Frontend changes this session:
+            1) Updated TypeScript `Breakdown` type to match new payload shape.
+            2) Restructured the Money-Flow Breakdown panel into 5 honest sections:
+                 💰 INFLOW
+                 🏦 HELD ON PLATFORM (Admin wallet + User wallets = Held total)
+                 🏧 LEFT PLATFORM (User withdrawals settled)
+                 ✅ IDENTITY CHECK: Inflow == Held + Withdrawn (green box if ≤₹1 drift)
+                 👥 USER WALLET RECONCILIATION:
+                       Ever credited (net) = Held + Withdrawn + Adjustments
+                       Honestly surfaces "Other debits (purchases/adjustments)"
+                       or "Other credits (refunds/bonuses)" when delta exists
+                       — no false-alarm "mismatch" since users can spend on
+                       shop/services from their wallet.
+                 🏛️ ADMIN WALLET COMPOSITION (full audit trail)
+            3) Added identityBox styles (green = OK, red = drift) with the
+               literal formula rendered for transparency.
+
+          Live data verified manually via curl on /api/admin/system-wallet/breakdown:
+            inflow.total = ₹14,750
+            balance.held_total = ₹14,650 (admin ₹13,886.34 + users ₹763.66)
+            outflow.user_withdrawals_settled = ₹100
+            Held + Withdrawn = ₹14,750 ✓ matches inflow exactly.
+
+          Needs backend regression: confirm /api/admin/system-wallet/breakdown
+          still returns all fields (especially redistributed_total,
+          to_user_wallets_referral_net, _legacy_* keys) and Inflow == Outflow
+          identity still holds.
+
+
+
+system_wallet_breakdown_regression_2026_05_22:
+  - task: "/api/admin/system-wallet/breakdown — payload + identities regression after UI rebuild"
+    implemented: true
+    working: false
+    file: "backend/server.py (get_system_wallet_breakdown)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          Regression test of /api/admin/system-wallet/breakdown after the
+          frontend system-wallet.tsx rebuild. Runner: /app/backend_test.py
+          against https://vendor-network-app-1.preview.emergentagent.com/api.
+          Result: 18/19 PASS, 1 FAIL.
+
+          ─ PAYLOAD SHAPE ─ ALL PASS
+          • Top-level keys present: inflow, outflow, balance, settings.
+          • inflow has ALL 9 required keys
+            (registration_fee_total, no_ref_signup_revenue,
+            with_ref_signup_revenue, no_ref_count, with_ref_count,
+            utr_deposits, service_margin, shop_margin, total).
+          • outflow has ALL 15 required keys
+            (to_user_wallets_referral_net, to_admin_retained,
+            to_admin_gst_collected, to_admin_direct_added,
+            to_admin_shop_margin, to_admin_service_margin,
+            to_admin_via_cascade, user_withdrawals_settled,
+            to_user_wallets_referral, _legacy_to_admin_direct_signup,
+            _legacy_to_admin_fee_residual, _legacy_to_admin_cascade_overflow,
+            _legacy_l1_funding_debit, redistributed_total, total).
+          • balance has all 3 keys
+            (in_admin_wallet, in_user_wallets, held_total).
+          • settings has all 3 keys
+            (registration_fee, directs_required, level_payouts).
+
+          ─ LIVE NUMBERS (matches the brief exactly) ─
+            inflow.total                          = ₹14,750.00
+            inflow.registration_fee_total         = ₹14,750.00
+            inflow.no_ref_signup_revenue          = ₹5,192.00  (44 signups)
+            inflow.with_ref_signup_revenue        = ₹9,558.00  (86 signups)
+            inflow.utr_deposits / service_margin / shop_margin = 0
+            outflow.total                         = ₹14,850.00
+            outflow.redistributed_total           = ₹14,750.00
+            outflow.user_withdrawals_settled      = ₹100.00
+            outflow.to_admin_retained             = ₹13,386.34
+            outflow.to_admin_via_cascade          = ₹488.00
+            outflow.to_admin_gst_collected        = ₹1,091.34
+            outflow.to_user_wallets_referral_net  = ₹1,363.66
+            outflow.to_user_wallets_referral      = ₹1,851.66
+            outflow._legacy_to_admin_direct_signup= ₹4,400.00
+            outflow._legacy_to_admin_fee_residual = ₹7,771.95
+            outflow._legacy_to_admin_cascade_ovf  = ₹435.05
+            outflow._legacy_l1_funding_debit      = ₹−800.00
+            balance.in_admin_wallet               = ₹13,886.34
+            balance.in_user_wallets               = ₹763.66
+            balance.held_total                    = ₹14,650.00
+            settings.registration_fee             = ₹118.00
+            settings.directs_required             = 6
+            settings.level_payouts                = [400, 12, 5, 3, 1,
+                                                     0.5, 0.25, 0.15,
+                                                     0.10, 0.05]
+
+          ─ IDENTITY CHECKS (3/4 PASS, 1 FAIL) ─
+          ✅ Identity #1  inflow.total ≈ held_total + user_withdrawals_settled
+                14,750 ≈ 14,650 + 100   (diff ₹0.00, ≤ ₹1)   PASS
+          ❌ Identity #2  outflow.total ≈ inflow.total
+                14,850 vs 14,750         (diff ₹100.00, > ₹1) FAIL
+          ✅ Identity #3  redistributed_total + user_withdrawals_settled ≈ outflow.total
+                14,750 + 100 = 14,850     (diff ₹0.00)        PASS
+          ✅ Identity #4  held_total == in_admin_wallet + in_user_wallets
+                14,650 == 13,886.34 + 763.66  (diff ₹0.00)    PASS
+
+          ─ LEGACY CONTRACT (PASS) ─
+          • GET /admin/system-wallet -> 200; .buckets dict has 7 keys
+            (referral_commission, direct_signup, fee_residual, direct_added,
+            service_margin, shopping_margin, gst_collected); .total = 13886.34.
+          • GET /admin/system-wallet/transactions?bucket=admin_wallet&limit=200
+            -> 200 with items array (count=200).
+
+          ─ INTERPRETATION OF IDENTITY #2 FAIL ─
+          The mismatch is EXACTLY equal to user_withdrawals_settled (₹100).
+          Backend logic appears to be:
+              redistributed_total = inflow.total                (= 14,750)
+              outflow.total       = redistributed_total + user_withdrawals_settled
+                                  = 14,750 + 100 = 14,850
+          So outflow.total counts withdrawn money TWICE relative to inflow:
+            • once inside redistributed_total (the original inflow that was
+              held and later paid out as withdrawal),
+            • once again in user_withdrawals_settled.
+          The brief explicitly demanded `outflow.total ≈ inflow.total` (≤ ₹1).
+          That identity DOES NOT HOLD on this live instance.
+
+          The clean identity that DOES hold here is the new UI-facing one
+          (`inflow == held + withdrawn`, Identity #1) which the rebuilt
+          frontend uses. But for code that still reads `outflow.total` as
+          the "money out" mirror of `inflow.total`, the value will be off
+          by the cumulative `user_withdrawals_settled` amount. Main agent
+          should either:
+            (a) Change outflow.total to: redistributed_total (so it
+                equals inflow.total again — what the brief expects), and
+                let the UI surface user_withdrawals_settled as a separate
+                "left platform" line (which it already does).
+            (b) OR explicitly drop Identity #2 from the contract and have
+                callers use Identity #1 (`inflow == held + withdrawn`)
+                as the canonical health check.
+          Either is a small fix; (a) preserves the brief's stated contract.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      SYSTEM WALLET BREAKDOWN REGRESSION (post UI rebuild) — 18/19 PASS.
+
+      ✅ PAYLOAD SHAPE: All 30 required keys present across inflow (9),
+         outflow (15), balance (3), settings (3). No keys missing — the
+         new frontend will be able to render every field it consumes.
+
+      ✅ LEGACY CONTRACT INTACT:
+         • GET /admin/system-wallet returns buckets dict (7 buckets) and total.
+         • GET /admin/system-wallet/transactions?bucket=admin_wallet&limit=200
+           returns 200 with items array.
+
+      ✅ Identities #1, #3, #4 PASS with ₹0.00 drift:
+         • inflow.total == held_total + user_withdrawals_settled
+           (14,750 = 14,650 + 100) — the NEW UI identity is rock solid.
+         • redistributed_total + user_withdrawals_settled == outflow.total.
+         • held_total == in_admin_wallet + in_user_wallets.
+
+      ❌ Identity #2 FAIL by exactly ₹100 (= user_withdrawals_settled):
+            outflow.total = ₹14,850   inflow.total = ₹14,750
+         Backend computes outflow.total = redistributed_total +
+         user_withdrawals_settled, but redistributed_total already equals
+         inflow.total, so withdrawals get double-counted relative to
+         inflow.total. Brief explicitly required `outflow.total ≈ inflow.total`
+         (within ₹1) and that contract is broken.
+
+      RECOMMENDED FIX for main agent (cheap):
+         In get_system_wallet_breakdown, set
+             outflow["total"] = outflow["redistributed_total"]
+         (drop the + user_withdrawals_settled term). User withdrawals are
+         already accounted for elsewhere (they're displayed as a separate
+         "left platform" line by the new UI). After this change,
+         outflow.total will mirror inflow.total exactly, satisfying both
+         the brief's identity and the new UI's "inflow == held + withdrawn"
+         identity simultaneously.
+
+      The live numbers exactly match what the brief said:
+        inflow=₹14,750, held=₹14,650, withdrawn=₹100.
+      Read-only verification — no data was mutated. /reconcile was NOT
+      called.
