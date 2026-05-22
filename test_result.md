@@ -3372,11 +3372,11 @@ l1_payout_funding_2026_02:
 money_flow_breakdown_ui_2026_05:
   - task: "System Wallet Money-Flow Breakdown UI honest math: Inflow = Held + Withdrawn"
     implemented: true
-    working: "NA"
+    working: true
     file: "frontend/app/admin/system-wallet.tsx (Breakdown section ~L307-410), backend/server.py (get_system_wallet_breakdown ~L3989-4187)"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
@@ -3414,6 +3414,32 @@ money_flow_breakdown_ui_2026_05:
           Live data verified manually via curl on /api/admin/system-wallet/breakdown:
             inflow.total = ₹14,750
             balance.held_total = ₹14,650 (admin ₹13,886.34 + users ₹763.66)
+      - working: true
+        agent: "testing"
+        comment: |
+          ALL IDENTITIES PASS (₹0.00 drift) after fixing double-counting in
+          outflow.total. Backend now correctly returns:
+            inflow.total = outflow.total = redistributed_total = ₹14,750
+            held_total = ₹14,650 (admin ₹13,886.34 + users ₹763.66)
+            user_withdrawals_settled = ₹100
+            inflow == held_total + user_withdrawals_settled ✓
+            inflow == outflow ✓
+          Withdrawals are correctly surfaced as a SEPARATE "left platform"
+          line, not double-counted in outflow.total. 30/30 payload keys
+          intact. Frontend remains compatible.
+      - working: true
+        agent: "main"
+        comment: |
+          Fixed backend double-counting bug per testing-agent feedback:
+          changed `outflow_total = round(redistributed_total + user_withdrawals_done, 2)`
+          to `outflow_total = redistributed_total`. Re-tested all 4 identities
+          → 0.00 drift across the board. Frontend Money-Flow Breakdown UI
+          now correctly visualizes Inflow = Held (Admin + Users) + Withdrawn
+          with green identity-check banner. Includes honest User Wallet
+          Reconciliation that surfaces "Other adjustments" when cumulative
+          referral credit ≠ currently held + withdrawn (due to wallet
+          spending on shop/services).
+
             outflow.user_withdrawals_settled = ₹100
             Held + Withdrawn = ₹14,750 ✓ matches inflow exactly.
 
