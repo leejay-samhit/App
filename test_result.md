@@ -3440,6 +3440,27 @@ money_flow_breakdown_ui_2026_05:
           referral credit ≠ currently held + withdrawn (due to wallet
           spending on shop/services).
 
+          FOLLOW-UP FIX (treasury tally inflation): User reported the
+          home-screen Treasury "Sum (excl. GST informational)" was inflating
+          relative to Inflow after a withdrawal settled (e.g. tally ₹1,204
+          vs inflow ₹826 → drift ₹378). Root cause: the legacy 6-row tally
+          summed `adminWallet (= to_admin_retained)` + `paidToUsers (=
+          to_user_wallets_referral + withdrawn)` + admin sub-buckets,
+          which double-counted (a) `to_admin_via_cascade` (already inside
+          `to_admin_retained` AND inside `to_user_wallets_referral`) and
+          (b) `user_withdrawals_settled` (already inside lifetime
+          `to_user_wallets_referral` credit). Fix: redesigned the Treasury
+          section to 3 SUMMED rows that mirror the backend identity
+          exactly: `Admin Wallet (held) + User Wallets (held) + Withdrawn
+          (left platform) = Inflow`, using `balance.in_admin_wallet`,
+          `balance.in_user_wallets`, `outflow.user_withdrawals_settled`.
+          The 5 admin sub-buckets (Admin Referral cascade, GST, Service
+          Margin, Shop Margin, UTR) are surfaced as INFORMATIONAL rows
+          in a separate "Admin Wallet Composition" section, clearly marked
+          as already counted inside Admin Wallet and NOT summed. Verified
+          ₹0.00 drift on live data: admin ₹13,886.34 + users ₹763.66 +
+          withdrawn ₹100 = ₹14,750 = inflow ₹14,750.
+
             outflow.user_withdrawals_settled = ₹100
             Held + Withdrawn = ₹14,750 ✓ matches inflow exactly.
 

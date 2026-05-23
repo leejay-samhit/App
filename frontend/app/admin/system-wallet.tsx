@@ -22,10 +22,12 @@ type BucketKey =
   | "user_payouts"
   | "admin_wallet";
 
-/** Top-level treasury rows shown on the System Wallet home — 6 lines that
- *  together tally the bank balance. GST is INSIDE Admin Wallet (no separate
- *  bucket subtraction); the GST line is informational drilldown only. */
-type TreasuryRowKey = "admin_wallet" | "gst_info" | "service_margin" | "shopping_margin" | "direct_added" | "paid_to_users";
+/** Top-level treasury rows shown on the System Wallet home — clean tally:
+ *  Admin Wallet (held) + User Wallets (held) + Withdrawn (left platform) = Inflow.
+ *  All other rows (GST/Service/Shop/UTR/Referral) are INFORMATIONAL sub-buckets
+ *  of Admin Wallet and are NOT added to the tally. */
+type TreasuryRowKey = "admin_wallet" | "user_wallets" | "withdrawn";
+type TreasuryInfoKey = "gst_info" | "service_margin" | "shopping_margin" | "direct_added" | "referral_admin";
 
 const BUCKETS: { key: BucketKey; label: string; icon: any; color: string; desc: string; cta?: string }[] = [
   { key: "direct_signup",       label: "Direct Joins & Realignments", icon: "user-plus",         color: "#2E7D52", desc: "No-referral + EARN signups (₹100 each)", cta: "View transactions" },
@@ -231,46 +233,48 @@ export default function AdminSystemWallet() {
           </Text>
         </GradientCard>
 
-        {/* ─── Treasury · 6 cash-management lines ─── */}
+        {/* ─── Treasury · 3 SUMMED rows + 5 informational rows ─── */}
         {(() => {
-          // ALL values below come from the breakdown endpoint so the SUM of
-          // the 6 visible rows always equals Total Inflow (drift ≤ ₹1).
-          // GST is INSIDE Admin Wallet — surfaced as info-only row, NOT added
-          // to the tally a second time.
-          const adminWallet = Number(breakdown?.outflow?.to_admin_retained || 0);
-          const referralPayouts = Number(breakdown?.outflow?.to_user_wallets_referral || 0);
-          const withdrawn = Number(breakdown?.outflow?.user_withdrawals_settled || 0);
-          // "Total Paid to Users" = total ever credited to user wallets via
-          // L1..L10 referral payouts + total settled withdrawals. This is
-          // the canonical "ever paid out to users" figure used in the tally.
-          const paidToUsers = referralPayouts + withdrawn;
-          const usersHeld = Number(breakdown?.balance?.in_user_wallets || 0);
-          const rows: { key: TreasuryRowKey; label: string; icon: any; color: string; value: number; sub: string; cta?: string }[] = [
-            { key: "admin_wallet",   label: "Admin Wallet",        icon: "credit-card",        color: "#7C3AED", value: adminWallet,                                                              sub: "Direct joins + cascade + L1 funding netted",          cta: "View ledger" },
-            { key: "gst_info",       label: "GST Collected (info)",icon: "percent",            color: "#B3261E", value: Number(breakdown?.outflow?.to_admin_gst_collected || 0),                  sub: "Already inside Admin Wallet — shown for compliance", cta: "View GST txns" },
-            { key: "service_margin", label: "Service Margin",      icon: "briefcase",          color: "#E57A44", value: Number(breakdown?.outflow?.to_admin_service_margin || 0),                 sub: "Platform fees from service bookings",                 cta: "View service txns" },
-            { key: "shopping_margin",label: "Sales Margin (Shop)", icon: "shopping-bag",       color: "#1E40AF", value: Number(breakdown?.outflow?.to_admin_shop_margin || 0),                    sub: "Commission from shop orders",                         cta: "View shop txns" },
-            { key: "direct_added",   label: "Direct Added (UTR)",  icon: "arrow-down-circle",  color: "#0B66C2", value: Number(breakdown?.outflow?.to_admin_direct_added || 0),                   sub: "Manual UTR bank deposits to system wallet",          cta: "View UTR deposits" },
-            { key: "paid_to_users",  label: "Total Paid to Users", icon: "users",              color: "#2E7D52", value: paidToUsers,                                                              sub: `Held in user wallets · ${formatINR(usersHeld)}    |    Withdrawn · ${formatINR(withdrawn)}`, cta: "View payouts & withdrawals" },
+          // HONEST IDENTITY: Inflow = Admin Wallet (held) + User Wallets (held) + Withdrawn (left)
+          // Other rows are SUB-BUCKETS of Admin Wallet — informational only, NOT summed.
+          const adminHeld    = Number(breakdown?.balance?.in_admin_wallet || 0);
+          const usersHeld    = Number(breakdown?.balance?.in_user_wallets || 0);
+          const withdrawn    = Number(breakdown?.outflow?.user_withdrawals_settled || 0);
+          const gstHeld      = Number(breakdown?.outflow?.to_admin_gst_collected || 0);
+          const serviceHeld  = Number(breakdown?.outflow?.to_admin_service_margin || 0);
+          const shopHeld     = Number(breakdown?.outflow?.to_admin_shop_margin || 0);
+          const utrHeld      = Number(breakdown?.outflow?.to_admin_direct_added || 0);
+          const referralAdmin= Number(breakdown?.outflow?.to_admin_via_cascade || 0);
+
+          // 3 rows that ADD UP TO INFLOW (Bank Tally identity).
+          const tallyRows: { key: TreasuryRowKey; label: string; icon: any; color: string; value: number; sub: string; cta?: string }[] = [
+            { key: "admin_wallet",  label: "Admin Wallet · held",   icon: "credit-card", color: "#7C3AED", value: adminHeld, sub: "All admin buckets (signup + cascade + GST + UTR + margins − L1 funding)", cta: "View ledger" },
+            { key: "user_wallets",  label: "User Wallets · held",   icon: "users",        color: "#2E7D52", value: usersHeld, sub: "Net referral payouts still sitting in user wallets",                    cta: "View payouts" },
+            { key: "withdrawn",     label: "Withdrawn · left platform", icon: "log-out",  color: "#0F766E", value: withdrawn, sub: "Settled withdrawals (UTR) — money physically left to bank",            cta: "View withdrawals" },
           ];
-          const sumAll = rows.filter((r) => r.key !== "gst_info").reduce((s, r) => s + r.value, 0);
+          // 5 informational rows — sub-buckets of Admin Wallet (NOT summed).
+          const infoRows: { key: TreasuryInfoKey; label: string; icon: any; color: string; value: number; sub: string; cta?: string }[] = [
+            { key: "referral_admin",  label: "↳ Admin Referral (cascade)", icon: "git-branch",       color: "#A855F7", value: referralAdmin, sub: "Admin received L_N when cascade reached root",       cta: "View cascade txns" },
+            { key: "gst_info",        label: "↳ GST Collected (18%)",      icon: "percent",          color: "#B3261E", value: gstHeld,       sub: "Regulatory hold — already inside Admin Wallet",        cta: "View GST txns" },
+            { key: "service_margin",  label: "↳ Service Margin",           icon: "briefcase",        color: "#E57A44", value: serviceHeld,   sub: "Platform fees from service bookings",                  cta: "View service txns" },
+            { key: "shopping_margin", label: "↳ Sales Margin (Shop)",      icon: "shopping-bag",     color: "#1E40AF", value: shopHeld,      sub: "Commission from shop orders",                          cta: "View shop txns" },
+            { key: "direct_added",    label: "↳ Direct Added (UTR)",       icon: "arrow-down-circle",color: "#0B66C2", value: utrHeld,       sub: "Manual UTR bank deposits to system wallet",            cta: "View UTR deposits" },
+          ];
+          const sumAll = tallyRows.reduce((s, r) => s + r.value, 0);
           const inflow = Number(breakdown?.inflow?.total || 0);
           const tallyOK = Math.abs(sumAll - inflow) <= 1;
           return (
             <View style={{ marginBottom: 6 }}>
-              <Text style={styles.sectionLabel}>Treasury · 6 lines = bank balance</Text>
-              {rows.map((r) => (
+              <Text style={styles.sectionLabel}>Treasury · Held + Withdrawn = Inflow</Text>
+              {tallyRows.map((r) => (
                 <TouchableOpacity
                   key={r.key}
                   style={[styles.bucketRow, { borderLeftColor: r.color }]}
                   activeOpacity={0.7}
                   onPress={() => {
                     if (r.key === "admin_wallet") openBucket("admin_wallet");
-                    else if (r.key === "gst_info") openBucket("gst_collected");
-                    else if (r.key === "service_margin") openBucket("service_margin");
-                    else if (r.key === "shopping_margin") openBucket("shopping_margin");
-                    else if (r.key === "direct_added") openBucket("direct_added");
-                    else if (r.key === "paid_to_users") openBucket("user_payouts");
+                    else if (r.key === "user_wallets") openBucket("user_payouts");
+                    else if (r.key === "withdrawn") openBucket("user_payouts");
                   }}
                   testID={`treasury-${r.key}`}
                 >
@@ -282,7 +286,7 @@ export default function AdminSystemWallet() {
                     <Text style={styles.bucketDesc}>{r.sub}</Text>
                   </View>
                   <View style={{ alignItems: "flex-end" }}>
-                    <Text style={[styles.bucketAmount, r.key === "gst_info" && { color: colors.textMuted, fontWeight: "600" }]}>{formatINR(r.value)}</Text>
+                    <Text style={styles.bucketAmount}>{formatINR(r.value)}</Text>
                     <View style={styles.bucketCta}>
                       <Text style={styles.bucketCtaText}>{r.cta || "Details"}</Text>
                       <Feather name="chevron-right" size={14} color={colors.primary} />
@@ -291,13 +295,49 @@ export default function AdminSystemWallet() {
                 </TouchableOpacity>
               ))}
               <View style={[styles.breakdownTotal, { marginTop: 4, backgroundColor: tallyOK ? colors.brand100 : "#FFE4E4" }]}>
-                <Text style={[styles.breakdownTotalLabel, { fontSize: 13 }]}>Sum (excl. GST informational)</Text>
+                <Text style={[styles.breakdownTotalLabel, { fontSize: 13 }]}>Sum (Held + Withdrawn)</Text>
                 <Text style={[styles.breakdownTotalAmount, !tallyOK && { color: "#B3261E" }]}>{formatINR(sumAll)}</Text>
               </View>
               <Text style={styles.helpText}>
                 {tallyOK
-                  ? `✓ Tally matches inflow (${formatINR(inflow)}). GST is part of Admin Wallet — shown only for compliance.`
+                  ? `✓ Tally matches inflow (${formatINR(inflow)}). Every rupee accounted for.`
                   : `⚠ Tally ${formatINR(sumAll)} differs from inflow ${formatINR(inflow)} by ${formatINR(Math.abs(sumAll - inflow))}.`}
+              </Text>
+
+              {/* ─── INFORMATIONAL · Admin Wallet sub-buckets (NOT summed) ─── */}
+              <Text style={[styles.sectionLabel, { marginTop: 18 }]}>Admin Wallet Composition · informational</Text>
+              {infoRows.map((r) => (
+                <TouchableOpacity
+                  key={r.key}
+                  style={[styles.bucketRow, { borderLeftColor: r.color, opacity: 0.92 }]}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    if (r.key === "gst_info") openBucket("gst_collected");
+                    else if (r.key === "service_margin") openBucket("service_margin");
+                    else if (r.key === "shopping_margin") openBucket("shopping_margin");
+                    else if (r.key === "direct_added") openBucket("direct_added");
+                    else if (r.key === "referral_admin") openBucket("referral_commission");
+                  }}
+                  testID={`treasury-info-${r.key}`}
+                >
+                  <View style={[styles.bucketIcon, { backgroundColor: r.color + "22" }]}>
+                    <Feather name={r.icon} size={20} color={r.color} />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.bucketLabel}>{r.label}</Text>
+                    <Text style={styles.bucketDesc}>{r.sub}</Text>
+                  </View>
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Text style={[styles.bucketAmount, { color: colors.textMuted, fontWeight: "700" }]}>{formatINR(r.value)}</Text>
+                    <View style={styles.bucketCta}>
+                      <Text style={styles.bucketCtaText}>{r.cta || "Details"}</Text>
+                      <Feather name="chevron-right" size={14} color={colors.primary} />
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              ))}
+              <Text style={styles.helpText}>
+                ↳ Above rows are sub-buckets of Admin Wallet — they’re already counted in “Admin Wallet · held” above and are NOT added to the tally.
               </Text>
             </View>
           );
