@@ -1,181 +1,222 @@
 """
-System Wallet Breakdown Regression Test
-========================================
-Verifies that the /api/admin/system-wallet/breakdown endpoint payload
-emits ALL required fields the new frontend UI consumes, plus identity checks.
+Test admin placement realignment endpoint:
+POST /api/admin/users/{user_id}/realign
 """
-
 import sys
+import json
 import requests
 
 BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASSWORD = "Admin@123"
-
-REQUIRED_INFLOW_KEYS = {
-    "registration_fee_total", "no_ref_signup_revenue", "with_ref_signup_revenue",
-    "no_ref_count", "with_ref_count", "utr_deposits", "service_margin",
-    "shop_margin", "total"
-}
-REQUIRED_OUTFLOW_KEYS = {
-    "to_user_wallets_referral_net", "to_admin_retained", "to_admin_gst_collected",
-    "to_admin_direct_added", "to_admin_shop_margin", "to_admin_service_margin",
-    "to_admin_via_cascade", "user_withdrawals_settled", "to_user_wallets_referral",
-    "_legacy_to_admin_direct_signup", "_legacy_to_admin_fee_residual",
-    "_legacy_to_admin_cascade_overflow", "_legacy_l1_funding_debit",
-    "redistributed_total", "total"
-}
-REQUIRED_BALANCE_KEYS = {"in_admin_wallet", "in_user_wallets", "held_total"}
-REQUIRED_SETTINGS_KEYS = {"registration_fee", "directs_required", "level_payouts"}
-
-results = []
+ADMIN_PASS = "Admin@123"
 
 
-def check(name, cond, detail=""):
-    status = "PASS" if cond else "FAIL"
-    results.append((name, status, detail))
-    marker = "PASS" if cond else "FAIL"
-    print(f"  [{marker}] {name}: {detail}")
-    return cond
+def pjson(label, resp):
+    try:
+        data = resp.json()
+    except Exception:
+        data = resp.text
+    print(f"[{resp.status_code}] {label}: {json.dumps(data, indent=2, default=str)[:1200]}")
+    return data
 
 
 def main():
-    print("=" * 70)
-    print("SYSTEM WALLET BREAKDOWN REGRESSION")
-    print("=" * 70)
+    results = []
 
-    print("\n[1] POST /auth/login (admin)")
-    r = requests.post(f"{BASE}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=20)
-    if r.status_code != 200:
-        check("auth/login admin", False, f"HTTP {r.status_code}: {r.text[:200]}")
-        return False
-    token = r.json().get("token")
-    check("auth/login admin", bool(token), f"got token len={len(token) if token else 0}")
+    # 1. Login admin
+    r = requests.post(f"{BASE}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS}, timeout=30)
+    data = pjson("login admin", r)
+    assert r.status_code == 200, f"login failed: {r.status_code}"
+    token = data.get("token") or data.get("access_token")
+    assert token, "no token in login response"
     H = {"Authorization": f"Bearer {token}"}
+    results.append(("1. Admin login", "PASS"))
 
-    print("\n[2] GET /admin/system-wallet/breakdown")
-    r = requests.get(f"{BASE}/admin/system-wallet/breakdown", headers=H, timeout=30)
-    if r.status_code != 200:
-        check("breakdown status 200", False, f"HTTP {r.status_code}: {r.text[:300]}")
+    # 2. GET /api/admin/users
+    r = requests.get(f"{BASE}/admin/users", headers=H, timeout=30)
+    assert r.status_code == 200, f"admin/users failed: {r.status_code}"
+    users = r.json()
+    if isinstance(users, dict):
+        users = users.get("items") or users.get("users") or []
+    print(f"Total users: {len(users)}")
+    assert len(users) >= 2, "need at least 2 users"
+    results.append(("2. GET /admin/users", f"PASS ({len(users)} users)"))
+
+    non_admins = [u for u in users if u.get("role") != "admin" and u.get("referral_code")]
+    assert len(non_admins) >= 2, "need 2 non-admin users with referral_code"
+
+    id_to_sponsor = {u["id"]: u.get("sponsor_id") for u in users}
+
+    def is_descendant(maybe_desc_id, ancestor_id, max_hops=50):
+        cur = id_to_sponsor.get(maybe_desc_id)
+        hops = 0
+        while cur and hops < max_hops:
+            if cur == ancestor_id:
+                return True
+            cur = id_to_sponsor.get(cur)
+            hops += 1
         return False
-    body = r.json()
-    check("breakdown status 200", True, "200 OK")
-    print(f"\n  Top-level keys: {sorted(body.keys())}")
 
-    inflow = body.get("inflow") or {}
-    outflow = body.get("outflow") or {}
-    balance = body.get("balance") or {}
-    settings = body.get("settings") or {}
+    user_a = None
+    user_b = None
+    for a in non_admins:
+        for b in non_admins:
+            if a["id"] == b["id"]:
+                continue
+            if a.get("sponsor_id") == b["id"]:
+                continue
+            if is_descendant(b["id"], a["id"]):
+                continue
+            user_a = a
+            user_b = b
+            break
+        if user_a:
+            break
 
-    check("inflow section present", isinstance(inflow, dict) and len(inflow) > 0,
-          f"keys={sorted(inflow.keys())}")
-    check("outflow section present", isinstance(outflow, dict) and len(outflow) > 0,
-          f"keys={sorted(outflow.keys())}")
-    check("balance section present", isinstance(balance, dict) and len(balance) > 0,
-          f"keys={sorted(balance.keys())}")
-    check("settings section present", isinstance(settings, dict) and len(settings) > 0,
-          f"keys={sorted(settings.keys())}")
+    assert user_a and user_b, "couldn't find suitable user-A, user-B pair"
+    print(f"user-A: {user_a['email']} id={user_a['id']} ref={user_a.get('referral_code')} sponsor_id={user_a.get('sponsor_id')}")
+    print(f"user-B: {user_b['email']} id={user_b['id']} ref={user_b.get('referral_code')}")
 
-    print("\n[3] Required key presence checks")
-    missing_in = REQUIRED_INFLOW_KEYS - set(inflow.keys())
-    check("inflow has all required keys", not missing_in,
-          f"missing={sorted(missing_in)}" if missing_in else "all 9 present")
-    missing_out = REQUIRED_OUTFLOW_KEYS - set(outflow.keys())
-    check("outflow has all required keys", not missing_out,
-          f"missing={sorted(missing_out)}" if missing_out else "all 15 present")
-    missing_bal = REQUIRED_BALANCE_KEYS - set(balance.keys())
-    check("balance has all required keys", not missing_bal,
-          f"missing={sorted(missing_bal)}" if missing_bal else "all 3 present")
-    missing_set = REQUIRED_SETTINGS_KEYS - set(settings.keys())
-    check("settings has all required keys", not missing_set,
-          f"missing={sorted(missing_set)}" if missing_set else "all 3 present")
+    # 3. Backfill check
+    required_fields = ["original_sponsor_id", "original_sponsor_code", "original_referral_code",
+                       "placement_history", "placement_realigned_at", "placement_realigned_reason"]
+    backfill_user = None
+    for u in users:
+        if all(f in u for f in required_fields):
+            backfill_user = u
+            break
+    if backfill_user:
+        print(f"Backfill user {backfill_user['email']}:")
+        for f in required_fields:
+            print(f"  {f} = {backfill_user.get(f)!r}")
+        results.append(("3. Backfill fields present", "PASS"))
+    else:
+        sample = users[0]
+        missing = [f for f in required_fields if f not in sample]
+        print(f"Sample user keys: {list(sample.keys())}")
+        print(f"Missing fields on user[0]: {missing}")
+        results.append(("3. Backfill fields present", f"FAIL (missing: {missing})"))
 
-    print("\n  --- inflow ---")
-    for k in sorted(inflow.keys()):
-        print(f"    {k} = {inflow[k]}")
-    print("  --- outflow ---")
-    for k in sorted(outflow.keys()):
-        print(f"    {k} = {outflow[k]}")
-    print("  --- balance ---")
-    for k in sorted(balance.keys()):
-        print(f"    {k} = {balance[k]}")
-    print("  --- settings ---")
-    for k in sorted(settings.keys()):
-        print(f"    {k} = {settings[k]}")
+    user_a_original_sponsor_code = user_a.get("original_sponsor_code") or user_a.get("referred_by")
+    print(f"user-A original_sponsor_code = {user_a_original_sponsor_code}")
 
-    print("\n[4] IDENTITY CHECKS")
-    TOL = 1.0
-    inflow_total = float(inflow.get("total") or 0)
-    outflow_total = float(outflow.get("total") or 0)
-    held_total = float(balance.get("held_total") or 0)
-    withdrawn = float(outflow.get("user_withdrawals_settled") or 0)
-    redistributed = float(outflow.get("redistributed_total") or 0)
-    in_admin = float(balance.get("in_admin_wallet") or 0)
-    in_user = float(balance.get("in_user_wallets") or 0)
+    # 4. Realign A under B
+    body4 = {"new_sponsor_code": user_b["referral_code"], "reason": "Manual placement test"}
+    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body4, headers=H, timeout=30)
+    data4 = pjson("realign A under B", r)
+    if r.status_code == 200 and isinstance(data4, dict) and "history_entry" in data4:
+        results.append(("4. Realign A under B", "PASS"))
+    else:
+        results.append(("4. Realign A under B", f"FAIL ({r.status_code})"))
 
-    diff1 = abs(inflow_total - (held_total + withdrawn))
-    check(
-        "Identity #1: inflow.total approximately equals held_total + user_withdrawals_settled",
-        diff1 <= TOL,
-        f"inflow={inflow_total}, held={held_total}, withdrawn={withdrawn}, diff=Rs.{diff1:.2f}",
-    )
+    # 5. Verify
+    r = requests.get(f"{BASE}/admin/users", headers=H, timeout=30)
+    users2 = r.json()
+    if isinstance(users2, dict):
+        users2 = users2.get("items") or users2.get("users") or []
+    user_a2 = next((u for u in users2 if u["id"] == user_a["id"]), None)
+    assert user_a2, "user-A not found after realign"
+    checks5 = []
+    if user_a2.get("sponsor_id") == user_b["id"]:
+        checks5.append("sponsor_id_OK")
+    else:
+        checks5.append(f"sponsor_id_BAD={user_a2.get('sponsor_id')}")
+    if user_a2.get("referred_by") == user_b["referral_code"]:
+        checks5.append("referred_by_OK")
+    else:
+        checks5.append(f"referred_by_BAD={user_a2.get('referred_by')}")
+    if user_a2.get("placement_realigned_reason") == "Manual placement test":
+        checks5.append("reason_OK")
+    else:
+        checks5.append(f"reason_BAD={user_a2.get('placement_realigned_reason')!r}")
+    ph = user_a2.get("placement_history") or []
+    if len(ph) == 1:
+        checks5.append("history_len_OK")
+        entry = ph[0]
+        need = ["new_sponsor_id", "new_sponsor_code", "new_sponsor_email", "reason", "changed_by_admin_email"]
+        miss = [k for k in need if k not in entry]
+        if not miss:
+            checks5.append("entry_keys_OK")
+        else:
+            checks5.append(f"entry_keys_BAD_missing={miss}")
+    else:
+        checks5.append(f"history_len_BAD={len(ph)}")
+    print("Step 5 checks:", checks5)
+    if all("_OK" in c for c in checks5):
+        results.append(("5. Post-realign verification", "PASS"))
+    else:
+        results.append(("5. Post-realign verification", f"FAIL: {checks5}"))
 
-    diff2 = abs(outflow_total - inflow_total)
-    check(
-        "Identity #2: outflow.total approximately equals inflow.total",
-        diff2 <= TOL,
-        f"outflow={outflow_total}, inflow={inflow_total}, diff=Rs.{diff2:.2f}",
-    )
+    # 6. Self-placement → 400
+    body6 = {"new_sponsor_code": user_a["referral_code"], "reason": "self-placement attempt"}
+    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body6, headers=H, timeout=30)
+    data6 = pjson("self-placement", r)
+    detail6 = data6.get("detail") if isinstance(data6, dict) else ""
+    if r.status_code == 400 and "themselves" in str(detail6):
+        results.append(("6. Self-placement blocked", "PASS"))
+    else:
+        results.append(("6. Self-placement blocked", f"FAIL ({r.status_code}, {detail6})"))
 
-    diff3 = abs((redistributed + withdrawn) - outflow_total)
-    check(
-        "Identity #3: redistributed_total + user_withdrawals_settled approximately equals outflow.total",
-        diff3 <= TOL,
-        f"redistributed={redistributed}, withdrawn={withdrawn}, outflow={outflow_total}, diff=Rs.{diff3:.2f}",
-    )
+    # 7. Invalid sponsor
+    body7 = {"new_sponsor_code": "NONEXISTENT99", "reason": "bad reason here"}
+    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body7, headers=H, timeout=30)
+    data7 = pjson("invalid sponsor", r)
+    detail7 = data7.get("detail") if isinstance(data7, dict) else ""
+    if r.status_code == 400 and "not found" in str(detail7).lower():
+        results.append(("7. Invalid sponsor 400", "PASS"))
+    else:
+        results.append(("7. Invalid sponsor 400", f"FAIL ({r.status_code}, {detail7})"))
 
-    diff4 = abs(held_total - (in_admin + in_user))
-    check(
-        "Identity #4: held_total equals in_admin_wallet + in_user_wallets",
-        diff4 <= TOL,
-        f"held={held_total}, admin={in_admin}, user={in_user}, diff=Rs.{diff4:.2f}",
-    )
+    # 8. Short reason → 422
+    body8 = {"new_sponsor_code": user_b["referral_code"], "reason": "x"}
+    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body8, headers=H, timeout=30)
+    pjson("short reason", r)
+    if r.status_code == 422:
+        results.append(("8. Short reason 422", "PASS"))
+    else:
+        results.append(("8. Short reason 422", f"FAIL ({r.status_code})"))
 
-    print("\n  Brief said live data:    inflow=Rs.14,750, held=Rs.14,650, withdrawn=Rs.100")
-    print(f"  Actual right now:        inflow=Rs.{inflow_total}, held=Rs.{held_total}, withdrawn=Rs.{withdrawn}")
+    # 9. Unchanged placement
+    body9 = {"new_sponsor_code": user_b["referral_code"], "reason": "again same sponsor"}
+    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body9, headers=H, timeout=30)
+    data9 = pjson("same sponsor again", r)
+    detail9 = data9.get("detail") if isinstance(data9, dict) else ""
+    if r.status_code == 400 and "already placed" in str(detail9).lower():
+        results.append(("9. Already placed 400", "PASS"))
+    else:
+        results.append(("9. Already placed 400", f"FAIL ({r.status_code}, {detail9})"))
 
-    print("\n[5] GET /admin/system-wallet (legacy contract)")
-    r = requests.get(f"{BASE}/admin/system-wallet", headers=H, timeout=20)
-    check("system-wallet status 200", r.status_code == 200, f"HTTP {r.status_code}")
-    if r.status_code == 200:
-        sw = r.json()
-        check("system-wallet has buckets dict", isinstance(sw.get("buckets"), dict),
-              f"buckets={list(sw.get('buckets', {}).keys())}")
-        check("system-wallet has total key", "total" in sw, f"total={sw.get('total')}")
+    # 10. Restore original
+    if not user_a_original_sponsor_code:
+        results.append(("10. Restore", "SKIP - no original_sponsor_code on user-A"))
+    else:
+        body10 = {"new_sponsor_code": user_a_original_sponsor_code, "reason": "Restoring after test"}
+        r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body10, headers=H, timeout=30)
+        data10 = pjson("restore original", r)
+        if r.status_code == 200:
+            r2 = requests.get(f"{BASE}/admin/users", headers=H, timeout=30)
+            users3 = r2.json()
+            if isinstance(users3, dict):
+                users3 = users3.get("items") or users3.get("users") or []
+            user_a3 = next((u for u in users3 if u["id"] == user_a["id"]), None)
+            ph3 = (user_a3 or {}).get("placement_history") or []
+            if len(ph3) == 2:
+                results.append(("10. Restore + history=2", "PASS"))
+            else:
+                results.append(("10. Restore + history=2", f"FAIL (history_len={len(ph3)})"))
+        else:
+            results.append(("10. Restore", f"FAIL ({r.status_code})"))
 
-    print("\n[6] GET /admin/system-wallet/transactions?bucket=admin_wallet&limit=200")
-    r = requests.get(f"{BASE}/admin/system-wallet/transactions",
-                     headers=H, params={"bucket": "admin_wallet", "limit": 200}, timeout=20)
-    check("transactions status 200", r.status_code == 200, f"HTTP {r.status_code}")
-    if r.status_code == 200:
-        txd = r.json()
-        items = txd.get("items")
-        check("transactions has items array", isinstance(items, list),
-              f"count={len(items) if isinstance(items, list) else 'n/a'}")
-
-    print("\n" + "=" * 70)
-    passed = sum(1 for _, s, _ in results if s == "PASS")
-    failed = sum(1 for _, s, _ in results if s == "FAIL")
-    print(f"TOTAL: {passed}/{len(results)} PASS  |  {failed} FAIL")
-    print("=" * 70)
+    print("\n" + "=" * 60)
+    print("RESULTS:")
+    for name, status in results:
+        marker = "PASS" if status.startswith("PASS") else ("SKIP" if status.startswith("SKIP") else "FAIL")
+        print(f"  [{marker}] {name}: {status}")
+    failed = [n for n, s in results if not s.startswith("PASS") and not s.startswith("SKIP")]
+    print(f"\nTotal: {len(results)} | Failed: {len(failed)}")
     if failed:
-        print("\nFAILED CHECKS:")
-        for n, s, d in results:
-            if s == "FAIL":
-                print(f"  [FAIL] {n} -- {d}")
-    return failed == 0
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    ok = main()
-    sys.exit(0 if ok else 1)
+    main()

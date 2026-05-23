@@ -270,6 +270,18 @@ async def register(payload: RegisterRequest):
         # signups, owner == placement (admin or downline).
         "referral_owner_id": (referral_owner or sponsor or {}).get("id"),
         "referral_owner_code": (referral_owner or sponsor or {}).get("referral_code"),
+        # ─── PLACEMENT AUDIT TRAIL (Feb-2026) ──────────────────────────
+        # `original_sponsor_id` is the placement at signup time (AFTER BFS
+        # spillover but BEFORE any admin-triggered manual realignment).
+        # `original_referral_code` snapshot of what the user actually typed.
+        # `placement_history` records every move (auto or manual) with who,
+        # why, and when — no money is recalculated, just lineage tracking.
+        "original_sponsor_id": sponsor["id"] if sponsor else None,
+        "original_sponsor_code": sponsor["referral_code"] if sponsor else None,
+        "original_referral_code": sponsor_code,  # raw input from signup form
+        "placement_history": [],
+        "placement_realigned_at": None,
+        "placement_realigned_reason": None,
         "extra_docs": {
             "cibil_report": None,
             "bank_statement": None,
@@ -2457,6 +2469,105 @@ async def admin_reset_password(user_id: str, payload: AdminPasswordReset, _: Dic
     await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(payload.new_password)}})
     await _create_notification(user_id, "account", "Password reset", "Your password was reset by admin. Please log in again.")
     return {"ok": True}
+
+
+# ───────────────────────────── PLACEMENT REALIGNMENT ─────────────────────────────
+# Admin can manually move a user under a different upline (sponsor_id).
+# This is a PURE LINEAGE MOVE — no commissions are recalculated, no money
+# is moved. Useful when a user was placed badly by BFS spillover or when
+# someone needs to be re-parented for organizational reasons.
+# Every change appends a row to placement_history with reason + admin id.
+# referral_owner_id (commission ownership) is NOT changed by this endpoint.
+class RealignPayload(BaseModel):
+    new_sponsor_id: Optional[str] = None
+    new_sponsor_code: Optional[str] = None
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+@api_router.post("/admin/users/{user_id}/realign")
+async def admin_realign_user(
+    user_id: str,
+    payload: RealignPayload,
+    admin: Dict[str, Any] = Depends(require_admin_not_finance),
+):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Resolve new sponsor — accept either id or referral_code.
+    new_sponsor = None
+    if payload.new_sponsor_id:
+        new_sponsor = await db.users.find_one({"id": payload.new_sponsor_id})
+    elif payload.new_sponsor_code:
+        new_sponsor = await db.users.find_one({"referral_code": payload.new_sponsor_code.strip().upper()})
+    if not new_sponsor:
+        raise HTTPException(status_code=400, detail="New sponsor not found (provide new_sponsor_id or new_sponsor_code)")
+    if new_sponsor["id"] == user_id:
+        raise HTTPException(status_code=400, detail="A user cannot be placed under themselves")
+
+    # Guard against creating a cycle: new_sponsor must NOT be a descendant of `target`.
+    cursor_id = new_sponsor.get("sponsor_id")
+    hops = 0
+    while cursor_id and hops < 50:
+        if cursor_id == user_id:
+            raise HTTPException(status_code=400, detail="Cannot move user under their own descendant (would create a cycle)")
+        parent = await db.users.find_one({"id": cursor_id}, {"sponsor_id": 1})
+        cursor_id = (parent or {}).get("sponsor_id")
+        hops += 1
+
+    old_sponsor_id = target.get("sponsor_id")
+    old_sponsor = await db.users.find_one({"id": old_sponsor_id}) if old_sponsor_id else None
+    if old_sponsor_id == new_sponsor["id"]:
+        raise HTTPException(status_code=400, detail="User is already placed under this sponsor")
+
+    history_entry = {
+        "type": "manual_admin",
+        "old_sponsor_id":    old_sponsor_id,
+        "old_sponsor_code":  (old_sponsor or {}).get("referral_code"),
+        "old_sponsor_email": (old_sponsor or {}).get("email"),
+        "new_sponsor_id":    new_sponsor["id"],
+        "new_sponsor_code":  new_sponsor.get("referral_code"),
+        "new_sponsor_email": new_sponsor.get("email"),
+        "reason":            payload.reason.strip(),
+        "changed_by_admin_id":    admin["id"],
+        "changed_by_admin_email": admin.get("email"),
+        "changed_at":        now_utc().isoformat(),
+    }
+
+    await db.users.update_one(
+        {"id": user_id},
+        {
+            "$set": {
+                "sponsor_id": new_sponsor["id"],
+                "referred_by": new_sponsor.get("referral_code"),
+                "placement_realigned_at":     history_entry["changed_at"],
+                "placement_realigned_reason": payload.reason.strip(),
+            },
+            "$push": {"placement_history": history_entry},
+        },
+    )
+
+    # Notify both old and new sponsors + the user themselves.
+    try:
+        await _create_notification(
+            user_id, "account", "Placement updated",
+            f"Admin moved your placement to {new_sponsor.get('name')} ({new_sponsor.get('referral_code')}). Reason: {payload.reason.strip()}",
+        )
+        if old_sponsor and old_sponsor.get("role") == "user":
+            await _create_notification(
+                old_sponsor["id"], "downline", "Downline moved",
+                f"{target.get('name')} was realigned by admin to {new_sponsor.get('name')}.",
+            )
+        if new_sponsor.get("role") == "user":
+            await _create_notification(
+                new_sponsor["id"], "downline", "Downline added",
+                f"{target.get('name')} was placed under you by admin.",
+            )
+    except Exception:
+        pass
+
+    await _audit_log(admin, "admin.realign_user", "user", user_id, history_entry)
+    return {"ok": True, "history_entry": history_entry}
 
 
 @api_router.delete("/admin/users/{user_id}")
@@ -5820,6 +5931,29 @@ async def _background_init():
         # Small initial delay to let uvicorn fully register the port + let
         # the K8s readiness probe pass with the first /api/branding call.
         await asyncio.sleep(2)
+        # ─── Backfill placement audit fields for legacy users (Feb-2026) ───
+        # Existing users that signed up BEFORE the realignment feature won't
+        # have `original_sponsor_id` / `placement_history`. Backfill the
+        # snapshot from their current sponsor_id (best guess — assumes no
+        # manual moves happened yet) and initialize an empty history list.
+        try:
+            backfill_res = await db.users.update_many(
+                {"original_sponsor_id": {"$exists": False}},
+                [{
+                    "$set": {
+                        "original_sponsor_id":   "$sponsor_id",
+                        "original_sponsor_code": "$referred_by",
+                        "original_referral_code": "$referred_by",
+                        "placement_history": {"$ifNull": ["$placement_history", []]},
+                        "placement_realigned_at":     None,
+                        "placement_realigned_reason": None,
+                    }
+                }],
+            )
+            if backfill_res.modified_count:
+                logger.info(f"Backfilled placement audit fields on {backfill_res.modified_count} legacy users")
+        except Exception as e:
+            logger.warning(f"placement_audit backfill skipped: {e}")
         try:
             zero_res = await db.transactions.update_many(
                 {

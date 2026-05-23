@@ -34,7 +34,14 @@ export const spacing = {
 
 export const formatINR = (n: number) => {
   if (typeof n !== "number") n = Number(n) || 0;
-  return "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+  // Show exact paise (2 decimals) ONLY when the amount has a fractional part —
+  // keeps whole rupees clean (e.g. ₹100) and surfaces sub-rupee values that
+  // would otherwise display as ₹0 (e.g. ₹0.50, ₹0.25, ₹0.05).
+  const hasFraction = Math.abs(n - Math.trunc(n)) >= 0.005;
+  return "₹" + n.toLocaleString("en-IN", {
+    minimumFractionDigits: hasFraction ? 2 : 0,
+    maximumFractionDigits: hasFraction ? 2 : 0,
+  });
 };
 
 // ---------- Responsive helpers ----------

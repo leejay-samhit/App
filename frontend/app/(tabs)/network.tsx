@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
+  Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -27,11 +28,22 @@ type Node = {
   children: Node[];
 };
 
+/** Flatten a tree into a list with depth annotation. */
+function flatten(nodes: Node[], depth = 1): Array<Node & { _depth: number }> {
+  const out: Array<Node & { _depth: number }> = [];
+  for (const n of nodes) {
+    out.push({ ...n, _depth: depth });
+    if (n.children?.length) out.push(...flatten(n.children, depth + 1));
+  }
+  return out;
+}
+
 export default function NetworkScreen() {
   const { user } = useAuth();
   const [tree, setTree] = useState<Node[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [listOpen, setListOpen] = useState<null | "direct" | "indirect">(null);
 
   const load = useCallback(async () => {
     try {
@@ -50,6 +62,19 @@ export default function NetworkScreen() {
     }, [load])
   );
 
+  // Counts (memoized)
+  const { directList, indirectList, directCount, indirectCount } = useMemo(() => {
+    const all = flatten(tree);
+    const directs = all.filter((n) => n._depth === 1);
+    const indirects = all.filter((n) => n._depth > 1);
+    return {
+      directList: directs,
+      indirectList: indirects,
+      directCount: directs.length,
+      indirectCount: indirects.length,
+    };
+  }, [tree]);
+
   if (loading) {
     return (
       <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>
@@ -65,16 +90,34 @@ export default function NetworkScreen() {
         <GradientCard variant="emerald" style={{ marginBottom: 20, padding: 22 }}>
           <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>YOUR DOWNLINE</Text>
           <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>Referral tree</Text>
-          <Text style={{ fontSize: 13, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>The 1+4 network you've built so far.</Text>
+          <Text style={{ fontSize: 13, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>Tap a card to view the full list.</Text>
           <View style={{ flexDirection: "row", marginTop: 16, gap: 12 }}>
-            <View style={{ backgroundColor: "rgba(255,255,255,0.15)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 }}>
-              <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>DIRECTS</Text>
-              <Text style={{ fontSize: 18, fontWeight: "800", color: "#fff", marginTop: 2 }}>{tree.length}</Text>
-            </View>
-            <View style={{ backgroundColor: "rgba(255,255,255,0.15)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 }}>
-              <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>SLOTS LEFT</Text>
-              <Text style={{ fontSize: 18, fontWeight: "800", color: "#fff", marginTop: 2 }}>{Math.max(0, 4 - tree.length)}</Text>
-            </View>
+            <TouchableOpacity
+              onPress={() => directCount > 0 && setListOpen("direct")}
+              activeOpacity={0.7}
+              style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 }}
+              testID="downline-direct-card"
+            >
+              <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.6 }}>DIRECT JOINS</Text>
+              <Text style={{ fontSize: 22, fontWeight: "800", color: "#fff", marginTop: 3 }}>{directCount}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 3, marginTop: 4 }}>
+                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>View list</Text>
+                <Feather name="chevron-right" size={11} color="#fff" />
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => indirectCount > 0 && setListOpen("indirect")}
+              activeOpacity={0.7}
+              style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 }}
+              testID="downline-indirect-card"
+            >
+              <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.6 }}>INDIRECT (L2-L4)</Text>
+              <Text style={{ fontSize: 22, fontWeight: "800", color: "#fff", marginTop: 3 }}>{indirectCount}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 3, marginTop: 4 }}>
+                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>View list</Text>
+                <Feather name="chevron-right" size={11} color="#fff" />
+              </View>
+            </TouchableOpacity>
           </View>
         </GradientCard>
 
@@ -103,6 +146,43 @@ export default function NetworkScreen() {
           </View>
         )}
       </ScrollView>
+
+      {/* ─── List drilldown modal ─── */}
+      <Modal visible={!!listOpen} transparent animationType="slide" onRequestClose={() => setListOpen(null)}>
+        <View style={styles.modalBg}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {listOpen === "direct" ? `Direct joins · ${directCount}` : `Indirect (L2-L4) · ${indirectCount}`}
+              </Text>
+              <TouchableOpacity onPress={() => setListOpen(null)} style={styles.modalClose}>
+                <Feather name="x" size={20} color={colors.textMain} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ paddingBottom: 28 }}>
+              {(listOpen === "direct" ? directList : indirectList).map((n) => (
+                <View key={n.id} style={styles.listRow}>
+                  <View style={[styles.listDot, { backgroundColor: n.registration_paid ? colors.success : colors.warning }]} />
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.listName} numberOfLines={1}>{n.name}</Text>
+                    <Text style={styles.listMeta}>{n.referral_code} · {n.direct_referrals_count} direct{n.direct_referrals_count === 1 ? "" : "s"}{listOpen === "indirect" ? ` · L${n._depth}` : ""}</Text>
+                  </View>
+                  <View style={[styles.listBadge, { backgroundColor: n.registration_paid ? colors.success + "22" : colors.warning + "22" }]}>
+                    <Text style={[styles.listBadgeText, { color: n.registration_paid ? colors.success : colors.warning }]}>{n.registration_paid ? "PAID" : "PEND"}</Text>
+                  </View>
+                </View>
+              ))}
+              {((listOpen === "direct" ? directList : indirectList).length === 0) ? (
+                <View style={styles.emptyCard}>
+                  <Feather name="users" size={28} color={colors.textMuted} />
+                  <Text style={styles.emptyTitle}>No {listOpen === "direct" ? "directs" : "indirects"} yet</Text>
+                </View>
+              ) : null}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -161,4 +241,17 @@ const styles = StyleSheet.create({
   dot: { width: 10, height: 10, borderRadius: 5, marginRight: 10 },
   nodeName: { fontSize: 14, fontWeight: "700", color: colors.textMain },
   nodeMeta: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  // Drilldown modal
+  modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
+  modalSheet: { backgroundColor: colors.background, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 24, height: "82%" },
+  modalHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: "center", marginBottom: 8 },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border, marginBottom: 4 },
+  modalTitle: { fontSize: 16, fontWeight: "900", color: colors.textMain },
+  modalClose: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted },
+  listRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 12, paddingHorizontal: 4, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  listDot: { width: 10, height: 10, borderRadius: 5 },
+  listName: { fontSize: 14, fontWeight: "800", color: colors.textMain },
+  listMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  listBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
+  listBadgeText: { fontSize: 9, fontWeight: "900", letterSpacing: 0.5 },
 });

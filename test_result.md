@@ -571,13 +571,54 @@ metadata:
 
 test_plan:
   current_focus:
-    - "L1 payout FUNDING — ledger no longer mints money on L1 cycle"
-    - "Backfill: historic L1 payouts retro-funded from admin buckets"
-    - "Money flow checker: drift ≤ ₹1 after multiple referral cycles"
-    - "Breakdown endpoint: l1_funding_debit appears correctly"
+    - "Admin placement realignment endpoint + backfill"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+placement_realignment_2026_05:
+  - task: "Admin placement realignment endpoint (POST /api/admin/users/{id}/realign) + backfill of original_* and placement_history fields"
+    implemented: true
+    working: true
+    file: "backend/server.py (L2474-2570 endpoint; L5935-5949 backfill; L274-285 signup snapshot)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          ALL 10/10 CHECKS PASS. Runner: /app/backend_test.py.
+          API: https://vendor-network-app-1.preview.emergentagent.com/api
+
+          1. POST /auth/login admin → 200 (token captured).
+          2. GET /admin/users → 200, 131 users returned.
+          3. BACKFILL: every legacy user now has the 6 new fields populated:
+               original_sponsor_id, original_sponsor_code, original_referral_code,
+               placement_history (=[] for legacy), placement_realigned_at (None),
+               placement_realigned_reason (None). Backend log confirms:
+               "Backfilled placement audit fields on 131 legacy users".
+          4. POST /admin/users/{A}/realign with new_sponsor_code=B.referral_code,
+             reason="Manual placement test" → 200 {ok:true, history_entry:{...}}.
+             history_entry includes all required fields: type=manual_admin,
+             old_sponsor_id, old_sponsor_code, old_sponsor_email,
+             new_sponsor_id, new_sponsor_code, new_sponsor_email, reason,
+             changed_by_admin_id, changed_by_admin_email, changed_at.
+          5. Re-fetch /admin/users → user-A.sponsor_id == B.id ✓,
+             referred_by == B.referral_code ✓,
+             placement_realigned_reason == "Manual placement test" ✓,
+             placement_history.length == 1 ✓, entry has all required keys ✓.
+          6. CYCLE PREVENTION (self-placement): POST realign A under A's own code
+             → 400 "A user cannot be placed under themselves" ✓.
+          7. INVALID SPONSOR: code "NONEXISTENT99" → 400
+             "New sponsor not found (provide new_sponsor_id or new_sponsor_code)" ✓.
+          8. SHORT REASON ("x"): → 422 string_too_short (min_length=3) ✓.
+          9. UNCHANGED PLACEMENT: realign A under B again → 400
+             "User is already placed under this sponsor" ✓.
+          10. RESTORE: realign A under original_sponsor_code "7RKOZM" with
+              reason "Restoring after test" → 200; placement_history length now == 2 ✓.
+
+          No 5xx errors. No missing fields. All status codes match spec.
 
 l1_payout_funding_2026_02:
   - task: "Scenario A — Static ledger health (breakdown inflow≈outflow + ledger-alerts)"
@@ -3467,6 +3508,96 @@ money_flow_breakdown_ui_2026_05:
           Needs backend regression: confirm /api/admin/system-wallet/breakdown
           still returns all fields (especially redistributed_total,
           to_user_wallets_referral_net, _legacy_* keys) and Inflow == Outflow
+
+placement_realignment_2026_05:
+  - task: "Admin can realign user placement (move under new upline) with audit trail"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py (RealignPayload, admin_realign_user @ ~L2474-2557), backend/server.py (_background_init backfill @ ~L5934-5957), frontend/app/admin/users.tsx (Placement section in edit modal)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW FEATURE — Per user request (#8): expose original referral code
+          + show realignment history + allow admin to manually move a user's
+          upline placement WITHOUT recalculating commissions or moving money.
+
+          BACKEND:
+          1. Extended user schema with `original_sponsor_id`,
+             `original_sponsor_code`, `original_referral_code`,
+             `placement_history` (list), `placement_realigned_at`,
+             `placement_realigned_reason`. Captured at signup AFTER BFS
+             spillover so we know what placement the user originally landed
+             on. `referral_owner_id` (commission ownership) is unchanged
+             — only tree-placement (`sponsor_id`) moves.
+          2. Migration in `_background_init` backfills these fields on
+             legacy users (tested: 131 users backfilled on this instance).
+          3. New endpoint `POST /admin/users/{id}/realign` body:
+             `{new_sponsor_id?|new_sponsor_code?, reason}`.
+             - Validates new sponsor exists, not self, not a descendant
+               (cycle prevention via 50-hop walk up the sponsor chain).
+             - Appends a row to `placement_history` with old/new sponsor
+               metadata, reason, admin who triggered it, timestamp.
+             - Sends notifications to user, old sponsor, new sponsor.
+             - Writes an audit_log entry.
+
+          FRONTEND:
+          - Admin user-edit modal gets a new PLACEMENT & UPLINE section
+            showing: signup code, original upline, current upline,
+            commission owner. If realigned, shows a warning banner with
+            date/reason. History list collapsible. Realign form: new
+            sponsor code + reason (min 3 chars) → POST to backend.
+
+          Needs verification: Admin login → user edit modal renders new
+          section. POST /api/admin/users/{id}/realign with admin token
+          updates sponsor_id, appends placement_history row, returns 200.
+          Cycle prevention works (POST with new_sponsor_code = a descendant
+          of the user → 400). Self-placement blocked (400).
+
+downline_counts_clickable_2026_05:
+  - task: "User Network tab: Direct/Indirect count cards clickable to flat list"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/(tabs)/network.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          UX upgrade per user request (#9): replaced "Directs / Slots left"
+          static counter with two clickable cards: DIRECT JOINS (L1) and
+          INDIRECT (L2-L4). Tapping opens a bottom-sheet modal listing all
+          downstream users with name, referral code, direct count, paid/
+          pending badge. Indirect rows show their depth (L2/L3/L4).
+          Computed client-side from the existing /users/me/network?depth=4
+          payload — no new backend endpoint required.
+
+sub_rupee_precision_2026_05:
+  - task: "Display sub-rupee transaction values (₹0.50, ₹0.25) instead of ₹0"
+    implemented: true
+    working: true
+    file: "frontend/src/theme.ts (formatINR)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Per user request (#7): formatINR was using maximumFractionDigits:0
+          which truncated all decimals — e.g. ₹0.50 → ₹1, ₹0.25 → ₹0. Fixed
+          to detect fractional content (abs(n − trunc(n)) >= 0.005) and
+          show 2 decimals only when needed. Whole rupees still display
+          cleanly (₹100), sub-rupee values show exact paise (₹0.50, ₹0.25,
+          ₹0.05). Single helper used app-wide so every wallet / txn / admin
+          screen benefits automatically.
+
+
           identity still holds.
 
 

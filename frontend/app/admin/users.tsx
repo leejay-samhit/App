@@ -45,6 +45,28 @@ type AdminUser = {
   location_sharing?: boolean;
   location_updated_at?: string | null;
   service_location?: { type?: string; coordinates?: [number, number] } | null;
+  // ─── Placement audit trail (Feb-2026) ───
+  sponsor_id?: string | null;
+  referral_owner_id?: string | null;
+  referral_owner_code?: string | null;
+  original_sponsor_id?: string | null;
+  original_sponsor_code?: string | null;
+  original_referral_code?: string | null;
+  placement_history?: Array<{
+    type: string;
+    old_sponsor_id?: string | null;
+    old_sponsor_code?: string | null;
+    old_sponsor_email?: string | null;
+    new_sponsor_id?: string | null;
+    new_sponsor_code?: string | null;
+    new_sponsor_email?: string | null;
+    reason?: string;
+    changed_by_admin_id?: string;
+    changed_by_admin_email?: string;
+    changed_at?: string;
+  }>;
+  placement_realigned_at?: string | null;
+  placement_realigned_reason?: string | null;
 };
 
 type Stats = {
@@ -354,6 +376,10 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
   const [newPassword, setNewPassword] = useState("");
   const [adjustAmount, setAdjustAmount] = useState("");
   const [adjustReason, setAdjustReason] = useState("");
+  // ─── Placement realignment state ───
+  const [realignCode, setRealignCode] = useState("");
+  const [realignReason, setRealignReason] = useState("");
+  const [showPlacementHistory, setShowPlacementHistory] = useState(false);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
@@ -493,6 +519,106 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
                 Wallet balance can&apos;t be edited directly. Use <Text style={{ fontWeight: "800", color: colors.primary }}>Wallet adjust ⤵</Text> below to credit/debit — it will atomically debit the System Wallet&apos;s Direct-Added bucket so every rupee paid out maps to a real deposit.
               </Text>
             </Field>
+
+            <Text style={modalStyles.section}>PLACEMENT & UPLINE</Text>
+            <View style={modalStyles.placementCard}>
+              <View style={modalStyles.placementRow}>
+                <Text style={modalStyles.placementLabel}>Signed up with code</Text>
+                <Text style={modalStyles.placementValue}>{user.original_referral_code || user.referred_by || "—"}</Text>
+              </View>
+              <View style={modalStyles.placementRow}>
+                <Text style={modalStyles.placementLabel}>Original upline</Text>
+                <Text style={modalStyles.placementValue}>{user.original_sponsor_code || user.referred_by || "—"}</Text>
+              </View>
+              <View style={modalStyles.placementRow}>
+                <Text style={modalStyles.placementLabel}>Current upline</Text>
+                <Text style={[modalStyles.placementValue, { color: colors.primary }]}>{user.referred_by || "—"}</Text>
+              </View>
+              <View style={modalStyles.placementRow}>
+                <Text style={modalStyles.placementLabel}>Commission owner</Text>
+                <Text style={modalStyles.placementValue}>{user.referral_owner_code || "—"}</Text>
+              </View>
+              {user.placement_realigned_at ? (
+                <View style={[modalStyles.placementRealigned]}>
+                  <Feather name="alert-circle" size={12} color="#B85F00" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={modalStyles.placementRealignedTitle}>Realigned {new Date(user.placement_realigned_at).toLocaleDateString()}</Text>
+                    <Text style={modalStyles.placementRealignedReason}>Reason: {user.placement_realigned_reason || "—"}</Text>
+                  </View>
+                </View>
+              ) : null}
+              {(user.placement_history || []).length > 0 ? (
+                <>
+                  <TouchableOpacity onPress={() => setShowPlacementHistory((v) => !v)} style={modalStyles.placementHistoryToggle}>
+                    <Feather name={showPlacementHistory ? "chevron-up" : "chevron-down"} size={12} color={colors.primary} />
+                    <Text style={modalStyles.placementHistoryToggleText}>
+                      {showPlacementHistory ? "Hide" : "Show"} placement history ({(user.placement_history || []).length})
+                    </Text>
+                  </TouchableOpacity>
+                  {showPlacementHistory ? (
+                    <View style={{ marginTop: 6 }}>
+                      {(user.placement_history || []).map((h, i) => (
+                        <View key={i} style={modalStyles.placementHistoryRow}>
+                          <Text style={modalStyles.placementHistoryDate}>{h.changed_at ? new Date(h.changed_at).toLocaleString() : "—"}</Text>
+                          <Text style={modalStyles.placementHistoryMove}>
+                            {h.old_sponsor_code || "—"} → <Text style={{ color: colors.primary, fontWeight: "800" }}>{h.new_sponsor_code || "—"}</Text>
+                          </Text>
+                          <Text style={modalStyles.placementHistoryReason}>Reason: {h.reason || "—"}</Text>
+                          {h.changed_by_admin_email ? (
+                            <Text style={modalStyles.placementHistoryBy}>by {h.changed_by_admin_email}</Text>
+                          ) : null}
+                        </View>
+                      ))}
+                    </View>
+                  ) : null}
+                </>
+              ) : null}
+              <Text style={modalStyles.placementHint}>Move user to new upline (no money recalculation):</Text>
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
+                <View style={{ flex: 1 }}>
+                  <TextInput
+                    placeholder="New sponsor code (e.g. 7RKOZM)"
+                    value={realignCode}
+                    onChangeText={(t) => setRealignCode(t.toUpperCase())}
+                    autoCapitalize="characters"
+                    style={modalStyles.input}
+                    placeholderTextColor={colors.textMuted}
+                    testID="realign-code"
+                  />
+                </View>
+              </View>
+              <TextInput
+                placeholder="Reason for realignment (required)"
+                value={realignReason}
+                onChangeText={setRealignReason}
+                style={[modalStyles.input, { marginTop: 6, minHeight: 50, textAlignVertical: "top" }]}
+                placeholderTextColor={colors.textMuted}
+                multiline
+                testID="realign-reason"
+              />
+              <TouchableOpacity
+                onPress={async () => {
+                  if (!realignCode.trim()) { setMsg("Enter new sponsor code"); return; }
+                  if (realignReason.trim().length < 3) { setMsg("Reason must be at least 3 chars"); return; }
+                  setBusy("realign");
+                  try {
+                    await api.post(`/admin/users/${user.id}/realign`, {
+                      new_sponsor_code: realignCode.trim().toUpperCase(),
+                      reason: realignReason.trim(),
+                    });
+                    setRealignCode(""); setRealignReason("");
+                    Alert.alert("Realigned", "User placement updated successfully.");
+                    onSaved();
+                  } catch (e) { setMsg(formatApiError(e)); setBusy(null); }
+                }}
+                disabled={busy === "realign"}
+                style={[modalStyles.realignBtn, busy === "realign" && { opacity: 0.5 }]}
+                testID="realign-submit"
+              >
+                <Feather name="git-pull-request" size={14} color="#fff" />
+                <Text style={modalStyles.realignBtnText}>{busy === "realign" ? "Realigning…" : "Realign placement"}</Text>
+              </TouchableOpacity>
+            </View>
 
             <Text style={modalStyles.section}>PAYOUT DETAILS</Text>
             <Field label="UPI ID"><TextInput testID="edit-upi" value={upi} onChangeText={setUpi} autoCapitalize="none" style={modalStyles.input} placeholderTextColor={colors.textMuted} /></Field>
@@ -908,4 +1034,22 @@ const modalStyles = StyleSheet.create({
   kycName: { fontSize: 14, color: colors.textMain, fontWeight: "600", flex: 1 },
   deleteBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 14, borderRadius: radii.button, marginTop: 12, borderWidth: 1, borderColor: "#B3261E" },
   deleteBtnText: { color: "#B3261E", fontWeight: "700", fontSize: 14 },
+  // Placement / realignment section
+  placementCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 10 },
+  placementRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  placementLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
+  placementValue: { fontSize: 13, color: colors.textMain, fontWeight: "800", fontVariant: ["tabular-nums"] },
+  placementRealigned: { flexDirection: "row", alignItems: "flex-start", gap: 8, backgroundColor: "#FFF7E6", borderWidth: 1, borderColor: "#B85F0044", borderRadius: 10, padding: 10, marginTop: 10 },
+  placementRealignedTitle: { fontSize: 12, fontWeight: "800", color: "#B85F00" },
+  placementRealignedReason: { fontSize: 11, color: "#7A4A00", marginTop: 2 },
+  placementHistoryToggle: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 8, paddingVertical: 6 },
+  placementHistoryToggleText: { fontSize: 11, fontWeight: "800", color: colors.primary },
+  placementHistoryRow: { backgroundColor: colors.surfaceMuted, borderRadius: 8, padding: 8, marginBottom: 6 },
+  placementHistoryDate: { fontSize: 10, color: colors.textMuted, fontWeight: "700" },
+  placementHistoryMove: { fontSize: 12, color: colors.textMain, marginTop: 2, fontWeight: "700" },
+  placementHistoryReason: { fontSize: 11, color: colors.textMain, marginTop: 2 },
+  placementHistoryBy: { fontSize: 10, color: colors.textMuted, marginTop: 2, fontStyle: "italic" },
+  placementHint: { fontSize: 11, color: colors.textMuted, marginTop: 12, fontStyle: "italic" },
+  realignBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: "#7C3AED", paddingVertical: 12, borderRadius: radii.button, marginTop: 8 },
+  realignBtnText: { color: "#fff", fontWeight: "800", fontSize: 13, letterSpacing: 0.3 },
 });
