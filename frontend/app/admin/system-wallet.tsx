@@ -220,18 +220,48 @@ export default function AdminSystemWallet() {
           </View>
         </View>
 
-        <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 12 }}>
-          <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>BANK BALANCE TALLY</Text>
-          <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>
-            {formatINR(
-              // Bank tally = Inflow − Withdrawals (cash actually still on platform)
-              Math.max(0, Number(breakdown?.inflow?.total || 0) - Number(breakdown?.outflow?.user_withdrawals_settled || 0))
-            )}
-          </Text>
-          <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>
-            Total inflow {formatINR(breakdown?.inflow?.total || 0)} − Withdrawn {formatINR(breakdown?.outflow?.user_withdrawals_settled || 0)} = Currently held on platform.
-          </Text>
-        </GradientCard>
+        {(() => {
+          // Hero KPI: surface the full money-flow identity at the top so the
+          // user always sees Inflow = Held + Withdrawn at a glance.
+          const inflow      = Number(breakdown?.inflow?.total || 0);
+          const adminHeld   = Number(breakdown?.balance?.in_admin_wallet || 0);
+          const usersHeld   = Number(breakdown?.balance?.in_user_wallets || 0);
+          const heldTotal   = adminHeld + usersHeld;
+          const withdrawn   = Number(breakdown?.outflow?.user_withdrawals_settled || 0);
+          const bankTally   = Math.max(0, inflow - withdrawn); // == heldTotal when books are balanced
+          const tallyOK     = Math.abs(inflow - (heldTotal + withdrawn)) <= 1;
+          return (
+            <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 12 }}>
+              <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>BANK BALANCE TALLY · ON PLATFORM</Text>
+              <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>{formatINR(bankTally)}</Text>
+              <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>
+                Cash currently held on platform (Admin + User wallets).
+              </Text>
+              {/* 3-up identity grid: Inflow | Held | Withdrawn */}
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 16 }}>
+                <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
+                  <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.5 }}>💰 INFLOW</Text>
+                  <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>{formatINR(inflow)}</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
+                  <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.5 }}>🏦 HELD</Text>
+                  <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>{formatINR(heldTotal)}</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
+                  <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.5 }}>🏧 WITHDRAWN</Text>
+                  <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>{formatINR(withdrawn)}</Text>
+                </View>
+              </View>
+              {/* Identity check line */}
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.2)" }}>
+                <Feather name={tallyOK ? "check-circle" : "alert-triangle"} size={13} color={tallyOK ? "#A7F3D0" : "#FECACA"} />
+                <Text style={{ flex: 1, fontSize: 11, color: "rgba(255,255,255,0.92)", fontWeight: "700", fontVariant: ["tabular-nums"] }}>
+                  {tallyOK ? "✓" : "⚠"} Inflow {formatINR(inflow)} = Held {formatINR(heldTotal)} + Withdrawn {formatINR(withdrawn)}
+                </Text>
+              </View>
+            </GradientCard>
+          );
+        })()}
 
         {/* ─── Treasury · 3 SUMMED rows + 5 informational rows ─── */}
         {(() => {

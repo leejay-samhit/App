@@ -3502,6 +3502,18 @@ money_flow_breakdown_ui_2026_05:
           ₹0.00 drift on live data: admin ₹13,886.34 + users ₹763.66 +
           withdrawn ₹100 = ₹14,750 = inflow ₹14,750.
 
+          FOLLOW-UP FIX 2 (Hero card identity surfacing): User asked the
+          money-flow identity be visible immediately at the top of the
+          System Wallet, not just in the collapsible breakdown. Rebuilt
+          the green Bank-Balance-Tally hero card with: a 3-up KPI grid
+          (💰 INFLOW / 🏦 HELD / 🏧 WITHDRAWN) and a single-line identity
+          check `✓ Inflow X = Held Y + Withdrawn Z` (with check/warn icon
+          when drift > ₹1). Now the user sees the identity at three levels
+          of detail: hero card (glance), Treasury rows (3 summed lines),
+          and Money Flow Breakdown (full audit). All three derive from
+          the same backend `breakdown.balance.*` + `outflow.user_withdrawals_settled`
+          + `inflow.total` triple — guaranteed to stay in sync.
+
             outflow.user_withdrawals_settled = ₹100
             Held + Withdrawn = ₹14,750 ✓ matches inflow exactly.
 
