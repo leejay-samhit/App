@@ -3823,3 +3823,158 @@ agent_communication:
         inflow=₹14,750, held=₹14,650, withdrawn=₹100.
       Read-only verification — no data was mutated. /reconcile was NOT
       called.
+
+
+session_2026_05_23_misc_endpoints:
+  - task: "Legal Pages CRUD (GET /legal/{kind}, GET/PUT /admin/legal)"
+    implemented: true
+    working: false
+    file: "backend/routes/legal_pages.py (L105, L126)"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          CRITICAL BUG in routes/legal_pages.py.
+          • PUBLIC reads work: GET /legal/{privacy|terms|refund|contact_us} -> 200
+            with correct shape {kind, content_text, is_default, updated_at}.
+            GET /legal/unknown_kind -> 404. (A1-A5 PASS)
+          • ALL ADMIN endpoints return 422 instead of working:
+              GET  /admin/legal              -> 422 (expected 200)
+              GET  /admin/legal  (no auth)   -> 422 (expected 401/403)
+              PUT  /admin/legal/privacy      -> 422 (expected 200)
+              PUT  /admin/legal/unknown_kind -> 422 (expected 404)
+            Error body: {"detail":[{"type":"missing","loc":["query","allowed"],
+                                    "msg":"Field required",…}]}
+
+          ROOT CAUSE: routes/legal_pages.py uses `Depends(require_admin_role)` as
+          a dependency WITHOUT CALLING the factory. `require_admin_role` is
+          defined in core/security.py:75 as
+              def require_admin_role(*allowed: str): -> async checker
+          i.e. a FACTORY that returns the actual checker. FastAPI inspects its
+          signature, sees the var-positional `*allowed: str`, and exposes it as
+          a REQUIRED query parameter named `allowed`. Missing it -> 422 BEFORE
+          auth ever runs. So admin auth is completely BYPASSED (in the sense
+          that the endpoint never even runs) — but every legitimate caller is
+          rejected with 422.
+
+          FIX (main agent): change BOTH occurrences in routes/legal_pages.py:
+            Line 105:  Depends(require_admin_role)
+            Line 126:  Depends(require_admin_role)
+          to one of:
+            Depends(require_admin)                                  # any admin
+            Depends(require_admin_role("super_admin", "manager", "support", "finance"))
+          The rest of server.py uses the latter pattern correctly.
+
+          Consequence today:
+            • is_default == True for /legal/privacy is currently a side-effect
+              of A8 never succeeding — no doc has ever been upserted. As soon
+              as the dep bug is fixed and PUT works, A9 (is_default=False after
+              PUT) will pass automatically.
+            • A10 (PUT short body -> 422) coincidentally passes because both
+              the dep error AND the content_text min_length=10 validator both
+              yield 422; this masks the actual failure mode.
+
+          Tests run via /app/backend_test.py against
+          https://vendor-network-app-1.preview.emergentagent.com/api .
+
+  - task: "Service Provider Profile + Reviews (B section)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py L7508-7587"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          SKIPPED — no rows with is_service_provider=True in db.users.
+          GET /services?lat=12.97&lng=77.59 -> 200 with []
+          GET /services (no params) -> 200 with []
+          The brief said "If none in DB, skip B and report" -> reported.
+          Code review of server.py:7508-7587 looks correct:
+            • Profile returns all required fields (id, name, service_name,
+              rating_avg, rating_count, reviews, bookings_count, is_active).
+            • Invalid id -> 404.
+            • POST reviews checks booked existence -> 403 "You can only review
+              providers you've booked".
+            • rating field uses Field(..., ge=1, le=5) -> 422 for rating=6.
+          MAIN AGENT: please seed at least one is_service_provider=True user
+          so this can be regression-tested.
+
+  - task: "Chat /chat/contact-support + role flags in /chat/threads"
+    implemented: true
+    working: true
+    file: "backend/routes/chat.py (L75-88, L281-328)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          ALL CHAT SUPPORT CHECKS PASS (3/3).
+          • POST /api/chat/contact-support (testuser, message="Test support
+            ping…") -> 200 {threads:[{thread_id, admin_id, admin_name}],
+            count:1}. (C17 PASS)
+          • GET /api/chat/threads (testuser) -> 200 with that thread present.
+            other.id matches the super_admin returned from contact-support.
+            (C18 PASS)
+          • thread.other payload includes the NEW boolean fields
+            is_vendor=False and is_service_provider=False (both bool type
+            confirmed). Key order: ['id', 'name', 'referral_code', 'avatar',
+            'sponsor_code', 'is_vendor', 'is_service_provider']. (C19 PASS)
+
+  - task: "Placement realignment fields regression on /admin/users"
+    implemented: true
+    working: true
+    file: "backend/server.py (L274-285 signup snapshot)"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          GET /api/admin/users (admin token) -> 200; sampled non-admin user
+          carries both `original_sponsor_id` and `placement_history` fields.
+          Regression intact. (D20 PASS)
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      SESSION REGRESSION (Legal + Services + Chat + Placement) — 10/16 PASS.
+      Runner: /app/backend_test.py.
+
+      CRITICAL — 1 backend bug found:
+        ❌ routes/legal_pages.py uses `Depends(require_admin_role)` WITHOUT
+           calling the factory. FastAPI promotes the `*allowed: str` to a
+           required query parameter and returns 422 on every admin legal
+           call (GET /admin/legal, PUT /admin/legal/{kind}). Need main agent
+           to change L105 and L126 to e.g.
+             Depends(require_admin_role("super_admin","manager","support","finance"))
+           OR Depends(require_admin). Once fixed, A6/A7/A8/A9/A11 should all
+           pass automatically.
+
+      Section B (service provider profile + reviews): SKIPPED — db.users has
+      zero is_service_provider=True rows. Code review looks correct. Main
+      agent should seed at least one approved provider so the path can be
+      regression tested.
+
+      Section C (chat /contact-support + role flags): ALL PASS.
+        ✅ POST /chat/contact-support creates 1 thread with super_admin.
+        ✅ GET /chat/threads surfaces it.
+        ✅ thread.other now exposes is_vendor + is_service_provider bools.
+
+      Section D (placement realignment fields): PASS.
+        ✅ /admin/users sample carries original_sponsor_id + placement_history.
+
+      Setup note: testuser@app.com didn't exist in DB at test start — I
+      registered it fresh (Test@123, phone 9999900001) to make the test
+      reproducible. Credentials file already lists this user as the
+      "seeded customer test user".
+
+      YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.

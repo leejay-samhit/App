@@ -1,221 +1,229 @@
+"""Backend regression tests for the session changes:
+A) Legal pages CRUD
+B) Service Provider Profile + Reviews
+C) Chat Support
+D) Placement realignment fields regression
 """
-Test admin placement realignment endpoint:
-POST /api/admin/users/{user_id}/realign
-"""
-import sys
-import json
 import requests
 
 BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASS = "Admin@123"
+ADMIN_PW = "Admin@123"
+USER_EMAIL = "testuser@app.com"
+USER_PW = "Test@123"
+
+results = []
 
 
-def pjson(label, resp):
-    try:
-        data = resp.json()
-    except Exception:
-        data = resp.text
-    print(f"[{resp.status_code}] {label}: {json.dumps(data, indent=2, default=str)[:1200]}")
-    return data
+def report(test_id, name, passed, detail=""):
+    results.append((test_id, name, passed, detail))
+    flag = "PASS" if passed else "FAIL"
+    print(f"[{flag}] {test_id} {name}: {detail}")
+
+
+def login(email, pw):
+    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": pw}, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    return data.get("token") or data.get("access_token")
 
 
 def main():
-    results = []
+    print(f"BASE={BASE}\n")
+    try:
+        admin_tok = login(ADMIN_EMAIL, ADMIN_PW)
+        print(f"Admin login OK")
+    except Exception as e:
+        report("LOGIN", "admin login", False, repr(e))
+        return
+    try:
+        user_tok = login(USER_EMAIL, USER_PW)
+        print(f"User login OK")
+    except Exception as e:
+        report("LOGIN", "testuser login", False, repr(e))
+        return
 
-    # 1. Login admin
-    r = requests.post(f"{BASE}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS}, timeout=30)
-    data = pjson("login admin", r)
-    assert r.status_code == 200, f"login failed: {r.status_code}"
-    token = data.get("token") or data.get("access_token")
-    assert token, "no token in login response"
-    H = {"Authorization": f"Bearer {token}"}
-    results.append(("1. Admin login", "PASS"))
+    A_HDR = {"Authorization": f"Bearer {admin_tok}"}
+    U_HDR = {"Authorization": f"Bearer {user_tok}"}
 
-    # 2. GET /api/admin/users
-    r = requests.get(f"{BASE}/admin/users", headers=H, timeout=30)
-    assert r.status_code == 200, f"admin/users failed: {r.status_code}"
-    users = r.json()
-    if isinstance(users, dict):
-        users = users.get("items") or users.get("users") or []
-    print(f"Total users: {len(users)}")
-    assert len(users) >= 2, "need at least 2 users"
-    results.append(("2. GET /admin/users", f"PASS ({len(users)} users)"))
+    # A) LEGAL PAGES
+    r = requests.get(f"{BASE}/legal/privacy", timeout=15)
+    ok = r.status_code == 200 and all(k in r.json() for k in ("kind", "content_text", "is_default"))
+    report("A1", "GET /legal/privacy", ok, f"status={r.status_code}")
+    initial_is_default = r.json().get("is_default") if r.ok else None
+    print(f"   initial is_default={initial_is_default}")
 
-    non_admins = [u for u in users if u.get("role") != "admin" and u.get("referral_code")]
-    assert len(non_admins) >= 2, "need 2 non-admin users with referral_code"
+    for kind in ("terms", "refund", "contact_us"):
+        r = requests.get(f"{BASE}/legal/{kind}", timeout=15)
+        ok = r.status_code == 200 and r.json().get("kind") == kind
+        report(f"A_{kind}", f"GET /legal/{kind}", ok, f"status={r.status_code}")
 
-    id_to_sponsor = {u["id"]: u.get("sponsor_id") for u in users}
+    r = requests.get(f"{BASE}/legal/unknown_kind", timeout=15)
+    report("A5", "GET /legal/unknown_kind", r.status_code == 404, f"status={r.status_code}")
 
-    def is_descendant(maybe_desc_id, ancestor_id, max_hops=50):
-        cur = id_to_sponsor.get(maybe_desc_id)
-        hops = 0
-        while cur and hops < max_hops:
-            if cur == ancestor_id:
-                return True
-            cur = id_to_sponsor.get(cur)
-            hops += 1
-        return False
-
-    user_a = None
-    user_b = None
-    for a in non_admins:
-        for b in non_admins:
-            if a["id"] == b["id"]:
-                continue
-            if a.get("sponsor_id") == b["id"]:
-                continue
-            if is_descendant(b["id"], a["id"]):
-                continue
-            user_a = a
-            user_b = b
-            break
-        if user_a:
-            break
-
-    assert user_a and user_b, "couldn't find suitable user-A, user-B pair"
-    print(f"user-A: {user_a['email']} id={user_a['id']} ref={user_a.get('referral_code')} sponsor_id={user_a.get('sponsor_id')}")
-    print(f"user-B: {user_b['email']} id={user_b['id']} ref={user_b.get('referral_code')}")
-
-    # 3. Backfill check
-    required_fields = ["original_sponsor_id", "original_sponsor_code", "original_referral_code",
-                       "placement_history", "placement_realigned_at", "placement_realigned_reason"]
-    backfill_user = None
-    for u in users:
-        if all(f in u for f in required_fields):
-            backfill_user = u
-            break
-    if backfill_user:
-        print(f"Backfill user {backfill_user['email']}:")
-        for f in required_fields:
-            print(f"  {f} = {backfill_user.get(f)!r}")
-        results.append(("3. Backfill fields present", "PASS"))
+    r = requests.get(f"{BASE}/admin/legal", headers=A_HDR, timeout=15)
+    if r.status_code == 200:
+        items = r.json().get("items", [])
+        kinds = sorted([i.get("kind") for i in items])
+        ok = kinds == ["contact_us", "privacy", "refund", "terms"]
+        report("A6", "GET /admin/legal admin", ok, f"items={len(items)} kinds={kinds}")
     else:
-        sample = users[0]
-        missing = [f for f in required_fields if f not in sample]
-        print(f"Sample user keys: {list(sample.keys())}")
-        print(f"Missing fields on user[0]: {missing}")
-        results.append(("3. Backfill fields present", f"FAIL (missing: {missing})"))
+        report("A6", "GET /admin/legal admin", False, f"status={r.status_code} body={r.text[:200]}")
 
-    user_a_original_sponsor_code = user_a.get("original_sponsor_code") or user_a.get("referred_by")
-    print(f"user-A original_sponsor_code = {user_a_original_sponsor_code}")
+    r = requests.get(f"{BASE}/admin/legal", timeout=15)
+    ok = r.status_code in (401, 403)
+    report("A7", "GET /admin/legal no auth", ok, f"status={r.status_code} body={r.text[:120]}")
 
-    # 4. Realign A under B
-    body4 = {"new_sponsor_code": user_b["referral_code"], "reason": "Manual placement test"}
-    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body4, headers=H, timeout=30)
-    data4 = pjson("realign A under B", r)
-    if r.status_code == 200 and isinstance(data4, dict) and "history_entry" in data4:
-        results.append(("4. Realign A under B", "PASS"))
-    else:
-        results.append(("4. Realign A under B", f"FAIL ({r.status_code})"))
+    new_content = "## Custom Privacy\n\nUpdated by automated regression test."
+    r = requests.put(f"{BASE}/admin/legal/privacy", headers=A_HDR,
+                     json={"content_text": new_content}, timeout=15)
+    ok = r.status_code == 200 and r.json().get("ok") is True
+    report("A8", "PUT /admin/legal/privacy", ok, f"status={r.status_code} body={r.text[:200]}")
 
-    # 5. Verify
-    r = requests.get(f"{BASE}/admin/users", headers=H, timeout=30)
-    users2 = r.json()
-    if isinstance(users2, dict):
-        users2 = users2.get("items") or users2.get("users") or []
-    user_a2 = next((u for u in users2 if u["id"] == user_a["id"]), None)
-    assert user_a2, "user-A not found after realign"
-    checks5 = []
-    if user_a2.get("sponsor_id") == user_b["id"]:
-        checks5.append("sponsor_id_OK")
+    r = requests.get(f"{BASE}/legal/privacy", timeout=15)
+    if r.status_code == 200:
+        b = r.json()
+        ok = (b.get("is_default") is False) and (b.get("content_text") == new_content)
+        report("A9", "GET /legal/privacy post-update", ok,
+               f"is_default={b.get('is_default')} matches={b.get('content_text')==new_content}")
     else:
-        checks5.append(f"sponsor_id_BAD={user_a2.get('sponsor_id')}")
-    if user_a2.get("referred_by") == user_b["referral_code"]:
-        checks5.append("referred_by_OK")
-    else:
-        checks5.append(f"referred_by_BAD={user_a2.get('referred_by')}")
-    if user_a2.get("placement_realigned_reason") == "Manual placement test":
-        checks5.append("reason_OK")
-    else:
-        checks5.append(f"reason_BAD={user_a2.get('placement_realigned_reason')!r}")
-    ph = user_a2.get("placement_history") or []
-    if len(ph) == 1:
-        checks5.append("history_len_OK")
-        entry = ph[0]
-        need = ["new_sponsor_id", "new_sponsor_code", "new_sponsor_email", "reason", "changed_by_admin_email"]
-        miss = [k for k in need if k not in entry]
-        if not miss:
-            checks5.append("entry_keys_OK")
-        else:
-            checks5.append(f"entry_keys_BAD_missing={miss}")
-    else:
-        checks5.append(f"history_len_BAD={len(ph)}")
-    print("Step 5 checks:", checks5)
-    if all("_OK" in c for c in checks5):
-        results.append(("5. Post-realign verification", "PASS"))
-    else:
-        results.append(("5. Post-realign verification", f"FAIL: {checks5}"))
+        report("A9", "GET /legal/privacy post-update", False, f"status={r.status_code}")
 
-    # 6. Self-placement → 400
-    body6 = {"new_sponsor_code": user_a["referral_code"], "reason": "self-placement attempt"}
-    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body6, headers=H, timeout=30)
-    data6 = pjson("self-placement", r)
-    detail6 = data6.get("detail") if isinstance(data6, dict) else ""
-    if r.status_code == 400 and "themselves" in str(detail6):
-        results.append(("6. Self-placement blocked", "PASS"))
-    else:
-        results.append(("6. Self-placement blocked", f"FAIL ({r.status_code}, {detail6})"))
+    r = requests.put(f"{BASE}/admin/legal/privacy", headers=A_HDR,
+                     json={"content_text": "short"}, timeout=15)
+    report("A10", "PUT /admin/legal/privacy <10 chars", r.status_code == 422,
+           f"status={r.status_code}")
 
-    # 7. Invalid sponsor
-    body7 = {"new_sponsor_code": "NONEXISTENT99", "reason": "bad reason here"}
-    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body7, headers=H, timeout=30)
-    data7 = pjson("invalid sponsor", r)
-    detail7 = data7.get("detail") if isinstance(data7, dict) else ""
-    if r.status_code == 400 and "not found" in str(detail7).lower():
-        results.append(("7. Invalid sponsor 400", "PASS"))
-    else:
-        results.append(("7. Invalid sponsor 400", f"FAIL ({r.status_code}, {detail7})"))
+    r = requests.put(f"{BASE}/admin/legal/unknown_kind", headers=A_HDR,
+                     json={"content_text": "long enough content text here"}, timeout=15)
+    report("A11", "PUT /admin/legal/unknown_kind", r.status_code == 404, f"status={r.status_code}")
 
-    # 8. Short reason → 422
-    body8 = {"new_sponsor_code": user_b["referral_code"], "reason": "x"}
-    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body8, headers=H, timeout=30)
-    pjson("short reason", r)
-    if r.status_code == 422:
-        results.append(("8. Short reason 422", "PASS"))
-    else:
-        results.append(("8. Short reason 422", f"FAIL ({r.status_code})"))
+    # B) SERVICE PROVIDER
+    provider_id = None
+    r = requests.get(f"{BASE}/services", params={"lat": 12.97, "lng": 77.59}, timeout=20)
+    services = []
+    if r.status_code == 200:
+        body = r.json()
+        services = body if isinstance(body, list) else body.get("items", [])
+        if services:
+            provider_id = services[0].get("id")
+    print(f"   services found w/lat/lng: {len(services)} provider_id={provider_id}")
 
-    # 9. Unchanged placement
-    body9 = {"new_sponsor_code": user_b["referral_code"], "reason": "again same sponsor"}
-    r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body9, headers=H, timeout=30)
-    data9 = pjson("same sponsor again", r)
-    detail9 = data9.get("detail") if isinstance(data9, dict) else ""
-    if r.status_code == 400 and "already placed" in str(detail9).lower():
-        results.append(("9. Already placed 400", "PASS"))
-    else:
-        results.append(("9. Already placed 400", f"FAIL ({r.status_code}, {detail9})"))
-
-    # 10. Restore original
-    if not user_a_original_sponsor_code:
-        results.append(("10. Restore", "SKIP - no original_sponsor_code on user-A"))
-    else:
-        body10 = {"new_sponsor_code": user_a_original_sponsor_code, "reason": "Restoring after test"}
-        r = requests.post(f"{BASE}/admin/users/{user_a['id']}/realign", json=body10, headers=H, timeout=30)
-        data10 = pjson("restore original", r)
+    if not provider_id:
+        r = requests.get(f"{BASE}/services", timeout=20)
         if r.status_code == 200:
-            r2 = requests.get(f"{BASE}/admin/users", headers=H, timeout=30)
-            users3 = r2.json()
-            if isinstance(users3, dict):
-                users3 = users3.get("items") or users3.get("users") or []
-            user_a3 = next((u for u in users3 if u["id"] == user_a["id"]), None)
-            ph3 = (user_a3 or {}).get("placement_history") or []
-            if len(ph3) == 2:
-                results.append(("10. Restore + history=2", "PASS"))
-            else:
-                results.append(("10. Restore + history=2", f"FAIL (history_len={len(ph3)})"))
-        else:
-            results.append(("10. Restore", f"FAIL ({r.status_code})"))
+            body = r.json()
+            services = body if isinstance(body, list) else body.get("items", [])
+            if services:
+                provider_id = services[0].get("id")
+        print(f"   fallback services: {len(services)} provider_id={provider_id}")
 
-    print("\n" + "=" * 60)
-    print("RESULTS:")
-    for name, status in results:
-        marker = "PASS" if status.startswith("PASS") else ("SKIP" if status.startswith("SKIP") else "FAIL")
-        print(f"  [{marker}] {name}: {status}")
-    failed = [n for n, s in results if not s.startswith("PASS") and not s.startswith("SKIP")]
-    print(f"\nTotal: {len(results)} | Failed: {len(failed)}")
-    if failed:
-        sys.exit(1)
+    if not provider_id:
+        report("B_skip", "No service providers in DB", False, "skipping section B")
+    else:
+        r = requests.get(f"{BASE}/services/{provider_id}/profile", timeout=15)
+        if r.status_code == 200:
+            b = r.json()
+            required = ["id", "name", "service_name", "rating_avg", "rating_count", "reviews",
+                        "bookings_count", "is_active"]
+            missing = [k for k in required if k not in b]
+            ok = not missing
+            report("B13", "GET /services/{id}/profile", ok, f"status=200 missing={missing}")
+        else:
+            report("B13", "GET /services/{id}/profile", False,
+                   f"status={r.status_code} body={r.text[:200]}")
+
+        r = requests.get(f"{BASE}/services/INVALID_ID_XYZ/profile", timeout=15)
+        report("B14", "GET /services/INVALID/profile", r.status_code == 404, f"status={r.status_code}")
+
+        r = requests.post(f"{BASE}/services/{provider_id}/reviews",
+                          headers=U_HDR, json={"rating": 5, "comment": "Great"}, timeout=15)
+        ok = r.status_code == 403 and "booked" in (r.text or "").lower()
+        report("B15", "POST review w/o booking", ok, f"status={r.status_code} body={r.text[:200]}")
+
+        r = requests.post(f"{BASE}/services/{provider_id}/reviews",
+                          headers=U_HDR, json={"rating": 6}, timeout=15)
+        report("B16", "POST review rating=6", r.status_code == 422, f"status={r.status_code}")
+
+    # C) CHAT SUPPORT
+    r = requests.post(f"{BASE}/chat/contact-support", headers=U_HDR,
+                      json={"message": "Test support ping from regression"}, timeout=20)
+    chat_threads_payload = []
+    if r.status_code == 200:
+        b = r.json()
+        threads = b.get("threads", [])
+        count = b.get("count", 0)
+        ok = count >= 1 and isinstance(threads, list) and len(threads) >= 1
+        report("C17", "POST /chat/contact-support", ok,
+               f"count={count} threads_len={len(threads)}")
+        chat_threads_payload = threads
+    else:
+        report("C17", "POST /chat/contact-support", False,
+               f"status={r.status_code} body={r.text[:300]}")
+
+    r = requests.get(f"{BASE}/chat/threads", headers=U_HDR, timeout=15)
+    if r.status_code == 200:
+        threads = r.json().get("threads", [])
+        match = None
+        for t in threads:
+            for ct in chat_threads_payload:
+                if t.get("id") == ct.get("thread_id"):
+                    match = t
+                    break
+            if match:
+                break
+        if not match and threads:
+            match = threads[0]
+        ok = match is not None
+        report("C18", "GET /chat/threads has support thread", ok,
+               f"total_threads={len(threads)} matched_thread_id={(match or {}).get('id')}")
+        if match:
+            other = match.get("other") or {}
+            has_vendor = "is_vendor" in other
+            has_sp = "is_service_provider" in other
+            ok2 = (has_vendor and has_sp
+                   and isinstance(other.get("is_vendor"), bool)
+                   and isinstance(other.get("is_service_provider"), bool))
+            report("C19", "thread.other has is_vendor & is_service_provider bools", ok2,
+                   f"keys={list(other.keys())} "
+                   f"is_vendor={other.get('is_vendor')} "
+                   f"is_service_provider={other.get('is_service_provider')}")
+        else:
+            report("C19", "thread.other role flags", False, "no thread")
+    else:
+        report("C18", "GET /chat/threads", False, f"status={r.status_code} body={r.text[:200]}")
+        report("C19", "thread.other role flags", False, "skipped")
+
+    # D) Placement realignment fields
+    r = requests.get(f"{BASE}/admin/users", headers=A_HDR, timeout=20)
+    if r.status_code == 200:
+        body = r.json()
+        users = body if isinstance(body, list) else body.get("users", body.get("items", []))
+        if not isinstance(users, list):
+            users = []
+        sample = None
+        for u in users:
+            if u.get("role") != "admin":
+                sample = u
+                break
+        if not sample and users:
+            sample = users[0]
+        if sample:
+            has_orig = "original_sponsor_id" in sample
+            has_hist = "placement_history" in sample
+            ok = has_orig and has_hist
+            report("D20", "/admin/users has original_sponsor_id & placement_history", ok,
+                   f"orig={has_orig} hist={has_hist} sample_email={sample.get('email')}")
+        else:
+            report("D20", "/admin/users sample", False, "no users")
+    else:
+        report("D20", "/admin/users", False, f"status={r.status_code} body={r.text[:200]}")
+
+    print("\n=========== SUMMARY ===========")
+    passed = sum(1 for _, _, p, _ in results if p)
+    print(f"Total: {len(results)}  Passed: {passed}  Failed: {len(results)-passed}")
+    for tid, name, p, detail in results:
+        print(f"  [{'PASS' if p else 'FAIL'}] {tid} {name}")
 
 
 if __name__ == "__main__":

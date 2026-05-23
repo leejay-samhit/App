@@ -6,8 +6,8 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { api } from "../../src/api";
-import { colors, spacing } from "../../src/theme";
+import { api } from "../src/api";
+import { colors, spacing } from "../src/theme";
 
 type Props = {
   kind: "privacy" | "terms" | "refund" | "contact_us";
