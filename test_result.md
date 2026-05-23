@@ -3978,3 +3978,103 @@ agent_communication:
       "seeded customer test user".
 
       YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.
+
+p1_p2_features_2026_05:
+  - task: "P1 & P2 batch — services flow + chat tabs + legal pages + more grid"
+    implemented: true
+    working: true
+    file: "multiple files (see status_history)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Implemented user requests #1–#6 + #10 in one batch.
+
+          P1 — SERVICES FLOW:
+            #1 Removed Language box from Services header (shop.tsx).
+            #2 Backend /services with lat/lng: removed default 50km cap.
+               Caller can still pass `radius_km` to clamp. Without a cap we
+               return every approved provider sorted by distance, so users
+               in remote areas can still discover services. Limit raised
+               to 500. (server.py /services aggregation).
+            #3 NEW service provider profile screen `/services/[id].tsx`:
+               photo or initials avatar, online dot, name + service,
+               rating stars + count, KYC chip, key facts (pincode/charge/
+               bookings), languages, about, reviews list, "Book Now" CTA,
+               write-review bottom-sheet modal.
+               NEW backend collection `service_reviews` (1 review per
+               user/provider, upsert on re-review).
+               NEW endpoints:
+                 GET  /services/{id}/profile — public, returns aggregate +
+                      last 20 reviews + bookings_count.
+                 POST /services/{id}/reviews — auth required, customer
+                      must have at least one booking with the provider
+                      (anti-spam → 403 otherwise), rating 1–5, optional
+                      comment ≤1000 chars.
+               Service card tap in /(tabs)/shop.tsx now routes to the new
+               profile screen instead of opening the contact modal.
+
+          P2 — UX:
+            #4 Chat redesign: 5 category tabs at the top of chat list —
+               All / Downline / Vendors / Services / Unread — with counts.
+               Filtered client-side from threads payload. Backend
+               `_user_brief` now exposes `is_vendor` + `is_service_provider`
+               role flags so tab filters work.
+               NEW Support Team floating button (FAB) at the bottom of
+               the chat list. Tap → POST /chat/contact-support → creates/
+               opens threads with EVERY super_admin AND every support
+               admin so both teams see the same conversation. Navigates
+               to first thread.
+            #5 Admin-editable legal pages (Privacy / Terms / Refund /
+               Contact Us) backed by `legal_pages` collection.
+               NEW `routes/legal_pages.py` router with:
+                 GET  /legal/{kind}            public
+                 GET  /admin/legal             admin
+                 PUT  /admin/legal/{kind}      admin
+               Frontend: NEW `src/legal-page-view.tsx` shared component
+               renders ## headings + paragraphs. The 4 user-facing legal
+               pages (legal/privacy.tsx, terms.tsx, refund.tsx, NEW
+               contact-us.tsx) now use this component. NEW admin editor
+               at /admin/legal-pages with 4 tabs, plain-text editor
+               (## headings supported), live preview, save, reset.
+               Admin More screen has a new "Legal pages (editable)" tile.
+            #6 Admin More screen: replaced list-style rows for STORE /
+               OPERATIONS / EXPORT DATA sections with 3-column grid
+               tiles (44×44 icon + label). DANGER ZONE stays as warning
+               rows so it's not too easy to tap.
+
+          P0 ADDITIONAL:
+            #10 System Wallet hero card now shows the full identity grid
+                (Inflow | Held | Withdrawn) + identity check banner — done
+                in prior batch but reaffirmed via this session's tests.
+            #7 (Sub-rupee precision) was completed in prior round.
+            #8 (Realignment audit trail) was completed in prior round
+               (10/10 backend tests passed).
+            #9 (Downline clickable counts) was completed in prior round.
+
+          BACKEND TESTING (deep_testing_backend_v2):
+          A1-A4 GET /legal/{kind}                   ✓
+          A5    GET /legal/unknown                  ✓ 404
+          A6    GET /admin/legal                    ✓ 200 (after fix)
+          A8    PUT /admin/legal/privacy            ✓ 200
+          A9    GET /legal/privacy post-update      ✓ is_default=False
+          A10   PUT short content                   ✓ 422
+          C17   POST /chat/contact-support          ✓ 200, count≥1
+          C18   GET /chat/threads (after support)   ✓ thread present
+          C19   thread.other includes is_vendor /
+                is_service_provider flags           ✓
+          D20   /admin/users still has original_*
+                + placement_history fields          ✓
+
+          BUG ENCOUNTERED & FIXED MID-SESSION:
+          - `routes/legal_pages.py` initially used `Depends(require_admin_role)`
+            without calling the factory, causing 422s on all admin legal
+            endpoints. Fixed by switching to `Depends(require_admin)`.
+          - Ngrok tunnel failed when bundling broke due to a stale import
+            `../../src/utils/errors` and a wrong relative path inside
+            `src/legal-page-view.tsx`. Both corrected; expo now serves 200.
+
+

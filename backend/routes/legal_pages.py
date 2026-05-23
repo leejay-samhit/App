@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.db import db
-from core.security import get_current_user, require_admin_role  # noqa: F401
+from core.security import get_current_user, require_admin_role, require_admin  # noqa: F401
 from core.utils import now_utc
 
 
@@ -102,7 +102,7 @@ async def get_legal_page(kind: str):
 
 
 @router.get("/admin/legal")
-async def list_legal_pages(_: Dict[str, Any] = Depends(require_admin_role)):
+async def list_legal_pages(_: Dict[str, Any] = Depends(require_admin)):
     out = []
     for kind in sorted(VALID_KINDS):
         doc = await db.legal_pages.find_one({"kind": kind}, {"_id": 0})
@@ -123,7 +123,7 @@ async def list_legal_pages(_: Dict[str, Any] = Depends(require_admin_role)):
 async def upsert_legal_page(
     kind: str,
     payload: LegalUpdate,
-    admin: Dict[str, Any] = Depends(require_admin_role),
+    admin: Dict[str, Any] = Depends(require_admin),
 ):
     if kind not in VALID_KINDS:
         raise HTTPException(status_code=404, detail="Unknown legal page")
