@@ -74,13 +74,17 @@ def _serialize(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def _user_brief(u: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not u:
-        return {"id": "", "name": "Unknown", "referral_code": "", "avatar": "", "sponsor_code": ""}
+        return {"id": "", "name": "Unknown", "referral_code": "", "avatar": "", "sponsor_code": "", "is_vendor": False, "is_service_provider": False}
     return {
         "id": u.get("id", ""),
         "name": u.get("name") or u.get("email") or "User",
         "referral_code": u.get("referral_code", ""),
         "avatar": u.get("avatar_url") or u.get("avatar", "") or "",
         "sponsor_code": u.get("sponsor_code", ""),
+        # Role flags exposed so the chat list can categorize threads
+        # (Downline / Vendors / Services / All / Unread). Cheap booleans.
+        "is_vendor":            bool(u.get("is_vendor")),
+        "is_service_provider":  bool(u.get("is_service_provider")),
     }
 
 
@@ -273,6 +277,56 @@ async def reject_request(req_id: str, user: Dict[str, Any] = Depends(get_current
 
 
 # ============== Threads / Messages ==============
+
+@router.post("/chat/contact-support")
+async def contact_support(body: Dict[str, Any] = {}, user: Dict[str, Any] = Depends(get_current_user)):
+    """Open chat with the Support Team. Creates / opens approved threads with
+    EVERY super_admin AND every admin with admin_role='support' so the user's
+    message reaches them all at once (no message broadcasting yet — we just
+    auto-create the thread skeletons so the user can pick whichever to chat
+    with from the Support tab of their chat list).
+
+    Returns the list of thread IDs created/found so the caller can navigate to
+    one of them (typically the first super_admin).
+    """
+    msg = (body.get("message") if isinstance(body, dict) else "") or ""
+    msg = str(msg).strip()[:1000]
+    admin_filter = {"role": "admin", "admin_role": {"$in": ["super_admin", "support"]}}
+    admins = await db.users.find(admin_filter, {"_id": 0, "id": 1, "name": 1}).to_list(50)
+    if not admins:
+        # Fallback: any admin
+        admins = await db.users.find({"role": "admin"}, {"_id": 0, "id": 1, "name": 1}).to_list(50)
+    threads = []
+    for a in admins:
+        if a["id"] == user["id"]:
+            continue
+        thread = await _find_or_create_thread(user["id"], a["id"])
+        threads.append({"thread_id": thread["id"], "admin_id": a["id"], "admin_name": a.get("name") or "Support"})
+        # Auto-send initial message to BOTH super_admin and support so they
+        # see the same content immediately (per user request).
+        if msg:
+            doc = {
+                "id":          str(uuid.uuid4()),
+                "thread_id":   thread["id"],
+                "sender_id":   user["id"],
+                "type":        "text",
+                "text":        msg,
+                "created_at":  _now(),
+                "read_by":     [user["id"]],
+            }
+            await db.chat_messages.insert_one(doc.copy())
+            await db.chat_threads.update_one(
+                {"id": thread["id"]},
+                {"$set": {"last_message_at": _now()}},
+            )
+            await manager.send_to([a["id"]], {
+                "type":   "message.new",
+                "thread_id": thread["id"],
+                "message": _serialize(dict(doc)),
+                "from":   _user_brief(user),
+            })
+    return {"threads": threads, "count": len(threads)}
+
 
 @router.get("/chat/threads")
 async def list_threads(user: Dict[str, Any] = Depends(get_current_user)):

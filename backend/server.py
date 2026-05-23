@@ -156,6 +156,7 @@ from routes import products_ai as products_ai_router  # noqa: E402
 from routes import shop_categories as shop_categories_router  # noqa: E402
 from routes import tickets as tickets_router  # noqa: E402
 from routes import pincodes as pincodes_router  # noqa: E402
+from routes import legal_pages as legal_pages_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -6965,19 +6966,22 @@ async def list_services(
     # ----- Geo path ----------------------------------------------------------
     if lat is not None and lng is not None:
         # `$geoNear` MUST be the first stage in an aggregation pipeline.
-        max_meters = float(radius_km) * 1000.0 if radius_km else 50000.0  # default 50 km
+        # NEW (Feb-2026): no upper-bound on distance by default — caller can
+        # still pass `radius_km` to clamp. Without a cap we surface EVERY
+        # approved provider with a location, sorted by distance, so users in
+        # remote areas can still discover services that are far away.
+        geo_stage: Dict[str, Any] = {
+            "near": {"type": "Point", "coordinates": [float(lng), float(lat)]},
+            "distanceField": "distance_m",
+            "spherical": True,
+            "query": {**base_filt, "service_location": {"$type": "object"}},
+        }
+        if radius_km is not None:
+            geo_stage["maxDistance"] = float(radius_km) * 1000.0
         pipeline: List[Dict[str, Any]] = [
-            {
-                "$geoNear": {
-                    "near": {"type": "Point", "coordinates": [float(lng), float(lat)]},
-                    "distanceField": "distance_m",
-                    "spherical": True,
-                    "maxDistance": max_meters,
-                    "query": {**base_filt, "service_location": {"$type": "object"}},
-                }
-            },
+            {"$geoNear": geo_stage},
             {"$project": {**project, "distance_m": 1}},
-            {"$limit": 300},
+            {"$limit": 500},
         ]
         try:
             geo_rows = await db.users.aggregate(pipeline).to_list(300)
@@ -7491,6 +7495,98 @@ async def admin_bulk_unassign_distributor_areas(
 # (admin_pincodes_in_region moved above admin_pincode_get to fix route precedence)
 
 
+# ───────────────────────────── SERVICE REVIEWS ──────────────────────────────
+# Customers can leave a star-rating + comment on a provider AFTER booking them
+# (i.e. they appear in `service_bookings` for that provider). Reviews are
+# stored in a dedicated `service_reviews` collection. Average rating + count
+# are returned by `/services/{provider_id}/profile` for ID-card display.
+class ServiceReviewIn(BaseModel):
+    rating: int = Field(..., ge=1, le=5)
+    comment: Optional[str] = Field(default=None, max_length=1000)
+
+
+@api_router.get("/services/{provider_id}/profile")
+async def get_service_provider_profile(provider_id: str):
+    """Public ID-card profile for a service provider — photo, charge, contact,
+    aggregate rating + recent reviews. No auth required so anonymous browsers
+    can preview before signing up.
+    """
+    p = await db.users.find_one(
+        {"id": provider_id, "is_service_provider": True},
+        {
+            "_id": 0, "id": 1, "name": 1, "phone": 1, "email": 1, "referral_code": 1,
+            "service_name": 1, "service_category": 1, "category_id": 1,
+            "service_languages": 1, "service_pincode": 1, "service_charge": 1,
+            "service_description": 1, "service_approved_at": 1,
+            "location_updated_at": 1, "profile_image": 1, "kyc_status": 1,
+        },
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="Service provider not found")
+    p["is_active"] = _is_active(p.get("location_updated_at"))
+    # Reviews aggregate
+    agg = await db.service_reviews.aggregate([
+        {"$match": {"provider_id": provider_id}},
+        {"$group": {"_id": None, "avg": {"$avg": "$rating"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    p["rating_avg"] = round(float(agg[0]["avg"]), 2) if agg else 0.0
+    p["rating_count"] = int(agg[0]["count"]) if agg else 0
+    # Recent reviews (latest 20)
+    reviews_raw = await db.service_reviews.find(
+        {"provider_id": provider_id}, {"_id": 0},
+    ).sort("created_at", -1).limit(20).to_list(20)
+    # Enrich each review with reviewer's name (kept private — only first name).
+    for r in reviews_raw:
+        u = await db.users.find_one({"id": r.get("user_id")}, {"_id": 0, "name": 1})
+        full = (u or {}).get("name", "Customer")
+        r["reviewer_name"] = full.split(" ")[0] if full else "Customer"
+        r.pop("user_id", None)
+    p["reviews"] = reviews_raw
+    # Bookings count (informational, drives "trusted by N customers" copy)
+    p["bookings_count"] = await db.service_bookings.count_documents({"provider_id": provider_id})
+    return p
+
+
+@api_router.post("/services/{provider_id}/reviews")
+async def post_service_review(
+    provider_id: str,
+    payload: ServiceReviewIn,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if provider_id == user["id"]:
+        raise HTTPException(status_code=400, detail="You can't review yourself")
+    provider = await db.users.find_one({"id": provider_id, "is_service_provider": True})
+    if not provider:
+        raise HTTPException(status_code=404, detail="Service provider not found")
+    # Must have at least one booking for this provider (anti-spam).
+    booked = await db.service_bookings.find_one({"provider_id": provider_id, "customer_id": user["id"]})
+    if not booked:
+        raise HTTPException(status_code=403, detail="You can only review providers you've booked")
+    # Upsert latest review per user — replace if they review again.
+    review_doc = {
+        "id":           str(uuid.uuid4()),
+        "provider_id":  provider_id,
+        "user_id":      user["id"],
+        "rating":       int(payload.rating),
+        "comment":      (payload.comment or "").strip() or None,
+        "created_at":   now_utc().isoformat(),
+    }
+    await db.service_reviews.update_one(
+        {"provider_id": provider_id, "user_id": user["id"]},
+        {"$set": review_doc},
+        upsert=True,
+    )
+    try:
+        await _create_notification(
+            provider_id, "service",
+            f"New {payload.rating}★ review",
+            f"{user.get('name', 'A customer')} left you a review.",
+        )
+    except Exception:
+        pass
+    return {"ok": True, "review": review_doc}
+
+
 @api_router.post("/services/{provider_id}/book")
 async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if provider_id == user["id"]:
@@ -7633,6 +7729,7 @@ app.include_router(products_ai_router.router, prefix="/api")
 app.include_router(shop_categories_router.router, prefix="/api")
 app.include_router(tickets_router.router, prefix="/api")
 app.include_router(pincodes_router.router, prefix="/api")
+app.include_router(legal_pages_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,

@@ -29,6 +29,7 @@ const ITEMS = [
   { icon: "list", label: "Transactions", route: "/admin/transactions" },
   { icon: "file-text", label: "Admin audit log", route: "/admin/audit" },
   { icon: "sliders", label: "Payout structure", route: "/admin/settings" },
+  { icon: "file-text", label: "Legal pages (editable)", route: "/admin/legal-pages" },
 ];
 
 // Store-related items grouped together so admin can manage products + customer-facing shop UI in one place.
@@ -180,34 +181,56 @@ export default function More() {
         <Text style={styles.subtitle}>{user?.email} · {(user as any)?.admin_role || "super_admin"}</Text>
 
         <Text style={styles.sectionLabel}>STORE</Text>
-        {STORE_ITEMS.map((it) => (
-          <TouchableOpacity key={it.route} style={styles.row} onPress={() => router.push(it.route as any)} testID={`more-store-${it.icon}`}>
-            <View style={styles.rowIcon}><Feather name={it.icon as any} size={16} color={colors.primary} /></View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.rowText}>{it.label}</Text>
-              <Text style={styles.rowHint}>{it.hint}</Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-        ))}
+        <View style={styles.tileGrid}>
+          {STORE_ITEMS.map((it) => (
+            <TouchableOpacity
+              key={it.route}
+              style={styles.tile}
+              onPress={() => router.push(it.route as any)}
+              testID={`more-store-${it.icon}`}
+            >
+              <View style={[styles.tileIcon, { backgroundColor: colors.brand100 }]}>
+                <Feather name={it.icon as any} size={22} color={colors.primary} />
+              </View>
+              <Text style={styles.tileLabel} numberOfLines={2}>{it.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
         <Text style={styles.sectionLabel}>OPERATIONS</Text>
-        {ITEMS.map((it) => (
-          <TouchableOpacity key={it.route} style={styles.row} onPress={() => router.push(it.route as any)} testID={`more-${it.icon}`}>
-            <View style={styles.rowIcon}><Feather name={it.icon as any} size={16} color={colors.primary} /></View>
-            <Text style={styles.rowText}>{it.label}</Text>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-        ))}
+        <View style={styles.tileGrid}>
+          {ITEMS.map((it) => (
+            <TouchableOpacity
+              key={it.route}
+              style={styles.tile}
+              onPress={() => router.push(it.route as any)}
+              testID={`more-${it.icon}`}
+            >
+              <View style={[styles.tileIcon, { backgroundColor: colors.brand100 }]}>
+                <Feather name={it.icon as any} size={22} color={colors.primary} />
+              </View>
+              <Text style={styles.tileLabel} numberOfLines={2}>{it.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
         <Text style={styles.sectionLabel}>EXPORT DATA</Text>
-        {EXPORTS.map((e) => (
-          <TouchableOpacity key={e.kind} style={styles.row} onPress={() => onExport(e.kind)} testID={`export-${e.kind}`}>
-            <View style={styles.rowIcon}><Feather name={e.icon as any} size={16} color={colors.primary} /></View>
-            <Text style={styles.rowText}>{e.label}</Text>
-            <Feather name="download" size={16} color={colors.textMuted} />
-          </TouchableOpacity>
-        ))}
+        <View style={styles.tileGrid}>
+          {EXPORTS.map((e) => (
+            <TouchableOpacity
+              key={e.kind}
+              style={styles.tile}
+              onPress={() => onExport(e.kind)}
+              testID={`export-${e.kind}`}
+            >
+              <View style={[styles.tileIcon, { backgroundColor: "#E0F2FE" }]}>
+                <Feather name={e.icon as any} size={22} color="#0369A1" />
+              </View>
+              <Text style={styles.tileLabel} numberOfLines={2}>{e.label}</Text>
+              <Feather name="download" size={11} color={colors.textMuted} style={{ position: "absolute", top: 6, right: 6 }} />
+            </TouchableOpacity>
+          ))}
+        </View>
 
         {isSuperAdmin && (
           <>
@@ -468,6 +491,11 @@ const styles = StyleSheet.create({
   rowIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
   rowText: { flex: 1, fontSize: 14, color: colors.textMain, fontWeight: "600" },
   rowHint: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  // Grid/tile layout — replaces list rows for OPERATIONS/STORE/EXPORT.
+  tileGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 4 },
+  tile: { width: "31.5%", aspectRatio: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 10, alignItems: "center", justifyContent: "center", gap: 6 },
+  tileIcon: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
+  tileLabel: { fontSize: 11, color: colors.textMain, fontWeight: "700", textAlign: "center", lineHeight: 14 },
   dangerRow: { flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", borderWidth: 1, borderColor: "#F2B8B5", borderRadius: 14, padding: 14, marginBottom: 8, gap: 12 },
   dangerIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" },
   dangerText: { fontSize: 14, color: "#B3261E", fontWeight: "800" },

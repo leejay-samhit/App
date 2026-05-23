@@ -12,9 +12,18 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
 import { useChatSocket } from "../../src/use-chat-socket";
 
-type UserBrief = { id: string; name: string; referral_code: string; avatar?: string };
+type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; is_vendor?: boolean; is_service_provider?: boolean };
 type Thread = { id: string; other: UserBrief; is_downline: boolean; unread_count: number; last_message: any; last_message_at?: string };
 type Request = { id: string; from_user_id: string; to_user_id: string; status: string; message: string; created_at: string; from?: UserBrief; to?: UserBrief };
+
+type Tab = "all" | "downline" | "vendors" | "services" | "unread";
+const TABS: { key: Tab; label: string; icon: any }[] = [
+  { key: "all",      label: "All",      icon: "list" },
+  { key: "downline", label: "Downline", icon: "git-branch" },
+  { key: "vendors",  label: "Vendors",  icon: "shopping-bag" },
+  { key: "services", label: "Services", icon: "briefcase" },
+  { key: "unread",   label: "Unread",   icon: "bell" },
+];
 
 export default function ChatListScreen() {
   const router = useRouter();
@@ -27,6 +36,8 @@ export default function ChatListScreen() {
   const [searching, setSearching] = useState(false);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestMessage, setRequestMessage] = useState("");
+  const [activeTab, setActiveTab] = useState<Tab>("all");
+  const [supportBusy, setSupportBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -48,6 +59,36 @@ export default function ChatListScreen() {
       load();
     }
   });
+
+  // ─── Filter threads by active tab ──────────────────────────────────
+  const filteredThreads = (() => {
+    switch (activeTab) {
+      case "downline": return threads.filter((t) => t.is_downline);
+      case "vendors":  return threads.filter((t) => t.other?.is_vendor);
+      case "services": return threads.filter((t) => t.other?.is_service_provider);
+      case "unread":   return threads.filter((t) => t.unread_count > 0);
+      default:         return threads;
+    }
+  })();
+  const totalUnread = threads.reduce((s, t) => s + (t.unread_count || 0), 0);
+
+  // ─── Contact Support Team ────────────────────────────────────────
+  // Opens chat threads with EVERY super_admin AND every support admin so
+  // both teams see the same conversation. Navigates to the first thread.
+  const onContactSupport = async () => {
+    setSupportBusy(true);
+    try {
+      const { data } = await api.post("/chat/contact-support", { message: "" });
+      const firstThread = (data?.threads || [])[0];
+      if (firstThread?.thread_id) {
+        router.push(`/chat/${firstThread.thread_id}` as any);
+      } else {
+        Alert.alert("No support team available", "Please try again later.");
+      }
+      load();
+    } catch (e) { Alert.alert("Failed", formatApiError(e)); }
+    finally { setSupportBusy(false); }
+  };
 
   const onSearch = async () => {
     const code = search.trim().toUpperCase();
@@ -188,16 +229,45 @@ export default function ChatListScreen() {
             </View>
           ) : null}
 
+          {/* ─── Category tabs ─── */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsRow}>
+            {TABS.map((t) => {
+              const active = t.key === activeTab;
+              const count =
+                t.key === "all" ? threads.length :
+                t.key === "downline" ? threads.filter((x) => x.is_downline).length :
+                t.key === "vendors" ? threads.filter((x) => x.other?.is_vendor).length :
+                t.key === "services" ? threads.filter((x) => x.other?.is_service_provider).length :
+                totalUnread;
+              return (
+                <TouchableOpacity
+                  key={t.key}
+                  onPress={() => setActiveTab(t.key)}
+                  style={[styles.chatTab, active && styles.chatTabActive]}
+                  testID={`chat-tab-${t.key}`}
+                >
+                  <Feather name={t.icon} size={12} color={active ? "#fff" : colors.textMain} />
+                  <Text style={[styles.chatTabLabel, active && { color: "#fff" }]}>{t.label}</Text>
+                  {count > 0 ? (
+                    <View style={[styles.chatTabBadge, active && { backgroundColor: "rgba(255,255,255,0.25)" }]}>
+                      <Text style={[styles.chatTabBadgeText, active && { color: "#fff" }]}>{count}</Text>
+                    </View>
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+
           {/* Threads */}
           <Text style={styles.sectionLabel}>YOUR CHATS</Text>
-          {threads.length === 0 ? (
+          {filteredThreads.length === 0 ? (
             <View style={styles.emptyCard}>
               <Feather name="message-square" size={28} color={colors.textMuted} />
-              <Text style={styles.emptyText}>No chats yet</Text>
-              <Text style={styles.emptySub}>Search a friend's referral code above to start a conversation.</Text>
+              <Text style={styles.emptyText}>{activeTab === "all" ? "No chats yet" : `No ${activeTab} chats`}</Text>
+              <Text style={styles.emptySub}>{activeTab === "all" ? "Search a friend's referral code above to start a conversation." : "Switch to another tab or start a new chat."}</Text>
             </View>
           ) : (
-            threads.map((t) => (
+            filteredThreads.map((t) => (
               <TouchableOpacity key={t.id} style={styles.threadCard} activeOpacity={0.85} onPress={() => router.push(`/chat/${t.id}` as any)} testID={`thread-${t.id}`}>
                 <View style={styles.avatar}><Text style={styles.avatarText}>{(t.other.name || "?").substring(0, 1).toUpperCase()}</Text></View>
                 <View style={{ flex: 1 }}>
@@ -219,6 +289,18 @@ export default function ChatListScreen() {
           )}
         </ScrollView>
       )}
+
+      {/* ─── Floating Support Team button (bottom) ─── */}
+      <TouchableOpacity
+        onPress={onContactSupport}
+        disabled={supportBusy}
+        style={[styles.supportFab, supportBusy && { opacity: 0.6 }]}
+        testID="support-fab"
+        activeOpacity={0.8}
+      >
+        <Feather name="life-buoy" size={16} color="#fff" />
+        <Text style={styles.supportFabText}>{supportBusy ? "Connecting…" : "Support Team"}</Text>
+      </TouchableOpacity>
 
       {/* Send request modal */}
       <Modal visible={showRequestModal} transparent animationType="slide" onRequestClose={() => setShowRequestModal(false)}>
@@ -290,4 +372,14 @@ const styles = StyleSheet.create({
   iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   label: { fontSize: 11, fontWeight: "800", letterSpacing: 1.2, color: colors.textMuted, marginBottom: 6 },
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: colors.textMain },
+  // Category tabs
+  tabsRow: { paddingHorizontal: spacing.screen, gap: 6, paddingVertical: 4, marginBottom: 8 },
+  chatTab: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  chatTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chatTabLabel: { fontSize: 11, fontWeight: "800", color: colors.textMain },
+  chatTabBadge: { backgroundColor: colors.primary + "22", paddingHorizontal: 6, minWidth: 18, alignItems: "center", borderRadius: 999, paddingVertical: 1 },
+  chatTabBadgeText: { fontSize: 9, fontWeight: "900", color: colors.primary },
+  // Support FAB (bottom)
+  supportFab: { position: "absolute", bottom: 18, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#0F766E", paddingHorizontal: 18, paddingVertical: 12, borderRadius: 999, shadowColor: "#000", shadowOpacity: 0.2, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 6 },
+  supportFabText: { color: "#fff", fontWeight: "900", fontSize: 13, letterSpacing: 0.3 },
 });

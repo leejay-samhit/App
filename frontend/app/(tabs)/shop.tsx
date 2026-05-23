@@ -360,19 +360,8 @@ export default function ShopScreen() {
                 <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
                 <Text style={styles.topHeaderTitle}>Find local talent</Text>
               </View>
-              <TouchableOpacity
-                onPress={() => setLangModalOpen(true)}
-                style={[styles.cartIconBtn, languageQ && { backgroundColor: colors.brand100, borderWidth: 1, borderColor: colors.primary }]}
-                testID="services-language-top-btn"
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Feather name="globe" size={20} color={languageQ ? colors.primary : colors.primaryFg} />
-                {languageQ ? (
-                  <View style={styles.cartBadgeTop}>
-                    <Text style={styles.cartBadgeTopText}>{languageQ.toUpperCase()}</Text>
-                  </View>
-                ) : null}
-              </TouchableOpacity>
+              {/* Language filter removed per user request — services list now
+                  shows all providers sorted by nearest GPS distance. */}
             </>
           )}
         </View>
@@ -737,7 +726,12 @@ export default function ShopScreen() {
                       </View>
                     ) : (
                       services.map((s) => (
-                        <TouchableOpacity key={s.id} style={styles.serviceCard} onPress={() => setContactOf(s)}>
+                        <TouchableOpacity
+                          key={s.id}
+                          style={styles.serviceCard}
+                          onPress={() => router.push(`/services/${s.id}`)}
+                          testID={`service-card-${s.id}`}
+                        >
                           <View style={styles.serviceAvatar}>
                             <Text style={styles.serviceAvatarText}>{(s.name || "?")[0].toUpperCase()}</Text>
                           </View>
