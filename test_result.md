@@ -3512,11 +3512,11 @@ money_flow_breakdown_ui_2026_05:
 placement_realignment_2026_05:
   - task: "Admin can realign user placement (move under new upline) with audit trail"
     implemented: true
-    working: "NA"
+    working: true
     file: "backend/server.py (RealignPayload, admin_realign_user @ ~L2474-2557), backend/server.py (_background_init backfill @ ~L5934-5957), frontend/app/admin/users.tsx (Placement section in edit modal)"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
