@@ -37,6 +37,13 @@ INVOICEABLE_COMMISSION = {
     # gross/GST/net split is rendered inline so they can reconcile against
     # the gross they expected and the net actually credited.
     "referral_payout", "level_payout",
+    # ─── Admin/system ledger statements (Feb-2026) ──────────────────────
+    # Treasury-side internal ledger movements — admin needs a "Statement of
+    # Account" copy for audit/compliance even though these aren't taxable
+    # supplies. They render with GST rows SUPPRESSED (see NO_GST_INVOICE_TYPES).
+    "direct_signup_credit", "fee_residual", "cascade_overflow",
+    "gst_collected", "l1_funding_debit", "l1_funding_recall",
+    "audit_credit", "audit_debit", "platform_revenue",
 }
 
 # Types where GST/CGST/SGST rows MUST be SUPPRESSED on the printed invoice.
@@ -45,6 +52,8 @@ INVOICEABLE_COMMISSION = {
 #   • admin_credit / admin_debit — manual wallet adjustments
 #   • transfer_in / transfer_out — peer-to-peer wallet transfer
 #   • withdrawal     — user pulling THEIR OWN money to bank/UPI
+#   • direct_signup_credit / fee_residual / cascade_overflow / l1_*  —
+#     internal treasury ledger movements (no tax event)
 #
 # For these, the printed statement only shows the gross amount as
 # "Net payment" with no taxable-value / IGST / CGST / SGST breakdown.
@@ -53,6 +62,10 @@ NO_GST_INVOICE_TYPES = {
     "admin_credit", "admin_debit",
     "transfer_in", "transfer_out",
     "withdrawal",
+    # Treasury-side internal ledger movements (Feb-2026)
+    "direct_signup_credit", "fee_residual", "cascade_overflow",
+    "gst_collected", "l1_funding_debit", "l1_funding_recall",
+    "audit_credit", "audit_debit", "platform_revenue",
 }
 
 

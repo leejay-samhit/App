@@ -9,6 +9,8 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
+import { WebView } from "react-native-webview";
 
 /** Buckets shown in the UI — keep order aligned with business priority. */
 type BucketKey =
@@ -49,6 +51,10 @@ type Txn = {
   source_user_name?: string; source_user_email?: string;
   placement_sponsor_name?: string; placement_sponsor_email?: string;
   reference_number?: string; created_at: string;
+  // Server may include these flags from /transactions; on /system-wallet
+  // they're absent — treat absence as "try and let backend reject 400".
+  invoiceable?: boolean;
+  invoice_number?: string;
 };
 type Breakdown = {
   inflow: {
@@ -110,6 +116,41 @@ export default function AdminSystemWallet() {
 
   // Reconcile state
   const [reconciling, setReconciling] = useState(false);
+
+  // ─── Invoice preview modal state ─────────────────────────────────
+  // When admin taps "View invoice/statement" on a txn row, we fetch the
+  // HTML via authenticated `api` (because Linking.openURL opens an
+  // external browser that has NO auth token — the request would 401).
+  const [invoiceHtml,     setInvoiceHtml]     = useState<string | null>(null);
+  const [invoiceTxnId,    setInvoiceTxnId]    = useState<string | null>(null);
+  const [invoiceNumber,   setInvoiceNumber]   = useState<string | undefined>(undefined);
+  const [invoiceBusy,     setInvoiceBusy]     = useState(false);
+  const onPreviewInvoice = useCallback(async (txn: Txn) => {
+    setInvoiceBusy(true);
+    setInvoiceTxnId(txn.id);
+    setInvoiceNumber(txn.invoice_number);
+    try {
+      const html = await fetchInvoiceHtml(txn.id);
+      setInvoiceHtml(html);
+    } catch (e: any) {
+      const status = e?.response?.status;
+      const msg = status === 400
+        ? "This transaction type does not have a GST invoice (it's an internal ledger movement)."
+        : status === 401 || status === 403
+        ? "You're not authorized to view this invoice."
+        : e?.response?.data?.detail || e?.message || "Could not load invoice. Please try again.";
+      Alert.alert("Invoice unavailable", msg);
+      setInvoiceTxnId(null);
+    } finally {
+      setInvoiceBusy(false);
+    }
+  }, []);
+  const onDownloadInvoice = useCallback(async () => {
+    if (!invoiceTxnId) return;
+    setInvoiceBusy(true);
+    try { await downloadInvoicePdf(invoiceTxnId, invoiceNumber); }
+    finally { setInvoiceBusy(false); }
+  }, [invoiceTxnId, invoiceNumber]);
 
   const load = useCallback(async () => {
     try {
@@ -566,7 +607,7 @@ export default function AdminSystemWallet() {
             ) : (
               <ScrollView style={{ flexGrow: 1 }} contentContainerStyle={{ paddingBottom: 28 }}>
                 {(bucketTxns || []).map((t) => (
-                  <TxnRow key={t.id} txn={t} />
+                  <TxnRow key={t.id} txn={t} onPreviewInvoice={onPreviewInvoice} />
                 ))}
                 <View style={{ height: 16 }} />
                 <Text style={styles.subtotalText}>Shown subtotal · {formatINR(bucketSubtotal)}</Text>
@@ -599,6 +640,29 @@ export default function AdminSystemWallet() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* ─── Invoice HTML preview modal (in-app, authenticated) ─── */}
+      <Modal visible={!!invoiceHtml} animationType="slide" onRequestClose={() => setInvoiceHtml(null)}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+          <View style={styles.invoiceHeader}>
+            <TouchableOpacity onPress={() => { setInvoiceHtml(null); setInvoiceTxnId(null); }} style={styles.invoiceCloseBtn} testID="invoice-close">
+              <Feather name="x" size={22} color={colors.textMain} />
+            </TouchableOpacity>
+            <Text style={styles.invoiceHeaderTitle}>GST Invoice / Statement</Text>
+            <TouchableOpacity onPress={onDownloadInvoice} style={styles.invoiceCloseBtn} disabled={invoiceBusy} testID="invoice-download">
+              {invoiceBusy ? <ActivityIndicator color={colors.primary} size="small" /> : <Feather name="download" size={20} color={colors.primary} />}
+            </TouchableOpacity>
+          </View>
+          {invoiceHtml ? (
+            Platform.OS === "web" ? (
+              // @ts-ignore — web iframe via dom element on RNW
+              <iframe srcDoc={invoiceHtml} style={{ flex: 1, border: 0, width: "100%", height: "100%" } as any} title="invoice-preview" />
+            ) : (
+              <WebView originWhitelist={["*"]} source={{ html: invoiceHtml }} style={{ flex: 1, backgroundColor: "#fff" }} />
+            )
+          ) : null}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -620,7 +684,7 @@ function BreakdownRow({ label, sub, value, hint }: { label: string; sub?: string
 
 /* ────────────────────────── Transaction row ────────────────────────── */
 
-function TxnRow({ txn }: { txn: Txn }) {
+function TxnRow({ txn, onPreviewInvoice }: { txn: Txn; onPreviewInvoice?: (t: Txn) => void }) {
   const dt = new Date(txn.created_at);
   const isCascade = txn.type === "cascade_overflow";
   const isDirect = txn.type === "direct_signup_credit";
@@ -658,11 +722,10 @@ function TxnRow({ txn }: { txn: Txn }) {
     ? { color: "#7C3AED", label: `Level ${txn.level || "?"} payout` }
     : { color: colors.primary, label: txn.type };
 
-  // Build invoice URL. The HTML view opens in the in-app browser via Linking.
-  // Backend route: GET /api/transactions/{id}/invoice (HTML), /invoice.pdf (PDF).
-  const base = (process.env.EXPO_PUBLIC_BACKEND_URL || "").replace(/\/$/, "");
-  const invoiceHtmlUrl = base ? `${base}/api/transactions/${txn.id}/invoice` : null;
-
+  // The HTML invoice endpoint requires an auth token (Bearer JWT) so we
+  // CAN'T just Linking.openURL the URL — the external browser has no auth.
+  // Instead, the parent component fetches the HTML via authenticated API
+  // and renders it in an in-app WebView/iframe modal.
   const isDebit = Number(txn.amount) < 0;
 
   return (
@@ -690,11 +753,9 @@ function TxnRow({ txn }: { txn: Txn }) {
           <Text style={styles.txnPlacement}>Placed under: {txn.placement_sponsor_name}{txn.placement_sponsor_email ? ` (${txn.placement_sponsor_email})` : ""}</Text>
         ) : null}
         <Text style={styles.txnMeta}>{dt.toLocaleString()} · ref {txn.reference_number || "—"}</Text>
-        {invoiceHtmlUrl ? (
+        {onPreviewInvoice ? (
           <TouchableOpacity
-            onPress={() => {
-              import("react-native").then(({ Linking }) => Linking.openURL(invoiceHtmlUrl));
-            }}
+            onPress={() => onPreviewInvoice(txn)}
             style={styles.invoiceLink}
             testID={`invoice-${txn.id}`}
           >
@@ -761,6 +822,10 @@ const styles = StyleSheet.create({
   helpText: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 8, marginBottom: 4 },
   invoiceLink: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6, alignSelf: "flex-start", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: colors.brand100, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.primary + "55" },
   invoiceLinkText: { fontSize: 10, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
+  // Invoice preview modal
+  invoiceHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, backgroundColor: colors.surface },
+  invoiceHeaderTitle: { fontSize: 15, fontWeight: "900", color: colors.textMain },
+  invoiceCloseBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
 
   empty: { padding: 30, alignItems: "center", gap: 6 },
   emptyText: { fontSize: 12, color: colors.textMuted },

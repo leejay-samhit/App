@@ -4078,3 +4078,65 @@ p1_p2_features_2026_05:
             `src/legal-page-view.tsx`. Both corrected; expo now serves 200.
 
 
+
+treasury_invoice_display_2026_05:
+  - task: "System Wallet treasury invoice / statement preview"
+    implemented: true
+    working: true
+    file: "frontend/app/admin/system-wallet.tsx (invoice modal + onPreviewInvoice), backend/invoices.py (INVOICEABLE_COMMISSION + NO_GST_INVOICE_TYPES expanded)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          BUG: Admin tapped "View invoice / statement" on a transaction in
+          the System Wallet treasury bucket modal and nothing displayed.
+
+          ROOT CAUSES (two):
+          1. Frontend used Linking.openURL(`/api/transactions/{id}/invoice`)
+             which opens the URL in an EXTERNAL BROWSER that has NO auth
+             token, so the backend returned 401 and nothing showed up.
+          2. Backend `is_invoiceable()` only accepted txn types in
+             INVOICEABLE_TAX_INVOICE ∪ INVOICEABLE_COMMISSION. The
+             treasury-side ledger has many internal types not in either
+             set — `cascade_overflow` (40 txns), `fee_residual` (5),
+             `gst_collected` (2), `direct_signup_credit` (2) — so even
+             with auth, most invoice clicks would 400 "Invoice/statement
+             not available for this transaction type".
+
+          FIX:
+          A) Frontend (`admin/system-wallet.tsx`):
+             - Added invoice preview Modal with WebView (native) / iframe
+               (web) — same pattern already used in admin/transactions.tsx.
+             - New `onPreviewInvoice(txn)` callback fetches HTML via
+               authenticated `fetchInvoiceHtml(txn.id)` (uses axios `api`
+               instance carrying the Bearer JWT).
+             - "Download PDF" header button uses `downloadInvoicePdf`.
+             - Error handling: friendly message if 400 (txn type doesn't
+               support invoice) vs 401/403 (not authorized) vs generic.
+             - Removed the `Linking.openURL` code path entirely.
+          B) Backend (`invoices.py`):
+             - Added these treasury-side ledger types to
+               INVOICEABLE_COMMISSION so admin can pull a "Statement of
+               Account" copy: direct_signup_credit, fee_residual,
+               cascade_overflow, gst_collected, l1_funding_debit,
+               l1_funding_recall, audit_credit, audit_debit,
+               platform_revenue.
+             - Added the SAME list to NO_GST_INVOICE_TYPES because these
+               are NOT taxable supplies — the printed statement
+               suppresses CGST/SGST/IGST rows and shows only the gross
+               amount as "Net payment", labeled "Statement of Account".
+
+          VERIFIED via curl with admin Bearer token:
+            cascade_overflow      → 200 (HTML)  + 200 (PDF)
+            fee_residual          → 200
+            gst_collected         → 200
+            direct_signup_credit  → 200
+            referral_payout       → 200
+            registration_fee      → 200
+          (Previously, only registration_fee + referral_payout returned 200;
+           the other 4 returned 400.)
+
+
