@@ -112,7 +112,10 @@ export default function UpiManualPayment() {
 
   const openUpiApp = async (appKey: typeof APPS[number]["key"]) => {
     if (!cfg?.deeplink_prefix) {
-      Alert.alert("Not configured", "Admin hasn't set the payee UPI ID yet. Please contact support.");
+      Alert.alert(
+        "Payment temporarily unavailable",
+        "The merchant UPI account is being set up. Please try again in a few minutes or contact support.",
+      );
       return;
     }
     setAppUsed(appKey);
@@ -229,14 +232,20 @@ export default function UpiManualPayment() {
               ))}
             </View>
 
-            <TouchableOpacity onPress={copyUpiId} style={styles.upiIdRow} testID="copy-upi-id">
-              <View style={{ flex: 1 }}>
-                <Text style={styles.upiIdLabel}>Payee UPI ID</Text>
-                <Text style={styles.upiIdValue}>{cfg.payee_upi_id || "Not configured"}</Text>
-                <Text style={styles.upiIdName}>{cfg.payee_name}</Text>
+            {/* Payee identity — name only (UPI ID intentionally hidden from end user) */}
+            <View style={styles.upiIdRow}>
+              <View style={[styles.payeeAvatar, { backgroundColor: colors.primary + "22" }]}>
+                <Feather name="user" size={18} color={colors.primary} />
               </View>
-              <Feather name="copy" size={18} color={colors.primary} />
-            </TouchableOpacity>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.upiIdLabel}>Paying to</Text>
+                <Text style={styles.upiIdValue}>{cfg.payee_name || brand.app_name || "App"}</Text>
+              </View>
+              <View style={styles.verifiedBadge}>
+                <Feather name="check-circle" size={12} color={colors.success} />
+                <Text style={styles.verifiedText}>Verified merchant</Text>
+              </View>
+            </View>
           </View>
 
           {/* Step 2 — submit UTR */}
@@ -358,8 +367,11 @@ const styles = StyleSheet.create({
 
   upiIdRow: { flexDirection: "row", alignItems: "center", marginTop: 14, padding: 12, borderRadius: 12, backgroundColor: colors.surfaceMuted, gap: 12 },
   upiIdLabel: { fontSize: 10, color: colors.textMuted, fontWeight: "800", letterSpacing: 0.5 },
-  upiIdValue: { fontSize: 16, fontWeight: "900", color: colors.textMain, fontVariant: ["tabular-nums"], marginTop: 2 },
+  upiIdValue: { fontSize: 16, fontWeight: "900", color: colors.textMain, marginTop: 2 },
   upiIdName:  { fontSize: 11, color: colors.textMuted, fontWeight: "700", marginTop: 2 },
+  payeeAvatar: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
+  verifiedBadge: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: colors.success + "1A" },
+  verifiedText: { fontSize: 10, fontWeight: "800", color: colors.success, letterSpacing: 0.2 },
 
   label: { fontSize: 11, color: colors.textMuted, fontWeight: "800", letterSpacing: 0.5, marginTop: 12, marginBottom: 6 },
   input: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, fontWeight: "700", color: colors.textMain, backgroundColor: colors.surface, fontVariant: ["tabular-nums"] },

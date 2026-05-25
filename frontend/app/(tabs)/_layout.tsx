@@ -22,7 +22,7 @@ export default function TabsLayout() {
   // The screen route still exists so other in-app navigation (e.g. Withdraw button on
   // Dashboard pushes to /(tabs)/wallet, Next L1 Payout card pushes to /(tabs)/network)
   // keeps working.
-  const HARD_HIDDEN: Set<string> = new Set(["wallet", "network"]);
+  const HARD_HIDDEN: Set<string> = new Set(["wallet", "network", "shop-category/[name]"]);
 
   // Hardcoded visible-tab order per current UX spec:
   // SHOP · SERVICES · DASHBOARD · CHAT · PROFILE

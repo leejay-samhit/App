@@ -2,7 +2,7 @@
 // the app boots (immediately after the native Expo splash dismisses).
 // Reads `splash_image`, `splash_duration_ms`, `splash_bg` from /api/branding.
 import { useEffect, useState } from "react";
-import { View, Image, StyleSheet, ActivityIndicator, Text } from "react-native";
+import { View, Image, StyleSheet, Text } from "react-native";
 import { useBranding } from "./branding";
 
 export function SplashOverlay() {
@@ -26,7 +26,7 @@ export function SplashOverlay() {
         <Image
           source={{ uri: img }}
           style={styles.image}
-          resizeMode="contain"
+          resizeMode="cover"
           onError={() => setVisible(false)}
         />
       ) : (
@@ -35,9 +35,6 @@ export function SplashOverlay() {
           {b.tagline ? <Text style={styles.fallbackSub}>{b.tagline}</Text> : null}
         </View>
       )}
-      <View style={styles.spinnerWrap}>
-        <ActivityIndicator color="#ffffff" />
-      </View>
     </View>
   );
 }
@@ -49,9 +46,10 @@ const styles = StyleSheet.create({
     alignItems: "center", justifyContent: "center",
     zIndex: 9999,
   },
-  image:       { width: "85%", height: "60%", maxWidth: 600, maxHeight: 800 },
+  // Full-screen splash: image fills the entire viewport (cover crop). The
+  // admin-uploaded image should be designed at portrait aspect for best result.
+  image:       { width: "100%", height: "100%" },
   fallback:    { alignItems: "center", justifyContent: "center", paddingHorizontal: 32 },
   fallbackTitle: { fontSize: 36, fontWeight: "900", color: "#fff", letterSpacing: -0.5, textAlign: "center" },
   fallbackSub:   { fontSize: 14, fontWeight: "600", color: "rgba(255,255,255,0.85)", marginTop: 10, textAlign: "center" },
-  spinnerWrap: { position: "absolute", bottom: 60 },
 });
