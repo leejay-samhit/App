@@ -10,6 +10,7 @@ import { colors, radii, spacing } from "../../src/theme";
 
 const ITEMS = [
   { icon: "message-circle", label: "Chat (team + users)", route: "/admin/chat" },
+  { icon: "credit-card",    label: "My wallet (personal)", route: "/admin/my-wallet" },
   { icon: "shield", label: "Admin access", route: "/admin/admins" },
   { icon: "user-check", label: "User approvals", route: "/admin/approvals" },
   { icon: "check-circle", label: "Approved registrations", route: "/admin/approved" },
