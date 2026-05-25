@@ -5813,9 +5813,16 @@ async def admin_list_changes(_: Dict[str, Any] = Depends(require_admin_not_finan
 
 @app.on_event("startup")
 async def on_startup():
-    await db.users.create_index("email", unique=True)
-    await db.users.create_index("referral_code", unique=True)
-    await db.users.create_index("sponsor_id")
+    # ---------- Core indexes (kept synchronous — fast on Atlas) ----------
+    # Wrapped defensively so a single index failure (e.g. transient Atlas
+    # hiccup, schema drift on migrated data) never kills the startup hook
+    # and never makes uvicorn fail the K8s probe.
+    try:
+        await db.users.create_index("email", unique=True)
+        await db.users.create_index("referral_code", unique=True)
+        await db.users.create_index("sponsor_id")
+    except Exception as _idx_err:
+        logger.warning(f"User-index setup failed (non-fatal): {_idx_err}")
     # ---------- Idempotency safety-net indexes for transactions ----------
     # Prevent duplicate transaction rows when the same upstream event (an order,
     # a service booking, a Razorpay payment) is processed twice.
@@ -5855,73 +5862,23 @@ async def on_startup():
     except Exception as _idx_err:
         logger.warning(f"Transaction unique-index setup failed: {_idx_err}")
 
-    # ---------- Backfill: clean up auto-prefixed admin descriptions ----------
-    # Earlier code stored "Admin credit: <remarks>" / "Admin debit: <remarks>".
-    # Now we store the typed remarks verbatim. Strip the legacy prefix from
-    # any existing transactions so the wallet history shows what the admin typed.
-    try:
-        async for tx in db.transactions.find(
-            {
-                "type": {"$in": ["admin_credit", "admin_debit"]},
-                "description": {"$regex": "^Admin (credit|debit): "},
-            },
-            {"_id": 0, "id": 1, "description": 1, "remarks": 1},
-        ):
-            new_desc = tx["description"].split(": ", 1)[1] if ": " in tx["description"] else tx["description"]
-            update = {"description": new_desc.strip()}
-            if not (tx.get("remarks") or "").strip():
-                update["remarks"] = new_desc.strip()
-            await db.transactions.update_one({"id": tx["id"]}, {"$set": update})
-    except Exception as _bf_err:
-        logger.warning(f"Admin-prefix backfill failed: {_bf_err}")
-
-    # ---------- Backfill: collapse duplicate registration_fee rows ----------
-    # Earlier code wrote one txn at /payment/create-order (status=created) AND
-    # another at /payment/verify (status=paid) for the same razorpay_order_id.
-    # Now we update the pending row in place; clean up legacy doubles by
-    # deleting the orphaned `created` row when a `paid` sibling exists.
-    try:
-        pipeline = [
-            {"$match": {"type": "registration_fee", "razorpay_order_id": {"$exists": True, "$ne": None}}},
-            {"$group": {
-                "_id": "$razorpay_order_id",
-                "count": {"$sum": 1},
-                "ids": {"$push": {"id": "$id", "status": "$status"}},
-            }},
-            {"$match": {"count": {"$gt": 1}}},
-        ]
-        dupe_groups = await db.transactions.aggregate(pipeline).to_list(5000)
-        removed = 0
-        for grp in dupe_groups:
-            statuses = {x["status"] for x in grp["ids"]}
-            if "paid" in statuses and "created" in statuses:
-                # Drop the "created" rows; keep "paid"
-                created_ids = [x["id"] for x in grp["ids"] if x["status"] == "created"]
-                res = await db.transactions.delete_many({"id": {"$in": created_ids}})
-                removed += res.deleted_count
-        if removed:
-            logger.info(f"Reg-fee duplicate backfill: removed {removed} legacy 'created' rows")
-    except Exception as _bf_err:
-        logger.warning(f"Reg-fee duplicate backfill failed: {_bf_err}")
-
-    # ---------- Backfill: zero-out amount on stale created/failed rows ----------
-    # Earlier `created` and `failed` registration_fee rows had positive amounts,
-    # so they polluted total_revenue (e.g. 5 phantom rows × ₹118 = ₹590).
-    # Going forward, those rows are kept with amount=0, but legacy data needs the
-    # same correction so the dashboard numbers are accurate.
-    #
-    # === DEPLOYMENT-CRITICAL: this and all the following heavy work runs in
-    # the BACKGROUND so uvicorn can bind to 0.0.0.0:8001 immediately and
-    # pass the Kubernetes startup probe.  Previously, the seed-pincodes step
-    # parsed a 9 MB CSV (155 k rows) + did a 155 k bulk insert which took
-    # 30-60 s, exceeding the K8s startup probe timeout and causing the pod
-    # to be restarted in a crash loop (nginx then logged "connect() failed
-    # (111: Connection refused)" for every request). ===
+    # === DEPLOYMENT-CRITICAL: ALL the heavy work below (admin-prefix
+    # backfill, duplicate reg-fee cleanup, phantom-amount cleanup, pincode
+    # CSV seed, etc.) runs in the BACKGROUND so uvicorn binds to
+    # 0.0.0.0:8001 immediately and passes the Kubernetes startup probe.
+    # Previously, just the pincode CSV (9 MB, 155 k rows) was identified as
+    # heavy and moved to background — but the two backfills directly below
+    # (admin-prefix + duplicate reg-fee) ALSO ran synchronously and on
+    # Atlas (with its 50-200 ms per-roundtrip latency), the cumulative
+    # delay still exceeded the K8s probe deadline → "connect() failed
+    # (111: Connection refused)" pod crash-loop. All backfills are
+    # idempotent and safe to run after startup. ===
     asyncio.create_task(_background_init())
     # Kick off the periodic backup task (also background, also fast)
     asyncio.create_task(_backup_scheduler())
     # Money-flow drift auto-check (every 5 min)
     asyncio.create_task(_money_flow_checker())
+
 
 
 async def _background_init():
@@ -5939,6 +5896,59 @@ async def _background_init():
         # Small initial delay to let uvicorn fully register the port + let
         # the K8s readiness probe pass with the first /api/branding call.
         await asyncio.sleep(2)
+
+        # ---------- Backfill: clean up auto-prefixed admin descriptions ----------
+        # Earlier code stored "Admin credit: <remarks>" / "Admin debit: <remarks>".
+        # Now we store the typed remarks verbatim. Strip the legacy prefix from
+        # any existing transactions so the wallet history shows what the admin typed.
+        # MOVED HERE FROM on_startup() (May-2026) — was causing K8s probe
+        # timeout in production with Atlas latency.
+        try:
+            async for tx in db.transactions.find(
+                {
+                    "type": {"$in": ["admin_credit", "admin_debit"]},
+                    "description": {"$regex": "^Admin (credit|debit): "},
+                },
+                {"_id": 0, "id": 1, "description": 1, "remarks": 1},
+            ):
+                new_desc = tx["description"].split(": ", 1)[1] if ": " in tx["description"] else tx["description"]
+                update = {"description": new_desc.strip()}
+                if not (tx.get("remarks") or "").strip():
+                    update["remarks"] = new_desc.strip()
+                await db.transactions.update_one({"id": tx["id"]}, {"$set": update})
+        except Exception as _bf_err:
+            logger.warning(f"Admin-prefix backfill failed: {_bf_err}")
+
+        # ---------- Backfill: collapse duplicate registration_fee rows ----------
+        # Earlier code wrote one txn at /payment/create-order (status=created) AND
+        # another at /payment/verify (status=paid) for the same razorpay_order_id.
+        # Now we update the pending row in place; clean up legacy doubles by
+        # deleting the orphaned `created` row when a `paid` sibling exists.
+        # MOVED HERE FROM on_startup() (May-2026) — same K8s probe reason.
+        try:
+            pipeline = [
+                {"$match": {"type": "registration_fee", "razorpay_order_id": {"$exists": True, "$ne": None}}},
+                {"$group": {
+                    "_id": "$razorpay_order_id",
+                    "count": {"$sum": 1},
+                    "ids": {"$push": {"id": "$id", "status": "$status"}},
+                }},
+                {"$match": {"count": {"$gt": 1}}},
+            ]
+            dupe_groups = await db.transactions.aggregate(pipeline).to_list(5000)
+            removed = 0
+            for grp in dupe_groups:
+                statuses = {x["status"] for x in grp["ids"]}
+                if "paid" in statuses and "created" in statuses:
+                    # Drop the "created" rows; keep "paid"
+                    created_ids = [x["id"] for x in grp["ids"] if x["status"] == "created"]
+                    res = await db.transactions.delete_many({"id": {"$in": created_ids}})
+                    removed += res.deleted_count
+            if removed:
+                logger.info(f"Reg-fee duplicate backfill: removed {removed} legacy 'created' rows")
+        except Exception as _bf_err:
+            logger.warning(f"Reg-fee duplicate backfill failed: {_bf_err}")
+
         # ─── Backfill placement audit fields for legacy users (Feb-2026) ───
         # Existing users that signed up BEFORE the realignment feature won't
         # have `original_sponsor_id` / `placement_history`. Backfill the
