@@ -94,6 +94,16 @@ DEFAULT_BRANDING: Dict[str, Any] = {
     "splash_image":       None,        # base64 data URI or http URL (null = no overlay)
     "splash_duration_ms": 5000,        # default 5s — admin can set 1000-10000
     "splash_bg":          "#143D2E",   # solid background behind the image
+    # ─── Payment methods config (Feb-2026) ───
+    # Razorpay is HIDDEN by default (manual UPI flow is preferred for now).
+    # Admin can flip `razorpay_enabled=true` to re-enable the Razorpay UI.
+    # `payee_upi_id` + `payee_name` are used in the `upi://` deep link.
+    "payment_methods": {
+        "razorpay_enabled":   False,
+        "upi_manual_enabled": True,
+        "payee_upi_id":       "",      # e.g. "kiran@ibl"
+        "payee_name":         "",      # display name on UPI app, default uses app_name
+    },
     "tabs": [
         {"key": "dashboard", "label": "Dashboard", "icon": "home", "visible": True},
         {"key": "network", "label": "Network", "icon": "git-branch", "visible": True},

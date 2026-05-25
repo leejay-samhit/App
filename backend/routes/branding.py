@@ -82,6 +82,27 @@ async def admin_update_branding(
         if bg and not re.match(r"^#[0-9A-Fa-f]{3,8}$", bg):
             raise HTTPException(status_code=400, detail="splash_bg must be a hex colour (e.g. #143D2E)")
         update["splash_bg"] = bg or DEFAULT_BRANDING["splash_bg"]
+    # ─── Payment methods (Feb-2026) ───
+    if payload.payment_methods is not None:
+        pm_in = payload.payment_methods or {}
+        if not isinstance(pm_in, dict):
+            raise HTTPException(status_code=400, detail="payment_methods must be an object")
+        # Merge over current branding so partial updates work.
+        _current = await get_branding_doc()
+        current_pm = (_current.get("payment_methods") or DEFAULT_BRANDING.get("payment_methods") or {}).copy()
+        if "razorpay_enabled" in pm_in:
+            current_pm["razorpay_enabled"] = bool(pm_in["razorpay_enabled"])
+        if "upi_manual_enabled" in pm_in:
+            current_pm["upi_manual_enabled"] = bool(pm_in["upi_manual_enabled"])
+        if "payee_upi_id" in pm_in:
+            pa = (pm_in["payee_upi_id"] or "").strip()
+            # Lightweight UPI-ID format check: must contain @ and be 5–50 chars.
+            if pa and not re.match(r"^[A-Za-z0-9._-]{2,40}@[A-Za-z]{2,15}$", pa):
+                raise HTTPException(status_code=400, detail="payee_upi_id must look like name@bank (e.g. kiran@ibl)")
+            current_pm["payee_upi_id"] = pa
+        if "payee_name" in pm_in:
+            current_pm["payee_name"] = (pm_in["payee_name"] or "")[:60].strip()
+        update["payment_methods"] = current_pm
     if payload.tabs is not None:
         cleaned: List[Dict[str, Any]] = []
         seen: set = set()

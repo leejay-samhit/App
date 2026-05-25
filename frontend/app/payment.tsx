@@ -29,8 +29,18 @@ type PayConfig = {
 
 export default function Payment() {
   const { user, refresh, logout } = useAuth();
-  const { app_name, payment_hero } = useBranding();
+  const { app_name, payment_hero, payment_methods } = useBranding();
   const router = useRouter();
+
+  // ─── Razorpay feature flag (Feb-2026) ───
+  // When admin disables Razorpay, route this entry-point to the new manual
+  // UPI flow. Razorpay code stays intact below — it re-activates the moment
+  // `payment_methods.razorpay_enabled` flips back to true.
+  useEffect(() => {
+    if (payment_methods && payment_methods.razorpay_enabled === false) {
+      router.replace("/payment-upi" as any);
+    }
+  }, [payment_methods?.razorpay_enabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [config, setConfig] = useState<PayConfig | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(true);

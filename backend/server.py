@@ -157,6 +157,7 @@ from routes import shop_categories as shop_categories_router  # noqa: E402
 from routes import tickets as tickets_router  # noqa: E402
 from routes import pincodes as pincodes_router  # noqa: E402
 from routes import legal_pages as legal_pages_router  # noqa: E402
+from routes import upi_manual as upi_manual_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -7730,6 +7731,7 @@ app.include_router(shop_categories_router.router, prefix="/api")
 app.include_router(tickets_router.router, prefix="/api")
 app.include_router(pincodes_router.router, prefix="/api")
 app.include_router(legal_pages_router.router, prefix="/api")
+app.include_router(upi_manual_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,

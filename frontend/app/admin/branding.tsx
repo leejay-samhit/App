@@ -171,6 +171,36 @@ export default function AdminBranding() {
             ))}
           </View>
 
+          {/* Payment methods (Feb-2026) — Razorpay toggle + Manual UPI config */}
+          <SectionHeader icon="credit-card" label="Payment methods" />
+          <Text style={styles.helper}>
+            Toggle Razorpay (advanced) or manual UPI flow. UPI ID is used in the deep link upi://pay?pa=…
+          </Text>
+          <View style={styles.splashRow}>
+            <Text style={styles.fieldLabel}>Razorpay enabled</Text>
+            <Switch
+              value={!!draft.payment_methods?.razorpay_enabled}
+              onValueChange={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), razorpay_enabled: v } }))}
+              trackColor={{ false: colors.border, true: colors.primary }}
+              testID="branding-pm-razorpay"
+            />
+          </View>
+          <View style={styles.splashRow}>
+            <Text style={styles.fieldLabel}>UPI manual enabled</Text>
+            <Switch
+              value={draft.payment_methods?.upi_manual_enabled !== false}
+              onValueChange={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), upi_manual_enabled: v } }))}
+              trackColor={{ false: colors.border, true: colors.primary }}
+              testID="branding-pm-upimanual"
+            />
+          </View>
+          <Field label="Payee UPI ID" value={draft.payment_methods?.payee_upi_id || ""}
+                 onChangeText={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), payee_upi_id: v.trim() } }))}
+                 placeholder="e.g. kiran@ibl" testID="branding-pm-upiid" />
+          <Field label="Payee Display Name" value={draft.payment_methods?.payee_name || ""}
+                 onChangeText={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), payee_name: v } }))}
+                 placeholder={draft.app_name || "NetworkRupay"} testID="branding-pm-payeename" />
+
           {/* Splash overlay (admin-uploaded launch image + duration) */}
           <SectionHeader icon="image" label="App launch splash" />
           <Text style={styles.helper}>

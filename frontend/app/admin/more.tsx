@@ -29,6 +29,7 @@ const ITEMS = [
   { icon: "list", label: "Transactions", route: "/admin/transactions" },
   { icon: "file-text", label: "Admin audit log", route: "/admin/audit" },
   { icon: "sliders", label: "Payout structure", route: "/admin/settings" },
+  { icon: "credit-card", label: "UPI Payments (pending)", route: "/admin/payments-pending" },
   { icon: "file-text", label: "Legal pages (editable)", route: "/admin/legal-pages" },
 ];
 

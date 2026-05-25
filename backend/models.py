@@ -134,6 +134,8 @@ class BrandingPayload(BaseModel):
     splash_image: Optional[str] = None      # base64 data URI or http URL
     splash_duration_ms: Optional[int] = None  # 1000..10000
     splash_bg: Optional[str] = None         # hex colour
+    # ─── Payment methods config (Feb-2026) ───
+    payment_methods: Optional[Dict[str, Any]] = None
 
 
 class GoogleExchange(BaseModel):

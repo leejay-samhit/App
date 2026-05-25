@@ -44,6 +44,13 @@ export type Branding = {
   splash_image?: string | null;
   splash_duration_ms?: number;
   splash_bg?: string;
+  // ─── Payment methods config (Feb-2026) ───
+  payment_methods?: {
+    razorpay_enabled?: boolean;
+    upi_manual_enabled?: boolean;
+    payee_upi_id?: string;
+    payee_name?: string;
+  };
   // Legal / business info (shown on Legal pages & used by payment gateway KYC)
   business_name?: string;
   business_address?: string;
