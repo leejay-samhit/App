@@ -28,6 +28,7 @@ import { useAuth } from "../src/auth";
 import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { useSmsUtrListener, isSmsConsentAvailable } from "../src/sms-utr";
+import QRCode from "react-native-qrcode-svg";
 
 type Config = {
   methods_enabled: { razorpay: boolean; upi_manual: boolean };
@@ -221,6 +222,17 @@ export default function UpiManualPayment() {
               <Text style={styles.stepTitle}>Pay {formatINR(cfg.amount)} via your UPI app</Text>
             </View>
             <Text style={styles.subtle}>Tap any app — the same UPI request opens. After paying, copy the UTR from the success screen.</Text>
+
+            {/* Heads-up about PhonePe/GPay's anti-fraud decline on direct
+                intent payments. If user sees the "declined for security
+                reasons" message, they should fall back to QR / UPI-ID. */}
+            <View style={styles.warnRow}>
+              <Feather name="info" size={14} color="#A16207" />
+              <Text style={styles.warnText}>
+                If your UPI app shows "declined for security reasons", use the QR code or copy the UPI ID below — both methods always work.
+              </Text>
+            </View>
+
             <View style={styles.appsRow}>
               {APPS.map((a) => (
                 <TouchableOpacity key={a.key} onPress={() => openUpiApp(a.key)} style={[styles.appBtn, { borderColor: a.tint + "55" }]} testID={`pay-${a.key}`}>
@@ -232,7 +244,14 @@ export default function UpiManualPayment() {
               ))}
             </View>
 
-            {/* Payee identity — name only (UPI ID intentionally hidden from end user) */}
+            {/* Payee identity card + QR + UPI-ID fallback.
+                IMPORTANT — PhonePe / GPay / Paytm sometimes BLOCK
+                intent-based (deep-link) payments to personal P2P VPAs
+                with the message "Your payment is declined for security
+                reasons. Please try using a mobile number, UPI ID, or
+                QR code". When that happens the user must fall back to
+                scanning the QR or pasting the UPI ID manually inside
+                their UPI app. So we surface BOTH options here. */}
             <View style={styles.upiIdRow}>
               <View style={[styles.payeeAvatar, { backgroundColor: colors.primary + "22" }]}>
                 <Feather name="user" size={18} color={colors.primary} />
@@ -246,6 +265,32 @@ export default function UpiManualPayment() {
                 <Text style={styles.verifiedText}>Verified merchant</Text>
               </View>
             </View>
+
+            {cfg.deeplink_prefix ? (
+              <View style={styles.qrCard}>
+                <Text style={styles.qrCardTitle}>Scan to pay ₹{formatINR(cfg.registration_fee)}</Text>
+                <Text style={styles.qrCardSub}>Open Google Pay / PhonePe / Paytm → tap "Scan QR" → point at this code</Text>
+                <View style={styles.qrBox}>
+                  <QRCode
+                    value={cfg.deeplink_prefix + `&tn=${encodeURIComponent("Registration fee")}`}
+                    size={180}
+                    color={colors.textMain}
+                    backgroundColor="#FFFFFF"
+                  />
+                </View>
+                {/* UPI-ID fallback — tap to copy, paste in "Pay to UPI ID" inside UPI app */}
+                <TouchableOpacity onPress={copyUpiId} style={styles.upiIdFallback} testID="copy-upi-id">
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.upiIdFallbackLabel}>Or enter UPI ID manually</Text>
+                    <Text style={styles.upiIdFallbackValue}>{cfg.payee_upi_id}</Text>
+                  </View>
+                  <View style={styles.copyChip}>
+                    <Feather name="copy" size={13} color={colors.primary} />
+                    <Text style={styles.copyChipText}>Copy</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            ) : null}
           </View>
 
           {/* Step 2 — submit UTR */}
@@ -372,6 +417,21 @@ const styles = StyleSheet.create({
   payeeAvatar: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
   verifiedBadge: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: colors.success + "1A" },
   verifiedText: { fontSize: 10, fontWeight: "800", color: colors.success, letterSpacing: 0.2 },
+
+  // QR code card — fallback path when PhonePe/GPay blocks the deep link.
+  qrCard:      { marginTop: 14, padding: 16, borderRadius: 14, backgroundColor: "#FFFFFF", borderWidth: 1, borderColor: colors.border, alignItems: "center" },
+  qrCardTitle: { fontSize: 14, fontWeight: "900", color: colors.textMain, letterSpacing: 0.2 },
+  qrCardSub:   { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 16, textAlign: "center", paddingHorizontal: 8 },
+  qrBox:       { marginTop: 14, padding: 10, backgroundColor: "#FFFFFF", borderRadius: 12, borderWidth: 1, borderColor: colors.border },
+  upiIdFallback: { flexDirection: "row", alignItems: "center", marginTop: 14, padding: 10, borderRadius: 10, backgroundColor: colors.surfaceMuted, alignSelf: "stretch" },
+  upiIdFallbackLabel: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.4 },
+  upiIdFallbackValue: { fontSize: 14, fontWeight: "900", color: colors.textMain, marginTop: 3, fontVariant: ["tabular-nums"] },
+  copyChip:    { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary + "1A" },
+  copyChipText:{ fontSize: 11, fontWeight: "900", color: colors.primary, letterSpacing: 0.3 },
+
+  // PhonePe / GPay anti-fraud heads-up banner above the app buttons.
+  warnRow:     { flexDirection: "row", alignItems: "flex-start", gap: 8, marginTop: 10, marginBottom: 6, padding: 10, borderRadius: 10, backgroundColor: "#FEF3C7", borderWidth: 1, borderColor: "#FDE68A" },
+  warnText:    { flex: 1, fontSize: 11, lineHeight: 16, color: "#78350F", fontWeight: "600" },
 
   label: { fontSize: 11, color: colors.textMuted, fontWeight: "800", letterSpacing: 0.5, marginTop: 12, marginBottom: 6 },
   input: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, fontWeight: "700", color: colors.textMain, backgroundColor: colors.surface, fontVariant: ["tabular-nums"] },
