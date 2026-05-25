@@ -92,10 +92,31 @@ DEFAULT_CATEGORIES: List[Dict[str, Any]] = [
 
 
 async def _ensure_seeded() -> None:
-    """Insert default categories if the collection is empty."""
+    """Insert default categories ONCE on first ever boot.
+
+    Previous behaviour: seed whenever the collection is empty. Side-effect —
+    admins who deleted every category from the admin Shop Categories screen
+    saw them magically reappear on the next page load, because the next GET
+    request would re-run the seed (count == 0 again).
+
+    New behaviour: a one-time marker in the `app_state` collection records
+    that the seed has already happened. Once the marker is set, we NEVER
+    re-seed — even if the categories collection becomes empty later. This
+    respects the admin's intent to delete categories permanently.
+    """
     try:
+        marker = await db.app_state.find_one({"_id": "shop_categories_seeded"})
+        if marker:
+            return  # already seeded once — never auto-recreate, even if empty.
         count = await db.shop_categories.count_documents({})
         if count > 0:
+            # Categories already exist (e.g. migrated data) — mark as seeded
+            # and exit so we don't double-insert on the next call.
+            await db.app_state.update_one(
+                {"_id": "shop_categories_seeded"},
+                {"$set": {"at": datetime.utcnow(), "reason": "preexisting_data"}},
+                upsert=True,
+            )
             return
         now = datetime.utcnow()
         docs = []
@@ -115,6 +136,13 @@ async def _ensure_seeded() -> None:
             })
         if docs:
             await db.shop_categories.insert_many(docs)
+        # Set the one-time marker so subsequent calls skip this branch
+        # for good, even if the admin later deletes every category.
+        await db.app_state.update_one(
+            {"_id": "shop_categories_seeded"},
+            {"$set": {"at": now, "reason": "first_boot_seed", "count": len(docs)}},
+            upsert=True,
+        )
     except Exception:
         # Best-effort: never let seeding break startup or requests.
         pass
