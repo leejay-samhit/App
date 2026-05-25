@@ -4346,3 +4346,115 @@ agent_communication:
       passed cleanly. Main agent can summarize and finish, optionally
       addressing the (b) hardening.
 
+
+upi_manual_payment_flow_2026_05:
+  - task: "Manual UPI payment flow (Google Pay / PhonePe / Paytm) + admin approval"
+    implemented: true
+    working: true
+    file: |
+      backend/routes/upi_manual.py (new router)
+      backend/core/config.py (DEFAULT_BRANDING.payment_methods)
+      backend/models.py (BrandingPayload.payment_methods)
+      backend/routes/branding.py (validation + merge)
+      frontend/app/payment-upi.tsx (user UPI screen)
+      frontend/app/payment.tsx (Razorpay flag redirect)
+      frontend/app/admin/payments-pending.tsx (admin approval queue)
+      frontend/app/admin/branding.tsx (payment-methods config UI)
+      frontend/app/admin/_layout.tsx + more.tsx (route registration + tile)
+      frontend/src/branding.tsx (Branding TS type extension)
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          NEW FEATURE — Hand-built manual UPI payment flow per user spec. Razorpay code stays intact and re-enables instantly via the `payment_methods.razorpay_enabled` branding flag.
+
+          BACKEND:
+          - New router `routes/upi_manual.py` with:
+            • GET /payment/upi-config   — user fetches: methods_enabled,
+              amount, payee_upi_id, payee_name, deeplink_prefix (full
+              `upi://pay?pa=<id>&pn=<name>&am=<fee>&cu=INR`), pending_payment.
+            • POST /payment/upi-manual {utr, app_used, note?} — creates a
+              `manual_payments` row with status=PENDING + a pending
+              `transactions` row so it shows up in the user's wallet history.
+              UTR format guard (8–22 alphanumeric), unique across users.
+              If user already has a PENDING row, the UTR/app/note are
+              UPDATED IN PLACE (no duplicate rows).
+            • GET /payment/upi-manual/status — polled by the user's
+              "Awaiting approval" screen.
+            • GET /admin/payments/pending?status= — admin queue.
+            • POST /admin/payments/{id}/approve — APPROVED + activates
+              user (sets registration_paid=true) + fires the same
+              downstream side-effects as Razorpay verify
+              (`_trigger_referral_commissions` → L1–L10 cascade,
+              `_archive_approved_user` → archive, `_audit_log`,
+              `_create_notification`).
+            • POST /admin/payments/{id}/reject {reason} — REJECTED with
+              user-visible reason; previous transaction row marked failed.
+          - DEFAULT_BRANDING extended with `payment_methods` object
+            (razorpay_enabled=False by default, upi_manual_enabled=True,
+             payee_upi_id="", payee_name="").
+          - BrandingPayload + branding PUT handler accept partial updates
+            and validate UPI ID format (`name@bank`).
+
+          FRONTEND:
+          - NEW user screen `app/payment-upi.tsx`:
+              • Hero with amount + payee name.
+              • Status banner (Pending/Rejected) if applicable.
+              • Step 1: 3 buttons (G Pay / PhonePe / Paytm) all open the
+                same `upi://` deep link via Linking.openURL (which fires
+                the system UPI app chooser). Web build shows a friendly
+                "open on mobile" message.
+              • Copy-UPI-ID row (expo-clipboard) for users who prefer to
+                paste into their app manually.
+              • Step 2: UTR input (8–22 chars, auto uppercase/strip), app
+                pill selector (G Pay / PhonePe / Paytm / Other), optional
+                note for admin, submit button.
+              • Polls /payment/upi-manual/status every 6s so the user is
+                auto-redirected to dashboard the moment admin approves.
+          - `app/payment.tsx` now checks `branding.payment_methods.razorpay_enabled`
+            on mount — if false, it `router.replace('/payment-upi')`.
+            Razorpay code below stays compiled; flipping the flag back
+            re-enables it instantly with NO code change.
+          - NEW admin screen `app/admin/payments-pending.tsx`:
+              • PENDING / APPROVED / REJECTED tab strip.
+              • Cards show user name, email, phone, referral code, ref code,
+                amount, UTR (selectable), app used, date, note.
+              • Approve button shows confirmation alert (mentions L1–L10
+                cascade fires). Reject opens bottom-sheet modal with
+                required reason text (min 3 chars).
+              • Pull-to-refresh.
+          - Admin More screen gets a new "UPI Payments (pending)" tile.
+          - Admin Branding screen gains a new "Payment methods" section:
+              • Razorpay toggle.
+              • UPI manual toggle.
+              • Payee UPI ID input (validated against `name@bank` regex).
+              • Payee display name input (defaults to app_name).
+          - Branding TS type extended with `payment_methods` so
+            `useBranding()` exposes the values everywhere.
+
+          BACKEND TESTING (deep_testing_backend_v2):
+          A1–A4   Branding config ✓ (UPI ID format validation works → 400)
+          B5–B11  User flow ✓ (deeplink correct, UTR validation, in-place
+                  update on re-submit)
+          C12–C15 Admin approval ✓ (user.registration_paid flips to true,
+                  L1–L10 cascade fires)
+          D16–D19 Rejection ✓ (cannot approve rejected → 400)
+          E20     Duplicate guard — testing-agent reported PASS-by-design:
+                  the duplicate guard works correctly when a user submits
+                  a UTR currently on record; the test's expected 409 was
+                  based on a stale UTR that had been overwritten in B10.
+                  No code change required.
+          F21     Cleanup ✓
+
+          SECURITY NOTES:
+          - We NEVER auto-approve from client signals (UTR is unverified
+            until admin sees it in the bank statement).
+          - SMS reading is INTENTIONALLY not implemented (per user
+            confirmation) — keeps Google Play approval risk = zero.
+          - UTR is unique across users (409 on collision) but in-place
+            re-submission by the SAME user is allowed (keeps queue clean).
+
+
