@@ -278,7 +278,7 @@ function BannerFormModal({ visible, banner, products, onClose, onSaved }: {
             </TouchableOpacity>
           </View>
 
-          <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 60 }} keyboardShouldPersistTaps="handled">
+          <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 60 }} keyboardShouldPersistTaps="handled">
             {/* Image */}
             <Text style={styles.label}>Banner image / GIF</Text>
             <TouchableOpacity onPress={pickImage} style={styles.imagePicker} testID="banner-image-picker">

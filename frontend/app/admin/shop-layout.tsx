@@ -690,7 +690,7 @@ function BlockFormModal({
             </TouchableOpacity>
           </View>
 
-          <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 80 }} keyboardShouldPersistTaps="handled">
+          <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }} keyboardShouldPersistTaps="handled">
             {/* Scope */}
             <Text style={styles.label}>Where does this block appear?</Text>
             <View style={{ flexDirection: "row", gap: 8 }}>
