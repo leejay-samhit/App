@@ -63,6 +63,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="shop-categories" options={{ href: null }} />
       <Tabs.Screen name="legal-pages" options={{ href: null }} />
       <Tabs.Screen name="payments-pending" options={{ href: null }} />
+      <Tabs.Screen name="shop-category/[name]" options={{ href: null }} />
     </Tabs>
   );
 }

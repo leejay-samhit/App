@@ -80,6 +80,10 @@ export default function AdminBranding() {
         splash_image: draft.splash_image,
         splash_duration_ms: draft.splash_duration_ms,
         splash_bg: draft.splash_bg,
+        // ⬇️ THIS WAS MISSING — the whole reason payee_upi_id wasn't
+        // saving. Without this key in the PUT body the backend never
+        // received the UPI ID / payee name / toggles changes.
+        payment_methods: draft.payment_methods,
       });
       setBranding(data);
       Alert.alert("Saved", "Branding updated. Users will see the new theme on next refresh.");

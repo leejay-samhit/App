@@ -56,9 +56,12 @@ export default function AdminShop() {
         </ScrollView>
       </View>
 
-      {/* Customer view */}
+      {/* Customer view — embedded with admin-route prefix so tapping a
+          category card pushes /admin/shop-category/<name> (and the admin
+          bottom-tab bar stays visible) instead of jumping into the
+          (tabs) layout. */}
       <View style={{ flex: 1 }}>
-        <ShopHome cartCount={0} wishlistCount={0} />
+        <ShopHome cartCount={0} wishlistCount={0} categoryRoutePrefix="/admin" />
       </View>
     </SafeAreaView>
   );

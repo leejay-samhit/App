@@ -111,10 +111,19 @@ export function ShopHome({
   cartCount = 0,
   wishlistCount = 0,
   deliveryAddress: defaultAddress = "Set your location",
+  categoryRoutePrefix = "",
 }: {
   cartCount?: number;
   wishlistCount?: number;
   deliveryAddress?: string;
+  /**
+   * Optional prefix for category navigation. When ShopHome is embedded
+   * inside the admin tabs (admin/shop.tsx), pass "/admin" so tapping a
+   * category card pushes /admin/shop-category/<name> (keeping the admin
+   * bottom-tab bar). User-side leaves this empty so it pushes
+   * /shop-category/<name> inside the (tabs) group.
+   */
+  categoryRoutePrefix?: string;
 }) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -578,8 +587,8 @@ export function ShopHome({
           category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
           onCategoryPress={(c) => {
-            if (!c) router.push("/shop" as any);
-            else router.push(`/shop-category/${encodeURIComponent(c)}` as any);
+            if (!c) router.push(`${categoryRoutePrefix}/shop` as any);
+            else router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c)}` as any);
           }}
           onAddToCart={async (id) => {
             try {
@@ -732,7 +741,7 @@ export function ShopHome({
                     onPress={() => {
                       setActiveCategory(c.name);
                       setAllCatModalOpen(false);
-                      router.push(`/shop-category/${encodeURIComponent(c.name)}` as any);
+                      router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c.name)}` as any);
                     }}
                     activeOpacity={0.75}
                     testID={`all-cat-${c.slug}`}
