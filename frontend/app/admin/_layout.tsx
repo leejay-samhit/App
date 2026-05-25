@@ -11,6 +11,7 @@ export default function AdminLayout() {
   const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 28 : 18);
   return (
     <Tabs
+      initialRouteName="shop"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.accent,

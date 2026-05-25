@@ -23,6 +23,7 @@ import { GradientCard } from "../../src/gradient-card";
 import { ShopLayoutRenderer } from "../../src/shop-layout-renderer";
 import { ShopHome } from "../../src/shop-home";
 import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
+import { useDoubleTapExit } from "../../src/use-double-tap-exit";
 
 type Product = {
   id: string;
@@ -69,6 +70,9 @@ const LANG_ORDER = ["en", "te", "hi", "ta"];
 
 export default function ShopScreen() {
   const router = useRouter();
+  // Shop is the user's landing tab — apply double-tap-back-to-exit pattern
+  // so hardware back at the root doesn't immediately close the app.
+  useDoubleTapExit();
   // Detect which tab we're rendering for. Both /shop and /services route to
   // this same component (services.tsx re-exports the default). Pathname tells
   // us which mode to lock — this also hides the Shop/Services toggle pills.

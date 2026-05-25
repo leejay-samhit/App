@@ -12,9 +12,13 @@ import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { ShopHome } from "../../src/shop-home";
 import { colors } from "../../src/theme";
+import { useDoubleTapExit } from "../../src/use-double-tap-exit";
 
 export default function AdminShop() {
   const router = useRouter();
+  // Shop is now the admin's landing tab — apply double-tap-back to exit
+  // (Indian-app standard, replaces the old 3-option popup).
+  useDoubleTapExit();
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>

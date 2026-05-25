@@ -1,5 +1,5 @@
-import { useCallback, useState, useEffect } from "react";
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator, RefreshControl, TouchableOpacity, useWindowDimensions, BackHandler, Alert, Platform } from "react-native";
+import { useCallback, useState } from "react";
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, RefreshControl, TouchableOpacity, useWindowDimensions, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import Svg, { Rect, Line, Text as SvgText, Path } from "react-native-svg";
@@ -7,6 +7,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { api } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { useAuth } from "../../src/auth";
+import { useDoubleTapExit } from "../../src/use-double-tap-exit";
 
 type Analytics = {
   kpis: {
@@ -52,39 +53,11 @@ export default function AdminHome() {
   const [pendingCount, setPendingCount] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  // ─── Intercept hardware back press on the Admin landing page ───
-  // Default behavior on Android: back from admin/home navigates the user
-  // back to the public user home (because that was the previous route
-  // before login). That confuses admins. Instead, we show a logout-or-exit
-  // prompt — admins should never land on the user home accidentally.
-  useEffect(() => {
-    if (Platform.OS === "web") return;
-    const onBackPress = () => {
-      Alert.alert(
-        "Exit admin?",
-        "What would you like to do?",
-        [
-          { text: "Stay here", style: "cancel" },
-          {
-            text: "Logout",
-            style: "destructive",
-            onPress: async () => {
-              try { await logout(); } catch {}
-              router.replace("/login" as any);
-            },
-          },
-          {
-            text: "Close app",
-            onPress: () => BackHandler.exitApp(),
-          },
-        ],
-        { cancelable: true },
-      );
-      return true; // we consumed the back press
-    };
-    const sub = BackHandler.addEventListener("hardwareBackPress", onBackPress);
-    return () => sub.remove();
-  }, [logout, router]);
+  // ─── Hardware back press at admin root ───
+  // Replaced the old "Exit admin? Stay/Logout/Close app" 3-option Alert
+  // with the standard Indian-app double-tap pattern (toast + 2-second
+  // window). Drill-down screens now use the natural pop-stack behaviour.
+  useDoubleTapExit();
 
   const load = useCallback(async () => {
     if (!user) return; // wait for auth hydration

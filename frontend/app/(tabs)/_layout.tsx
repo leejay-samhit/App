@@ -41,6 +41,7 @@ export default function TabsLayout() {
 
   return (
     <Tabs
+      initialRouteName="shop"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
