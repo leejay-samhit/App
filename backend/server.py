@@ -351,9 +351,15 @@ async def login(payload: LoginRequest):
 @api_router.post("/auth/google/exchange")
 async def google_exchange(payload: GoogleExchange):
     """Exchange an Emergent session_id for our JWT bearer token. Creates user on first sign-in."""
+    # OAuth session-data URL is environment-configurable so the same code runs
+    # in dev (Emergent demo) and prod (customer's own OAuth proxy if any).
+    session_url = os.environ.get(
+        "EMERGENT_OAUTH_SESSION_URL",
+        "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+    )
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.get(
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            session_url,
             headers={"X-Session-ID": payload.session_id},
         )
     if r.status_code != 200:
