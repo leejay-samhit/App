@@ -4140,3 +4140,77 @@ treasury_invoice_display_2026_05:
            the other 4 returned 400.)
 
 
+
+ui_polish_2026_05_round_2:
+  - task: "4-item batch — shop side layout / admin back nav / splash editor / move legal to More"
+    implemented: true
+    working: true
+    file: "see status_history"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          User requests #1–#4 (this round):
+
+          #1 SHOP CATEGORY — keep bottom tab bar visible
+            Bug: tapping a shop category opened `/shop-category/[name]`
+            which was OUTSIDE the (tabs) group, so the bottom tab bar
+            disappeared. User wanted tabs to stay (side layout).
+            Fix: moved the file into `(tabs)/shop-category/[name].tsx`
+            and registered it in `(tabs)/_layout.tsx` as a hidden tab
+            (`<Tabs.Screen name="shop-category/[name]" options={{ href: null }} />`).
+            Fixed relative imports from `../../src/*` → `../../../src/*`.
+
+          #2 ADMIN BACK NAVIGATION
+            Bug: pressing hardware back from admin home navigated to the
+            public user home (because that was the previous route stack).
+            Fix: registered a Platform-conditional `BackHandler` on the
+            admin home screen. On back press shows an Alert with 3
+            options: Stay / Logout (→ /login) / Close app
+            (BackHandler.exitApp()). Web build skips this hook entirely.
+
+          #3 APP LAUNCH SPLASH SCREEN
+            NEW: admin-uploaded image shown for N seconds when the app
+            opens (after the native Expo splash dismisses).
+            Backend:
+              - DEFAULT_BRANDING gained `splash_image`, `splash_duration_ms`
+                (default 5000), `splash_bg` (default `#143D2E`).
+              - models.BrandingPayload extended with the 3 new fields.
+              - routes/branding.py validates: splash_image must be data:
+                URI or http(s) URL ≤ 1.2 MB; splash_duration_ms must be
+                1000–10000; splash_bg must be hex.
+            Frontend:
+              - NEW `src/splash-overlay.tsx` renders a full-screen image
+                (or text fallback) for `splash_duration_ms` ms.
+                Wired into `app/_layout.tsx` so it appears at boot.
+              - NEW splash section in `app/admin/branding.tsx`:
+                  - 90×160 px preview of the current splash.
+                  - Image picker → ImageManipulator compress to 1080 px
+                    wide, 75% quality JPEG, embed as base64 data URI.
+                  - Duration input (seconds, 1–10).
+                  - Background colour input (hex).
+                  - "Replace" / "Remove" buttons.
+                  - Helper text shows recommended size: 1080×1920 px
+                    (9:16 portrait, ≤500 KB).
+              - Branding TS type extended with new fields so the
+                useBranding hook exposes them.
+              - PUT /admin/branding now sends the 3 new fields too.
+            Verified: PUT splash_duration_ms=3000 → 200, GET /branding
+            returns splash_duration_ms=3000.
+
+          #4 MOVE LEGAL PAGES TO "MORE"
+            Bug/Request: legal links cluttered the main Profile page.
+            Fix: NEW `app/more.tsx` user-side More screen with a 3-col
+            grid of tiles for About / Contact us / Terms / Privacy /
+            Refund. Replaced the "Legal & Policies" card in
+            `(tabs)/profile.tsx` with a single "More" card that opens
+            this new screen.
+
+          INFRA NOTE: ngrok tunnel occasionally fails with ERR_NGROK_334
+          when supervisor restarts expo too fast (the old tunnel hasn't
+          released yet). Single restart resolves it. Not a code bug.
+
+

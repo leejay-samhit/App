@@ -32,7 +32,10 @@ export default function TabsLayout() {
   // Every screen file under (tabs)/ must still be registered as a route, even
   // hidden ones. Build the full registration list = visible (in our order) +
   // hidden (so they're reachable via router.push()).
-  const allKeys = Array.from(new Set([...HARDCODED_ORDER, ...tabs.map((t) => t.key), "wallet", "network"]));
+  // NOTE: `shop-category/[name]` is a child route registered as a hidden tab
+  // so that the bottom tab bar STAYS VISIBLE when a user drills into a
+  // shop category from the Shop tab (per user request — keep the side layout).
+  const allKeys = Array.from(new Set([...HARDCODED_ORDER, ...tabs.map((t) => t.key), "wallet", "network", "shop-category/[name]"]));
   const order = allKeys;
   const byKey = Object.fromEntries(tabs.map((t) => [t.key, t]));
 

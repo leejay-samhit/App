@@ -6,9 +6,9 @@ import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, I
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { api, formatApiError } from "../../src/api";
-import { colors, radii, spacing, formatINR } from "../../src/theme";
-import { ShopLayoutRenderer } from "../../src/shop-layout-renderer";
+import { api, formatApiError } from "../../../src/api";
+import { colors, radii, spacing, formatINR } from "../../../src/theme";
+import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
 
 type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string };
 

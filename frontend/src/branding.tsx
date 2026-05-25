@@ -40,6 +40,10 @@ export type Branding = {
   colors: typeof defaultColors;
   font: "system" | "inter" | "poppins" | "jakarta" | "manrope" | "dmsans";
   tabs: BrandingTab[];
+  // ─── Splash overlay (Feb-2026) ───
+  splash_image?: string | null;
+  splash_duration_ms?: number;
+  splash_bg?: string;
   // Legal / business info (shown on Legal pages & used by payment gateway KYC)
   business_name?: string;
   business_address?: string;

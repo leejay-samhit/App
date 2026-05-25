@@ -88,6 +88,12 @@ DEFAULT_BRANDING: Dict[str, Any] = {
         "border": "#E5E4E0",
     },
     "font": "system",
+    # Custom splash overlay shown for `splash_duration_ms` after the native
+    # Expo splash dismisses. Admin can upload a base64 image + tweak duration.
+    # Recommended resolution: 1080×1920 (9:16 portrait, ~500KB max).
+    "splash_image":       None,        # base64 data URI or http URL (null = no overlay)
+    "splash_duration_ms": 5000,        # default 5s — admin can set 1000-10000
+    "splash_bg":          "#143D2E",   # solid background behind the image
     "tabs": [
         {"key": "dashboard", "label": "Dashboard", "icon": "home", "visible": True},
         {"key": "network", "label": "Network", "icon": "git-branch", "visible": True},

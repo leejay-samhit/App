@@ -62,6 +62,26 @@ async def admin_update_branding(
         if payload.font not in ALLOWED_FONTS:
             raise HTTPException(status_code=400, detail=f"Font must be one of: {sorted(ALLOWED_FONTS)}")
         update["font"] = payload.font
+    # ─── Splash overlay (Feb-2026) ───
+    if payload.splash_image is not None:
+        # Empty string / None removes the splash. Accept base64 data URI or http URL.
+        img = (payload.splash_image or "").strip()
+        if img and not (img.startswith("data:") or img.startswith("http://") or img.startswith("https://")):
+            raise HTTPException(status_code=400, detail="splash_image must be a data: URI or http(s) URL")
+        # Size guard — base64 images > 800KB tend to slow the GET /branding response.
+        if len(img) > 1_200_000:
+            raise HTTPException(status_code=400, detail="splash_image too large — please use < 800 KB after base64")
+        update["splash_image"] = img or None
+    if payload.splash_duration_ms is not None:
+        d = int(payload.splash_duration_ms)
+        if d < 1000 or d > 10000:
+            raise HTTPException(status_code=400, detail="splash_duration_ms must be between 1000 and 10000")
+        update["splash_duration_ms"] = d
+    if payload.splash_bg is not None:
+        bg = (payload.splash_bg or "").strip()
+        if bg and not re.match(r"^#[0-9A-Fa-f]{3,8}$", bg):
+            raise HTTPException(status_code=400, detail="splash_bg must be a hex colour (e.g. #143D2E)")
+        update["splash_bg"] = bg or DEFAULT_BRANDING["splash_bg"]
     if payload.tabs is not None:
         cleaned: List[Dict[str, Any]] = []
         seen: set = set()

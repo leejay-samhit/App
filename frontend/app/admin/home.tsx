@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator, RefreshControl, TouchableOpacity, useWindowDimensions } from "react-native";
+import { useCallback, useState, useEffect } from "react";
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, RefreshControl, TouchableOpacity, useWindowDimensions, BackHandler, Alert, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import Svg, { Rect, Line, Text as SvgText, Path } from "react-native-svg";
@@ -41,7 +41,7 @@ type NewUser = {
 };
 
 export default function AdminHome() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const router = useRouter();
   const [data, setData] = useState<Analytics | null>(null);
   const [loading, setLoading] = useState(true);
@@ -51,6 +51,40 @@ export default function AdminHome() {
   const [newToday, setNewToday] = useState<NewUser[]>([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // ─── Intercept hardware back press on the Admin landing page ───
+  // Default behavior on Android: back from admin/home navigates the user
+  // back to the public user home (because that was the previous route
+  // before login). That confuses admins. Instead, we show a logout-or-exit
+  // prompt — admins should never land on the user home accidentally.
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    const onBackPress = () => {
+      Alert.alert(
+        "Exit admin?",
+        "What would you like to do?",
+        [
+          { text: "Stay here", style: "cancel" },
+          {
+            text: "Logout",
+            style: "destructive",
+            onPress: async () => {
+              try { await logout(); } catch {}
+              router.replace("/login" as any);
+            },
+          },
+          {
+            text: "Close app",
+            onPress: () => BackHandler.exitApp(),
+          },
+        ],
+        { cancelable: true },
+      );
+      return true; // we consumed the back press
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", onBackPress);
+    return () => sub.remove();
+  }, [logout, router]);
 
   const load = useCallback(async () => {
     if (!user) return; // wait for auth hydration

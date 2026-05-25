@@ -6,6 +6,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { AuthProvider } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
 import { LocationGate } from "../src/location-gate";
+import { SplashOverlay } from "../src/splash-overlay";
 import { colors } from "../src/theme";
 import { TABLET_MIN_WIDTH, READABLE_MAX_WIDTH } from "../src/theme";
 
@@ -74,6 +75,11 @@ export default function RootLayout() {
                     }}
                   />
                 </LocationGate>
+                {/* App-launch splash overlay (admin-uploaded image + duration).
+                    Renders over EVERYTHING for the first N seconds (default 5s)
+                    and then unmounts itself. Reads from branding context so it
+                    follows admin changes without a rebuild. */}
+                <SplashOverlay />
               </TabletContainer>
             </GlobalFont>
           </AuthProvider>

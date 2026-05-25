@@ -61,6 +61,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="service-management" options={{ href: null }} />
       <Tabs.Screen name="area-mapping" options={{ href: null }} />
       <Tabs.Screen name="shop-categories" options={{ href: null }} />
+      <Tabs.Screen name="legal-pages" options={{ href: null }} />
     </Tabs>
   );
 }

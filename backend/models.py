@@ -127,6 +127,13 @@ class BrandingPayload(BaseModel):
     colors: Optional[Dict[str, str]] = None
     font: Optional[str] = None
     tabs: Optional[List[Dict[str, Any]]] = None
+    # ─── App-launch splash overlay (Feb-2026) ───
+    # Admin can upload an in-app splash image (shown for `splash_duration_ms`
+    # after the native splash dismisses). Recommended size: 1080×1920 px,
+    # ≤500 KB after base64. Pass `splash_image: null` to remove the overlay.
+    splash_image: Optional[str] = None      # base64 data URI or http URL
+    splash_duration_ms: Optional[int] = None  # 1000..10000
+    splash_bg: Optional[str] = None         # hex colour
 
 
 class GoogleExchange(BaseModel):

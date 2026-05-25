@@ -151,11 +151,11 @@ export default function ProfileScreen() {
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => router.push("/legal" as any)} style={styles.kycCard} testID="profile-legal-link">
+          <TouchableOpacity onPress={() => router.push("/more" as any)} style={styles.kycCard} testID="profile-more-link">
             <View style={[styles.kycDot, { backgroundColor: colors.textMuted }]} />
             <View style={{ flex: 1 }}>
-              <Text style={styles.kycTitle}>Legal & Policies</Text>
-              <Text style={styles.kycSub}>TERMS · PRIVACY · REFUND · CONTACT</Text>
+              <Text style={styles.kycTitle}>More</Text>
+              <Text style={styles.kycSub}>ABOUT · CONTACT · LEGAL & POLICIES</Text>
             </View>
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
