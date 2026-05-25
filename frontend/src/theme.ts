@@ -29,7 +29,13 @@ export const spacing = {
   md: 16,
   lg: 24,
   xl: 32,
-  screen: 24,
+  // Horizontal padding applied at the edge of every screen.
+  // Was 24 (felt too "indented" on 390-414 px phones — only ~342 px of usable
+  // content). Tightened to 16 to match iOS HIG / Material 3 mobile standard
+  // and recover ~16 px (≈5 %) of horizontal real-estate across the whole app.
+  // This is the single source of truth — 143 usages downstream pick it up
+  // automatically (Shop cards, wallet, profile, admin pages, etc.).
+  screen: 16,
 };
 
 export const formatINR = (n: number) => {
