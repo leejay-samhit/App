@@ -9,6 +9,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
 import { api, formatApiError } from "../../src/api";
+import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 import { useChatSocket } from "../../src/use-chat-socket";
 
@@ -27,6 +28,10 @@ const TABS: { key: Tab; label: string; icon: any }[] = [
 
 export default function ChatListScreen() {
   const router = useRouter();
+  const { user } = useAuth();
+  // Show referral codes only to admins. Regular users see clean
+  // name-only labels (privacy / less network-marketing visual noise).
+  const isAdmin = !!(user as any)?.is_admin || ((user as any)?.role === "admin") || !!(user as any)?.admin_role;
   const [threads, setThreads] = useState<Thread[]>([]);
   const [requests, setRequests] = useState<{ incoming: Request[]; outgoing: Request[] }>({ incoming: [], outgoing: [] });
   const [loading, setLoading] = useState(true);
@@ -166,7 +171,7 @@ export default function ChatListScreen() {
               <Text style={styles.userName}>{searchResult.user.name}</Text>
               {searchResult.is_downline ? <View style={styles.downlineBadge}><Text style={styles.downlineBadgeText}>DOWNLINE</Text></View> : null}
             </View>
-            <Text style={styles.userCode}>#{searchResult.user.referral_code}</Text>
+            {isAdmin ? <Text style={styles.userCode}>#{searchResult.user.referral_code}</Text> : null}
           </View>
           {searchResult.relationship === "already_chatting" ? (
             <TouchableOpacity style={styles.primaryBtn} onPress={() => router.push(`/chat/${searchResult.thread_id}` as any)}>
@@ -222,7 +227,7 @@ export default function ChatListScreen() {
                   <View style={styles.avatar}><Text style={styles.avatarText}>{(r.to?.name || "?").substring(0, 1).toUpperCase()}</Text></View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.userName}>{r.to?.name || "Unknown"}</Text>
-                    <Text style={styles.userCode}>Pending… #{r.to?.referral_code}</Text>
+                    <Text style={styles.userCode}>{isAdmin && r.to?.referral_code ? `Pending… #${r.to.referral_code}` : "Pending…"}</Text>
                   </View>
                 </View>
               ))}
@@ -273,6 +278,9 @@ export default function ChatListScreen() {
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                     <Text style={styles.userName} numberOfLines={1}>{t.other.name}</Text>
+                    {isAdmin && t.other.referral_code ? (
+                      <Text style={styles.threadCode} numberOfLines={1}>#{t.other.referral_code}</Text>
+                    ) : null}
                     {t.is_downline ? <View style={styles.downlineBadge}><Text style={styles.downlineBadgeText}>DOWNLINE</Text></View> : null}
                   </View>
                   <Text style={styles.lastMessage} numberOfLines={1}>
@@ -348,6 +356,7 @@ const styles = StyleSheet.create({
   avatarText: { fontSize: 18, fontWeight: "900", color: colors.primary },
   userName: { fontSize: 14, fontWeight: "800", color: colors.textMain },
   userCode: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  threadCode: { fontSize: 10, color: colors.textMuted, fontWeight: "700", letterSpacing: 0.3, backgroundColor: colors.surfaceMuted, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 },
   downlineBadge: { backgroundColor: "#DCFCE7", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999 },
   downlineBadgeText: { fontSize: 9, fontWeight: "900", color: "#065F46", letterSpacing: 0.6 },
   primaryBtn: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999 },

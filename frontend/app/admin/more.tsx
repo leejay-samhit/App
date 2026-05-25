@@ -9,6 +9,7 @@ import { downloadText } from "../../src/download";
 import { colors, radii, spacing } from "../../src/theme";
 
 const ITEMS = [
+  { icon: "message-circle", label: "Chat (team + users)", route: "/admin/chat" },
   { icon: "shield", label: "Admin access", route: "/admin/admins" },
   { icon: "user-check", label: "User approvals", route: "/admin/approvals" },
   { icon: "check-circle", label: "Approved registrations", route: "/admin/approved" },
