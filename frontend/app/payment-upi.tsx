@@ -22,10 +22,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
+import * as Haptics from "expo-haptics";
 import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
 import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { useSmsUtrListener, isSmsConsentAvailable } from "../src/sms-utr";
 
 type Config = {
   methods_enabled: { razorpay: boolean; upi_manual: boolean };
@@ -54,6 +56,8 @@ export default function UpiManualPayment() {
   const [utr, setUtr] = useState("");
   const [appUsed, setAppUsed] = useState<"gpay" | "phonepe" | "paytm" | "other">("other");
   const [note, setNote] = useState("");
+  const [smsAuto, setSmsAuto] = useState<null | { utr: string; at: number }>(null);
+  const [smsEnabled, setSmsEnabled] = useState<boolean>(true);
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +88,27 @@ export default function UpiManualPayment() {
     }, 6000);
     return () => clearInterval(t);
   }, [cfg?.pending_payment?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- SMS User Consent auto-detect (Android only) ----
+  // Listens for an incoming bank SMS for ~5 min after user opens the screen
+  // (or taps a UPI app button). When a UTR is detected we auto-fill the input.
+  const smsSupported = isSmsConsentAvailable();
+  const smsListenerEnabled =
+    smsEnabled && smsSupported && !cfg?.registration_paid && !loading;
+
+  useSmsUtrListener(
+    smsListenerEnabled,
+    ({ utr: detected }) => {
+      // Don't overwrite if the user has already typed/submitted the exact same UTR.
+      if (detected && detected !== utr) {
+        setUtr(detected);
+        setSmsAuto({ utr: detected, at: Date.now() });
+        try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+      }
+    },
+    () => { /* silent; consent timeout / user cancelled */ },
+  );
+
 
   const openUpiApp = async (appKey: typeof APPS[number]["key"]) => {
     if (!cfg?.deeplink_prefix) {
@@ -222,6 +247,32 @@ export default function UpiManualPayment() {
             </View>
             <Text style={styles.subtle}>After your UPI app shows "Payment Successful", paste the UTR / Transaction ID below. Admin will verify against the bank statement.</Text>
 
+            {/* SMS auto-detect status (Android only) */}
+            {smsSupported && !cfg.registration_paid ? (
+              <View style={[styles.smsRow, smsAuto && styles.smsRowActive]}>
+                <Feather
+                  name={smsAuto ? "check-circle" : smsListenerEnabled ? "radio" : "bell-off"}
+                  size={16}
+                  color={smsAuto ? colors.success : smsListenerEnabled ? colors.primary : colors.textMuted}
+                />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.smsTitle}>
+                    {smsAuto ? "UTR auto-filled from SMS" : smsListenerEnabled ? "Auto-fill UTR from bank SMS" : "SMS auto-fill paused"}
+                  </Text>
+                  <Text style={styles.smsSub}>
+                    {smsAuto
+                      ? `Detected ${smsAuto.utr} — please verify before submitting.`
+                      : smsListenerEnabled
+                        ? "When your bank SMS arrives, tap Allow on the system prompt and the UTR will fill itself."
+                        : "Re-enable to listen for incoming bank SMS."}
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setSmsEnabled((v) => !v)} style={styles.smsToggle} testID="sms-toggle">
+                  <Text style={styles.smsToggleText}>{smsListenerEnabled ? "Off" : "On"}</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+
             <Text style={styles.label}>UTR / Reference Number</Text>
             <TextInput
               value={utr}
@@ -322,4 +373,15 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: "#fff", fontWeight: "900", fontSize: 14, letterSpacing: 0.3 },
 
   fineprint: { fontSize: 11, color: colors.textMuted, lineHeight: 17, marginTop: 16, fontStyle: "italic" },
+
+  smsRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    marginTop: 12, padding: 12, borderRadius: 12,
+    backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border,
+  },
+  smsRowActive: { backgroundColor: "#E7F8EE", borderColor: "#16A34A55" },
+  smsTitle: { fontSize: 12, fontWeight: "900", color: colors.textMain, letterSpacing: 0.2 },
+  smsSub:   { fontSize: 11, color: colors.textMuted, lineHeight: 15, marginTop: 2 },
+  smsToggle:{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  smsToggleText: { fontSize: 11, fontWeight: "900", color: colors.textMain, letterSpacing: 0.4 },
 });

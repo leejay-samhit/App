@@ -4458,3 +4458,46 @@ upi_manual_payment_flow_2026_05:
             re-submission by the SAME user is allowed (keeps queue clean).
 
 
+
+
+upi_sms_user_consent_2026_05:
+  - task: "SMS User Consent auto-detect for UTR on UPI payment screen (Android)"
+    implemented: true
+    working: "NA"
+    file: |
+      frontend/src/sms-utr.android.ts (new — full hook impl on Android)
+      frontend/src/sms-utr.ts (new — no-op stub for web / iOS)
+      frontend/app/payment-upi.tsx (wired hook + UI banner)
+      frontend/package.json (+ @eabdullazyanov/react-native-sms-user-consent@1.3.0)
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW FEATURE — Android-only auto-fill of UTR using Google's
+          SMS User Consent API (NO READ_SMS permission, NO bank SMS hash
+          required, Play-Store-friendly).
+
+          • Wrapped `@eabdullazyanov/react-native-sms-user-consent` in a
+            React hook `useSmsUtrListener(enabled, onUtr, onError?)` that
+            starts the native broadcast receiver on mount, calls onUtr
+            with the parsed UTR, and stops on unmount.
+          • UTR extractor uses keyword regex (UPI Ref / RRN / Txn ID …)
+            first, then falls back to longest 10–22-digit numeric token,
+            excluding obvious 10-digit Indian mobile numbers.
+          • Platform-split: Metro picks `sms-utr.android.ts` on Android,
+            `sms-utr.ts` (no-op) on iOS/web — keeps the web bundle clean
+            (the native module's index resolves to `index.android.js` /
+            `index.ios.js` only, so the import is fenced off the web
+            bundle entirely).
+          • UI: a card row in Step 2 shows live status — "Auto-fill UTR
+            from bank SMS" while listening, switches to "UTR auto-filled
+            from SMS" with green tint + success haptic when the user
+            taps Allow on the system consent dialog. User can pause/resume
+            with an inline toggle.
+
+          Requires EAS dev/prod build to test (native module is NOT
+          available in Expo Go). Web bundle compiles cleanly (HTTP 200
+          on /payment-upi).
