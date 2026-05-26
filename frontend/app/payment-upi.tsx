@@ -223,14 +223,27 @@ export default function UpiManualPayment() {
             </View>
             <Text style={styles.subtle}>Tap any app — the same UPI request opens. After paying, copy the UTR from the success screen.</Text>
 
-            {/* Heads-up about PhonePe/GPay's anti-fraud decline on direct
-                intent payments. If user sees the "declined for security
-                reasons" message, they should fall back to QR / UPI-ID. */}
+            {/* Heads-up about common UPI app declines. Two known causes:
+                (a) "Declined for security reasons" — PhonePe blocking
+                    intent payments to personal P2P VPAs.
+                (b) "Payment Limit Reached" — payer's BANK has hit its
+                    daily / per-txn / first-24h-after-activation UPI
+                    ceiling. Not fixable from our app; user must wait
+                    24h or use a different bank in their UPI app. */}
             <View style={styles.warnRow}>
               <Feather name="info" size={14} color="#A16207" />
-              <Text style={styles.warnText}>
-                If your UPI app shows "declined for security reasons", use the QR code or copy the UPI ID below — both methods always work.
-              </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.warnText}>
+                  If your UPI app shows{" "}
+                  <Text style={{ fontWeight: "900" }}>"declined for security reasons"</Text>{" "}
+                  → use the QR code or copy the UPI ID below.
+                </Text>
+                <Text style={[styles.warnText, { marginTop: 4 }]}>
+                  If it shows{" "}
+                  <Text style={{ fontWeight: "900" }}>"Payment Limit Reached"</Text>{" "}
+                  → your bank has hit its daily UPI limit. Open your UPI app, switch to a different bank account, and try again — or retry after 24 hours.
+                </Text>
+              </View>
             </View>
 
             <View style={styles.appsRow}>
