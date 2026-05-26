@@ -47,6 +47,50 @@ const APPS: { key: "gpay" | "phonepe" | "paytm"; label: string; pkg: string; ico
   { key: "paytm",   label: "Paytm",      pkg: "paytmmp://pay",          icon: "smartphone",    tint: "#00BAF2" },
 ];
 
+/**
+ * Personal-VPA suffix heuristic.
+ *
+ * UPI VPAs ending with these handles are P2P (peer-to-peer / personal),
+ * issued by GPay / PhonePe / Paytm / WhatsApp / Cred / Slice etc. PhonePe
+ * & GPay routinely BLOCK intent-based (`upi://pay`) payments to these
+ * with "Declined for security reasons" — but QR scan and manual UPI-ID
+ * entry continue to work because those bypass the third-party-intent
+ * fraud check.
+ *
+ * Anything NOT in this list is treated as a merchant / bank-domain VPA
+ * (e.g. `networkpay@hdfcbank`, `merchant@razorpay`) where deep-link
+ * payments work reliably and we can show the GPay/PhonePe/Paytm buttons.
+ *
+ * Source: cross-referenced from NPCI's PSP-handle directory + popular
+ * P2P apps as of 2026. Suffixes are stored without the leading "@".
+ */
+const PERSONAL_VPA_SUFFIXES: ReadonlySet<string> = new Set([
+  // PhonePe (Yes Bank, IndusInd Bank, Axis Bank PSPs)
+  "ybl", "ibl", "axl", "axisb",
+  // Google Pay (HDFC/Axis/SBI/ICICI PSPs)
+  "okhdfcbank", "okaxis", "oksbi", "okicici",
+  // Paytm
+  "paytm", "ptaxis", "ptyes", "ptsbi", "pthdfc",
+  // Amazon Pay
+  "apl",
+  // WhatsApp Pay
+  "waicici", "waaxis", "wasbi",
+  // CRED
+  "cred",
+  // Slice
+  "jupiteraxis", "jupaxis",
+  // Generic personal handles
+  "upi", "rapl",
+]);
+
+function isLikelyMerchantVpa(vpa?: string | null): boolean {
+  if (!vpa || typeof vpa !== "string") return false;
+  const at = vpa.lastIndexOf("@");
+  if (at < 1 || at === vpa.length - 1) return false;
+  const suffix = vpa.slice(at + 1).toLowerCase().trim();
+  return !PERSONAL_VPA_SUFFIXES.has(suffix);
+}
+
 export default function UpiManualPayment() {
   const router = useRouter();
   const { user, refresh } = useAuth();
@@ -183,6 +227,16 @@ export default function UpiManualPayment() {
   const isPending  = pending?.status === "PENDING";
   const isRejected = pending?.status === "REJECTED";
 
+  // Auto-classify the configured payee VPA. When the admin configures a
+  // personal P2P UPI ID (e.g. kiran@ybl, @okhdfcbank, @paytm) we hide the
+  // GPay/PhonePe/Paytm direct-pay buttons entirely — PhonePe blocks those
+  // intent payments with "Declined for security reasons". We force the
+  // user down the QR / Copy-UPI-ID path which always works regardless of
+  // the payee VPA type. When the admin upgrades to a merchant/bank VPA
+  // (e.g. networkpay@hdfcbank), the direct-pay buttons re-appear
+  // automatically — no toggle required.
+  const looksLikeMerchant = isLikelyMerchantVpa(cfg?.payee_upi_id);
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
@@ -215,47 +269,54 @@ export default function UpiManualPayment() {
             </View>
           ) : null}
 
-          {/* Step 1 — pay via UPI app */}
+          {/* Step 1 — pay via UPI app or QR */}
           <View style={styles.step}>
             <View style={styles.stepHeader}>
               <View style={styles.stepNum}><Text style={styles.stepNumText}>1</Text></View>
               <Text style={styles.stepTitle}>Pay {formatINR(cfg.amount)} via your UPI app</Text>
             </View>
-            <Text style={styles.subtle}>Tap any app — the same UPI request opens. After paying, copy the UTR from the success screen.</Text>
+            {looksLikeMerchant ? (
+              <Text style={styles.subtle}>Tap any app — the same UPI request opens. After paying, copy the UTR from the success screen.</Text>
+            ) : (
+              <Text style={styles.subtle}>Scan the QR below from any UPI app (Google Pay · PhonePe · Paytm) — or copy the UPI ID and paste it in your app's "Pay to UPI ID" screen.</Text>
+            )}
 
-            {/* Heads-up about common UPI app declines. Two known causes:
-                (a) "Declined for security reasons" — PhonePe blocking
-                    intent payments to personal P2P VPAs.
-                (b) "Payment Limit Reached" — payer's BANK has hit its
-                    daily / per-txn / first-24h-after-activation UPI
-                    ceiling. Not fixable from our app; user must wait
-                    24h or use a different bank in their UPI app. */}
-            <View style={styles.warnRow}>
-              <Feather name="info" size={14} color="#A16207" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.warnText}>
-                  If your UPI app shows{" "}
-                  <Text style={{ fontWeight: "900" }}>"declined for security reasons"</Text>{" "}
-                  → use the QR code or copy the UPI ID below.
-                </Text>
-                <Text style={[styles.warnText, { marginTop: 4 }]}>
-                  If it shows{" "}
-                  <Text style={{ fontWeight: "900" }}>"Payment Limit Reached"</Text>{" "}
-                  → your bank has hit its daily UPI limit. Open your UPI app, switch to a different bank account, and try again — or retry after 24 hours.
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.appsRow}>
-              {APPS.map((a) => (
-                <TouchableOpacity key={a.key} onPress={() => openUpiApp(a.key)} style={[styles.appBtn, { borderColor: a.tint + "55" }]} testID={`pay-${a.key}`}>
-                  <View style={[styles.appIcon, { backgroundColor: a.tint + "1A" }]}>
-                    <Feather name={a.icon} size={22} color={a.tint} />
+            {/* Direct-pay buttons — shown ONLY when the configured payee
+                VPA looks like a merchant/bank VPA. For personal P2P VPAs
+                (@ybl, @okhdfcbank, @paytm, etc.) PhonePe/GPay actively
+                block intent-based payments with "Declined for security
+                reasons" — so we hide those buttons entirely and force the
+                user down the QR / Copy-UPI-ID path which always works. */}
+            {looksLikeMerchant ? (
+              <>
+                <View style={styles.warnRow}>
+                  <Feather name="info" size={14} color="#A16207" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.warnText}>
+                      If your UPI app shows{" "}
+                      <Text style={{ fontWeight: "900" }}>"declined for security reasons"</Text>{" "}
+                      → use the QR code or copy the UPI ID below.
+                    </Text>
+                    <Text style={[styles.warnText, { marginTop: 4 }]}>
+                      If it shows{" "}
+                      <Text style={{ fontWeight: "900" }}>"Payment Limit Reached"</Text>{" "}
+                      → your bank has hit its daily UPI limit. Switch to a different bank in your UPI app, or retry after 24 hours.
+                    </Text>
                   </View>
-                  <Text style={[styles.appLabel, { color: a.tint }]}>{a.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+                </View>
+
+                <View style={styles.appsRow}>
+                  {APPS.map((a) => (
+                    <TouchableOpacity key={a.key} onPress={() => openUpiApp(a.key)} style={[styles.appBtn, { borderColor: a.tint + "55" }]} testID={`pay-${a.key}`}>
+                      <View style={[styles.appIcon, { backgroundColor: a.tint + "1A" }]}>
+                        <Feather name={a.icon} size={22} color={a.tint} />
+                      </View>
+                      <Text style={[styles.appLabel, { color: a.tint }]}>{a.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </>
+            ) : null}
 
             {/* Payee identity card + QR + UPI-ID fallback.
                 IMPORTANT — PhonePe / GPay / Paytm sometimes BLOCK

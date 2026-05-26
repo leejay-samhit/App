@@ -200,7 +200,25 @@ export default function AdminBranding() {
           </View>
           <Field label="Payee UPI ID" value={draft.payment_methods?.payee_upi_id || ""}
                  onChangeText={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), payee_upi_id: v.trim() } }))}
-                 placeholder="e.g. kiran@ibl" testID="branding-pm-upiid" />
+                 placeholder="e.g. networkpay@hdfcbank" testID="branding-pm-upiid" />
+
+          {/* Live VPA-class hint: shown only when admin has typed a UPI ID. */}
+          {draft.payment_methods?.payee_upi_id ? (() => {
+            const PERSONAL = new Set(["ybl","ibl","axl","axisb","okhdfcbank","okaxis","oksbi","okicici","paytm","ptaxis","ptyes","ptsbi","pthdfc","apl","waicici","waaxis","wasbi","cred","jupiteraxis","jupaxis","upi","rapl"]);
+            const vpa = draft.payment_methods.payee_upi_id;
+            const suffix = vpa.includes("@") ? vpa.split("@").pop()!.toLowerCase().trim() : "";
+            const isPersonal = PERSONAL.has(suffix);
+            return (
+              <View style={[styles.vpaHint, { backgroundColor: isPersonal ? "#FEF3C7" : "#DCFCE7", borderColor: isPersonal ? "#FDE68A" : "#86EFAC" }]}>
+                <Text style={[styles.vpaHintText, { color: isPersonal ? "#78350F" : "#14532D" }]}>
+                  {isPersonal
+                    ? `⚠ Personal VPA detected (@${suffix}). PhonePe / GPay may block direct-pay buttons — users will see QR + Copy-UPI-ID only. To enable direct-pay buttons, switch to a merchant VPA (e.g. ...@hdfcbank, ...@icici, ...@razorpay).`
+                    : `✓ Merchant-style VPA (@${suffix}). Direct-pay buttons (GPay / PhonePe / Paytm) will be visible to users.`}
+                </Text>
+              </View>
+            );
+          })() : null}
+
           <Field label="Payee Display Name" value={draft.payment_methods?.payee_name || ""}
                  onChangeText={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), payee_name: v } }))}
                  placeholder={draft.app_name || "NetworkRupay"} testID="branding-pm-payeename" />
@@ -365,6 +383,8 @@ const styles = StyleSheet.create({
   fieldLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600", marginBottom: 6 },
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, padding: 12, fontSize: 14, color: colors.textMain },
   helper: { fontSize: 12, color: colors.textMuted, marginBottom: 10 },
+  vpaHint: { marginTop: -6, marginBottom: 12, padding: 10, borderRadius: 10, borderWidth: 1 },
+  vpaHintText: { fontSize: 11, lineHeight: 16, fontWeight: "700" },
   colorRow: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 10 },
   swatch: { width: 36, height: 36, borderRadius: 10, borderWidth: 1, borderColor: colors.border },
   hexInput: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12, fontSize: 13, color: colors.textMain, fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) },
