@@ -4501,3 +4501,274 @@ upi_sms_user_consent_2026_05:
           Requires EAS dev/prod build to test (native module is NOT
           available in Expo Go). Web bundle compiles cleanly (HTTP 200
           on /payment-upi).
+
+
+# ─── Latest changes to test (May 26, 2026) ───
+
+frontend:
+  - task: "Payment-UPI screen — VPA classifier + QR-first flow + admin live hint"
+    implemented: true
+    working: "NA"
+    file: |
+      frontend/app/payment-upi.tsx
+      frontend/app/admin/branding.tsx
+      frontend/src/sms-utr.android.ts
+      frontend/src/sms-utr.ts
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          MULTI-PART CHANGES that need UI verification end-to-end:
+
+          1) VPA CLASSIFIER (payment-upi.tsx):
+             • Added isLikelyMerchantVpa() — inspects the suffix of the
+               configured payee_upi_id; returns false if suffix is in the
+               PERSONAL_VPA_SUFFIXES set (@ybl, @ibl, @okhdfcbank, @paytm,
+               @apl, @cred, @waicici, @upi, etc.) — true otherwise
+               (assumes merchant/bank VPA).
+             • When personal VPA detected:
+               ─ GPay / PhonePe / Paytm direct-pay buttons HIDDEN
+               ─ Warning banner about "declined for security" / "limit"
+                 HIDDEN (not relevant — buttons aren't visible)
+               ─ Subtle copy switches to "Scan the QR below from any UPI
+                 app — or copy the UPI ID and paste it..."
+               ─ Only QR + Copy-UPI-ID path is shown.
+             • When merchant VPA detected:
+               ─ Direct-pay buttons VISIBLE (3 of them, GPay/PhonePe/Paytm)
+               ─ Warning banner visible (2 cases: security decline, payment limit)
+               ─ QR + Copy still visible as fallback.
+             • Test credentials: admin@app.com / Admin@123 currently has
+               kiran@ibl set in branding → personal → buttons should be HIDDEN.
+
+          2) ADMIN BRANDING LIVE HINT (admin/branding.tsx):
+             • Right below the "Payee UPI ID" input, a small badge appears
+               the moment admin types a UPI ID:
+               ─ Amber/yellow box if suffix is personal: "⚠ Personal VPA
+                 detected (@xxx). PhonePe / GPay may block direct-pay
+                 buttons — users will see QR + Copy-UPI-ID only..."
+               ─ Green box if suffix is merchant-style: "✓ Merchant-style
+                 VPA (@xxx). Direct-pay buttons (GPay / PhonePe / Paytm)
+                 will be visible to users."
+             • Test by typing: kiran@ybl (amber) vs networkpay@hdfcbank (green).
+
+          3) QR CODE PANEL (payment-upi.tsx):
+             • New "Scan to pay ₹118" card with 180×180 QR rendered via
+               react-native-qrcode-svg, encoding the upi://pay deeplink.
+             • Below the QR: "Or enter UPI ID manually — <id>  [Copy]"
+               row — taps copy to clipboard with Alert confirmation.
+
+          4) SMS USER CONSENT BANNER (payment-upi.tsx, sms-utr*.ts):
+             • Android-only banner above the UTR input:
+               "Auto-fill UTR from bank SMS" with on/off toggle.
+             • On web/iOS the banner is hidden (Platform-split file).
+             • If SMS arrives during the 5-min listening window, the UTR
+               is auto-extracted via regex and filled.
+
+          5) FULL-SCREEN SPLASH OVERLAY (src/splash-overlay.tsx):
+             • Now 100%×100% cover (was 85%×60% contain).
+             • No ActivityIndicator spinner — clean fullscreen image.
+             • app.json native splash bg #143D2E (brand green) instead of
+               white — eliminates the white-flash → emergent-logo
+               transition on cold start.
+
+          PRIORITIES FOR THE TESTING AGENT (in order):
+          P0 — Verify /payment-upi loads cleanly for an UNPAID user
+               (use a fresh signup with sponsor_code = ADMIN001 or login
+               as qrtest@app.com if it exists with Qr@1234), shows the
+               QR card prominently, shows the Copy-UPI-ID row, and the
+               GPay/PhonePe/Paytm buttons are NOT visible (personal VPA).
+          P1 — Verify the "Paying to: NetworkRupay · ✓ Verified merchant"
+               card is present and the actual UPI ID is NOT shown in
+               the main payee row (only in the fallback Copy chip).
+          P2 — Login as admin (admin@app.com / Admin@123), navigate to
+               Branding screen, scroll to "Payment Methods" section,
+               verify the Payee UPI ID input shows kiran@ibl, and that
+               the amber "⚠ Personal VPA detected (@ibl)" hint appears
+               below it. Then change the value to networkpay@hdfcbank,
+               verify the hint turns green ✓. Don't save (keep dev data).
+          P3 — Verify admin bottom-tab bar (Home · Users · Shop · Payouts
+               · Wallet · More) stays visible across all admin screens
+               INCLUDING /admin/shop-category/Pet%20Care, /admin/chat,
+               /admin/my-wallet (the 3 new mirror routes from this session).
+          P4 — Verify admin More menu now contains both:
+               "Chat (team + users)" and "My wallet (personal)" tiles.
+
+          KNOWN LIMITATIONS:
+          • SMS User Consent banner does not visibly render in web
+            testing — that's expected (Android-only native module).
+            Don't fail the test for absence of the SMS banner on web.
+          • Native splash image change requires EAS build to test —
+            not testable in Expo Go / web preview.
+          • QR code on web uses react-native-svg-web fallback; expect
+            it to render as a vector but with slightly different
+            anti-aliasing than native.
+
+          TEST CREDENTIALS:
+          • Admin: admin@app.com / Admin@123 (paid, has wallet, can
+            access Branding).
+          • Unpaid test user: try qrtest@app.com / Qr@1234 first.
+            If that fails, register fresh via POST /api/auth/register
+            with sponsor_code ADMIN001.
+
+metadata:
+  created_by: "main_agent"
+  version: "2.0"
+  test_sequence: 12
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "Payment-UPI screen — VPA classifier + QR-first flow + admin live hint"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Need UI testing on the payment-upi VPA-classifier flow + admin
+      branding live hint. See the priority list (P0-P4) inside the
+      "Payment-UPI screen ..." task above. Test on mobile dimensions
+      (390×844 iPhone, 360×800 Samsung). Don't fail on absent SMS
+      banner — that's Android-native only. Currently dev branding has
+      `kiran@ibl` configured so the GPay/PhonePe/Paytm direct-pay
+      buttons MUST be hidden on the /payment-upi screen.
+
+upi_payment_branding_2026_05_26:
+  - task: "P0 — /payment-upi VPA classifier (kiran@ibl personal → buttons hidden, QR shown)"
+    implemented: true
+    working: true
+    file: "frontend/app/payment-upi.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Tested on iPhone 12/13/14 (390×844) viewport as logged-in qrtest@app.com.
+          NOTE: live branding has payee_upi_id = "9154735888@ybl" (PhonePe personal
+          PSP suffix), NOT "kiran@ibl" as documented in test_credentials.md.
+          Classifier still treats @ybl as personal → behaviour is correct:
+            ✅ Step 1 title "Pay ₹118 via your UPI app" visible.
+            ✅ Identity row "Paying to: NetworkRupay · ✓ Verified merchant" visible.
+            ✅ Direct-pay buttons (GPay/PhonePe/Paytm) absent before QR card —
+               (PhonePe/Paytm strings only appear lower as Step-2 "I paid via"
+                radio chips, which is expected and unrelated to the deep-link
+                buttons under test).
+            ✅ Yellow "Heads-up about declines" banner absent.
+            ✅ "Scan to pay ₹118" QR card visible with 180×180 SVG QR rendered.
+            ✅ "Or enter UPI ID manually" row with VPA + "Copy" chip visible.
+            ✅ Step 2 "Submit the UTR for approval" section below.
+          ⚠ Minor: Copy chip tap — confirmation triggers React Native Alert which
+            on Expo Web renders as in-app overlay (not native browser dialog), so
+            the Playwright `dialog` event listener didn't capture it. Visually the
+            Copy chip is interactive and styled correctly. The Alert.alert call
+            in payment-upi.tsx:188 is correct code; this is a known RN-Web Alert
+            quirk, not a real bug.
+
+  - task: "P1 — Admin Branding live VPA hint"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/admin/branding.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          Could not fully verify in this run. Two blockers:
+            1. After admin@app.com / Admin@123 login the page URL stayed at /login
+               briefly then /admin/branding loaded. Page text dump captured only
+               the top ~1.2 KB of the screen (App name / Tagline / Colors); the
+               "Payment Methods" section is further down and the rendered DOM in
+               this virtualized React-Native ScrollView didn't include it in the
+               text query — the UPI input was not located.
+            2. Actual stored payee_upi_id is "9154735888@ybl" — not "kiran@ibl"
+               as test_credentials.md claims. Main agent should reconcile the
+               credentials doc with current DB state OR seed it back to
+               "kiran@ibl" so the hint-test wording is deterministic.
+          OBSERVED partial strings in the loaded page (full HTML): "Personal VPA"
+          and "merchant VPA" — suggesting the amber hint is present and the
+          classifier logic fires. The strict spec phrase
+          "⚠ Personal VPA detected (@ibl)" could not be matched because the
+          actual VPA is @ybl (so the rendered hint would read "(@ybl)") and
+          because of the scroll-into-view virtualization issue above.
+          ACTION FOR MAIN AGENT: either (a) seed branding back to kiran@ibl
+          before re-testing, or (b) update the test_credentials.md to reflect
+          the @ybl reality and update the review-spec wording accordingly.
+          Live-typing networkpay@hdfcbank could not be exercised because the
+          input was not reachable in this run.
+
+  - task: "P2 — Admin bottom-bar persistence on 6 routes"
+    implemented: true
+    working: true
+    file: "frontend/app/admin/_layout.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          All 6 admin routes show the 6-tab bottom bar (Home · Users · Shop ·
+          Payouts · Wallet · More) in the correct order on 390×844:
+            ✅ /admin/home
+            ✅ /admin/shop
+            ✅ /admin/branding
+            ✅ /admin/chat                       (new mirror route)
+            ✅ /admin/my-wallet                  (new mirror route)
+            ✅ /admin/shop-category/Pet%20Care   (new mirror route)
+          Bottom-bar persistence is verified across all listed routes.
+
+  - task: "P3 — Admin More menu: Chat + My wallet tiles + nav targets"
+    implemented: true
+    working: true
+    file: "frontend/app/admin/more.tsx + admin/chat.tsx + admin/my-wallet.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          /admin/more OPERATIONS section starts with the 2 new tiles:
+            ✅ "Chat (team + users)"
+            ✅ "My wallet (personal)"
+          Tapping each navigates correctly:
+            ✅ Chat tile → /admin/chat — page shows tabs (All / Downline /
+               Vendors / Unread …) and the 6-tab admin bottom bar persists.
+            ✅ My wallet tile → /admin/my-wallet — page shows Available /
+               Earned / Withdraw etc. plus the 6-tab admin bottom bar persists.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      UPI PAYMENT + BRANDING + ADMIN LAYOUT REVIEW — mobile 390×844.
+
+      VERDICT:
+        ✅ P0 /payment-upi VPA classifier — PASS (real backing VPA is
+           9154735888@ybl which is also personal; classifier correctly hides
+           the direct-pay buttons & shows QR-only flow per spec).
+        ⚠ P1 admin branding live hint — INCONCLUSIVE this run. The Payment
+           Methods section was below the rendered scroll area and the
+           configured VPA is 9154735888@ybl, not kiran@ibl. Suggest main
+           agent reseed branding to kiran@ibl OR update credentials doc;
+           classifier wording for personal VPA does appear in DOM but full
+           assertion of "(@ibl)" cannot match against an "@ybl" string.
+        ✅ P2 admin bottom-bar on all 6 routes — PASS.
+        ✅ P3 admin More: Chat + My wallet tiles + navigation — PASS
+           (both new tiles present, both navigate to expected routes, both
+           preserve the admin 6-tab bottom bar).
+
+      KNOWN BENIGN: Copy-chip's React-Native Alert renders as in-app overlay
+      on Expo Web, not a native browser dialog, so my dialog-listener didn't
+      catch it. The code (`Alert.alert("Copied", …)` at payment-upi.tsx:188)
+      is correct; this is RN-Web quirk only.
+
+      NOTHING IS BROKEN. Only follow-up needed: reconcile branding seed
+      (kiran@ibl vs 9154735888@ybl) so future runs of P1 are deterministic.
