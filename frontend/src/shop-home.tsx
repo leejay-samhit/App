@@ -25,7 +25,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, formatApiError } from "./api";
-import { colors } from "./theme";
+import { colors, spacing } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
 import { getCurrentCoords } from "./location";
 import { LocationBanner } from "./location-banner";
@@ -461,7 +461,7 @@ export function ShopHome({
         <LocationBanner />
         {searchSubmitted && search.trim() ? (
           // ── SEARCH RESULTS VIEW ─────────────────────────────────────
-          <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+          <View style={{ paddingHorizontal: spacing.screen, paddingTop: spacing.screen }}>
             <View style={styles.searchResultHeader}>
               <Text style={styles.searchResultTitle}>
                 Results for "<Text style={{ color: colors.primary }}>{search.trim()}</Text>"
@@ -585,7 +585,7 @@ export function ShopHome({
             new screen. The category strip stays pinned at top so the user can
             switch between categories smoothly. */}
         {activeCategory && activeCategory !== "all" ? (
-          <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+          <View style={{ paddingHorizontal: spacing.screen, paddingTop: spacing.screen }}>
             <View style={styles.searchResultHeader}>
               <Text style={styles.searchResultTitle}>
                 <Text style={{ color: colors.primary }}>{activeCategory}</Text>
@@ -838,10 +838,11 @@ export function ShopHome({
 
 // ── Styles ───────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  // 1. Header
+  // 1. Header — uses spacing.screen so every Shop section aligns to the same
+  // left/right rail. Phase: shop visual polish (2026-05-27).
   headerWrap: {
     backgroundColor: colors.background,
-    paddingHorizontal: 16,
+    paddingHorizontal: spacing.screen,
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: colors.border + "55",
@@ -918,9 +919,11 @@ const styles = StyleSheet.create({
     }),
   },
 
-  // 3. Category circles
-  catScroll: { paddingHorizontal: 12, paddingVertical: 14, gap: 0 },
-  catItem: { alignItems: "center", width: 72, marginHorizontal: 2 },
+  // 3. Category circles — same `spacing.screen` left/right rail as the
+  // header / banner / grid below, so the row of circles is visually
+  // anchored. Was 12 — felt too tight against the screen edge.
+  catScroll: { paddingHorizontal: spacing.screen, paddingVertical: 14, gap: spacing.gridGap },
+  catItem: { alignItems: "center", width: 72 },
   catCircle: {
     width: 56, height: 56, borderRadius: 28,
     alignItems: "center", justifyContent: "center",
@@ -930,8 +933,8 @@ const styles = StyleSheet.create({
   catCircleImg: { width: 56, height: 56, borderRadius: 28 },
   catLabel: { fontSize: 11.5, color: colors.textMain, fontWeight: "700", textAlign: "center" },
 
-  // 4. Banner
-  bannerWrap: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 4 },
+  // 4. Banner — anchored to the same rail.
+  bannerWrap: { paddingHorizontal: spacing.screen, paddingTop: 4, paddingBottom: 4 },
   banner: {
     flexDirection: "row", alignItems: "center",
     minHeight: 150,
@@ -968,13 +971,17 @@ const styles = StyleSheet.create({
   // Section headers
   sectionHeader: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    paddingHorizontal: 16, marginTop: 18, marginBottom: 8,
+    paddingHorizontal: spacing.screen, marginTop: 18, marginBottom: 8,
   },
+  // Horizontal list common padding — same `spacing.screen` rail as the
+  // section headers above (so the card aligns to the title), with the
+  // canonical gridGap as inter-card spacing.
+  hList: { paddingHorizontal: spacing.screen, paddingVertical: 4, gap: spacing.gridGap - 4 },
   sectionTitle: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
   viewAll: { fontSize: 12, fontWeight: "800", color: colors.primary },
 
   // Horizontal list common padding
-  hList: { paddingHorizontal: 16, paddingVertical: 4 },
+  hList: { paddingHorizontal: spacing.screen, paddingVertical: 4 },
 
   // Product card
   pCard: {
@@ -1152,12 +1159,17 @@ const styles = StyleSheet.create({
   // 3-column responsive grid with `flexBasis: "31%"` so the tiles wrap
   // cleanly on phones of every width. The gap is achieved with row +
   // margin since gap on FlexWrap isn't supported on every RN version.
+  // Phase: shop visual polish (2026-05-27) — uses spacing.gridGap as the
+  // canonical row gap so this 3-col grid stays vertically rhythmic with
+  // the rest of the page. Horizontal padding intentionally omitted: the
+  // outer scroll container already supplies it via styles.hList, keeping
+  // the grid's first/last items flush with the section title above.
   allCatGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
     justifyContent: "space-between",
     paddingVertical: 6,
-    rowGap: 12,
+    rowGap: spacing.gridGap,
   },
   allCatItem: {
     flexBasis: "31%",

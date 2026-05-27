@@ -36,6 +36,16 @@ export const spacing = {
   // This is the single source of truth — 143 usages downstream pick it up
   // automatically (Shop cards, wallet, profile, admin pages, etc.).
   screen: 16,
+  // Phase: Shop visual polish (2026-05-27).
+  // Canonical inter-card gutter inside grids/strips. Keeps category circles,
+  // product cards, and section dividers visually rhythmic on the same rail.
+  // 12 px is the magic number that lets a 2-col grid breathe without making
+  // each card narrower than ~155 px on a 390-px phone (`(390 - 16*2 - 12) / 2`).
+  gridGap: 12,
+  // Vertical breathing room between sections (header → search → categories →
+  // banner → product strips). Sits between md (16) and lg (24) so the page
+  // scrolls feel rhythmic, not crowded.
+  sectionGap: 20,
 };
 
 export const formatINR = (n: number) => {

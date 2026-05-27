@@ -4158,11 +4158,12 @@ async def admin_create_user(
     # Log an offline-paid transaction for bookkeeping
     if payload.mark_paid_offline:
         chosen_source = payload.registration_source or "offline_cash"
+        fee_amount = settings["registration_fee"]
         await db.transactions.insert_one({
             "id": str(uuid.uuid4()),
             "user_id": user_id,
             "type": "registration_fee",
-            "amount": settings["registration_fee"],
+            "amount": fee_amount,
             "status": "paid",
             # Canonical source tag — see _trigger_referral_commissions where
             # downstream payout txns inherit this so the entire fan-out is
@@ -4171,6 +4172,38 @@ async def admin_create_user(
             "description": f"Registration fee — {chosen_source.replace('_',' ')} (admin {admin.get('email')})",
             "created_at": now,
         })
+        # ── Accountability sync (2026-05-27) ─────────────────────────────
+        # The admin has physically/digitally collected ₹118 (cash, Razorpay
+        # link, or direct UPI). That money MUST land in the system-wallet
+        # so the ledger drift checker sees inflow == actual_held. Park it
+        # in the `direct_added` bucket — same bucket used by manual
+        # system-wallet deposits — until the user is approved and
+        # _trigger_referral_commissions splits it into L1/GST/cascade.
+        # We also log a parallel system-wallet deposit row so admins can
+        # see WHO/WHEN even before approval. Idempotent via unique
+        # (user_id, type) txn index — duplicate offline create attempts
+        # would already 409 at the user-insert step.
+        try:
+            await credit_admin_bucket("direct_added", float(fee_amount), also_total_earned=False)
+            await db.system_wallet_deposits.insert_one({
+                "id": str(uuid.uuid4()),
+                "amount": float(fee_amount),
+                # Synthetic UTR — keeps the unique-index happy and tags this
+                # row so admin can distinguish it from real bank deposits.
+                "utr": f"OFFLINE-{user_id[:8].upper()}",
+                "bank_ref": None,
+                "remarks": f"Offline registration fee · {chosen_source} · {payload.name}",
+                "deposited_by": admin["id"],
+                "deposited_by_email": admin.get("email"),
+                "source": chosen_source,
+                "linked_user_id": user_id,
+                "created_at": now,
+            })
+        except Exception as _e:
+            # Wallet-credit failures are non-fatal at user-creation time —
+            # the ledger heal-check will surface the drift on its next run
+            # and admins can re-run via /api/admin/system-wallet/reconcile.
+            logger.warning(f"offline-create wallet credit failed for {user_id}: {_e}")
 
     await _create_notification(
         user_id, "welcome",

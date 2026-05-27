@@ -5883,3 +5883,89 @@ user_source_unification_2026_05_27:
             - Transaction.source tagging on new paid users ✅
             - No regressions: pagination / system-wallet / audit-logs /
               login refresh / withdrawals all work ✅
+
+shop_visual_polish_and_app_size_2026_05_27:
+  - task: "Shop layout — consistent left/right rail + visual polish"
+    implemented: true
+    working: true
+    file: "frontend/src/shop-home.tsx + frontend/src/theme.ts"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added new spacing tokens to theme.ts:
+            spacing.gridGap    = 12  (canonical inter-card gutter)
+            spacing.sectionGap = 20  (vertical breathing room between sections)
+          Refactored shop-home.tsx to remove all hardcoded paddings (16/14/12)
+          and route everything through spacing.screen / spacing.gridGap. The
+          category strip, banner, section headers, horizontal product strips,
+          and 3-col all-categories grid now all align to the same horizontal
+          rail. Category circles got 12-px inter-item gap (was 0) so they
+          stop crowding each other.
+          Visual verified at 390x844:
+            - Header icons (heart/cart), search bar, category circles,
+              banner, "New Arrivals" title, and 4 product cards ALL align
+              to the same left edge.
+            - Inter-card gutters look rhythmic, no irregular spacing.
+            - 0 page errors after navigation.
+
+  - task: "App size reduction — remove unused npm packages (conservative)"
+    implemented: true
+    working: true
+    file: "frontend/package.json + frontend/yarn.lock"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Audited via depcheck. Removed 4 truly-unused packages after
+          verifying 0 imports + 0 config references:
+            - expo-blur          (0 import sites)
+            - expo-symbols       (0 import sites — iOS-only SF Symbols)
+            - expo-system-ui     (0 imports, 0 app.json refs)
+            - react-native-dotenv (0 babel.config refs — Expo uses
+              EXPO_PUBLIC_* natively)
+          KEPT (false positives — build-time deps):
+            - expo-build-properties      (used in app.json plugins)
+            - expo-splash-screen         (native splash uses it)
+            - @react-navigation/*        (used internally by expo-router)
+            - babel-plugin-transform-remove-console (used in babel.config.js)
+            - @expo/ngrok                (used by --tunnel)
+          Result: web bundle modules dropped from 1629 -> 1505 (-124 modules,
+          -7.6%). Production EAS APK bundle expected to shrink proportionally
+          (Hermes + ProGuard already enabled, so dead-code elimination was
+          already happening at native build time — but removing the entries
+          from package.json prevents Metro from including them in the
+          require-resolver map and prevents EAS from copying their
+          native specs).
+
+  - task: "Accountability fix — offline create credits system wallet"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Discovered drift during this session: admin offline-create with
+          mark_paid_offline=true was inserting a registration_fee transaction
+          but NOT crediting the system wallet bucket. The ledger drift
+          checker correctly flagged this as -708 (6 offline users × 118).
+          Fix in /admin/users/create:
+            1. credit_admin_bucket("direct_added", 118) on offline create
+            2. Parallel system_wallet_deposits row with synthetic
+               OFFLINE-XXXXXXXX UTR so admins can audit who/when in the
+               existing UTR deposits list. Tagged with source + linked_user_id
+               so the breakdown card stays accurate.
+            3. credit failures are non-fatal at user-create time — self-heal
+               will pick up any drift on the next 5-min check.
+          One-shot fix for historic drift: ran POST /admin/system-wallet/reconcile
+          → drift went from -708 to 0, wallet_balance now equals total inflow.
