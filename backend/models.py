@@ -348,12 +348,12 @@ class TicketCreateRequest(BaseModel):
 
 class PublicTicketCreateRequest(BaseModel):
     """Guest (unauthenticated) ticket submission from the pre-login Contact page."""
-    email: str                                 # mandatory — used to email back
+    email: Optional[str] = None                # validated in-route → returns 400 (not 422) if missing/empty
     name: Optional[str] = None
     subject: str = "ISSUE"
     category: str = "other"                    # one of the standard slugs OR "other"
     custom_category: Optional[str] = None      # free-text label when category=="other"
-    message: str
+    message: Optional[str] = None              # validated in-route → 400 on missing/short/long
 
 
 class TicketReplyRequest(BaseModel):
