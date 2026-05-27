@@ -1,410 +1,463 @@
-"""
-Phase 3 Session A — Anti-tampering integrity reporting tests.
+"""Backend validation for the User Creation Source Tracking matrix.
 
-Tests /api/security/integrity-report verdict matrix + per-action guards on
-financial endpoints (withdrawals + upi-manual). Read-only — no code changes.
+Targets external preview URL. Read-only validation (creates a few
+admin-created users but no code changes are made to the backend).
+
+Run: python /app/backend_test.py
 """
+
+import json
 import os
 import sys
 import time
-import json
-import requests
+from typing import Any, Dict, List, Optional, Tuple
 
-BASE = os.environ.get("BACKEND_URL", "https://vendor-network-app-1.preview.emergentagent.com") + "/api"
+import httpx
 
+BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PW = "Admin@123"
+ADMIN_PASS = "Admin@123"
 USER_EMAIL = "testuser@app.com"
-USER_PW = "Test@123"
-QR_EMAIL = "qrtest@app.com"
-QR_PW = "Qr@1234"
+USER_PASS = "Test@123"
 
-PASSES = []
-FAILS = []
+CLIENT = httpx.Client(timeout=30.0)
 
-
-def ok(name, msg=""):
-    PASSES.append(name)
-    print(f"  ✅ {name}  {msg}")
+PASS: List[str] = []
+FAIL: List[str] = []
+INFO: List[str] = []
 
 
-def fail(name, msg=""):
-    FAILS.append(f"{name}: {msg}")
-    print(f"  ❌ {name}  {msg}")
+def ok(label: str, detail: str = ""):
+    PASS.append(f"PASS · {label}" + (f" — {detail}" if detail else ""))
+    print(f"  [PASS] {label} {detail}")
 
 
-def login(email, pw):
-    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": pw}, timeout=20)
-    if r.status_code == 429:
-        print(f"   ⏳ 429 on login; sleeping 60s then retrying…")
-        time.sleep(60)
-        r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": pw}, timeout=20)
+def fail(label: str, detail: str = ""):
+    FAIL.append(f"FAIL · {label}" + (f" — {detail}" if detail else ""))
+    print(f"  [FAIL] {label} {detail}")
+
+
+def info(label: str):
+    INFO.append(label)
+    print(f"  [INFO] {label}")
+
+
+def login(email: str, password: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    r = CLIENT.post(f"{BASE}/auth/login", json={"email": email, "password": password})
     if r.status_code != 200:
-        raise RuntimeError(f"Login failed for {email}: {r.status_code} {r.text}")
+        return None, {"status": r.status_code, "body": r.text[:300]}
     j = r.json()
-    return j.get("token") or j.get("access_token"), j.get("refresh_token"), j.get("user", {})
+    return j.get("token"), j
 
 
-def post(path, token, body=None):
-    h = {"Authorization": f"Bearer {token}"} if token else {}
-    r = requests.post(f"{BASE}{path}", json=body or {}, headers=h, timeout=20)
-    if r.status_code == 429:
-        print(f"   ⏳ 429 on {path}; sleeping 65s…")
-        time.sleep(65)
-        r = requests.post(f"{BASE}{path}", json=body or {}, headers=h, timeout=20)
-    return r
+def H(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
-def get(path, token=None):
-    h = {"Authorization": f"Bearer {token}"} if token else {}
-    return requests.get(f"{BASE}{path}", headers=h, timeout=20)
+# ─────────────── 1. SOURCE BREAKDOWN ENDPOINT ───────────────
 
 
-def integrity_report(token, checks, build_type="dev-client", os_name="ios"):
-    return post("/security/integrity-report", token, {
-        "checks": checks,
-        "build_type": build_type,
-        "app_version": "1.0.0",
-        "os": os_name,
-    })
-
-
-# ────────── LOGIN ALL THREE (single login each, rate-limit safe) ──────────
-print("\n[BOOT] Logging in 3 accounts (single login each to respect 10/min rate limit)")
-admin_tok, _, _ = login(ADMIN_EMAIL, ADMIN_PW)
-print(f"  admin token len={len(admin_tok)}")
-user_tok, user_refresh, user_doc = login(USER_EMAIL, USER_PW)
-print(f"  testuser token len={len(user_tok)}")
-qr_tok, _, qr_doc = login(QR_EMAIL, QR_PW)
-print(f"  qrtest token len={len(qr_tok)}")
-
-
-# ────────── TEST 1: BASIC ENDPOINT FLOW ──────────
-print("\n[TEST 1] Basic endpoint flow")
-r = integrity_report(user_tok, [])
-if r.status_code == 200:
-    j = r.json()
-    if j.get("ok") is True and j.get("block_level") == "none" and j.get("reasons") == []:
-        ok("1.1 empty checks → 200 + none/[]")
+def test_source_breakdown(admin_token: str, user_token: Optional[str]):
+    print("\n[1] SOURCE BREAKDOWN ENDPOINT")
+    # no-auth → 401
+    r = CLIENT.get(f"{BASE}/admin/system-wallet/source-breakdown")
+    if r.status_code in (401, 403):
+        ok("no-auth → 401/403", f"got {r.status_code}")
     else:
-        fail("1.1 empty checks shape", f"got {j}")
-else:
-    fail("1.1 empty checks HTTP", f"{r.status_code} {r.text}")
+        fail("no-auth gating", f"expected 401, got {r.status_code} — {r.text[:200]}")
 
-r = requests.post(f"{BASE}/security/integrity-report", json={"checks": []}, timeout=20)
-if r.status_code in (401, 403):
-    ok(f"1.2 no auth → {r.status_code}")
-else:
-    fail("1.2 no auth", f"got {r.status_code} {r.text}")
+    # non-admin → 403
+    if user_token:
+        r = CLIENT.get(
+            f"{BASE}/admin/system-wallet/source-breakdown",
+            headers=H(user_token),
+        )
+        if r.status_code == 403:
+            ok("non-admin token → 403")
+        else:
+            fail("non-admin gating", f"expected 403, got {r.status_code} — {r.text[:200]}")
 
-
-# ────────── TEST 2: VERDICT MATRIX ──────────
-print("\n[TEST 2] Verdict matrix (per-check severity ladder)")
-matrix = [
-    ("2a root_jailbreak",   [{"name": "root_jailbreak",  "passed": False, "available": True}], "read_only"),
-    ("2b play_integrity",   [{"name": "play_integrity",  "passed": False, "available": True}], "hard_block"),
-    ("2c ssl_pin",          [{"name": "ssl_pin",         "passed": False, "available": True}], "hard_block"),
-    ("2d emulator",         [{"name": "emulator",        "passed": False, "available": True}], "warn"),
-    ("2e developer_mode",   [{"name": "developer_mode",  "passed": False, "available": True}], "warn"),
-    ("2f apk_signature",    [{"name": "apk_signature",   "passed": False, "available": True}], "hard_block"),
-    ("2g available=false",  [{"name": "root_jailbreak",  "passed": False, "available": False}], "none"),
-    ("2h mix emu+root",     [{"name": "emulator", "passed": False, "available": True},
-                             {"name": "root_jailbreak", "passed": False, "available": True}], "read_only"),
-    ("2i mix root+ssl",     [{"name": "root_jailbreak", "passed": False, "available": True},
-                             {"name": "ssl_pin", "passed": False, "available": True}], "hard_block"),
-]
-for name, checks, expected in matrix:
-    r = integrity_report(user_tok, checks)
+    # admin → 200 with the right shape
+    r = CLIENT.get(
+        f"{BASE}/admin/system-wallet/source-breakdown",
+        headers=H(admin_token),
+    )
     if r.status_code != 200:
-        fail(name, f"HTTP {r.status_code} {r.text}")
-        continue
+        fail("admin GET → 200", f"got {r.status_code}: {r.text[:300]}")
+        return None
     j = r.json()
-    got = j.get("block_level")
-    if got == expected:
-        reasons = j.get("reasons") or []
-        # for 2h verify both reasons present
-        if name.startswith("2h"):
-            has_emu = any("emulator" in s for s in reasons)
-            has_root = any("root_jailbreak" in s for s in reasons)
-            if has_emu and has_root:
-                ok(name, f"block_level={got} reasons=both")
-            else:
-                fail(name, f"reasons missing one: {reasons}")
-        else:
-            ok(name, f"block_level={got}")
+    for k in ("rows", "totals", "fan_out", "generated_at"):
+        if k not in j:
+            fail("shape", f"missing key '{k}'")
+            return None
+    if not isinstance(j["rows"], list):
+        fail("rows is list", f"got {type(j['rows']).__name__}")
+        return None
+    # rows objects shape
+    for row in j["rows"]:
+        for rk in ("source", "count", "amount"):
+            if rk not in row:
+                fail("row keys", f"row missing '{rk}': {row}")
+                return None
+    if "count" not in j["totals"] or "amount" not in j["totals"]:
+        fail("totals shape", str(j["totals"]))
+        return None
+    if not isinstance(j["fan_out"], dict):
+        fail("fan_out is dict", f"got {type(j['fan_out']).__name__}")
+        return None
+
+    sources_present = [r["source"] for r in j["rows"]]
+    ok("admin GET → 200 + correct shape",
+       f"rows={len(j['rows'])} sources={sources_present} totals={j['totals']}")
+    if "razorpay" in sources_present:
+        ok("backfill: 'razorpay' source present in rows")
     else:
-        fail(name, f"expected {expected}, got {got}; full={j}")
+        fail("backfill: 'razorpay' source missing", f"sources seen: {sources_present}")
+    if "upi_manual" in sources_present:
+        ok("backfill: 'upi_manual' source present in rows")
+    else:
+        fail("backfill: 'upi_manual' source missing", f"sources seen: {sources_present}")
+    return j
 
 
-# ────────── TEST 3: PER-ACTION GUARD on /withdrawals ──────────
-print("\n[TEST 3] Per-action guard — /api/withdrawals (testuser)")
-# Step A: dirty (ssl_pin → hard_block)
-r = integrity_report(user_tok, [{"name": "ssl_pin", "passed": False, "available": True}])
-if r.status_code == 200 and r.json().get("block_level") == "hard_block":
-    ok("3.0 dirty report applied")
-else:
-    fail("3.0 dirty report", f"{r.status_code} {r.text}")
+# ─────────────── 2. BACKFILL VERIFICATION ───────────────
 
-# /withdrawals → expect 403 device_compromised
-r = post("/withdrawals", user_tok, {"amount": 100})
-print(f"   withdrawals after dirty: {r.status_code} {r.text[:300]}")
-if r.status_code == 403:
-    try:
-        detail = r.json().get("detail")
-        if isinstance(detail, dict) and detail.get("code") == "device_compromised" and detail.get("block_level") == "hard_block":
-            ok("3.1 dirty → 403 device_compromised hard_block")
+
+def test_backfill_users(admin_token: str):
+    print("\n[2] BACKFILL VERIFICATION on legacy paid users")
+    r = CLIENT.get(f"{BASE}/admin/users?limit=200", headers=H(admin_token))
+    if r.status_code != 200:
+        fail("GET /admin/users?limit=200", f"got {r.status_code}: {r.text[:200]}")
+        return
+    users = r.json()
+    if not isinstance(users, list):
+        fail("users list shape", f"got {type(users).__name__}")
+        return
+    info(f"received {len(users)} users from /admin/users?limit=200")
+
+    paid = [u for u in users if u.get("registration_paid")]
+    info(f"paid users among loaded page: {len(paid)}")
+
+    razor_users = [u for u in paid if (u.get("payment_method") or "").startswith("razorpay")]
+    upi_users = [u for u in paid if (u.get("payment_method") or "").startswith("upi_manual")]
+    offline_users = [
+        u for u in paid
+        if (u.get("payment_method") or "").startswith("admin_offline")
+        or u.get("payment_method") is None
+    ]
+    info(f"razorpay paid users: {len(razor_users)} | upi_manual: {len(upi_users)} | "
+         f"admin_offline/null: {len(offline_users)}")
+
+    def assert_source(label: str, lst: List[Dict[str, Any]], expected: str):
+        bad = [u for u in lst if u.get("registration_source") != expected]
+        if not bad:
+            ok(f"backfill: {label} → registration_source == '{expected}' for all {len(lst)} users")
         else:
-            fail("3.1 dirty → 403 shape", f"detail={detail}")
+            samples = [{"email": u.get("email"),
+                        "payment_method": u.get("payment_method"),
+                        "registration_source": u.get("registration_source")}
+                       for u in bad[:5]]
+            fail(f"backfill: {label} mismatch", f"{len(bad)}/{len(lst)} wrong. samples={samples}")
+
+    if razor_users:
+        assert_source("razorpay paid users", razor_users, "razorpay")
+    else:
+        info("no razorpay paid users found on this page — skipping that assertion")
+    if upi_users:
+        assert_source("upi_manual paid users", upi_users, "upi_manual")
+    else:
+        info("no upi_manual paid users found on this page — skipping that assertion")
+    if offline_users:
+        assert_source("admin_offline/null paid users", offline_users, "offline_cash")
+    else:
+        info("no admin_offline/null paid users found on this page — skipping that assertion")
+
+
+# ─────────────── 3. ADMIN CREATE USER WITH NEW SOURCE FIELD ───────────────
+
+
+def fetch_user_by_q(admin_token: str, q: str) -> Optional[Dict[str, Any]]:
+    r = CLIENT.get(f"{BASE}/admin/users", params={"q": q, "limit": 5}, headers=H(admin_token))
+    if r.status_code != 200:
+        return None
+    arr = r.json()
+    return arr[0] if arr else None
+
+
+def create_user(admin_token: str, email: str, *, mark_paid: bool,
+                source: Optional[str], label_tag: str) -> Optional[Dict[str, Any]]:
+    body: Dict[str, Any] = {
+        "name": f"Source Test {label_tag}",
+        "email": email,
+        "password": "Pass@1234",
+        "mark_paid_offline": mark_paid,
+    }
+    if source is not None:
+        body["registration_source"] = source
+    r = CLIENT.post(f"{BASE}/admin/users/create", json=body, headers=H(admin_token))
+    if r.status_code not in (200, 201):
+        fail(f"create user [{label_tag}]", f"got {r.status_code}: {r.text[:300]}")
+        return None
+    j = r.json()
+    return j
+
+
+def test_admin_create_user_sources(admin_token: str):
+    print("\n[3] ADMIN CREATE USER WITH registration_source")
+    ts = int(time.time())
+    created: Dict[str, Dict[str, Any]] = {}
+
+    cases = [
+        ("razorpay", True, "razorpay"),
+        ("upi_manual", True, "upi_manual"),
+        ("offline_cash", True, "offline_cash"),
+        ("default", True, None),       # legacy caller, no field
+        ("unpaid", False, None),       # mark_paid_offline=false
+    ]
+    for tag, mark_paid, src in cases:
+        email = f"src-test-{tag}-{ts}@app.com"
+        res = create_user(admin_token, email, mark_paid=mark_paid, source=src,
+                          label_tag=tag)
+        if not res:
+            continue
+        ok(f"create user [{tag}] mark_paid_offline={mark_paid} src={src} → 200")
+        # Verify via /admin/users?q=
+        time.sleep(0.3)
+        u = fetch_user_by_q(admin_token, f"src-test-{tag}-{ts}")
+        if not u:
+            fail(f"lookup user [{tag}] via ?q=", "no user matched")
+            continue
+        created[tag] = u
+        actual = u.get("registration_source")
+        if tag == "razorpay":
+            expected = "razorpay"
+        elif tag == "upi_manual":
+            expected = "upi_manual"
+        elif tag == "offline_cash":
+            expected = "offline_cash"
+        elif tag == "default":
+            expected = "offline_cash"
+        elif tag == "unpaid":
+            expected = None
+        else:
+            expected = "??"
+        if actual == expected:
+            ok(f"[{tag}] registration_source on user doc == {expected!r}")
+        else:
+            fail(f"[{tag}] wrong registration_source",
+                 f"expected {expected!r} got {actual!r} (payment_method={u.get('payment_method')!r})")
+    return created
+
+
+# ─────────────── 4. BREAKDOWN INCREMENTS ───────────────
+
+
+def get_breakdown(admin_token: str) -> Dict[str, Any]:
+    r = CLIENT.get(f"{BASE}/admin/system-wallet/source-breakdown",
+                   headers=H(admin_token))
+    r.raise_for_status()
+    return r.json()
+
+
+def row_for(j: Dict[str, Any], source: str) -> Dict[str, Any]:
+    for r in j.get("rows", []):
+        if r.get("source") == source:
+            return r
+    return {"source": source, "count": 0, "amount": 0}
+
+
+def test_breakdown_increments(admin_token: str):
+    print("\n[4] BREAKDOWN INCREMENTS — create 2 offline_cash users")
+    before = get_breakdown(admin_token)
+    base = row_for(before, "offline_cash")
+    info(f"BEFORE — offline_cash count={base.get('count')} amount={base.get('amount')}")
+    ts = int(time.time())
+    for i in range(2):
+        email = f"inc-test-offline-{ts}-{i}@app.com"
+        res = create_user(admin_token, email, mark_paid=True,
+                          source="offline_cash", label_tag=f"inc-{i}")
+        if not res:
+            return
+    time.sleep(0.5)
+    after = get_breakdown(admin_token)
+    af = row_for(after, "offline_cash")
+    info(f"AFTER — offline_cash count={af.get('count')} amount={af.get('amount')}")
+    dc = int(af.get("count") or 0) - int(base.get("count") or 0)
+    da = float(af.get("amount") or 0) - float(base.get("amount") or 0)
+    if dc == 2:
+        ok("offline_cash count increased by exactly 2")
+    else:
+        fail("offline_cash count delta", f"expected +2 got +{dc}")
+    if abs(da - 236.0) < 0.01:
+        ok("offline_cash amount increased by ₹236 (2 × 118)")
+    else:
+        fail("offline_cash amount delta", f"expected +236.0 got +{da}")
+
+
+# ─────────────── 5. REGRESSION CHECK ───────────────
+
+
+def test_regressions(admin_token: str, user_token: Optional[str]):
+    print("\n[5] REGRESSION CHECK")
+    r = CLIENT.get(f"{BASE}/admin/users", params={"limit": 20}, headers=H(admin_token))
+    if r.status_code == 200 and isinstance(r.json(), list):
+        ok(f"/admin/users?limit=20 → 200 ({len(r.json())} items)")
+    else:
+        fail("/admin/users?limit=20", f"status={r.status_code}")
+
+    r = CLIENT.get(f"{BASE}/admin/system-wallet", headers=H(admin_token))
+    if r.status_code == 200:
+        j = r.json()
+        has_buckets = isinstance(j, dict) and (
+            "wallet_buckets" in j or "buckets" in j or "balance" in j
+        )
+        ok(f"/admin/system-wallet → 200{' (buckets present)' if has_buckets else ''}")
+        if not has_buckets:
+            info(f"/admin/system-wallet shape: {list(j.keys()) if isinstance(j, dict) else type(j).__name__}")
+    else:
+        fail("/admin/system-wallet", f"status={r.status_code} body={r.text[:200]}")
+
+    r = CLIENT.get(f"{BASE}/admin/audit-logs", headers=H(admin_token))
+    if r.status_code == 200:
+        ok("/admin/audit-logs → 200")
+    else:
+        fail("/admin/audit-logs", f"status={r.status_code}")
+
+    # Fresh admin login → refresh_token present (use the same we already have? Avoid 429.)
+    # Skip a second admin login — review brief explicitly says "ONE admin login".
+    info("Skipped re-login for admin to respect 10/min/IP rate limit; "
+         "refresh_token presence verified at start of run.")
+
+    # withdrawal endpoint smoke for clean-device users:
+    if user_token:
+        r = CLIENT.post(
+            f"{BASE}/withdrawals",
+            headers=H(user_token),
+            json={"amount": 1},  # small
+        )
+        # Either 200 or a business-rule 400/422 means the endpoint reachable.
+        # 403 device_compromised would be a regression for clean device.
+        if r.status_code in (200, 400, 422):
+            ok(f"/withdrawals (clean-device user) → {r.status_code} (endpoint reachable)")
+            info(f"withdraw body: {r.text[:200]}")
+        elif r.status_code == 429:
+            info(f"/withdrawals → 429 (rate-limited from prior testing); endpoint reachable")
+        else:
+            fail(f"/withdrawals regression", f"status={r.status_code} body={r.text[:200]}")
+
+
+# ─────────────── 6. TRANSACTION TAGGING ───────────────
+
+
+def test_transaction_tagging(admin_token: str, created: Dict[str, Dict[str, Any]]):
+    print("\n[6] TRANSACTION TAGGING")
+    if not created:
+        fail("no created users from step 3", "")
+        return
+    # Pull a large slice of recent transactions
+    r = CLIENT.get(
+        f"{BASE}/admin/transactions",
+        params={"include_pending": "true", "limit": 200},
+        headers=H(admin_token),
+    )
+    if r.status_code != 200:
+        fail("/admin/transactions GET", f"status={r.status_code}")
+        return
+    txns = r.json()
+    info(f"loaded {len(txns)} txns from /admin/transactions")
+
+    # For each tag we expect a registration_fee txn with source==tag
+    for tag in ("razorpay", "upi_manual", "offline_cash", "default"):
+        u = created.get(tag)
+        if not u:
+            continue
+        uid = u.get("id")
+        expected_src = "offline_cash" if tag == "default" else tag
+        matches = [t for t in txns if t.get("user_id") == uid and t.get("type") == "registration_fee"]
+        if not matches:
+            # if not on first page, try a second page
+            r2 = CLIENT.get(
+                f"{BASE}/admin/transactions",
+                params={"include_pending": "true", "limit": 200, "offset": 200},
+                headers=H(admin_token),
+            )
+            if r2.status_code == 200:
+                matches = [t for t in r2.json() if t.get("user_id") == uid and t.get("type") == "registration_fee"]
+        if not matches:
+            fail(f"txn lookup [{tag}]", f"no registration_fee txn for user_id={uid}")
+            continue
+        t = matches[0]
+        if t.get("source") == expected_src:
+            ok(f"txn [{tag}] source == {expected_src!r}")
+        else:
+            fail(f"txn [{tag}] source mismatch",
+                 f"got {t.get('source')!r} expected {expected_src!r} status={t.get('status')!r}")
+
+    # Unpaid user must NOT have a registration_fee txn
+    u_unpaid = created.get("unpaid")
+    if u_unpaid:
+        uid = u_unpaid.get("id")
+        matches = [t for t in txns if t.get("user_id") == uid and t.get("type") == "registration_fee"]
+        if not matches:
+            ok("unpaid user has no registration_fee txn (as expected)")
+        else:
+            fail("unpaid user has a registration_fee txn", str(matches[:1]))
+
+    # Observation about old razorpay txns (documenting the brief's note)
+    razor_old = [t for t in txns
+                 if t.get("type") == "registration_fee"
+                 and (t.get("payment_method") or "").startswith("razorpay")]
+    if razor_old:
+        tagged = [t for t in razor_old if t.get("source") == "razorpay"]
+        info(f"EXISTING razorpay registration_fee txns on page: {len(razor_old)}, "
+             f"of which source-tagged: {len(tagged)} (old txns are unstamped, "
+             f"new txns are stamped — that is expected per the brief).")
+
+
+# ─────────────── MAIN ───────────────
+
+
+def main() -> int:
+    print(f"BASE = {BASE}")
+    print(f"==== Admin login (single use) ====")
+    token, payload = login(ADMIN_EMAIL, ADMIN_PASS)
+    if not token:
+        print(f"  CANNOT LOGIN admin: {payload}")
+        return 1
+    refresh = (payload or {}).get("refresh_token")
+    if refresh:
+        ok("admin login → refresh_token present")
+    else:
+        fail("admin login missing refresh_token", str(list((payload or {}).keys())))
+
+    print("==== User login (separate IP-shared bucket) ====")
+    user_token = None
+    try:
+        utoken, _ = login(USER_EMAIL, USER_PASS)
+        user_token = utoken
+        if user_token:
+            ok("testuser login → token")
+        else:
+            info(f"testuser login failed: {_}")
     except Exception as e:
-        fail("3.1 dirty → 403 shape", f"json err {e} / body {r.text[:200]}")
-else:
-    fail("3.1 dirty withdrawal", f"expected 403, got {r.status_code} {r.text[:200]}")
+        info(f"testuser login exception: {e}")
 
-# Step B: clean report
-r = integrity_report(user_tok, [])
-if r.status_code == 200 and r.json().get("block_level") == "none":
-    ok("3.2 clean report applied")
-else:
-    fail("3.2 clean report", f"{r.status_code} {r.text}")
+    test_source_breakdown(token, user_token)
+    test_backfill_users(token)
+    created = test_admin_create_user_sources(token)
+    test_breakdown_increments(token)
+    test_regressions(token, user_token)
+    test_transaction_tagging(token, created or {})
 
-# /withdrawals after clean → must NOT be 403 device_compromised
-r = post("/withdrawals", user_tok, {"amount": 100})
-print(f"   withdrawals after clean: {r.status_code} {r.text[:300]}")
-if r.status_code == 403:
-    try:
-        detail = r.json().get("detail")
-        if isinstance(detail, dict) and detail.get("code") == "device_compromised":
-            fail("3.3 clean withdrawal", f"STILL device_compromised: {detail}")
-        else:
-            ok("3.3 clean withdrawal", f"403 but NOT device_compromised: {detail}")
-    except Exception:
-        ok("3.3 clean withdrawal", f"403 with str body (not device_compromised JSON)")
-else:
-    # 400 (insufficient balance / no upi) or 200 — all fine, guard released
-    ok("3.3 clean withdrawal", f"non-403 ({r.status_code}) — guard released")
+    print("\n========== SUMMARY ==========")
+    print(f"PASS: {len(PASS)}")
+    print(f"FAIL: {len(FAIL)}")
+    if FAIL:
+        print("\nFAILURES:")
+        for f in FAIL:
+            print(f"  - {f}")
+    return 0 if not FAIL else 2
 
 
-# ────────── TEST 3b: /payment/upi-manual with qrtest ──────────
-print("\n[TEST 3b] Per-action guard — /api/payment/upi-manual (qrtest)")
-r = integrity_report(qr_tok, [{"name": "ssl_pin", "passed": False, "available": True}])
-if r.status_code == 200 and r.json().get("block_level") == "hard_block":
-    ok("3b.0 dirty report (qrtest) applied")
-else:
-    fail("3b.0 dirty report (qrtest)", f"{r.status_code} {r.text}")
-
-r = post("/payment/upi-manual", qr_tok, {"utr": "FAKEUTR99TEST", "app_used": "gpay"})
-print(f"   upi-manual after dirty: {r.status_code} {r.text[:300]}")
-if r.status_code == 403:
-    try:
-        detail = r.json().get("detail")
-        if isinstance(detail, dict) and detail.get("code") == "device_compromised":
-            ok("3b.1 dirty upi-manual → 403 device_compromised")
-        else:
-            fail("3b.1 dirty upi-manual shape", f"detail={detail}")
-    except Exception as e:
-        fail("3b.1 dirty upi-manual shape", f"json err {e}")
-else:
-    fail("3b.1 dirty upi-manual", f"expected 403, got {r.status_code} {r.text[:200]}")
-
-# clean for qrtest
-r = integrity_report(qr_tok, [])
-if r.status_code == 200 and r.json().get("block_level") == "none":
-    ok("3b.2 clean report (qrtest) applied")
-else:
-    fail("3b.2 clean report (qrtest)", f"{r.status_code} {r.text}")
-
-r = post("/payment/upi-manual", qr_tok, {"utr": "FAKEUTR99TEST", "app_used": "gpay"})
-print(f"   upi-manual after clean: {r.status_code} {r.text[:300]}")
-if r.status_code == 403:
-    try:
-        detail = r.json().get("detail")
-        if isinstance(detail, dict) and detail.get("code") == "device_compromised":
-            fail("3b.3 clean upi-manual", f"STILL device_compromised: {detail}")
-        else:
-            ok("3b.3 clean upi-manual", f"403 but NOT device_compromised")
-    except Exception:
-        ok("3b.3 clean upi-manual", "403 non-JSON device_compromised")
-else:
-    ok("3b.3 clean upi-manual", f"non-device-compromised ({r.status_code})")
-
-
-# ────────── TEST 4: read_only blocks finances ──────────
-print("\n[TEST 4] read_only also blocks finances (testuser, root_jailbreak)")
-r = integrity_report(user_tok, [{"name": "root_jailbreak", "passed": False, "available": True}])
-if r.status_code == 200 and r.json().get("block_level") == "read_only":
-    ok("4.0 read_only report applied")
-else:
-    fail("4.0 read_only report", f"{r.status_code} {r.text}")
-
-r = post("/withdrawals", user_tok, {"amount": 100})
-print(f"   withdrawals read_only: {r.status_code} {r.text[:300]}")
-if r.status_code == 403:
-    try:
-        detail = r.json().get("detail")
-        if isinstance(detail, dict) and detail.get("code") == "device_compromised" and detail.get("block_level") == "read_only":
-            ok("4.1 read_only → 403 device_compromised read_only")
-        else:
-            fail("4.1 read_only shape", f"detail={detail}")
-    except Exception as e:
-        fail("4.1 read_only shape", f"json err {e}")
-else:
-    fail("4.1 read_only withdrawal", f"expected 403 got {r.status_code} {r.text[:200]}")
-
-# restore clean for testuser
-r = integrity_report(user_tok, [])
-if r.status_code == 200 and r.json().get("block_level") == "none":
-    ok("4.2 clean report after read_only applied")
-else:
-    fail("4.2 clean report after read_only", f"{r.status_code} {r.text}")
-
-
-# ────────── TEST 5: SECURITY EVENTS LOG ──────────
-print("\n[TEST 5] Security events log (admin view)")
-r = get("/admin/security-events?action=integrity.hard_block&limit=5", admin_tok)
-if r.status_code == 200:
-    j = r.json()
-    items = j.get("items") or []
-    if len(items) >= 1 and items[0].get("severity") == "critical":
-        details = items[0].get("details") or {}
-        if isinstance(details.get("reasons"), list):
-            ok("5.1 hard_block events present", f"n={len(items)} sev=critical reasons={details.get('reasons')}")
-        else:
-            fail("5.1 hard_block details.reasons", f"got {details}")
-    else:
-        fail("5.1 hard_block events", f"count={len(items)} first={items[:1]}")
-else:
-    fail("5.1 hard_block events HTTP", f"{r.status_code} {r.text}")
-
-r = get("/admin/security-events?action=integrity.read_only&limit=5", admin_tok)
-if r.status_code == 200:
-    j = r.json()
-    items = j.get("items") or []
-    if len(items) >= 1 and items[0].get("severity") == "warning":
-        ok("5.2 read_only events present", f"n={len(items)} sev=warning")
-    else:
-        fail("5.2 read_only events", f"count={len(items)} first={items[:1]}")
-else:
-    fail("5.2 read_only events HTTP", f"{r.status_code} {r.text}")
-
-# 5.3 clean reports should NOT create events
-r_before = get("/admin/security-events?limit=1000", admin_tok)
-count_before = len((r_before.json() or {}).get("items") or [])
-r2 = integrity_report(user_tok, [])
-r_after = get("/admin/security-events?limit=1000", admin_tok)
-count_after = len((r_after.json() or {}).get("items") or [])
-if count_after == count_before:
-    ok("5.3 clean report writes NO event", f"count_before={count_before} after={count_after}")
-else:
-    fail("5.3 clean report event-noise", f"before={count_before} after={count_after} (delta {count_after-count_before})")
-
-
-# ────────── TEST 6: USER DOC STAMP via /auth/me ──────────
-print("\n[TEST 6] User doc integrity_status stamp")
-# We just stamped clean above. Submit one dirty, then check, then clean, then check.
-r = integrity_report(user_tok, [{"name": "ssl_pin", "passed": False, "available": True}])
-ok("6.0 dirty report queued") if r.status_code == 200 else fail("6.0 dirty", r.text)
-
-r = get("/auth/me", user_tok)
-if r.status_code == 200:
-    j = r.json()
-    # serialize_user wraps as `user`? Let me check both shapes
-    if "user" in j:
-        u = j["user"]
-    else:
-        u = j
-    integ = u.get("integrity_status") or {}
-    if integ.get("block_level") == "hard_block" and isinstance(integ.get("reasons"), list) and integ.get("last_check_at") and "build_type" in integ and "os" in integ:
-        ok("6.1 dirty → user.integrity_status populated", f"block_level={integ.get('block_level')} reasons={integ.get('reasons')}")
-    else:
-        fail("6.1 integrity_status fields", f"got {integ}")
-else:
-    fail("6.1 /auth/me", f"{r.status_code} {r.text}")
-
-# clean and re-check
-r = integrity_report(user_tok, [])
-ok("6.2 clean report queued") if r.status_code == 200 else fail("6.2 clean", r.text)
-r = get("/auth/me", user_tok)
-if r.status_code == 200:
-    u = r.json().get("user") or r.json()
-    integ = u.get("integrity_status") or {}
-    if integ.get("block_level") == "none":
-        ok("6.3 clean → integrity_status.block_level=none")
-    else:
-        fail("6.3 integrity_status clean", f"got {integ}")
-else:
-    fail("6.3 /auth/me clean", f"{r.status_code} {r.text}")
-
-
-# ────────── TEST 7: BACKWARDS-COMPAT (legacy user never reported) ──────────
-print("\n[TEST 7] Backwards-compat: admin has never reported integrity")
-# Admin should not have integrity_status set OR have block_level=none (since
-# admin hasn't called integrity-report this session, ideally no field at all,
-# but at minimum non-blocking).
-r = get("/auth/me", admin_tok)
-if r.status_code == 200:
-    u = r.json().get("user") or r.json()
-    integ = u.get("integrity_status")
-    print(f"   admin.integrity_status = {integ}")
-
-# /withdrawals should NOT be 403 device_compromised (admin has wallet so other errors fine)
-r = post("/withdrawals", admin_tok, {"amount": 100})
-print(f"   admin /withdrawals: {r.status_code} {r.text[:300]}")
-if r.status_code == 403:
-    try:
-        detail = r.json().get("detail")
-        if isinstance(detail, dict) and detail.get("code") == "device_compromised":
-            fail("7.1 admin (no integrity report) blocked", f"detail={detail}")
-        else:
-            ok("7.1 admin not device_compromised", f"403 but other reason: {detail}")
-    except Exception:
-        ok("7.1 admin not device_compromised", "403 non-JSON")
-else:
-    ok("7.1 admin not device_compromised", f"got {r.status_code} (NOT device_compromised)")
-
-
-# ────────── TEST 8: NO REGRESSIONS ──────────
-print("\n[TEST 8] No regressions")
-# 8.1 /auth/refresh works
-r = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": user_refresh}, timeout=20)
-if r.status_code == 200 and r.json().get("token"):
-    ok("8.1 /auth/refresh still works", f"new token len={len(r.json()['token'])}")
-else:
-    fail("8.1 /auth/refresh", f"{r.status_code} {r.text}")
-
-# 8.2 pagination on /admin/users
-r = get("/admin/users?limit=5&offset=0", admin_tok)
-if r.status_code == 200:
-    items = r.json() if isinstance(r.json(), list) else r.json().get("items") or []
-    if len(items) <= 5:
-        ok("8.2 /admin/users pagination", f"len={len(items)}")
-    else:
-        fail("8.2 /admin/users pagination", f"len {len(items)} > 5")
-else:
-    fail("8.2 /admin/users", f"{r.status_code} {r.text[:200]}")
-
-# 8.3 /auth/login 429 after 10/min — we already burned 3 logins at start.
-# To verify rate-limit, fire 12 BAD logins rapidly. If 429 appears anywhere, pass.
-print("   Firing 12 bad logins to verify 10/min rate-limit…")
-seen_429 = False
-for i in range(12):
-    rr = requests.post(f"{BASE}/auth/login", json={"email": "ratelimit_probe@nx.com", "password": "x"}, timeout=10)
-    if rr.status_code == 429:
-        seen_429 = True
-        print(f"      attempt {i+1}: 429 ✓")
-        break
-    print(f"      attempt {i+1}: {rr.status_code}")
-if seen_429:
-    ok("8.3 /auth/login rate-limit 10/min")
-else:
-    fail("8.3 /auth/login rate-limit", "no 429 in 12 attempts")
-
-
-# ─────────────── SUMMARY ───────────────
-print("\n" + "=" * 60)
-print(f"PASSED: {len(PASSES)}")
-print(f"FAILED: {len(FAILS)}")
-if FAILS:
-    print("\nFailures:")
-    for f in FAILS:
-        print(f"  • {f}")
-sys.exit(0 if not FAILS else 1)
+if __name__ == "__main__":
+    sys.exit(main())

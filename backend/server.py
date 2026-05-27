@@ -1361,6 +1361,9 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
     txn_id = str(uuid.uuid4())
     user_set: Dict[str, Any] = {
         "registration_paid": True,
+        # Canonical source tag (mock variant still attributes to razorpay
+        # for breakdown purposes — they're real Razorpay-shaped orders).
+        "registration_source": "razorpay",
         "payment_method": "razorpay" + ("_mock" if creds["is_mock"] else ""),
         "razorpay_payment_id": payload.razorpay_payment_id,
         "razorpay_order_id": payload.razorpay_order_id,
@@ -1389,6 +1392,8 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
     # ("order created" + "payment successful" both showing for one payment).
     pending_set = {
         "status": "paid",
+        # Canonical source tag for the registration_fee row.
+        "source": "razorpay",
         "description": (
             "Registration fee via Razorpay"
             + (f" · UTR {utr}" if utr else "")
@@ -1424,6 +1429,7 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
                 "type": "registration_fee",
                 "amount": fee,
                 "status": "paid",
+                "source": "razorpay",
                 "description": (
                     "Registration fee via Razorpay"
                     + (f" · UTR {utr}" if utr else "")
@@ -4111,6 +4117,10 @@ async def admin_create_user(
         "wallet_balance": 0.0,
         "total_earned": 0.0,
         "registration_paid": bool(payload.mark_paid_offline),
+        # Phase: User-source unification (2026-05-27). Every user gets a
+        # canonical `registration_source` so the system-wallet breakdown,
+        # filters, and audit trail can group / count / sum by origin.
+        "registration_source": (payload.registration_source or "offline_cash") if payload.mark_paid_offline else None,
         "payment_method": "admin_offline" if payload.mark_paid_offline else None,
         "paid_at": now if payload.mark_paid_offline else None,
         "payment_attempts": 0,
@@ -4147,13 +4157,18 @@ async def admin_create_user(
 
     # Log an offline-paid transaction for bookkeeping
     if payload.mark_paid_offline:
+        chosen_source = payload.registration_source or "offline_cash"
         await db.transactions.insert_one({
             "id": str(uuid.uuid4()),
             "user_id": user_id,
             "type": "registration_fee",
             "amount": settings["registration_fee"],
             "status": "paid",
-            "description": f"Registration fee — offline (admin {admin.get('email')})",
+            # Canonical source tag — see _trigger_referral_commissions where
+            # downstream payout txns inherit this so the entire fan-out is
+            # filterable by where the money originally came from.
+            "source": chosen_source,
+            "description": f"Registration fee — {chosen_source.replace('_',' ')} (admin {admin.get('email')})",
             "created_at": now,
         })
 
@@ -4526,6 +4541,91 @@ async def get_system_wallet(admin: Dict[str, Any] = Depends(require_admin_role("
         "buckets": out,
         "total": float(a.get("wallet_balance") or 0),
         "deposits": deposits,
+    }
+
+
+@api_router.get("/admin/system-wallet/source-breakdown")
+async def system_wallet_source_breakdown(
+    _admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager", "support", "finance")),
+):
+    """Group registration revenue by the canonical source the user registered through.
+
+    Joins transactions(type=registration_fee, status=paid) → users.registration_source
+    via $lookup so we don't have to denormalize the source onto every payout txn —
+    the user doc is the single source of truth.
+
+    Response shape:
+      { "rows": [{source, count, amount}, ...],
+        "totals": {count, amount},
+        "fan_out": {source: {payouts_count, payouts_amount}, ...},
+        "generated_at": iso8601 }
+
+    `fan_out` is the downstream view: for each registration_source, how much
+    money was paid out to the upline (referral_payout / direct_signup_credit /
+    cascade_overflow). Lets admin see "Razorpay users generated ₹X in payouts,
+    Offline users generated ₹Y" — the full accountability matrix.
+    """
+    # 1) Inflow side — registration fees grouped by user.registration_source
+    inflow_pipeline = [
+        {"$match": {"type": "registration_fee", "status": "paid"}},
+        {"$lookup": {
+            "from": "users",
+            "localField": "user_id",
+            "foreignField": "id",
+            "as": "_u",
+        }},
+        {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+        {"$group": {
+            "_id": {"$ifNull": ["$_u.registration_source", "unknown"]},
+            "count": {"$sum": 1},
+            "amount": {"$sum": "$amount"},
+        }},
+        {"$project": {"_id": 0, "source": "$_id", "count": 1, "amount": 1}},
+        {"$sort": {"amount": -1}},
+    ]
+    rows = await db.transactions.aggregate(inflow_pipeline).to_list(50)
+
+    # 2) Fan-out side — payout txns whose `related_signup_id` ties back to a user.
+    # These are the L1..L10 payouts + direct_signup_credit + cascade_overflow.
+    fan_out_pipeline = [
+        {"$match": {
+            "type": {"$in": [
+                "referral_payout", "direct_signup_credit", "cascade_overflow",
+                "l1_funding", "gst_collected",
+            ]},
+            "status": {"$in": ["success", "paid"]},
+            # Only payouts that were triggered by a SIGNUP (not by a shop order/withdrawal).
+            "related_signup_id": {"$exists": True, "$ne": None},
+        }},
+        {"$lookup": {
+            "from": "users",
+            "localField": "related_signup_id",
+            "foreignField": "id",
+            "as": "_u",
+        }},
+        {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+        {"$group": {
+            "_id": {"$ifNull": ["$_u.registration_source", "unknown"]},
+            "payouts_count": {"$sum": 1},
+            "payouts_amount": {"$sum": {"$abs": "$amount"}},
+        }},
+        {"$project": {"_id": 0, "source": "$_id", "payouts_count": 1, "payouts_amount": 1}},
+    ]
+    fan_out_rows = await db.transactions.aggregate(fan_out_pipeline).to_list(50)
+    fan_out = {r["source"]: {
+        "payouts_count": int(r.get("payouts_count") or 0),
+        "payouts_amount": float(r.get("payouts_amount") or 0),
+    } for r in fan_out_rows}
+
+    totals = {
+        "count": sum(int(r.get("count") or 0) for r in rows),
+        "amount": round(sum(float(r.get("amount") or 0) for r in rows), 2),
+    }
+    return {
+        "rows": rows,
+        "totals": totals,
+        "fan_out": fan_out,
+        "generated_at": now_utc().isoformat(),
     }
 
 
@@ -5285,7 +5385,6 @@ async def admin_audit_logs(_: Dict[str, Any] = Depends(require_admin), limit: in
     return items
 
 
-# ------------------ Security events (auth failures, IP anomalies) ------------------
 @api_router.get("/admin/security-events")
 async def admin_security_events(
     _: Dict[str, Any] = Depends(require_admin),
@@ -6780,6 +6879,52 @@ async def _background_init():
             )
         except Exception as _e:
             logger.warning(f"approval-status backfill failed: {str(_e)[:200]}")
+
+        # ── Backfill registration_source on legacy users + transactions ──
+        # Phase: User-source unification (2026-05-27). Existing users were
+        # created before this field existed — infer their source from the
+        # already-stored payment_method so the breakdown card is accurate
+        # from day one. Idempotent: only touches docs where
+        # registration_source is missing/null.
+        try:
+            now_iso = now_utc().isoformat()
+            for pm_pattern, src in [
+                ("razorpay", "razorpay"),
+                ("upi_manual", "upi_manual"),
+                ("admin_offline", "offline_cash"),
+            ]:
+                # users
+                u_res = await db.users.update_many(
+                    {
+                        "registration_paid": True,
+                        "payment_method": {"$regex": f"^{pm_pattern}"},
+                        "$or": [
+                            {"registration_source": {"$exists": False}},
+                            {"registration_source": None},
+                        ],
+                    },
+                    {"$set": {"registration_source": src, "_source_backfilled_at": now_iso}},
+                )
+                if u_res.modified_count:
+                    logger.info(f"backfill registration_source={src}: stamped {u_res.modified_count} users")
+            # Any remaining paid user without a payment_method (e.g. seeded
+            # demo accounts) gets tagged "offline_cash" so the breakdown
+            # totals don't show "unknown".
+            unk_res = await db.users.update_many(
+                {
+                    "registration_paid": True,
+                    "$or": [
+                        {"registration_source": {"$exists": False}},
+                        {"registration_source": None},
+                    ],
+                },
+                {"$set": {"registration_source": "offline_cash", "_source_backfilled_at": now_iso}},
+            )
+            if unk_res.modified_count:
+                logger.info(f"backfill registration_source=offline_cash (fallback): stamped {unk_res.modified_count} users")
+        except Exception as _e:
+            logger.warning(f"registration_source backfill failed: {str(_e)[:200]}")
+
         logger.info("Background init complete")
     except Exception as _root_err:
         # Catch-all: never let the background init task die loudly.

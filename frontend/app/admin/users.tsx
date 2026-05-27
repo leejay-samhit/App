@@ -25,6 +25,17 @@ import { useInfiniteList } from "../../src/use-infinite-list";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { formatActiveAgo } from "../../src/location";
 
+// Phase: User-source unification (2026-05-27). Human-readable labels for
+// the three creation paths. Used by the New User modal dropdown and the
+// system wallet breakdown card. `unknown` is a defensive fallback for
+// legacy rows where backfill couldn't determine the source.
+const SOURCE_LABELS: Record<string, string> = {
+  offline_cash: "Offline / cash",
+  razorpay:     "Razorpay gateway",
+  upi_manual:   "UPI manual transfer",
+  unknown:      "Unknown source",
+};
+
 type AdminUser = {
   id: string;
   name: string;
@@ -301,9 +312,18 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
   const [password, setPassword] = useState("");
   const [sponsor, setSponsor] = useState("");
   const [markPaid, setMarkPaid] = useState(true);
+  // Canonical source for the registration. Defaults to offline_cash (the
+  // most common scenario when admins manually create users). Admin can flip
+  // this to razorpay / upi_manual if they collected the fee through one of
+  // those channels OUTSIDE the app (e.g. customer paid via Razorpay link
+  // and admin is creating the account based on that proof).
+  const [source, setSource] = useState<"offline_cash" | "razorpay" | "upi_manual">("offline_cash");
   const [saving, setSaving] = useState(false);
 
-  const reset = () => { setName(""); setEmail(""); setPhone(""); setPassword(""); setSponsor(""); setMarkPaid(true); };
+  const reset = () => {
+    setName(""); setEmail(""); setPhone(""); setPassword(""); setSponsor("");
+    setMarkPaid(true); setSource("offline_cash");
+  };
 
   const onSubmit = async () => {
     if (!name.trim() || !email.trim() || password.length < 6) {
@@ -319,9 +339,10 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
         phone: phone.trim() || undefined,
         referral_code: sponsor.trim().toUpperCase() || undefined,
         mark_paid_offline: markPaid,
+        registration_source: markPaid ? source : undefined,
       });
       Alert.alert("User created", markPaid
-        ? "Account created and marked as paid. It now awaits finance approval."
+        ? `Account created and marked as paid via ${SOURCE_LABELS[source]}. It now awaits finance approval.`
         : "Account created — awaiting payment + finance approval.");
       reset();
       onCreated();
@@ -354,6 +375,33 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
               </View>
               <Switch value={markPaid} onValueChange={setMarkPaid} testID="new-user-mark-paid" />
             </View>
+
+            {markPaid ? (
+              <View style={nuStyles.sourceBlock}>
+                <Text style={nuStyles.fieldLabel}>Payment source · how did the customer pay?</Text>
+                <Text style={nuStyles.switchSub}>This tags the user + ledger so the System Wallet breakdown stays accurate. Pick the channel that actually carried the ₹118.</Text>
+                <View style={nuStyles.sourceRow}>
+                  {(["offline_cash", "razorpay", "upi_manual"] as const).map((s) => {
+                    const active = source === s;
+                    return (
+                      <TouchableOpacity
+                        key={s}
+                        onPress={() => setSource(s)}
+                        style={[nuStyles.sourceChip, active && nuStyles.sourceChipActive]}
+                        testID={`new-user-source-${s}`}
+                      >
+                        <Feather
+                          name={s === "razorpay" ? "credit-card" : s === "upi_manual" ? "smartphone" : "dollar-sign"}
+                          size={13}
+                          color={active ? "#fff" : colors.primary}
+                        />
+                        <Text style={[nuStyles.sourceChipText, active && { color: "#fff" }]}>{SOURCE_LABELS[s]}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
           </ScrollView>
           <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
             <TouchableOpacity onPress={() => { reset(); onClose(); }} style={[nuStyles.btn, { backgroundColor: colors.surfaceMuted }]}>
@@ -379,6 +427,26 @@ const nuStyles = StyleSheet.create({
   switchRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 16, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   switchTitle: { fontSize: 13, fontWeight: "700", color: colors.textMain },
   switchSub: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 16 },
+  sourceBlock: {
+    marginTop: 4,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
+  },
+  sourceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  sourceChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.primary + "44",
+    backgroundColor: colors.primary + "0A",
+  },
+  sourceChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  sourceChipText: { fontSize: 12, fontWeight: "700", color: colors.primary },
   btn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
   // Absolute overlay rendered inside the parent's SafeAreaView. Always opaque, always covers the parent.
   confirmOverlay: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.75)", justifyContent: "center", alignItems: "center", padding: 18, zIndex: 9999, ...(Platform.OS === "web" ? ({ position: "fixed" } as any) : {}) },

@@ -97,6 +97,13 @@ export default function AdminSystemWallet() {
   const [data, setData] = useState<{ buckets: Record<string, number>; total: number; deposits: Deposit[] } | null>(null);
   const [breakdown, setBreakdown] = useState<Breakdown | null>(null);
   const [showBreakdown, setShowBreakdown] = useState(false);
+  // Phase: User-source unification (2026-05-27). 3-way accountability card
+  // — Razorpay / UPI Manual / Offline Cash inflow + downstream payout fan-out.
+  const [sourceBreakdown, setSourceBreakdown] = useState<{
+    rows: { source: string; count: number; amount: number }[];
+    totals: { count: number; amount: number };
+    fan_out: Record<string, { payouts_count: number; payouts_amount: number }>;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -154,12 +161,14 @@ export default function AdminSystemWallet() {
 
   const load = useCallback(async () => {
     try {
-      const [{ data }, bd] = await Promise.all([
+      const [{ data }, bd, sb] = await Promise.all([
         api.get("/admin/system-wallet"),
         api.get<Breakdown>("/admin/system-wallet/breakdown").catch(() => ({ data: null as any })),
+        api.get("/admin/system-wallet/source-breakdown").catch(() => ({ data: null as any })),
       ]);
       setData(data);
       setBreakdown(bd.data || null);
+      setSourceBreakdown(sb.data || null);
     } catch (e) {
       console.warn(e);
     } finally {
@@ -563,6 +572,53 @@ export default function AdminSystemWallet() {
           Recomputes each bucket from the transaction ledger and fixes any drift. Run any time to verify books tally.
         </Text>
 
+        {/* Phase: User-source unification — 3-way accountability breakdown.
+            Shows registration revenue and downstream payout fan-out grouped
+            by HOW the user joined (Razorpay / UPI manual / Offline cash).
+            Always rendered, even when totals are zero, so admins know the
+            tracking is active. Empty rows are styled muted. */}
+        {sourceBreakdown ? (
+          <View style={{ marginTop: 8 }}>
+            <Text style={styles.sectionLabel}>USER SOURCE ACCOUNTABILITY</Text>
+            <View style={[styles.identityCard, { padding: 12 }]} testID="src-breakdown-card">
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <Text style={{ fontSize: 12.5, color: colors.textMuted }}>Registration revenue by source</Text>
+                <Text style={{ fontSize: 13, fontWeight: "900", color: colors.textMain }}>
+                  {formatINR(sourceBreakdown.totals.amount)} · {sourceBreakdown.totals.count} user{sourceBreakdown.totals.count === 1 ? "" : "s"}
+                </Text>
+              </View>
+              {(["razorpay", "upi_manual", "offline_cash"] as const).map((s) => {
+                const row = sourceBreakdown.rows.find((r) => r.source === s);
+                const fan = sourceBreakdown.fan_out?.[s];
+                const amt = row?.amount || 0;
+                const cnt = row?.count || 0;
+                const icon = s === "razorpay" ? "credit-card" : s === "upi_manual" ? "smartphone" : "dollar-sign";
+                const label = s === "razorpay" ? "Razorpay Gateway" : s === "upi_manual" ? "UPI Manual" : "Offline / Cash";
+                return (
+                  <View key={s} style={localStyles.srcRow} testID={`src-row-${s}`}>
+                    <View style={localStyles.srcIcon}>
+                      <Feather name={icon as any} size={14} color={colors.primary} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={localStyles.srcLabel}>{label}</Text>
+                      <Text style={localStyles.srcSub}>
+                        {cnt} signup{cnt === 1 ? "" : "s"}
+                        {fan && fan.payouts_count > 0 ? ` · ${fan.payouts_count} payout${fan.payouts_count === 1 ? "" : "s"} (${formatINR(fan.payouts_amount)})` : ""}
+                      </Text>
+                    </View>
+                    <Text style={[localStyles.srcAmt, cnt === 0 && { color: colors.textMuted }]}>
+                      {formatINR(amt)}
+                    </Text>
+                  </View>
+                );
+              })}
+              <Text style={styles.helpText}>
+                Inflow on the LEFT vs upline payouts on the RIGHT — must reconcile to the bucket balances above.
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
         <Text style={styles.sectionLabel}>Recent UTR Deposits</Text>
         {(data?.deposits || []).length === 0 ? (
           <View style={styles.empty}><Feather name="inbox" size={20} color={colors.textMuted} /><Text style={styles.emptyText}>No deposits yet</Text></View>
@@ -772,6 +828,27 @@ function TxnRow({ txn, onPreviewInvoice }: { txn: Txn; onPreviewInvoice?: (t: Tx
     </View>
   );
 }
+
+// Phase: User-source unification — styles for the 3-way breakdown card.
+const localStyles = StyleSheet.create({
+  srcRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
+  },
+  srcIcon: {
+    width: 32, height: 32, borderRadius: 16,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.primary + "12",
+  },
+  srcLabel: { fontSize: 13.5, fontWeight: "800", color: colors.textMain },
+  srcSub:   { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  srcAmt:   { fontSize: 14, fontWeight: "900", color: colors.textMain },
+});
+
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },

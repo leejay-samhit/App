@@ -5676,3 +5676,141 @@ phase3_anti_tampering_session_b_2026_05_27:
                Play Integrity / clean) with expected outcomes.
             7. Operational maintenance: cert rotation timing, kill switch
                to globally disable anti-tamper.
+
+
+user_creation_source_tracking_2026_05_27:
+  - task: "Source breakdown endpoint + backfill + admin-create source field + txn tagging"
+    implemented: true
+    working: true
+    file: "backend/server.py + backend/models.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Full validation of the User Creation Source Tracking matrix via
+          /app/backend_test.py against the external preview URL — read-only,
+          no backend code changes. 31/31 assertions PASS.
+
+          BACKFILL (verified from startup logs):
+            backfill registration_source=razorpay:     stamped 8 users
+            backfill registration_source=upi_manual:   stamped 1 users
+            backfill registration_source=offline_cash: stamped 6 users (fallback)
+
+          [1] GET /api/admin/system-wallet/source-breakdown
+            ✅ no-token              → 401
+            ✅ non-admin testuser    → 403
+            ✅ admin                 → 200 with shape
+               { rows[{source,count,amount}], totals{count,amount},
+                 fan_out{}, generated_at:iso8601 }
+               Initial rows: [{razorpay, n=8, ₹944}, {upi_manual, n=1, ₹118}]
+               totals: {count:9, amount:1062.0}
+            NOTE: "offline_cash" was NOT initially in rows because the 6
+            backfilled offline_cash users had no registration_fee transactions
+            in the ledger (backfill stamps users but not legacy txns — exactly
+            as the brief documents). offline_cash appears in rows as soon as
+            new offline_cash users with mark_paid_offline=true are created
+            (step 4 below).
+
+          [2] BACKFILL on legacy paid users (GET /admin/users?limit=200)
+            Of 19 loaded users, 15 are paid. Bucket counts and sources:
+            ✅ razorpay paid users (n=8) → all have registration_source="razorpay"
+            ✅ upi_manual paid users (n=1) → registration_source="upi_manual"
+            ✅ admin_offline/NULL payment_method (n=6, paid) →
+                registration_source="offline_cash"
+
+          [3] POST /api/admin/users/create with new registration_source field
+            Created 5 users with timestamp-unique emails. All returned 200.
+            User docs (read back via ?q= filter) show:
+            ✅ registration_source="razorpay"     when sent
+            ✅ registration_source="upi_manual"   when sent
+            ✅ registration_source="offline_cash" when sent
+            ✅ registration_source="offline_cash" when omitted (legacy default)
+            ✅ registration_source=None when mark_paid_offline=false
+               (intentional — only paid users carry a canonical source)
+
+          [4] INCREMENT VERIFICATION
+            BEFORE: offline_cash row → count=2, amount=₹236 (the 2 created
+                    above with mark_paid_offline=true & source=offline_cash)
+            Created 2 more offline_cash paid users via /admin/users/create.
+            AFTER:  offline_cash row → count=4, amount=₹472
+            ✅ count delta = +2 (exact)
+            ✅ amount delta = +₹236.00 (= 2 × ₹118 registration_fee)
+
+          [5] REGRESSION CHECK
+            ✅ GET /admin/users?limit=20 → 200, 20 items
+            ✅ GET /admin/system-wallet → 200 (wallet_buckets / balance present)
+            ✅ GET /admin/audit-logs → 200
+            ✅ POST /auth/login (admin) returns refresh_token (verified at
+               start of run; only ONE admin login used for the entire suite
+               to respect the 10/min/IP cap, as the brief required)
+            ✅ POST /withdrawals (testuser clean device) reaches the endpoint:
+               returns 400 "Complete registration payment first" — i.e.
+               device-compromise guard releases, business rule fires
+               (testuser apparently doesn't carry registration_paid).
+               Crucially NOT 403 device_compromised → no regression.
+
+          [6] TRANSACTION TAGGING (GET /admin/transactions?include_pending=true&limit=200)
+            Found 76 txns on first page. For each newly created paid user,
+            their registration_fee txn carries the correct source tag:
+            ✅ razorpay user     → txn.source="razorpay"
+            ✅ upi_manual user   → txn.source="upi_manual"
+            ✅ offline_cash user → txn.source="offline_cash"
+            ✅ default-source user → txn.source="offline_cash"
+            ✅ unpaid user (mark_paid_offline=false) has NO registration_fee
+               txn at all (correct — no payment, no ledger entry)
+
+          DOCUMENTED EXPECTATION (per brief):
+            • New razorpay registration_fee txns ARE source-tagged on the
+              verify path. Old legacy razorpay txns may not carry the
+              source field (backfill stamps USERS not txns). The user-doc
+              level source is still authoritative for the breakdown card
+              because the aggregation does a $lookup users.registration_source
+              — the txn-level source is supplementary metadata, not the
+              grouping key.
+
+          NO DEFECTS. The User Creation Source Tracking matrix is fully wired
+          end-to-end: admin-create accepts the field, backfill stamped all
+          legacy paid users correctly, the breakdown endpoint groups & sums
+          accurately, new offline txns increment the rows by the exact
+          expected (count, ₹118) delta, txn-level source tagging on new
+          rows works, gating is correct (401/403 vs admin), and no existing
+          admin or finance endpoint regressed.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      USER CREATION SOURCE TRACKING — backend validation COMPLETE.
+      31/31 assertions PASS via /app/backend_test.py against the external
+      preview URL (read-only, single admin login reused throughout to
+      respect the 10/min/IP rate limit).
+
+      RESULTS:
+        ✅ Source-breakdown endpoint: shape correct, auth gating correct
+           (401 no-token, 403 non-admin, 200 admin), backfilled sources
+           "razorpay" + "upi_manual" present in rows.
+        ✅ Backfill stamped legacy paid users by payment_method prefix:
+             razorpay   → 8 users (all registration_source="razorpay")
+             upi_manual → 1 user  (registration_source="upi_manual")
+             admin_offline/null → 6 users (registration_source="offline_cash")
+        ✅ /admin/users/create honours payload.registration_source
+           (razorpay / upi_manual / offline_cash), defaults to "offline_cash"
+           when omitted, and stamps NULL when mark_paid_offline=false.
+        ✅ Breakdown increments correctly: 2 new offline_cash paid users
+           → +2 count, +₹236 amount on the offline_cash row.
+        ✅ New registration_fee txns carry the correct `source` field for
+           all 4 source values. Unpaid user has no txn (correct).
+        ✅ Regressions clean: /admin/users?limit=20, /admin/system-wallet,
+           /admin/audit-logs, admin /auth/login refresh_token,
+           /withdrawals all behave normally.
+
+      OBSERVATION (matches brief): offline_cash didn't appear in the
+      breakdown rows BEFORE my test created offline_cash paid users —
+      because the 6 backfilled offline_cash users have no registration_fee
+      ledger rows. Backfill stamps user docs but not legacy txns. This is
+      expected per the review brief.
+
+      Main agent: please summarise and finish.
+      YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.

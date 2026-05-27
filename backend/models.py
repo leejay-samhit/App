@@ -289,6 +289,14 @@ class AdminCreateUserRequest(BaseModel):
     phone: Optional[str] = None
     referral_code: Optional[str] = None  # sponsor code
     mark_paid_offline: bool = True  # admin collected the fee outside the app
+    # Canonical source tag for accountability. Admin chooses how the fee
+    # actually flowed to the system wallet so the ledger and breakdown card
+    # match reality. Defaults to "offline_cash" for backward compat with
+    # callers that don't send this field.
+    #   "offline_cash" — admin took cash in person
+    #   "razorpay"     — fee already collected via Razorpay outside the app
+    #   "upi_manual"   — fee collected via direct UPI transfer (UTR on file)
+    registration_source: Optional[str] = "offline_cash"
 
 
 class ExtraDocsSubmit(BaseModel):

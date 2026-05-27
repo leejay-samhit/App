@@ -282,6 +282,7 @@ async def approve_manual_payment(
         {"id": user["id"], "registration_paid": {"$ne": True}},
         {"$set": {
             "registration_paid":  True,
+            "registration_source": "upi_manual",
             "payment_method":     "upi_manual",
             "razorpay_utr":       row["utr"],         # reuse same field for invoice rendering
             "paid_at":            now_iso,
@@ -299,6 +300,7 @@ async def approve_manual_payment(
         {"user_id": user["id"], "manual_payment_id": payment_id, "status": "pending"},
         {"$set": {
             "status":           "paid",
+            "source":           "upi_manual",
             "description":      f"Registration fee via UPI · UTR {row['utr']} (approved by {admin.get('email')})",
             "paid_at":          now_iso,
         }},
