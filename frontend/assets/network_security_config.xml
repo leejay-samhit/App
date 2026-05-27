@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Android Network Security Config — used by EAS production builds for SSL pinning.
+  Android Network Security Config used by EAS production builds for SSL pinning.
 
   HOW THIS GETS PICKED UP
-  -----------------------
+  =======================
   Add this file's path to a custom expo config plugin or hand-edit
   AndroidManifest.xml's <application android:networkSecurityConfig=...>
   attribute during the EAS prebuild step. The simplest approach is the
@@ -11,15 +11,15 @@
   (created alongside this file) which copies + wires the file at build time.
 
   BEFORE THE FIRST EAS BUILD
-  --------------------------
+  ==========================
   1. Replace REPLACE_WITH_PROD_API_HOSTNAME with the real hostname
      (e.g.  api.networkpay.in).
   2. Extract two SPKI SHA-256 pins:
-        openssl s_client -showcerts -servername api.networkpay.in \
-            -connect api.networkpay.in:443 < /dev/null 2>/dev/null \
-          | openssl x509 -pubkey -noout \
-          | openssl pkey -pubin -outform der \
-          | openssl dgst -sha256 -binary \
+        openssl s_client -showcerts -servername api.networkpay.in
+            -connect api.networkpay.in:443 < /dev/null 2>/dev/null
+          | openssl x509 -pubkey -noout
+          | openssl pkey -pubin -outform der
+          | openssl dgst -sha256 -binary
           | openssl enc -base64
      The first pin is your CURRENT leaf cert. Pre-compute a BACKUP pin
      from the cert chain (intermediate CA's public key) so a renewal
@@ -28,14 +28,14 @@
      REPLACE_WITH_BACKUP_PIN_SHA256_BASE64 below.
 
   TESTING
-  -------
-  • Use an EAS Dev Client build. Hit your API normally — should work.
-  • Now spin up mitmproxy with a self-signed cert. Connect the device
+  =======
+  - Use an EAS Dev Client build. Hit your API normally  should work.
+  - Now spin up mitmproxy with a self-signed cert. Connect the device
     via Wi-Fi proxy. Network calls MUST fail with a TLS handshake error
     when pinning is active. If they succeed, the config wasn't applied.
 
   KILL SWITCH
-  -----------
+  ===========
   If a cert rotation brick happens, ship a hotfix that removes the
   <pin-set> block (leaving <domain-config> intact). The trust-anchors
   default to system, so the app keeps working over standard TLS.
