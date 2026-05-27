@@ -58,7 +58,6 @@
         }
       ],
       "expo-web-browser",
-      "./plugins/network-security-config",
       [
         "expo-build-properties",
         {
