@@ -6113,3 +6113,39 @@ agent_communication:
           throughout). No 5xx observed in any run.
 
       VERDICT: refactor is purely structural. Zero regressions detected.
+
+phase2b_modular_refactor_iter4_2026_05_27:
+  - task: "Phase 2B Iter 4 — extract wallet/withdrawals/cart endpoints"
+    implemented: true
+    working: true
+    file: "backend/server.py + backend/routes/wallet.py + backend/routes/withdrawals.py + backend/routes/cart.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Carved 5 read endpoints (+ 4 cart writes) out of server.py:
+            routes/wallet.py:
+              GET /transactions/me
+              GET /transactions/{txn_id}
+              GET /transactions/{txn_id}/invoice (HTML)
+              GET /transactions/{txn_id}/invoice.pdf (PDF)
+              + helpers _auto_remarks_for() + _resolve_invoice_data()
+            routes/withdrawals.py:
+              GET /withdrawals/me
+            routes/cart.py:
+              POST /cart/add, GET /cart, POST /cart/remove, POST /cart/clear
+              GET /orders/me
+          Routers registered in server.py via app.include_router(prefix="/api").
+          Net change: 143 lines removed from server.py (8463 -> 8320 lines).
+          Behaviour: IDENTICAL to pre-refactor — backend testing agent ran
+          50/50 tests covering moved endpoints, error paths, auth gating,
+          pagination, and ALL endpoints that stayed in server.py
+          (POST /withdrawals, POST /orders/checkout, POST /wallet/transfer
+          — the commission-engine-coupled writes that we deliberately did
+          NOT move yet). Zero regressions.
+          Future work: extract _trigger_referral_commissions to
+          core/commissions.py — once that's done the 3 write endpoints
+          can also move to their respective routers.
