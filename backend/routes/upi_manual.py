@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from core.db import db
 from core.rate_limit import limiter as _rl
-from core.security import get_current_user, require_admin
+from core.security import get_current_user, require_admin, require_clean_device
 from core.utils import now_utc
 
 
@@ -125,7 +125,7 @@ async def get_upi_payment_config(user: Dict[str, Any] = Depends(get_current_user
 async def submit_upi_manual_payment(
     request: Request,
     payload: SubmitUpiManualPayload,
-    user: Dict[str, Any] = Depends(get_current_user),
+    user: Dict[str, Any] = Depends(require_clean_device),
 ):
     """User submits the UTR after paying via UPI app. Status starts PENDING —
     NO auto-activation. Admin must approve before commission cascade fires."""

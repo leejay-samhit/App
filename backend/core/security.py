@@ -206,3 +206,31 @@ async def require_admin_not_finance(admin: Dict[str, Any] = Depends(require_admi
     if sub == "finance":
         raise HTTPException(status_code=403, detail="Finance role cannot perform this action — only withdrawals.")
     return admin
+
+
+async def require_clean_device(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """Phase 3 — block financial actions when the user's device failed an
+    integrity check (root/jailbreak/Play-Integrity/SSL-pin/...).
+
+    The frontend POSTs to /api/security/integrity-report on app boot. That
+    endpoint stamps users.integrity_status with the verdict. Here we read
+    the stamp and reject the request when level ∈ {read_only, hard_block}.
+
+    Backward compat: users with NO integrity_status (legacy install, Expo
+    Go, OAuth users who haven't reported yet) are ALLOWED — anti-tampering
+    rolls out without locking out the existing base. The FE will stamp
+    them on its next boot.
+    """
+    integ = (user or {}).get("integrity_status") or {}
+    level = integ.get("block_level")
+    if level in ("read_only", "hard_block"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "device_compromised",
+                "block_level": level,
+                "reasons": integ.get("reasons", []),
+                "message": "Action blocked: device failed a security check. Please use the app on a non-rooted, non-tampered device.",
+            },
+        )
+    return user

@@ -5407,3 +5407,176 @@ phase1_security_perf_session_c_2026_05_27:
           flipping tabs resets to page 0 of that status. Digest counters
           (oldest_pending_age, settled_today) still load via a separate
           one-shot GET in load() — they're a single object, not paginatable.
+
+phase3_anti_tampering_session_a_2026_05_27:
+  - task: "Backend integrity-report endpoint + per-action guard"
+    implemented: true
+    working: true
+    file: "backend/server.py + backend/core/security.py + backend/routes/upi_manual.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          New endpoint POST /api/security/integrity-report (rate-limited
+          30/min) accepts {checks[], play_integrity_token?, build_type,
+          app_version, os}. Server evaluates per-check policy:
+            root_jailbreak  -> read_only
+            play_integrity  -> hard_block
+            emulator        -> warn
+            developer_mode  -> warn
+            ssl_pin         -> hard_block
+            apk_signature   -> hard_block
+          Strongest applicable severity wins. Verdict is stamped onto
+          users.integrity_status and a security_event is logged when
+          block_level != "none". Verified live:
+            ssl_pin failed         -> hard_block
+            emulator only          -> warn
+            emulator + root        -> read_only (strongest wins)
+            all available=false    -> none (Expo Go safe)
+          New dependency core.security.require_clean_device guards:
+            POST /api/withdrawals
+            POST /api/payment/upi-manual
+          On read_only/hard_block stamp, these return 403 with
+          {detail:{code:"device_compromised", block_level, reasons,
+          message}}. Verified live: rooted -> withdrawal 403; re-report
+          clean -> withdrawal proceeds to next-stage error (400 needs
+          registration), proving the guard releases correctly.
+          Play Integrity token is feature-flagged via PLAY_INTEGRITY_ENABLED
+          env var (off by default) — Session B will swap in the Google
+          Cloud verifier without touching the route shape.
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 3 Session A backend validation — 33/33 scenarios PASS via
+          /app/backend_test.py against the public preview URL.
+
+          [TEST 1] BASIC FLOW ✅
+            • POST /api/security/integrity-report with checks:[] → 200
+              {ok:true, block_level:"none", reasons:[]}
+            • Same call w/o Authorization → 401 (correct).
+
+          [TEST 2] VERDICT MATRIX — all 9 cases ✅
+            2a root_jailbreak  → read_only       ✅
+            2b play_integrity  → hard_block      ✅
+            2c ssl_pin         → hard_block      ✅
+            2d emulator        → warn            ✅
+            2e developer_mode  → warn            ✅
+            2f apk_signature   → hard_block      ✅
+            2g available=false → none (no escalation on unavailable) ✅
+            2h emulator+root_jailbreak → read_only (strongest wins),
+                reasons contains BOTH "emulator:warn" and
+                "root_jailbreak:read_only" ✅
+            2i root_jailbreak+ssl_pin → hard_block ✅
+
+          [TEST 3] PER-ACTION GUARD on /api/withdrawals (testuser) ✅
+            • Dirty ssl_pin report → /withdrawals returns 403 with
+              detail={code:"device_compromised", block_level:"hard_block",
+              reasons:["ssl_pin:hard_block"], message:"…"}.
+            • Clean report → /withdrawals returns 400 "Complete registration
+              payment first" (i.e. guard released, hit downstream
+              business error).
+
+          [TEST 3b] PER-ACTION GUARD on /api/payment/upi-manual (qrtest) ✅
+            • Dirty ssl_pin report → 403 device_compromised hard_block.
+            • Clean report → 200 {ok:true, payment_id:…, status:"PENDING"}
+              i.e. guard released and submission accepted.
+
+          [TEST 4] read_only ALSO BLOCKS FINANCES ✅
+            • root_jailbreak (read_only) report → /withdrawals returns 403
+              device_compromised with block_level:"read_only". Clean report
+              afterward → guard releases.
+
+          [TEST 5] SECURITY EVENTS LOG ✅
+            • GET /api/admin/security-events?action=integrity.hard_block
+              returns ≥1 critical event with details.reasons array
+              ["ssl_pin:hard_block"].
+            • action=integrity.read_only returns warning-severity events
+              with details.reasons present.
+            • Clean reports do NOT create events: count_before=135,
+              count_after=135 after a clean POST.
+
+          [TEST 6] USER DOC STAMP via /auth/me ✅
+            • After dirty ssl_pin: user.integrity_status =
+              {block_level:"hard_block", reasons:["ssl_pin:hard_block"],
+              last_check_at:iso, build_type:"dev-client", os:"ios"}.
+            • After clean report: user.integrity_status.block_level="none".
+
+          [TEST 7] BACKWARDS-COMPAT (legacy / no integrity report) ✅
+            • Admin user (never POSTed an integrity report) → /auth/me
+              shows integrity_status=null. POST /api/withdrawals returns
+              200 (admin has wallet) — NOT 403 device_compromised,
+              confirming legacy users / Expo-Go are allowed through.
+
+          [TEST 8] NO REGRESSIONS ✅
+            • POST /auth/refresh with refresh_token → 200, new access
+              token issued.
+            • GET /api/admin/users?limit=5&offset=0 → 5 items.
+            • /auth/login rate-limit verified: 15 sequential bad logins
+              from same IP → first ~4 returned 401, then 429 dominated
+              ("Too many requests. Please slow down…") confirming the
+              10/min/IP cap.
+
+          Conclusion: Phase 3 Session A backend is fully working. Verdict
+          matrix correct, per-endpoint device-compromised guards correct,
+          read_only correctly blocks finances, security_events logged
+          with correct severity, user doc stamped accurately, backwards
+          compat preserved, no regressions on refresh/pagination/login
+          rate limit.
+
+  - task: "Frontend tamper-detection facade + TamperGate + TamperBlockedScreen"
+    implemented: true
+    working: true
+    file: "frontend/src/tamper-detection.ts + tamper-blocked-screen.tsx + auth.tsx + app/_layout.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          src/tamper-detection.ts orchestrates 6 client-side checks:
+          root_jailbreak / emulator / developer_mode / ssl_pin /
+          play_integrity / apk_signature. ALL are Expo-Go-safe (each native
+          require is wrapped in try/catch and falls back to
+          {available:false}). detectBuildType() emits "expo-go" |
+          "dev-client" | "production" | "web" so backend can later weight
+          reports.
+          runAndCacheIntegrity() runs all checks in parallel, POSTs to
+          /api/security/integrity-report, caches the verdict in module-level
+          state for synchronous reads from UI guards (getLastVerdict,
+          isFinancialBlocked, isHardBlocked).
+          auth.tsx: re-runs integrity (a) on every fresh login, (b) on app
+          boot when restoring an existing token. Exposes `integrity` and
+          `recheckIntegrity` via useAuth().
+          src/tamper-blocked-screen.tsx: full-screen takeover with
+          per-reason human labels + retry / contact-support actions.
+          app/_layout.tsx: TamperGate component swaps the entire app for
+          TamperBlockedScreen when integrity.block_level === "hard_block".
+          read_only block is intentionally NOT routed through this gate —
+          users keep app access and only get rejected when they touch a
+          financial endpoint (per-action 403). That gives them visibility
+          into balance/history while they resolve the device issue.
+          Visual smoke test (web preview, Expo Go equivalent): login flow
+          completed, 0 page errors, integrity check ran silently with
+          all checks reporting available=false -> block_level=none -> app
+          stayed fully usable.
+
+  - task: "Frontend imports / Expo-Go bundler safety"
+    implemented: true
+    working: true
+    file: "frontend/src/tamper-detection.ts"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          No top-level native requires. expo-constants only (already
+          installed). Web preview bundled cleanly in 1362ms; no new
+          warnings emitted by Metro. Native packages (jail-monkey,
+          react-native-ssl-pinning, play integrity) will be installed in
+          Session B once EAS is unblocked.

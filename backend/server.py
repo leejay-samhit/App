@@ -122,6 +122,7 @@ from core.security import (  # noqa: E402
     require_admin,
     require_admin_role,
     require_admin_not_finance,
+    require_clean_device,
 )
 from core.utils import (  # noqa: E402
     now_utc,
@@ -1698,7 +1699,7 @@ async def update_bank(payload: BankUpdate, user: Dict[str, Any] = Depends(get_cu
 # but tight enough to deter wallet-drain abuse scripts.
 @api_router.post("/withdrawals")
 @_rl.limit("5/hour")
-async def request_withdrawal(request: Request, payload: WithdrawalRequest, user: Dict[str, Any] = Depends(get_current_user)):
+async def request_withdrawal(request: Request, payload: WithdrawalRequest, user: Dict[str, Any] = Depends(require_clean_device)):
     if not user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Complete registration payment first")
     if user.get("approval_status", "approved") != "approved":
@@ -5311,6 +5312,140 @@ async def admin_security_events(
     limit = max(1, min(limit, 1000))
     items = await db.security_events.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
     return {"items": items, "count": len(items)}
+
+
+# ============================================================
+# Phase 3 — Anti-tampering / Integrity reporting
+# ============================================================
+# The frontend runs a battery of client-side integrity checks (root /
+# jailbreak, emulator, dev-mode, SSL pin, Play Integrity attestation) and
+# POSTs the verdict here on app boot + at key checkpoints. We:
+#   1. Stamp the verdict onto users.integrity_status so financial guards
+#      (withdrawals, payments) can read it.
+#   2. Log the event to security_events for the admin investigation UI.
+#   3. Return the BLOCK LEVEL — the FE uses this to decide whether to
+#      render TamperBlockedScreen / disable financial buttons / show a
+#      soft warning.
+#
+# Severity policy (Session A defaults — confirmed by user):
+#   • root / jailbreak             → read_only      (block payouts/payments)
+#   • Play Integrity FAIL_VERDICT  → hard_block     (Google's strongest signal)
+#   • emulator                     → warn           (don't block our own QA)
+#   • developer-mode               → warn
+#   • SSL pin mismatch             → hard_block     (MITM defence — non-negotiable)
+#
+# Backwards compatibility: Expo Go cannot run native checks. Each check the
+# FE sends carries `available: bool`. If `available=false` (unsupported build
+# type), we record `unknown` and apply the SOFTEST policy (warn) for that
+# check — never hard-block users on missing data.
+
+class _IntegrityCheck(BaseModel):
+    name: str
+    passed: bool
+    available: bool = True
+    detail: Optional[str] = None
+
+
+class _IntegrityReport(BaseModel):
+    checks: List[_IntegrityCheck]
+    play_integrity_token: Optional[str] = None
+    build_type: Optional[str] = None  # "expo-go" | "dev-client" | "production"
+    app_version: Optional[str] = None
+    os: Optional[str] = None
+
+
+# Per-check severity ladder. Higher = more severe.
+_SEVERITY = {"warn": 1, "read_only": 2, "hard_block": 3}
+_INV_SEVERITY = {v: k for k, v in _SEVERITY.items()}
+_CHECK_POLICY = {
+    "root_jailbreak":          "read_only",
+    "play_integrity":          "hard_block",
+    "emulator":                "warn",
+    "developer_mode":          "warn",
+    "ssl_pin":                 "hard_block",
+    "apk_signature":           "hard_block",
+}
+
+
+def _evaluate_integrity(checks: List[_IntegrityCheck]) -> Dict[str, Any]:
+    """Convert a list of FE checks into the strongest applicable block level
+    + a human-readable reason list. `available=false` checks never escalate."""
+    block_severity = 0  # severity 0 = "none"
+    reasons: List[str] = []
+    for c in checks:
+        if not c.available:
+            continue
+        if c.passed:
+            continue
+        # Failed + available — apply the policy for this check name.
+        policy = _CHECK_POLICY.get(c.name, "warn")
+        sev = _SEVERITY.get(policy, 1)
+        reasons.append(f"{c.name}:{policy}")
+        if sev > block_severity:
+            block_severity = sev
+    block_level = _INV_SEVERITY.get(block_severity, "none") if block_severity > 0 else "none"
+    return {"block_level": block_level, "reasons": reasons}
+
+
+@api_router.post("/security/integrity-report")
+@_rl.limit("30/minute")
+async def integrity_report(
+    request: Request,
+    payload: _IntegrityReport,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    verdict = _evaluate_integrity(payload.checks)
+    # Server-side Play Integrity verification is feature-flagged off by
+    # default — flip PLAY_INTEGRITY_ENABLED=1 in backend/.env once the GCP
+    # project + service-account JSON is in place. Until then we accept the
+    # FE's verdict at face value (still useful: root/emulator detection
+    # works without server attestation).
+    if os.environ.get("PLAY_INTEGRITY_ENABLED") == "1" and payload.play_integrity_token:
+        # TODO Session B: call Google Play Integrity API to verify the token
+        # server-side, extract verdicts, override the FE's claim if needed.
+        # Skeleton intentionally left as a no-op so the route shape stays
+        # stable — flipping the env var + adding the verifier code is a
+        # one-file change in core/play_integrity.py.
+        pass
+
+    now_iso = now_utc().isoformat()
+    # Stamp the user doc — financial endpoints will read this.
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "integrity_status": {
+                "block_level": verdict["block_level"],
+                "reasons": verdict["reasons"],
+                "last_check_at": now_iso,
+                "build_type": payload.build_type,
+                "app_version": payload.app_version,
+                "os": payload.os,
+            },
+        }},
+    )
+    # Log to security_events for admin visibility — only when the verdict
+    # is NOT "none". A clean device shouldn't spam the event stream.
+    if verdict["block_level"] != "none":
+        ip = (request.client.host if request.client else None)
+        await _security_event(
+            f"integrity.{verdict['block_level']}",
+            user_id=user["id"],
+            email=user.get("email"),
+            ip=ip,
+            details={
+                "reasons": verdict["reasons"],
+                "build_type": payload.build_type,
+                "app_version": payload.app_version,
+                "os": payload.os,
+                "checks": [c.dict() for c in payload.checks],
+            },
+            severity="critical" if verdict["block_level"] == "hard_block" else "warning",
+        )
+    return {
+        "ok": True,
+        "block_level": verdict["block_level"],
+        "reasons": verdict["reasons"],
+    }
 
 
 # ------------------ Phase 1: Analytics ------------------

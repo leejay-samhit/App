@@ -3,10 +3,11 @@ import { StatusBar } from "expo-status-bar";
 import { Text, TextInput, View, useWindowDimensions, StyleSheet, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { AuthProvider } from "../src/auth";
+import { AuthProvider, useAuth } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
 import { LocationGate } from "../src/location-gate";
 import { SplashOverlay } from "../src/splash-overlay";
+import TamperBlockedScreen from "../src/tamper-blocked-screen";
 import { colors } from "../src/theme";
 import { TABLET_MIN_WIDTH, READABLE_MAX_WIDTH } from "../src/theme";
 
@@ -48,6 +49,19 @@ function TabletContainer({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Phase 3 Session A — Full-screen gate that swaps the entire app for a
+// tamper-blocked screen when the most-recent integrity verdict from the
+// backend is "hard_block". Other verdicts (none / warn / read_only) let
+// the children render normally — the per-action 403 guard on the backend
+// handles those at the financial endpoint.
+function TamperGate({ children }: { children: React.ReactNode }) {
+  const { integrity, recheckIntegrity } = useAuth();
+  if (integrity && integrity.block_level === "hard_block") {
+    return <TamperBlockedScreen verdict={integrity} onRetry={() => { recheckIntegrity().catch(() => {}); }} />;
+  }
+  return <>{children}</>;
+}
+
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.background }}>
@@ -67,13 +81,15 @@ export default function RootLayout() {
                     Admin users and the unauthenticated /login screen pass
                     through the gate untouched. */}
                 <LocationGate>
-                  <Stack
-                    screenOptions={{
-                      headerShown: false,
-                      contentStyle: { backgroundColor: colors.background },
-                      animation: "fade",
-                    }}
-                  />
+                  <TamperGate>
+                    <Stack
+                      screenOptions={{
+                        headerShown: false,
+                        contentStyle: { backgroundColor: colors.background },
+                        animation: "fade",
+                      }}
+                    />
+                  </TamperGate>
                 </LocationGate>
                 {/* App-launch splash overlay (admin-uploaded image + duration).
                     Renders over EVERYTHING for the first N seconds (default 5s)

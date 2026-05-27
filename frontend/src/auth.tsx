@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState, ReactNode } from
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { api, setAuthToken, setSessionTokens, onSessionInvalidated } from "./api";
+import { runAndCacheIntegrity, IntegrityVerdict } from "./tamper-detection";
 
 export type User = {
   id: string;
@@ -38,6 +39,13 @@ type AuthState = {
    */
   sessionEndReason: "session_revoked" | "refresh_failed" | null;
   clearSessionEnd: () => void;
+  /** Phase 3 — Latest device-integrity verdict from the backend.
+   *  null = haven't checked yet (still loading), or check failed silently
+   *  (network blip — we never block the user on transport errors). */
+  integrity: IntegrityVerdict | null;
+  /** Force a re-run of the integrity checks (e.g. after a fresh login or
+   *  on a payment screen entrance). */
+  recheckIntegrity: () => Promise<IntegrityVerdict | null>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -46,6 +54,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [sessionEndReason, setSessionEndReason] = useState<AuthState["sessionEndReason"]>(null);
+  const [integrity, setIntegrity] = useState<IntegrityVerdict | null>(null);
+
+  // Phase 3 — run the integrity battery + POST verdict to the backend.
+  // Always backgrounded (never blocks UI) and tolerant of failures —
+  // anti-tampering must never lock people out on a flaky network.
+  const recheckIntegrity = async () => {
+    const v = await runAndCacheIntegrity();
+    setIntegrity(v);
+    return v;
+  };
 
   const refresh = async () => {
     try {
@@ -65,6 +83,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         return;
       }
       await refresh();
+      // Phase 3 — restored session → re-run integrity check so the
+      // server's stamp on this user reflects the CURRENT device, not the
+      // last one they signed in from.
+      recheckIntegrity().catch(() => {});
     })();
   }, []);
 
@@ -86,6 +108,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     await setSessionTokens(data.token ?? null, data.refresh_token ?? null);
     setUser(data.user);
     setSessionEndReason(null);
+    // Phase 3 — every fresh login triggers an integrity check so the
+    // backend stamp on this user is up-to-date before they touch any
+    // financial action. Fire-and-forget; we don't block the UI.
+    recheckIntegrity().catch(() => {});
   };
 
   const login = async (email: string, password: string) => {
@@ -134,6 +160,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         user, loading,
         login, register, logout, refresh, setSession,
         sessionEndReason, clearSessionEnd,
+        integrity, recheckIntegrity,
       }}
     >
       {children}
