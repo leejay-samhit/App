@@ -8,6 +8,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams } from "expo-router";
 import { WebView } from "react-native-webview";
 import { api } from "../../src/api";
+import { useInfiniteList } from "../../src/use-infinite-list";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
 
@@ -43,10 +44,15 @@ export default function AdminTxns() {
   const params = useLocalSearchParams<{ type?: string }>();
   const typeFilter = (Array.isArray(params.type) ? params.type[0] : params.type) || "";
 
-  const [items, setItems] = useState<Txn[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [includePending, setIncludePending] = useState(false);
+
+  // Phase 1 Session C — infinite scrolling via reusable hook. Pulls 20 rows
+  // per page; backend supports limit/offset; client filter (typeFilter, see
+  // below) is applied AFTER the page is loaded.
+  const list = useInfiniteList<Txn>("/admin/transactions", {
+    pageSize: 20,
+    params: includePending ? { include_pending: true } : {},
+  });
 
   // Title / chip label for the active type filter (when present).
   const TYPE_LABELS: Record<string, string> = {
@@ -64,8 +70,8 @@ export default function AdminTxns() {
   // Apply the optional type filter client-side. Keeps the existing list API
   // simple and avoids a server round-trip when admin toggles include-pending.
   const visibleItems = useMemo(
-    () => (typeFilter ? items.filter((t) => t.type === typeFilter) : items),
-    [items, typeFilter],
+    () => (typeFilter ? list.items.filter((t) => t.type === typeFilter) : list.items),
+    [list.items, typeFilter],
   );
   const visibleTotal = useMemo(
     () => visibleItems.reduce((s, t) => s + Number(t.amount || 0), 0),
@@ -80,15 +86,10 @@ export default function AdminTxns() {
   const [invoiceHtml, setInvoiceHtml] = useState<string | null>(null);
   const [invoiceBusy, setInvoiceBusy] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      const { data } = await api.get<Txn[]>(`/admin/transactions${includePending ? "?include_pending=true" : ""}`);
-      setItems(data);
-    } catch {}
-    finally { setLoading(false); setRefreshing(false); }
-  }, [includePending]);
-
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  // Re-fetch from page 0 whenever the screen regains focus (e.g. admin
+  // returns from a transaction detail). Empty deps — we only want this on
+  // mount and on focus, not on every list-object identity change.
+  useFocusEffect(useCallback(() => { list.reload(); /* eslint-disable-next-line */ }, []));
 
   const openDetail = async (txnId: string) => {
     setDetailLoading(true);
@@ -122,7 +123,7 @@ export default function AdminTxns() {
     finally { setInvoiceBusy(false); }
   };
 
-  if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
+  if (list.loading && list.items.length === 0) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
 
   const tx = detail?.transaction;
   const sign = (tx?.amount ?? 0) >= 0 ? "+" : "";
@@ -132,7 +133,18 @@ export default function AdminTxns() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <FlatList
         contentContainerStyle={styles.container}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
+        refreshControl={<RefreshControl refreshing={list.refreshing} onRefresh={list.refresh} />}
+        onEndReached={list.loadMore}
+        onEndReachedThreshold={0.5}
+        ListFooterComponent={list.loadingMore ? (
+          <View style={{ paddingVertical: 16, alignItems: "center" }}>
+            <ActivityIndicator color={colors.primary} size="small" />
+          </View>
+        ) : (!list.hasMore && list.items.length > 0 ? (
+          <Text style={{ textAlign: "center", color: colors.textMuted, paddingVertical: 12, fontSize: 12 }}>
+            End of list · {list.items.length} loaded
+          </Text>
+        ) : null)}
         ListHeaderComponent={
           <View>
             <Text style={styles.overline}>ADMIN</Text>
@@ -149,7 +161,7 @@ export default function AdminTxns() {
               </View>
             ) : null}
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4, marginBottom: 20 }}>
-              <Text style={styles.sub}>{visibleItems.length} of {items.length} total</Text>
+              <Text style={styles.sub}>{visibleItems.length} of {list.items.length} loaded</Text>
               <TouchableOpacity onPress={() => setIncludePending((v) => !v)} style={styles.toggle} testID="toggle-pending">
                 <Feather name={includePending ? "eye" : "eye-off"} size={13} color={colors.primary} />
                 <Text style={styles.toggleText}>{includePending ? "Showing pending/failed" : "Hide pending/failed"}</Text>

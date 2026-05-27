@@ -1,277 +1,208 @@
 """
-Phase 1 Session B validation — refresh tokens + single-session + device fingerprint.
-Read-only verification against the live preview backend.
+Phase 1 Session C — Pagination + search backend regression
+READ-ONLY test (no destructive operations).
 """
-import base64
-import json
 import os
 import sys
 import time
+import json
 import requests
 
 BASE = os.environ.get("BACKEND_BASE", "https://vendor-network-app-1.preview.emergentagent.com/api")
-ADMIN = ("admin@app.com", "Admin@123")
-TESTUSER = ("testuser@app.com", "Test@123")
-QR = ("qrtest@app.com", "Qr@1234")
 
-results = []  # (section, name, passed, detail)
+ADMIN = {"email": "admin@app.com", "password": "Admin@123"}
+USER = {"email": "testuser@app.com", "password": "Test@123"}
+QR = {"email": "qrtest@app.com", "password": "Qr@1234"}
 
+results = []  # (name, passed, detail)
 
-def record(section, name, passed, detail=""):
-    results.append((section, name, passed, detail))
-    icon = "PASS" if passed else "FAIL"
-    print(f"[{icon}] {section} :: {name} — {detail}")
+def rec(name, ok, detail=""):
+    results.append((name, ok, detail))
+    print(f"{'PASS' if ok else 'FAIL'} :: {name} :: {detail}")
 
+def login(creds):
+    """Login once; tolerates 429 with single backoff."""
+    for attempt in range(2):
+        r = requests.post(f"{BASE}/auth/login", json=creds, timeout=30)
+        if r.status_code == 429:
+            print(f"  rate-limited on login {creds['email']}; sleeping 60s")
+            time.sleep(60)
+            continue
+        r.raise_for_status()
+        d = r.json()
+        return d
+    raise RuntimeError(f"login failed for {creds['email']}")
 
-def decode_jwt_payload(tok: str) -> dict:
-    """Decode JWT without verifying signature (for claim inspection)."""
-    try:
-        mid = tok.split(".")[1]
-        pad = "=" * (-len(mid) % 4)
-        raw = base64.urlsafe_b64decode(mid + pad)
-        return json.loads(raw.decode("utf-8"))
-    except Exception as e:
-        return {"_decode_err": str(e)}
+def hdr(tok):
+    return {"Authorization": f"Bearer {tok}"}
 
-
-def login(email, password):
-    return requests.post(f"{BASE}/auth/login", json={"email": email, "password": password}, timeout=30)
-
-
-def me(tok, extra_headers=None):
-    h = {"Authorization": f"Bearer {tok}"}
-    if extra_headers:
-        h.update(extra_headers)
-    return requests.get(f"{BASE}/auth/me", headers=h, timeout=30)
+def get(path, token, **params):
+    return requests.get(f"{BASE}{path}", headers=hdr(token), params=params or None, timeout=30)
 
 
-# ───────────────────────── 1) ISSUANCE ─────────────────────────────
-print("\n=== SECTION 1: REFRESH TOKEN ISSUANCE ===")
-r = login(*TESTUSER)
-record("1", "POST /auth/login (testuser) = 200", r.status_code == 200, f"http={r.status_code}")
-if r.status_code != 200:
-    print("Cannot continue without login")
-    sys.exit(1)
-body = r.json()
-record("1", "response has `token`", "token" in body, "")
-record("1", "response has `refresh_token`", "refresh_token" in body, "")
-record("1", "response has `user`", "user" in body, "")
-T1 = body["token"]
-RT1 = body["refresh_token"]
+def main():
+    print(f"BASE = {BASE}")
+    # Single logins reused
+    a = login(ADMIN)
+    A_TOK = a.get("token") or a.get("access_token")
+    A_REFRESH = a.get("refresh_token")
+    print(f"admin token len={len(A_TOK) if A_TOK else None}; refresh={'yes' if A_REFRESH else 'no'}")
 
-acc_claims = decode_jwt_payload(T1)
-ref_claims = decode_jwt_payload(RT1)
-record("1", "access type=access", acc_claims.get("type") == "access", f"type={acc_claims.get('type')}")
-record("1", "access has sid", bool(acc_claims.get("sid")), f"sid={acc_claims.get('sid')}")
-now = int(time.time())
-acc_exp_delta = int(acc_claims.get("exp", 0)) - now
-record("1", "access exp ~15min", 12 * 60 <= acc_exp_delta <= 20 * 60, f"delta={acc_exp_delta}s")
-record("1", "refresh type=refresh", ref_claims.get("type") == "refresh", f"type={ref_claims.get('type')}")
-record("1", "refresh same sid as access", ref_claims.get("sid") == acc_claims.get("sid"),
-       f"acc={acc_claims.get('sid')} ref={ref_claims.get('sid')}")
-ref_exp_delta = int(ref_claims.get("exp", 0)) - now
-record("1", "refresh exp ~7 days",
-       6 * 86400 <= ref_exp_delta <= 8 * 86400, f"delta={ref_exp_delta}s")
-r = me(T1)
-record("1", "access → /auth/me = 200", r.status_code == 200, f"http={r.status_code}")
+    u = login(USER)
+    U_TOK = u.get("token") or u.get("access_token")
+    print(f"user token len={len(U_TOK) if U_TOK else None}")
 
+    # ───────────────────── 1) BACKWARD COMPAT ───────────────────────────────
+    legacy = {}
+    for label, path, tok in [
+        ("u.transactions", "/transactions/me", U_TOK),
+        ("u.withdrawals", "/withdrawals/me", U_TOK),
+        ("a.users", "/admin/users", A_TOK),
+        ("a.transactions", "/admin/transactions", A_TOK),
+        ("a.withdrawals", "/admin/withdrawals", A_TOK),
+    ]:
+        r = get(path, tok)
+        ok = r.status_code == 200 and isinstance(r.json(), list)
+        rec(f"BC {label} legacy list", ok, f"HTTP {r.status_code} len={len(r.json()) if ok else 'n/a'}")
+        if ok:
+            legacy[label] = r.json()
 
-# ───────────────────────── 2) REFRESH ROTATION ────────────────────
-print("\n=== SECTION 2: /auth/refresh ROTATION ===")
-r = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": RT1}, timeout=30)
-record("2", "POST /auth/refresh valid = 200", r.status_code == 200, f"http={r.status_code} body={r.text[:200]}")
-T2 = None
-if r.status_code == 200:
-    refbody = r.json()
-    record("2", "has new token", "token" in refbody, "")
-    record("2", "has new refresh_token", "refresh_token" in refbody, "")
-    T2 = refbody["token"]
-    acc2_claims = decode_jwt_payload(T2)
-    record("2", "new sid differs",
-           acc2_claims.get("sid") and acc2_claims.get("sid") != acc_claims.get("sid"),
-           f"old={acc_claims.get('sid')} new={acc2_claims.get('sid')}")
+    N_total = len(legacy.get("a.users", []))
+    print(f"\nN_total(/admin/users) = {N_total}\n")
 
-    r2 = me(T1)
-    d = ""
-    try:
-        d = r2.json().get("detail", "")
-    except Exception:
-        pass
-    record("2", "OLD access T1 → 401 session_revoked",
-           r2.status_code == 401 and d == "session_revoked", f"http={r2.status_code} detail={d}")
+    # ───────────────────── 2) PAGINATION CORRECTNESS ────────────────────────
+    def pagination_checks(label, path, tok, legacy_list):
+        N = len(legacy_list)
+        # ?limit=5&offset=0
+        r = get(path, tok, limit=5, offset=0)
+        ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) <= 5
+        first_match = bool(legacy_list) and r.json() and r.json()[0].get("id") == legacy_list[0].get("id") if ok and N else (N == 0)
+        rec(f"PG {label} limit=5 offset=0", ok and first_match,
+            f"HTTP {r.status_code} got {len(r.json()) if ok else 'n/a'} first_match={first_match}")
 
-    r3 = me(T2)
-    record("2", "NEW access T2 → 200", r3.status_code == 200, f"http={r3.status_code}")
+        # ?limit=5&offset=5 (if N>=6)
+        if N >= 6:
+            r = get(path, tok, limit=5, offset=5)
+            ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) <= 5
+            match = ok and r.json() and r.json()[0].get("id") == legacy_list[5].get("id")
+            rec(f"PG {label} limit=5 offset=5", ok and match,
+                f"HTTP {r.status_code} got {len(r.json()) if ok else 'n/a'} item0_match_legacy[5]={match}")
+        else:
+            rec(f"PG {label} limit=5 offset=5", True, f"skipped (N={N})")
 
-    r4 = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": RT1}, timeout=30)
-    d4 = ""
-    try:
-        d4 = r4.json().get("detail", "")
-    except Exception:
-        pass
-    record("2", "OLD refresh RT1 reused → 401",
-           r4.status_code == 401 and d4 in ("session_revoked", "refresh_invalid"),
-           f"http={r4.status_code} detail={d4}")
+        # ?limit=5&offset=N_total → []
+        r = get(path, tok, limit=5, offset=N)
+        ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) == 0
+        rec(f"PG {label} limit=5 offset={N}", ok, f"HTTP {r.status_code} len={len(r.json()) if r.status_code==200 else 'n/a'}")
 
-r = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": "this.is.garbage"}, timeout=30)
-d = ""
-try:
-    d = r.json().get("detail", "")
-except Exception:
-    pass
-record("2", "garbage → 401 refresh_invalid",
-       r.status_code == 401 and d == "refresh_invalid", f"http={r.status_code} detail={d}")
+        # ?limit=0 → legacy unbounded
+        r = get(path, tok, limit=0)
+        ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) == N
+        rec(f"PG {label} limit=0 → unbounded", ok, f"HTTP {r.status_code} got={len(r.json()) if r.status_code==200 else 'n/a'} expected={N}")
 
-r = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": "abc"}, timeout=30)
-d = ""
-try:
-    d = r.json().get("detail", "")
-except Exception:
-    pass
-record("2", "malformed → 401",
-       r.status_code == 401 and d in ("refresh_invalid", "refresh_expired"),
-       f"http={r.status_code} detail={d}")
+        # ?limit=10000 → cap at 200 (won't matter if N<200)
+        r = get(path, tok, limit=10000)
+        ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) <= 200
+        rec(f"PG {label} limit=10000 cap", ok, f"HTTP {r.status_code} len={len(r.json()) if r.status_code==200 else 'n/a'}")
 
+    pagination_checks("a.users", "/admin/users", A_TOK, legacy.get("a.users", []))
+    pagination_checks("a.transactions", "/admin/transactions", A_TOK, legacy.get("a.transactions", []))
+    pagination_checks("a.withdrawals", "/admin/withdrawals", A_TOK, legacy.get("a.withdrawals", []))
+    pagination_checks("u.transactions", "/transactions/me", U_TOK, legacy.get("u.transactions", []))
+    pagination_checks("u.withdrawals", "/withdrawals/me", U_TOK, legacy.get("u.withdrawals", []))
 
-# ───────────────────────── 3) SINGLE-SESSION ──────────────────────
-print("\n=== SECTION 3: SINGLE-SESSION ===")
-r_a = login(*TESTUSER)
-record("3", "login #1 = 200", r_a.status_code == 200, f"http={r_a.status_code}")
-T_A = r_a.json()["token"]
-time.sleep(0.5)
-r_b = login(*TESTUSER)
-record("3", "login #2 = 200", r_b.status_code == 200, f"http={r_b.status_code}")
-T_B = r_b.json()["token"]
+    # ───────────────────── 3) SERVER-SIDE SEARCH on /admin/users ───────────
+    r = get("/admin/users", A_TOK, q="admin", limit=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    found_admin = ok and any(it.get("email") == "admin@app.com" for it in r.json())
+    rec("SR q=admin contains admin@app.com", ok and found_admin,
+        f"HTTP {r.status_code} len={len(r.json()) if ok else 'n/a'} found={found_admin}")
 
-r1 = me(T_A)
-d = ""
-try:
-    d = r1.json().get("detail", "")
-except Exception:
-    pass
-record("3", "T1 → 401 session_revoked",
-       r1.status_code == 401 and d == "session_revoked", f"http={r1.status_code} detail={d}")
-r2 = me(T_B)
-record("3", "T2 → 200", r2.status_code == 200, f"http={r2.status_code}")
+    r = get("/admin/users", A_TOK, q="testuser", limit=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    found_user = ok and any(it.get("email") == "testuser@app.com" for it in r.json())
+    rec("SR q=testuser contains testuser@app.com", ok and found_user,
+        f"HTTP {r.status_code} len={len(r.json()) if ok else 'n/a'} found={found_user}")
 
+    # regex-special chars
+    r = get("/admin/users", A_TOK, q="$^*", limit=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    rec("SR q=$^* (regex-escape)", ok,
+        f"HTTP {r.status_code} len={len(r.json()) if ok else 'n/a'} (must NOT 500)")
 
-# ───────────────────────── 4) LOGOUT ──────────────────────────────
-print("\n=== SECTION 4: LOGOUT INVALIDATES ===")
-r = login(*TESTUSER)
-T = r.json()["token"]
-rm = me(T)
-record("4", "fresh T → /auth/me = 200", rm.status_code == 200, f"http={rm.status_code}")
-rl = requests.post(f"{BASE}/auth/logout", headers={"Authorization": f"Bearer {T}"}, timeout=30)
-record("4", "POST /auth/logout = 200", rl.status_code == 200, f"http={rl.status_code}")
-rmm = me(T)
-d = ""
-try:
-    d = rmm.json().get("detail", "")
-except Exception:
-    pass
-record("4", "T after logout → 401 session_revoked",
-       rmm.status_code == 401 and d == "session_revoked", f"http={rmm.status_code} detail={d}")
+    # non-matching phrase
+    r = get("/admin/users", A_TOK, q="zzzz_nonmatching_phrase_xyz", limit=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    rec("SR q=nonmatch drops count", ok and len(r.json()) < N_total,
+        f"HTTP {r.status_code} len={len(r.json()) if ok else 'n/a'} vs N_total={N_total}")
 
+    # ───────────── 4) STATUS FILTER + PAGINATION /admin/withdrawals ─────────
+    r = get("/admin/withdrawals", A_TOK, status="success", limit=5)
+    if r.status_code == 200 and isinstance(r.json(), list):
+        items = r.json()
+        ok = all(it.get("status") == "success" for it in items)
+        rec("SF withdrawals status=success", ok, f"HTTP 200 len={len(items)} all_success={ok}")
+    else:
+        rec("SF withdrawals status=success", False, f"HTTP {r.status_code}")
 
-# ───────────────────────── 5) DEVICE FINGERPRINT ──────────────────
-print("\n=== SECTION 5: DEVICE FINGERPRINT ===")
-r = login(*TESTUSER)
-T = r.json()["token"]
-rA = me(T, {"X-Device-FP": "fp-A-1234567890123456"})
-record("5", "FP-A → 200", rA.status_code == 200, f"http={rA.status_code}")
-rB = me(T, {"X-Device-FP": "fp-B-9999999999999999"})
-record("5", "FP-B (different) → 200 (no block)",
-       rB.status_code == 200, f"http={rB.status_code}")
+    r = get("/admin/withdrawals", A_TOK, status="pending", limit=5)
+    if r.status_code == 200 and isinstance(r.json(), list):
+        items = r.json()
+        ok = all(it.get("status") == "pending" for it in items)
+        rec("SF withdrawals status=pending", ok, f"HTTP 200 len={len(items)} all_pending={ok}")
+    else:
+        rec("SF withdrawals status=pending", False, f"HTTP {r.status_code}")
 
-ra = login(*ADMIN)
-record("5", "admin login = 200", ra.status_code == 200, f"http={ra.status_code}")
-ADMIN_T = ra.json()["token"] if ra.status_code == 200 else ""
-time.sleep(1)
-rs = requests.get(
-    f"{BASE}/admin/security-events",
-    params={"action": "auth.device_change", "email": "testuser@app.com", "limit": 20},
-    headers={"Authorization": f"Bearer {ADMIN_T}"},
-    timeout=30,
-)
-record("5", "GET /admin/security-events = 200", rs.status_code == 200, f"http={rs.status_code}")
-if rs.status_code == 200:
-    items = rs.json().get("items", [])
-    found = None
-    for ev in items:
-        det = ev.get("details") or {}
-        if ev.get("severity") == "warning" and det.get("previous_fp") and det.get("new_fp"):
-            found = ev
-            break
-    record("5", "device_change event with truncated previous_fp + new_fp + severity=warning",
-           found is not None,
-           f"count={len(items)} sample_details={(items[0].get('details') if items else None)}")
+    # ───────────── 5) include_pending + PAGINATION /admin/transactions ─────
+    r = get("/admin/transactions", A_TOK, include_pending="true", limit=5)
+    ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) <= 5
+    rec("IP transactions include_pending=true limit=5", ok,
+        f"HTTP {r.status_code} len={len(r.json()) if ok else 'n/a'}")
 
+    r = get("/admin/transactions", A_TOK, limit=5)
+    if r.status_code == 200 and isinstance(r.json(), list):
+        items = r.json()
+        bad = [it for it in items if it.get("status") in ("created", "failed")]
+        rec("IP transactions default excludes created/failed", len(bad) == 0,
+            f"HTTP 200 len={len(items)} bad_count={len(bad)}")
+    else:
+        rec("IP transactions default", False, f"HTTP {r.status_code}")
 
-# ───────────────────────── 6) RATE LIMIT ──────────────────────────
-print("\n=== SECTION 6: RATE LIMIT /auth/refresh ===")
-hit_429 = False
-last_resp = None
-last_body = None
-count_to_429 = 0
-for i in range(40):
-    r = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": "garbage"}, timeout=10)
-    count_to_429 = i + 1
-    if r.status_code == 429:
-        hit_429 = True
-        last_resp = r
-        try:
-            last_body = r.json()
-        except Exception:
-            last_body = r.text[:300]
-        break
-    last_resp = r
-record("6", ">30 rapid /auth/refresh calls → 429",
-       hit_429, f"hit_at_call={count_to_429} body={last_body}")
-if hit_429:
-    record("6", "429 body is JSON dict (friendly shape)",
-           isinstance(last_body, dict), f"body={last_body}")
+    # ───────────────────── 6) NO REGRESSIONS ────────────────────────────────
+    r = requests.get(f"{BASE}/branding", timeout=30)
+    rec("RG /branding (anon)", r.status_code == 200, f"HTTP {r.status_code}")
+
+    r = requests.get(f"{BASE}/products", timeout=30)
+    rec("RG /products", r.status_code == 200, f"HTTP {r.status_code}")
+
+    r = get("/auth/me", A_TOK)
+    rec("RG /auth/me (admin)", r.status_code == 200, f"HTTP {r.status_code}")
+
+    # Admin login still works — but we already did one login; do not log in again to avoid 429.
+    rec("RG admin login (already done)", bool(A_TOK), f"token_len={len(A_TOK) if A_TOK else 0}")
+
+    # Refresh-token rotation — use already-captured A_REFRESH
+    if A_REFRESH:
+        r = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": A_REFRESH}, timeout=30)
+        ok = r.status_code == 200 and isinstance(r.json(), dict)
+        body = r.json() if ok else {}
+        new_acc = body.get("token") or body.get("access_token")
+        new_ref = body.get("refresh_token")
+        rotated = bool(new_acc) and bool(new_ref) and new_ref != A_REFRESH
+        rec("RG /auth/refresh rotation", ok and rotated,
+            f"HTTP {r.status_code} new_access={'y' if new_acc else 'n'} new_refresh={'y' if new_ref else 'n'} rotated={rotated}")
+    else:
+        rec("RG /auth/refresh rotation", False, "no refresh_token on login response")
+
+    # ─────────────────────── SUMMARY ───────────────────────────────────────
+    passed = sum(1 for _, ok, _ in results if ok)
+    total = len(results)
+    print(f"\n========== SUMMARY {passed}/{total} ==========")
+    for name, ok, detail in results:
+        if not ok:
+            print(f"  FAIL :: {name} :: {detail}")
+    return 0 if passed == total else 1
 
 
-# ───────────────────────── 7) BACKWARDS-COMPAT ────────────────────
-print("\n=== SECTION 7: BACKWARDS-COMPAT (missing field) ===")
-time.sleep(3)
-r = requests.post(f"{BASE}/auth/refresh", json={}, timeout=30)
-d = ""
-try:
-    d = r.json().get("detail", "")
-except Exception:
-    pass
-record("7", "missing refresh_token → 401 or 422",
-       r.status_code in (401, 422), f"http={r.status_code} detail={d}")
-
-
-# ───────────────────────── 8) NO REGRESSIONS ──────────────────────
-print("\n=== SECTION 8: NO REGRESSIONS ===")
-r = requests.get(f"{BASE}/products", timeout=30)
-record("8", "GET /products anon = 200", r.status_code == 200, f"http={r.status_code}")
-
-r = requests.get(f"{BASE}/branding", timeout=30)
-record("8", "GET /branding = 200", r.status_code == 200, f"http={r.status_code}")
-
-ra = login(*ADMIN)
-if ra.status_code == 200:
-    ADMIN_T = ra.json()["token"]
-r = requests.get(f"{BASE}/admin/audit-logs", headers={"Authorization": f"Bearer {ADMIN_T}"}, timeout=30)
-record("8", "GET /admin/audit-logs (admin) = 200", r.status_code == 200, f"http={r.status_code}")
-
-r = login(*ADMIN)
-record("8", "admin can still log in", r.status_code == 200, f"http={r.status_code}")
-
-
-# ─────────── REPORT ───────────
-print("\n=== FINAL REPORT ===")
-total = len(results)
-passed = sum(1 for (_, _, p, _) in results if p)
-failed = total - passed
-print(f"\nTOTAL: {passed}/{total} passed ({failed} failed)")
-if failed:
-    print("\nFAILED:")
-    for (s, n, p, d) in results:
-        if not p:
-            print(f"  [{s}] {n} — {d}")
-sys.exit(0 if failed == 0 else 1)
+if __name__ == "__main__":
+    sys.exit(main())

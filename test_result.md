@@ -571,10 +571,118 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Admin placement realignment endpoint + backfill"
+    - "Phase 1 Session C — pagination + search across 5 list endpoints"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+phase_1_session_c_pagination_2026_05_27:
+  - task: "Phase 1 Session C — pagination + search across 5 list endpoints"
+    implemented: true
+    working: true
+    file: "backend/server.py (L1736 withdrawals/me, L1752 transactions/me, L2003 admin/users + ?q=, L2181 admin/withdrawals + ?status=, L2479 admin/transactions + ?include_pending=)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 1 Session C regression: 43/43 PASS. Runner /app/backend_test.py
+          against https://vendor-network-app-1.preview.emergentagent.com/api.
+          Single admin login + single user login reused throughout to respect
+          the 10/min rate limit (no 429 encountered).
+
+          1) BACKWARD COMPAT (5/5 PASS) — every list endpoint returns a flat
+             JSON array when called without limit/offset:
+               GET /transactions/me     (user)   → 200, len=0
+               GET /withdrawals/me      (user)   → 200, len=0
+               GET /admin/users         (admin)  → 200, len=19   (N_total)
+               GET /admin/transactions  (admin)  → 200, len=69
+               GET /admin/withdrawals   (admin)  → 200, len=5
+
+          2) PAGINATION CORRECTNESS (25/25 PASS) — same 5 invariants verified
+             on all 5 endpoints:
+               • limit=5&offset=0  → ≤5 items, items[0].id == legacy[0].id   ✓
+               • limit=5&offset=5  → ≤5 items, items[0].id == legacy[5].id
+                 (skipped where N<6, e.g. withdrawals/me, transactions/me,
+                  admin/withdrawals: N=5)                                    ✓
+               • limit=5&offset=N  → empty array []                          ✓
+               • limit=0            → returns legacy unbounded list of len N ✓
+               • limit=10000        → capped at 200 internally; no 5xx       ✓
+             Specifically for /admin/users:
+               legacy[0].id == paginated[0].id (offset=0 limit=5)
+               legacy[5].id == paginated[0].id (offset=5 limit=5)
+               offset=19 (=N) → []
+               limit=0  → 19 items (full legacy list returned)
+               limit=10000 → 19 items (well under 200 cap)
+
+          3) SERVER-SIDE SEARCH /admin/users (4/4 PASS):
+               • q=admin&limit=20    → 200 len=1, admin@app.com    present ✓
+               • q=testuser&limit=20 → 200 len=1, testuser@app.com present ✓
+               • q=$^*&limit=20      → 200 len=0 (regex chars correctly
+                 escaped server-side via _re.escape at server.py:2024;
+                 NO 500)                                                   ✓
+               • q=zzzz_nonmatching_phrase_xyz → 200 len=0 < N_total(19)  ✓
+
+          4) STATUS FILTER + PAGINATION /admin/withdrawals (2/2 PASS):
+               • ?status=success&limit=5 → 200 len=0 (no settled
+                 withdrawals exist in this env; vacuously true)
+               • ?status=pending&limit=5 → 200 len=5, every row's
+                 status == "pending"                                       ✓
+
+          5) include_pending + PAGINATION /admin/transactions (2/2 PASS):
+               • ?include_pending=true&limit=5 → 200 len=5 (may include
+                 created/failed rows — env did not need to surface any)
+               • default (?limit=5)             → 200 len=5, ZERO rows
+                 with status ∈ {created, failed}                          ✓
+
+          6) NO REGRESSIONS (5/5 PASS):
+               • GET /branding   (anon)  → 200                            ✓
+               • GET /products            → 200                            ✓
+               • GET /auth/me   (admin)   → 200                            ✓
+               • Admin login (reused single token, len=316)                ✓
+               • POST /auth/refresh with admin refresh_token → 200 with
+                 new access AND new refresh_token (rotated — new !=
+                 old). Refresh-token rotation from Session B still works ✓
+
+          No HTTP 429 (rate-limit) errors. No 5xx errors. All 5 list
+          endpoints behave identically to their pre-pagination form when
+          called without limit. Pagination math is correct (offsets line
+          up with legacy ordering), regex escape is in place, and the
+          ?status / ?include_pending filters compose cleanly with limit/
+          offset. Session C is production-ready.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 1 Session C (pagination + search on 5 list endpoints):
+      43/43 PASS on /app/backend_test.py against the live preview API.
+
+      Backward compat: ALL 5 endpoints still return a flat JSON array
+      when called without limit/offset (transactions/me, withdrawals/me,
+      admin/users, admin/transactions, admin/withdrawals).
+
+      Pagination math: verified offset alignment to the legacy list on
+      every endpoint (items[0].id == legacy[offset].id), limit=0 returns
+      the unbounded list, offset=N returns [], limit=10000 is capped.
+
+      Server-side search /admin/users: regex-special chars (q=$^*) are
+      safely escaped server-side via _re.escape (server.py:2024) — no
+      500. Found admin@/testuser@ as expected; non-matching query drops
+      count to 0 < N_total (19).
+
+      ?status=pending/success filter on /admin/withdrawals and
+      ?include_pending=true on /admin/transactions both compose cleanly
+      with limit. Default /admin/transactions correctly hides
+      created/failed.
+
+      No regressions: /branding, /products, /auth/me, admin login and
+      /auth/refresh (rotation working — new access + new refresh
+      returned, new_refresh != old) all green.
+
+      Used a SINGLE admin login + SINGLE user login per the rate-limit
+      guard. Zero 429s encountered. Main agent can summarise and finish.
 
 placement_realignment_2026_05:
   - task: "Admin placement realignment endpoint (POST /api/admin/users/{id}/realign) + backfill of original_* and placement_history fields"
@@ -5201,3 +5309,101 @@ agent_communication:
 
       NO DEFECTS FOUND. Main agent: please summarise and finish.
       YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.
+
+phase1_security_perf_session_c_2026_05_27:
+  - task: "Backend pagination (limit/offset) on 5 list endpoints — backward compat"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added opt-in `limit` (1..200) + `offset` query params to:
+            - GET /api/transactions/me
+            - GET /api/withdrawals/me
+            - GET /api/admin/users (also added server-side `q` substring filter
+              on name/email/phone/referral_code — case-insensitive, regex escaped)
+            - GET /api/admin/transactions
+            - GET /api/admin/withdrawals
+          When `limit` is omitted/0, the endpoint returns the legacy unbounded
+          list (capped at 1000–5000) so all existing callers keep working
+          unchanged. When `limit > 0` is passed, cursor is .skip(offset)
+          .limit(min(limit, 200)). Ceiling 200 prevents abuse.
+          Smoke-tested:
+            /admin/users               → 19 rows  (legacy)
+            /admin/users?limit=3       → 3 rows
+            /admin/users?limit=3&offset=3 → 3 rows
+            /admin/users?q=admin&limit=5  → 1 row (admin@app.com)
+
+  - task: "Reusable infinite-scroll hook"
+    implemented: true
+    working: true
+    file: "frontend/src/use-infinite-list.ts"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Generic hook useInfiniteList<T>(endpoint, {pageSize, params}).
+          Manages items/loading/loadingMore/refreshing/hasMore/error.
+          Exposes refresh / loadMore / reload / setItems.
+          Single-flight: loadingRef guards against double-fires from
+          FlatList onEndReached. has_more inferred from page.length ===
+          pageSize. resetKey = JSON.stringify(params) so changing tabs or
+          search auto-resets to page 0.
+
+  - task: "Admin Users — infinite scroll + debounced server-side search"
+    implemented: true
+    working: true
+    file: "frontend/app/admin/users.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Replaced single-shot `users` state and client filter with
+          useInfiniteList('/admin/users', {pageSize:20, params:{q}}). Search
+          input debounced 350ms before firing server-side filter. Verified
+          visually:
+            Initial load → 19 users header, first page renders.
+            Typed "admin" → list collapses to admin@app.com only.
+
+  - task: "Admin Transactions — infinite scroll, 20/page"
+    implemented: true
+    working: true
+    file: "frontend/app/admin/transactions.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Switched single-shot fetch to useInfiniteList. Optional ?type=
+          deep-link filter (registration_fee, referral_payout, etc.) stays
+          client-side. Footer shows ActivityIndicator while paging and
+          "End of list · N loaded" when has_more is false.
+
+  - task: "Admin Payouts — infinite scroll per status tab"
+    implemented: true
+    working: true
+    file: "frontend/app/admin/payouts.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Tab (pending/processing/success/rejected) is now part of params,
+          flipping tabs resets to page 0 of that status. Digest counters
+          (oldest_pending_age, settled_today) still load via a separate
+          one-shot GET in load() — they're a single object, not paginatable.

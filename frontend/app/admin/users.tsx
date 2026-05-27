@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -21,6 +21,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { useInfiniteList } from "../../src/use-infinite-list";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { formatActiveAgo } from "../../src/location";
 
@@ -82,11 +83,28 @@ type Stats = {
 export default function AdminUsers() {
   const router = useRouter();
   const { user: currentAdmin } = useAuth();
-  const [users, setUsers] = useState<AdminUser[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
+  // Debounced search — fires the server-side ?q= filter 350ms after the
+  // last keystroke so we don't slam the API on every character typed.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => clearTimeout(id);
+  }, [search]);
+
+  // Phase 1 Session C — infinite scrolling for the user roster.
+  // Server-side `q` re-evaluates the result set whenever the debounced
+  // search changes; the hook auto-resets to page 0 on each new key.
+  const list = useInfiniteList<AdminUser>("/admin/users", {
+    pageSize: 20,
+    params: debouncedSearch ? { q: debouncedSearch } : {},
+  });
+  const users = list.items;          // <-- alias so existing JSX keeps reading `users`
+  const filtered = users;            // server-side filtering — client filter no longer needed
+  const loading = list.loading;
+
   const [editing, setEditing] = useState<AdminUser | null>(null);
   const [pendingDelete, setPendingDelete] = useState<AdminUser | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -96,24 +114,19 @@ export default function AdminUsers() {
   );
 
   const load = useCallback(async () => {
+    // Stats is one small object — keep a separate /admin/stats fetch.
+    // The user roster reload is owned by useInfiniteList.
     try {
-      const [u, s] = await Promise.all([api.get<AdminUser[]>("/admin/users"), api.get<Stats>("/admin/stats")]);
-      setUsers(u.data);
+      const s = await api.get<Stats>("/admin/stats");
       setStats(s.data);
-    } catch {}
-    finally { setLoading(false); setRefreshing(false); }
-  }, []);
+    } catch { /* stats are nice-to-have */ }
+    await list.reload();
+    setRefreshing(false);
+  }, [list]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => { load(); /* eslint-disable-next-line */ }, []));
 
-  const filtered = search.trim()
-    ? users.filter((u) => {
-        const q = search.toLowerCase();
-        return u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q) || u.referral_code.toLowerCase().includes(q);
-      })
-    : users;
-
-  if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
+  if (loading && users.length === 0) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -182,11 +195,26 @@ export default function AdminUsers() {
                 testID="admin-users-search"
               />
             </View>
-            <Text style={styles.sectionLabel}>{filtered.length} USERS</Text>
+            <Text style={styles.sectionLabel}>
+              {filtered.length} USER{filtered.length === 1 ? "" : "S"}
+              {debouncedSearch ? ` · matching “${debouncedSearch}”` : ""}
+              {list.loading ? " · loading…" : ""}
+            </Text>
           </View>
         }
         data={filtered}
         keyExtractor={(u) => u.id}
+        onEndReached={list.loadMore}
+        onEndReachedThreshold={0.5}
+        ListFooterComponent={list.loadingMore ? (
+          <View style={{ paddingVertical: 16, alignItems: "center" }}>
+            <ActivityIndicator color={colors.primary} size="small" />
+          </View>
+        ) : (!list.hasMore && filtered.length > 0 ? (
+          <Text style={{ textAlign: "center", color: colors.textMuted, paddingVertical: 12, fontSize: 12 }}>
+            End of list · {filtered.length} loaded
+          </Text>
+        ) : null)}
         renderItem={({ item }) => (
           <TouchableOpacity onPress={() => setEditing(item)} style={styles.userRow} testID={`admin-user-${item.id}`}>
             <View style={styles.avatar}><Text style={styles.avatarText}>{item.name.charAt(0).toUpperCase()}</Text></View>

@@ -1734,24 +1734,42 @@ async def request_withdrawal(request: Request, payload: WithdrawalRequest, user:
 
 
 @api_router.get("/withdrawals/me")
-async def my_withdrawals(user: Dict[str, Any] = Depends(get_current_user)):
-    items = await db.withdrawals.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    return items
+async def my_withdrawals(
+    user: Dict[str, Any] = Depends(get_current_user),
+    limit: int = 0,
+    offset: int = 0,
+):
+    """User withdrawal history. Pagination is opt-in: when limit is omitted
+    (or 0) we return the legacy unbounded list (capped at 1000) so existing
+    clients keep working. New FE infinite-scroll passes limit=20."""
+    cursor = db.withdrawals.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1)
+    if limit and limit > 0:
+        cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
+        return await cursor.to_list(min(limit, 200))
+    return await cursor.to_list(1000)
 
 
 @api_router.get("/transactions/me")
 async def my_transactions(
     user: Dict[str, Any] = Depends(get_current_user),
     include_pending: bool = False,
+    limit: int = 0,
+    offset: int = 0,
 ):
     """User wallet history. By default we hide pre-payment / failed registration
     rows (status in {created, failed}) so the wallet view shows only money that
-    actually moved. Pass ?include_pending=true to see all rows for debugging."""
+    actually moved. Pass ?include_pending=true to see all rows for debugging.
+
+    Pagination: opt-in via limit (1..200) + offset. Omit to get the legacy
+    unbounded list (capped at 1000)."""
     q: Dict[str, Any] = {"user_id": user["id"]}
     if not include_pending:
         q["status"] = {"$nin": ["created", "failed"]}
-    items = await db.transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    return items
+    cursor = db.transactions.find(q, {"_id": 0}).sort("created_at", -1)
+    if limit and limit > 0:
+        cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
+        return await cursor.to_list(min(limit, 200))
+    return await cursor.to_list(1000)
 
 
 def _auto_remarks_for(tx: Dict[str, Any]) -> str:
@@ -1983,9 +2001,38 @@ async def wallet_transfer(payload: WalletTransfer, user: Dict[str, Any] = Depend
 
 # ------------------ Admin Endpoints ------------------
 @api_router.get("/admin/users")
-async def admin_list_users(_: Dict[str, Any] = Depends(require_admin)):
-    items = await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(5000)
-    return items
+async def admin_list_users(
+    _: Dict[str, Any] = Depends(require_admin),
+    limit: int = 0,
+    offset: int = 0,
+    q: Optional[str] = None,
+):
+    """Admin user roster.
+
+    • limit/offset (opt-in): pass limit=20 for infinite-scroll pagination.
+      When limit is 0 or omitted we return the legacy unbounded list
+      (capped at 5000) so existing admin tooling keeps working.
+    • q (opt-in): server-side substring filter on name/email/phone/referral_code
+      — case-insensitive. Lets the FE search the whole roster (not just the
+      currently-loaded page) which becomes critical once we paginate.
+    """
+    mongo_q: Dict[str, Any] = {}
+    if q and q.strip():
+        # Anchored regex on indexed fields — Mongo uses ix_users_* when available
+        # and falls back to a collscan otherwise (still fast for <100k users).
+        import re as _re
+        safe = _re.escape(q.strip())
+        mongo_q["$or"] = [
+            {"name": {"$regex": safe, "$options": "i"}},
+            {"email": {"$regex": safe, "$options": "i"}},
+            {"phone": {"$regex": safe, "$options": "i"}},
+            {"referral_code": {"$regex": safe, "$options": "i"}},
+        ]
+    cursor = db.users.find(mongo_q, {"_id": 0, "password_hash": 0}).sort("created_at", -1)
+    if limit and limit > 0:
+        cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
+        return await cursor.to_list(min(limit, 200))
+    return await cursor.to_list(5000)
 
 
 # ------------------ Admin: referral tree views ------------------
@@ -2132,12 +2179,21 @@ async def admin_user_lineage(user_id: str, _: Dict[str, Any] = Depends(require_a
 
 
 @api_router.get("/admin/withdrawals")
-async def admin_list_withdrawals(_: Dict[str, Any] = Depends(require_admin), status: Optional[str] = None):
+async def admin_list_withdrawals(
+    _: Dict[str, Any] = Depends(require_admin),
+    status: Optional[str] = None,
+    limit: int = 0,
+    offset: int = 0,
+):
+    """Admin withdrawal queue. Pagination opt-in via limit (1..200) + offset."""
     q = {}
     if status:
         q["status"] = status
-    items = await db.withdrawals.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
-    return items
+    cursor = db.withdrawals.find(q, {"_id": 0}).sort("created_at", -1)
+    if limit and limit > 0:
+        cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
+        return await cursor.to_list(min(limit, 200))
+    return await cursor.to_list(2000)
 
 
 @api_router.post("/admin/withdrawals/{wid}/approve")
@@ -2421,18 +2477,29 @@ async def admin_withdrawals_digest(_: Dict[str, Any] = Depends(require_admin_rol
 
 
 @api_router.get("/admin/transactions")
-async def admin_transactions(_: Dict[str, Any] = Depends(require_admin), include_pending: bool = False):
+async def admin_transactions(
+    _: Dict[str, Any] = Depends(require_admin),
+    include_pending: bool = False,
+    limit: int = 0,
+    offset: int = 0,
+):
     """Admin transaction feed. By default hides pre-payment / failed registration
     rows so the wallet & revenue figures match. Pass ?include_pending=true to
     surface them for support / debugging.
 
+    Pagination opt-in via limit (1..200) + offset. When paginated, user
+    enrichment only runs for the current page — significant speed-up.
     Each row is enriched with `user_name` (from users collection) and `reference_number`
     auto-derived if missing — UTR for bank transactions, TXN-{shortid} for in-app moves.
     """
     q: Dict[str, Any] = {}
     if not include_pending:
         q["status"] = {"$nin": ["created", "failed"]}
-    items = await db.transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    cursor = db.transactions.find(q, {"_id": 0}).sort("created_at", -1)
+    if limit and limit > 0:
+        items = await cursor.skip(max(0, offset)).limit(min(limit, 200)).to_list(min(limit, 200))
+    else:
+        items = await cursor.to_list(5000)
 
     # Build a one-shot user_id → name map to avoid N+1 lookups
     user_ids = {t.get("user_id") for t in items if t.get("user_id")}

@@ -5,6 +5,7 @@ import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
+import { useInfiniteList } from "../../src/use-infinite-list";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 
 type Withdrawal = {
@@ -44,11 +45,19 @@ export default function AdminPayouts() {
     ? initialTabRaw
     : "pending") as (typeof allowedTabs)[number];
 
-  const [items, setItems] = useState<Withdrawal[]>([]);
   const [digest, setDigest] = useState<Digest | null>(null);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<"pending" | "processing" | "success" | "rejected">(initialTab);
+
+  // Phase 1 Session C — infinite scroll over the withdrawal queue. Re-renders
+  // when `tab` changes (resetKey embeds the current status filter).
+  const list = useInfiniteList<Withdrawal>("/admin/withdrawals", {
+    pageSize: 20,
+    params: { status: tab },
+  });
+  // Aliases so the (large) JSX below stays readable.
+  const items = list.items;
+  const loading = list.loading;
 
   // Keep tab in sync if the user re-enters the route with a different
   // ?tab= param (e.g. taps Settled then later Withdrawal Pending tile).
@@ -74,20 +83,20 @@ export default function AdminPayouts() {
   const [batchPrefix, setBatchPrefix] = useState("");
 
   const load = useCallback(async () => {
+    // Reload the paginated withdrawal list + refresh the digest counters
+    // (settled_today, oldest_pending_age etc.) in parallel. The list reload
+    // is owned by useInfiniteList; we only need to fetch the digest here.
     try {
-      const [list, dg] = await Promise.all([
-        api.get<Withdrawal[]>(`/admin/withdrawals?status=${tab}`),
-        api.get<Digest>("/admin/withdrawals/digest"),
-      ]);
-      setItems(list.data);
+      const dg = await api.get<Digest>("/admin/withdrawals/digest");
       setDigest(dg.data);
-    } catch (e) {}
-    finally { setLoading(false); setRefreshing(false); }
-  }, [tab]);
+    } catch { /* digest is non-critical */ }
+    await list.reload();
+    setRefreshing(false);
+  }, [list]);
 
   // First focus shows the spinner; subsequent focus re-fetches in the
   // background so pull-to-refresh on a populated list still works.
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => { load(); /* eslint-disable-next-line */ }, []));
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -320,7 +329,7 @@ export default function AdminPayouts() {
         )}
       </View>
 
-      {loading ? (
+      {loading && items.length === 0 ? (
         <View style={styles.center}><ActivityIndicator color={colors.primary} size="large" /></View>
       ) : (
         <FlatList
@@ -329,6 +338,17 @@ export default function AdminPayouts() {
           data={items}
           keyExtractor={(i) => i.id}
           renderItem={renderItem}
+          onEndReached={list.loadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={list.loadingMore ? (
+            <View style={{ paddingVertical: 16, alignItems: "center" }}>
+              <ActivityIndicator color={colors.primary} size="small" />
+            </View>
+          ) : (!list.hasMore && items.length > 0 ? (
+            <Text style={{ textAlign: "center", color: colors.textMuted, paddingVertical: 12, fontSize: 12 }}>
+              End of list · {items.length} loaded
+            </Text>
+          ) : null)}
           ListEmptyComponent={<Text style={styles.empty}>No {tab} payouts.</Text>}
         />
       )}
