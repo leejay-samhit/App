@@ -5814,3 +5814,72 @@ agent_communication:
 
       Main agent: please summarise and finish.
       YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.
+
+user_source_unification_2026_05_27:
+  - task: "User creation source tracking — Razorpay / UPI manual / Offline cash"
+    implemented: true
+    working: true
+    file: "backend/server.py + backend/models.py + backend/routes/upi_manual.py + frontend/app/admin/users.tsx + frontend/app/admin/system-wallet.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added canonical users.registration_source field (canonical values:
+          "razorpay" | "upi_manual" | "offline_cash") stamped at every
+          creation/payment site:
+            - Razorpay verify (server.py)         -> "razorpay"
+            - UPI manual approve (upi_manual.py)  -> "upi_manual"
+            - Admin offline create (server.py)    -> defaults to "offline_cash",
+              admin can override via the new registration_source field on
+              AdminCreateUserRequest.
+          Each registration_fee transaction also carries `source` tag so
+          the admin transaction feed can be filtered by origin.
+
+          New endpoint:
+            GET /api/admin/system-wallet/source-breakdown
+              Returns {
+                rows: [{source, count, amount}, ...],
+                totals: {count, amount},
+                fan_out: {source: {payouts_count, payouts_amount}, ...},
+                generated_at
+              }
+              Uses $lookup to join transactions(type=registration_fee, status=paid)
+              against users.registration_source — single source of truth, no
+              need to denormalize source onto every payout txn. fan_out joins
+              payout txns (referral_payout / direct_signup_credit / cascade_overflow
+              / l1_funding / gst_collected) via related_signup_id -> user.
+
+          One-time backfill in _background_init stamped existing users:
+            razorpay     -> 8 users
+            upi_manual   -> 1 user
+            offline_cash -> 6 fallback users (paid users without recognizable payment_method)
+          Idempotent (only touches docs missing registration_source).
+
+          Matrix realignment (BFS spillover): UNCHANGED. All 3 paths
+          continue to call the same _trigger_referral_commissions which
+          runs the same BFS sponsor / cascade logic. No payout logic was
+          touched — every user gets the identical fan-out regardless of
+          how they signed up.
+
+          Frontend:
+            - app/admin/users.tsx New User modal: adds source dropdown
+              with 3 pill chips (Offline / Razorpay / UPI manual) — only
+              shown when mark_paid_offline is ON. Sends registration_source
+              field to POST /admin/users/create.
+            - app/admin/system-wallet.tsx: new "USER SOURCE ACCOUNTABILITY"
+              card below Reconcile Books showing 3-way breakdown
+              (count + amount + payouts) per source. Always rendered
+              (zero rows muted) so admin knows tracking is live.
+
+          Backend testing agent: 31/31 PASS.
+            - Endpoint shape + auth gating (admin-only) ✅
+            - Backfill stamped all legacy paid users ✅
+            - Create user with each source value ✅
+            - Default to offline_cash for legacy callers ✅
+            - Breakdown increments correctly (+2 users → +₹236) ✅
+            - Transaction.source tagging on new paid users ✅
+            - No regressions: pagination / system-wallet / audit-logs /
+              login refresh / withdrawals all work ✅
