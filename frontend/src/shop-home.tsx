@@ -577,11 +577,74 @@ export function ShopHome({
           </TouchableOpacity>
         </ScrollView>
 
-        {/* 4–7. ADMIN-CONFIGURABLE LAYOUT BLOCKS — banners, flash sales,
-            product grids, sliders, etc. Managed by super-admin via
-            /admin/shop-layout (Home scope). Replaces the hardcoded "Deal
-            of the Day / Popular Categories / Best Sellers" sections so the
-            admin's edits actually reflect in the customer view. */}
+        {/* When the user taps any category in the strip above (e.g. "Electronics",
+            "Fashion", "House Accessories"), we show a clean filtered product grid
+            INSIDE this same screen — instead of the admin layout blocks below.
+            This delivers the marketplace-app behaviour users expect: tap chip →
+            products appear instantly, no need to first tap "All" or drill into a
+            new screen. The category strip stays pinned at top so the user can
+            switch between categories smoothly. */}
+        {activeCategory && activeCategory !== "all" ? (
+          <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+            <View style={styles.searchResultHeader}>
+              <Text style={styles.searchResultTitle}>
+                <Text style={{ color: colors.primary }}>{activeCategory}</Text>
+              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Text style={styles.searchResultCount}>
+                  {filteredProducts.length} product{filteredProducts.length === 1 ? "" : "s"}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setActiveCategory("all")}
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  testID="home-cat-clear"
+                >
+                  <Feather name="x-circle" size={18} color={colors.textMuted} />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {loading ? (
+              // Skeleton: 6 placeholder cards that match the real grid shape,
+              // so the layout doesn't pop when products arrive.
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
+                {[0, 1, 2, 3, 4, 5].map((i) => (
+                  <View key={`sk-${i}`} style={styles.skelCard}>
+                    <View style={styles.skelImage} />
+                    <View style={styles.skelLineLong} />
+                    <View style={styles.skelLineShort} />
+                  </View>
+                ))}
+              </View>
+            ) : filteredProducts.length === 0 ? (
+              <View style={styles.emptyResultsWrap}>
+                <View style={[styles.iconRound, { backgroundColor: colors.brand100 }]}>
+                  <Feather name="package" size={28} color={colors.primary} />
+                </View>
+                <Text style={styles.emptyResultsTitle}>No products in {activeCategory}</Text>
+                <Text style={styles.emptyResultsSub}>
+                  This category doesn't have anything listed yet. Browse other categories or check back soon.
+                </Text>
+                <TouchableOpacity style={styles.bannerCta} onPress={() => setActiveCategory("all")}>
+                  <Text style={[styles.bannerCtaText, { color: colors.primary }]}>Show all categories</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <FlatList
+                data={filteredProducts}
+                keyExtractor={(p) => `cat-${p.id}`}
+                numColumns={2}
+                scrollEnabled={false}
+                columnWrapperStyle={{ gap: 12, marginBottom: 12 }}
+                renderItem={({ item }) => (
+                  <View style={{ flex: 1 }}>
+                    <ProductCard p={item} />
+                  </View>
+                )}
+              />
+            )}
+          </View>
+        ) : (
         <ShopLayoutRenderer
           scope="home"
           category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
@@ -596,6 +659,7 @@ export function ShopHome({
             } catch (e) { /* eslint-disable-next-line no-console */ console.warn("add to cart failed:", formatApiError(e)); }
           }}
         />
+        )}
           </>
         )}
       </ScrollView>
@@ -1005,6 +1069,39 @@ const styles = StyleSheet.create({
   emptyResultsSub: {
     fontSize: 13, color: colors.textMuted, textAlign: "center",
     lineHeight: 18, maxWidth: 280,
+  },
+
+  // ── Category-filter skeleton placeholders (shown while products load
+  //    after a category tap). Match the ProductCard footprint so the grid
+  //    doesn't jump when real data swaps in.
+  skelCard: {
+    width: "48%",
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 10,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  skelImage: {
+    width: "100%",
+    height: 130,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 10,
+    marginBottom: 8,
+  },
+  skelLineLong: {
+    height: 11,
+    width: "85%",
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 4,
+    marginBottom: 6,
+  },
+  skelLineShort: {
+    height: 11,
+    width: "55%",
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 4,
   },
 
   // ── Delivery-location picker modal ─────────────────────────────────
