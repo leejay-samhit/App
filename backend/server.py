@@ -171,6 +171,20 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Referral & E-commerce API")
 api_router = APIRouter(prefix="/api")
 
+# Performance / Security middleware ────────────────────────────────────────
+# 1. GZip — compresses every response >1KB. Reduces network bytes by 60-80%
+#    on JSON-heavy admin endpoints (users list, analytics, transactions).
+# 2. Rate limiter — protects auth & payment endpoints from brute-force /
+#    credential-stuffing / replay attacks. Friendly 429 instead of hard ban.
+from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
+from slowapi.errors import RateLimitExceeded  # noqa: E402
+from core.rate_limit import limiter as _rate_limiter, rate_limit_handler  # noqa: E402
+
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.state.limiter = _rate_limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+
+
 
 # ------------------ Auth Endpoints ------------------
 @api_router.post("/auth/register")
