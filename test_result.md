@@ -6225,3 +6225,215 @@ phase2b_modular_refactor_iter4_2026_05_27:
       VERDICT: Phase 2B Iter 4 (wallet / withdrawals / cart router
       extraction) is a clean structural refactor — zero functional
       regressions detected. No duplicate-route / 405 surprises.
+
+
+
+ledger_drift_offline_pre_credit_fix_2026_06:
+  - task: "Fix LEDGER ALERT drift caused by double-credit on offline-created users at approval time"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Root cause: admin_create_user (offline path with mark_paid_offline=True)
+          pre-credits the registration fee into admin's `direct_added` bucket
+          AND inserts a `registration_fee` txn (so INFLOW counts it once and
+          HELD goes up once → balanced). Then at user approval, the
+          `_trigger_referral_commissions` cascade (or `_credit_no_ref_signup_to_admin`)
+          REDISTRIBUTES the fee by adding credits to direct_signup, gst_collected,
+          referral_commission overflow, fee_residual, AND user wallets for L1..L10.
+          The pre-credit was NEVER debited from `direct_added` first, so HELD
+          gets +fee a second time → permanent drift = Σ pre-credited fees of
+          approved offline-created users.
+          
+          Production log evidence (2026-05-27):
+            drift ₹236 | inflow ₹354 | withdrawn ₹236 | expected_held ₹118 | actual_held ₹354
+          The drift equals the cumulative pre-credited fees that were
+          redistributed without first being reversed.
+          
+          FIX applied (2 changes in /app/backend/server.py):
+          
+          (1) admin_create_user, around line 3992 — after the existing
+              `credit_admin_bucket("direct_added", fee_amount, ...)` call AND
+              the system_wallet_deposits insert, persist an `offline_pre_credit_amount`
+              marker on the user doc so the approval flow can read the exact
+              amount that was pre-credited.
+          
+          (2) _trigger_referral_commissions, immediately after the
+              `commission_triggered` set (just after the `directs_required`
+              load), BEFORE any redistribution path. New block:
+                pre_credit = float(user.get("offline_pre_credit_amount") or 0)
+                will_redistribute = bool(user.get("no_referral_signup")) or bool(sponsor_id)
+                if pre_credit > 0.01 and will_redistribute:
+                    # debit direct_added by min(available, pre_credit)
+                    # insert an admin_debit txn so _BUCKET_TXN_TYPES["direct_added"]
+                    # invariant stays clean for the startup self-healer
+                    # unset the marker so re-runs don't double-reverse
+              
+              The `will_redistribute` guard ensures we DO NOT reverse the
+              pre-credit for offline-created users with no sponsor + no
+              no_referral_signup flag (in which case the cascade returns
+              early at `if not sponsor_id: return` without redistributing —
+              so the pre-credit must stay to keep HELD == INFLOW).
+          
+          LEGACY DRIFT HEALING:
+          The existing startup self-healer at server.py:6511-6628 (Strategy
+          1: bucket-reset to txn-sum, Strategy 2: fee_residual deficit fill)
+          will continue to heal any historic drift from before this fix on
+          the next backend restart. Strategy 1 resets admin buckets to
+          match their authoritative txn sums — since `direct_added`'s
+          txn-types are only [system_deposit, admin_credit, admin_debit],
+          legacy phantom `direct_added` inflation from offline-creates
+          (which only added a `registration_fee` txn, not a matching
+          system_deposit/admin_credit txn) gets reset to 0 automatically.
+          Combined with Strategy 2 fee_residual fill, drift collapses to
+          ~₹0 within a single startup cycle.
+          
+          REGRESSION SCOPE:
+          • Online (Razorpay/UPI manual) registration: UNAFFECTED — no
+            `offline_pre_credit_amount` marker is ever set, reversal is
+            skipped, behaviour identical to before.
+          • Offline-create WITHOUT sponsor AND no_referral_signup=False:
+            UNAFFECTED — `will_redistribute` is False, reversal skipped,
+            pre-credit stays in `direct_added` as before.
+          • Offline-create WITH sponsor: FIXED — reversal -fee, then
+            cascade adds fee back via L1/L2..L10/cascade_overflow/fee_residual.
+            Net change to HELD = 0 (was +fee → drift).
+          • Offline-create with no_referral_signup=True: FIXED — reversal
+            -fee, then _credit_no_ref_signup_to_admin adds direct_signup
+            (net) + gst_collected (gst) = fee. Net change = 0.
+          
+          Verified locally:
+            • Sandbox drift = ₹0.00 (live snapshot post-reload)
+            • Backend reloaded cleanly (uvicorn watchfiles)
+            • No lint regressions (8 pre-existing warnings, none from new
+              code)
+            • Code changes string-grep confirmed in server.py
+          
+          REQUEST TO TESTING AGENT:
+          Please verify the fix does NOT regress any existing flow. Critical
+          paths to re-test:
+            1. POST /api/admin/users/create with mark_paid_offline=True and
+               a valid referral_code → user is created with
+               offline_pre_credit_amount field set.
+            2. POST /api/admin/approvals/{user_id}/approve on that user →
+               triggers _trigger_referral_commissions →
+               (a) admin's `direct_added` bucket decreases by fee_amount,
+               (b) `admin_debit` txn is inserted with is_offline_reversal=True
+                   and description containing "Offline pre-credit reversal",
+               (c) offline_pre_credit_amount field is unset,
+               (d) admin's overall wallet_balance changes by ~0 (cascade
+                   adds the fee back),
+               (e) money-flow snapshot drift remains ≤ ₹1.
+            3. POST /api/admin/users/create with mark_paid_offline=True and
+               NO referral_code → user gets the marker, but on approval
+               (which returns early), reversal is SKIPPED and direct_added
+               remains untouched.
+            4. POST /auth/register (online flow) → no marker set, approval
+               works identically to before (no reversal txn inserted).
+            5. Existing regression suite for cart, wallet, withdrawals,
+               admin endpoints — should remain 100% PASS.
+      - working: true
+        agent: "testing"
+        comment: |
+          VERIFIED — Ledger-drift fix is working end-to-end. Test suite
+          extended at /app/backend_test.py (sections 10.0a → 10.4, +18 new
+          assertions). Full run: 43/44 PASS against
+          https://vendor-network-app-1.preview.emergentagent.com/api.
+          (The single fail `4b.invoice non-invoiceable -> 400` is a pre-
+          existing data-dependent edge case unrelated to this fix: no
+          non-invoiceable transaction exists in the live test dataset, so
+          the 400 path cannot be exercised. Same result before and after
+          the patch.)
+
+          REGRESSION (sections 1–9): 23/24 PASS — identical to pre-fix
+          baseline. Auth, wallet, transactions, invoices, withdrawals,
+          cart, orders, admin/system-wallet/breakdown all unchanged.
+
+          NEW LEDGER-DRIFT FIX TESTS — 18/18 PASS:
+
+          10.0  Pre-flight
+            • admin_doc_lookup: ref_code=EARN, id=34132f17-…  ✅
+            • registration_fee setting = ₹118.0                ✅
+
+          10.1  Offline-create WITH sponsor (admin EARN code) — the
+                "happy path" that was broken before the fix:
+            a. before_state_capture                            ✅
+               direct_added=₹354.0, admin_total=₹2242.0, drift=₹0.00
+            b. POST /admin/users/create (mark_paid_offline=True,
+               referral_code='EARN') → 200, returns user.id        ✅
+            c. user doc has offline_pre_credit_amount=118.0
+               (== registration_fee)                                ✅
+            d. direct_added AFTER create = ₹472.0
+               (delta = +₹118.0 == fee)                             ✅
+            e. POST /admin/approvals/{user_id}/approve → 200        ✅
+            f. direct_added AFTER approve = ₹354.0 — REVERSED
+               cleanly back to the pre-create baseline. Net delta
+               vs before = ₹0.00 (no drift residue)                 ✅
+            g. admin_debit reversal txn FOUND in GET
+               /admin/transactions:
+                 type        = "admin_debit"
+                 amount      = -118.0
+                 user_id     = admin's id (34132f17-…)
+                 source_user_id = created user id
+                 is_offline_reversal = true
+                 description starts with "Offline pre-credit reversal
+                 — ₹118 for Vinay Kumar Sponsor (redistributed via re…"
+                                                                    ✅
+            h. user doc post-approval: offline_pre_credit_amount
+               field is UNSET ($unset confirmed — key absent from
+               serialized response)                                 ✅
+            i. drift AFTER approve = ₹0.00 (HEALED / stable, ≤ ₹1)  ✅
+
+          10.2  Offline-create WITHOUT sponsor (no_referral_signup
+                falsy + sponsor_id null → reversal MUST skip):
+            a. POST /admin/users/create (no referral_code) → 200    ✅
+            b. user doc has offline_pre_credit_amount=118.0 AND
+               sponsor_id=None                                       ✅
+            c. POST /admin/approvals/{user_id}/approve → 200        ✅
+            d. direct_added UNCHANGED across approval
+               (₹472.0 → ₹472.0, delta = ₹0.00) — early-return
+               path correctly skipped reversal                        ✅
+            e. NO admin_debit reversal txn was inserted for this
+               user (GET /admin/transactions filtered by
+               source_user_id returned nothing)                     ✅
+            f. drift remains ₹0.00 (stable, ≤ ₹1)                   ✅
+
+          10.3  Online registration (no marker should ever be set):
+            a. POST /auth/register (fresh email, no referral) → 200 ✅
+            b. user doc has NO offline_pre_credit_amount field
+               (key absent from serialized response, val=None)       ✅
+
+          10.4  Backend log sanity (post-restart window only):
+            • No 500 / Internal Server Error                          ✅
+            • No Tracebacks                                           ✅
+            • No new [LEDGER ALERT] warnings in the test window       ✅
+            (Historical alerts from before the fix-deploy restart at
+             2026-05-27 09:20:18 UTC are present in the older log
+             tail, but ZERO new alerts since the fix was loaded.)
+
+          DELIVERABLE SUMMARY
+            • PASS:  43/44 (all 18 new fix assertions pass + 25/26
+                     regression; the 1 stale fail is unrelated).
+            • Drift heals on the next money-flow check cycle — drift
+              measured pre-create, post-create, post-approve all
+              equal ₹0.00 across both sponsor and no-sponsor flows.
+            • offline_pre_credit_amount marker lifecycle works as
+              designed: SET on offline-create → READ at approval →
+              $unset only when redistribution actually happens →
+              left intact when no redistribution occurs (no-sponsor
+              + no_referral_signup=False path).
+            • admin_debit txn with is_offline_reversal=True keeps
+              the direct_added bucket's authoritative txn-sum
+              invariant clean for the startup self-healer at
+              server.py:6511-6628 (Strategy 1).
+            • No 5xx, no exceptions, no new ledger-alert warnings.
+
+          No further action required from main agent — fix is
+          production-ready. Mark `working: true` and
+          `needs_retesting: false`.

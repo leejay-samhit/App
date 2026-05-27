@@ -877,6 +877,56 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     # Mark first to avoid race-condition double trigger
     await db.users.update_one({"id": user["id"]}, {"$set": {"commission_triggered": True}})
 
+    # ─── Offline pre-credit REVERSAL (2026-06 ledger drift fix) ───────
+    # When a user was created via admin offline-create with
+    # `mark_paid_offline=True`, the registration fee was pre-credited to
+    # admin's `direct_added` bucket so the books looked balanced between
+    # create and approval. Now that we're about to redistribute the fee
+    # via the no-ref credit OR the L1..L10 cascade (both add money to
+    # buckets/user wallets), we MUST reverse the pre-credit first —
+    # otherwise the fee gets counted TWICE in HELD, producing a
+    # permanent [LEDGER ALERT] drift equal to Σ pre-credited fees.
+    #
+    # We only reverse if the redistribution path will actually fire:
+    #   • no_referral_signup=True  → _credit_no_ref_signup_to_admin
+    #   • sponsor_id set           → L1/L2..L10 cascade
+    # For a no-sponsor + no-flag user, the function returns early at
+    # `if not sponsor_id: return` below — no redistribution happens,
+    # so the pre-credit MUST stay (skip reversal).
+    pre_credit = float(user.get("offline_pre_credit_amount") or 0)
+    will_redistribute = bool(user.get("no_referral_signup")) or bool(sponsor_id)
+    if pre_credit > 0.01 and will_redistribute:
+        admin_doc_pre = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+        if admin_doc_pre:
+            avail_da = float((admin_doc_pre.get("wallet_buckets") or {}).get("direct_added") or 0)
+            debit_amt = round(min(avail_da, pre_credit), 2)
+            if debit_amt > 0:
+                await credit_admin_bucket("direct_added", -debit_amt, also_total_earned=False)
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": admin_doc_pre["id"],
+                    # Use `admin_debit` so _BUCKET_TXN_TYPES["direct_added"]
+                    # matches and the startup self-healer's bucket-vs-txn
+                    # invariant stays clean.
+                    "type": "admin_debit",
+                    "amount": -debit_amt,
+                    "status": "success",
+                    "description": (
+                        f"Offline pre-credit reversal — ₹{debit_amt:g} for {user.get('name')} "
+                        f"(redistributed via referral cascade)"
+                    ),
+                    "source_user_id": user["id"],
+                    "source_user_name": user.get("name"),
+                    "related_signup_id": user["id"],
+                    "is_offline_reversal": True,
+                    "created_at": now_utc().isoformat(),
+                })
+        # Clear the marker so re-runs (if any) don't double-reverse.
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$unset": {"offline_pre_credit_amount": ""}},
+        )
+
     # ─────────────────────────────────────────────────────────────────
     # NO-REFERRAL SIGNUP — clean accounting model
     # ─────────────────────────────────────────────────────────────────
@@ -3989,6 +4039,18 @@ async def admin_create_user(
                 "linked_user_id": user_id,
                 "created_at": now,
             })
+            # ── Ledger marker (2026-06 fix) ──────────────────────────────
+            # Stamp the exact amount we pre-credited to `direct_added` on
+            # the user doc. `_trigger_referral_commissions` will read this
+            # at approval time and DEBIT direct_added by the same amount
+            # BEFORE the cascade redistributes the fee. Without this
+            # marker, the cascade adds money on top of the pre-credit
+            # (double-count) and the money-flow checker logs a recurring
+            # [LEDGER ALERT] drift equal to Σ pre-credited fees.
+            await db.users.update_one(
+                {"id": user_id},
+                {"$set": {"offline_pre_credit_amount": float(fee_amount)}},
+            )
         except Exception as _e:
             # Wallet-credit failures are non-fatal at user-creation time —
             # the ledger heal-check will surface the drift on its next run
