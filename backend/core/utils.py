@@ -52,3 +52,38 @@ async def audit_log(admin: Dict[str, Any], action: str, target_type: str = "", t
 
 # Backwards-compat alias for existing call-sites that use the underscore name.
 _audit_log = audit_log
+
+
+async def security_event(
+    action: str,
+    user_id: Optional[str] = None,
+    email: Optional[str] = None,
+    ip: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    severity: str = "info",
+) -> None:
+    """Log a security-relevant event to the `security_events` collection.
+
+    Unlike `audit_log` (which is admin-keyed), this is for *system-observed*
+    events: failed logins, IP anomalies, device-fingerprint mismatches,
+    rate-limit breaches, etc. No admin context required — caller passes
+    whatever identity it has (user_id, email, or just IP).
+
+    Stays a separate collection so the admin Audit Log UI isn't flooded
+    with auth-failure noise, but admins can still query it via a dedicated
+    endpoint when investigating an incident.
+    """
+    try:
+        await db.security_events.insert_one({
+            "id": str(uuid.uuid4()),
+            "action": action,
+            "user_id": user_id,
+            "email": (email or "").lower() or None,
+            "ip": ip,
+            "details": details or {},
+            "severity": severity,
+            "created_at": now_utc().isoformat(),
+        })
+    except Exception:
+        # Never let auditing crash the request path.
+        pass

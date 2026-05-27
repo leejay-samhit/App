@@ -28,10 +28,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.db import db
+from core.rate_limit import limiter as _rl
 from core.security import get_current_user, require_admin
 from core.utils import now_utc
 
@@ -120,7 +121,9 @@ async def get_upi_payment_config(user: Dict[str, Any] = Depends(get_current_user
 
 
 @router.post("/payment/upi-manual")
+@_rl.limit("10/hour")
 async def submit_upi_manual_payment(
+    request: Request,
     payload: SubmitUpiManualPayload,
     user: Dict[str, Any] = Depends(get_current_user),
 ):

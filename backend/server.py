@@ -126,6 +126,7 @@ from core.utils import (  # noqa: E402
     gen_referral_code,
     get_settings,
     audit_log as _audit_log,
+    security_event as _security_event,
 )
 from core.danger import (  # noqa: E402
     SUPER_PWD_SYMBOLS,
@@ -185,10 +186,18 @@ app.state.limiter = _rate_limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
 
+# Local alias so the @decorator syntax stays compact at the route definitions.
+# (Importing as `_rate_limiter` keeps things explicit while preserving the
+# already-exported `limiter` attribute on app.state above.)
+_rl = _rate_limiter
+
 
 # ------------------ Auth Endpoints ------------------
+# Rate-limit register at 5/min per IP — generous for typos but tight enough
+# to deter credential-stuffing scripts that try a list of emails fast.
 @api_router.post("/auth/register")
-async def register(payload: RegisterRequest):
+@_rl.limit("5/minute")
+async def register(request: Request, payload: RegisterRequest):
     email = payload.email.lower().strip()
     existing = await db.users.find_one({"email": email})
     if existing:
@@ -314,8 +323,11 @@ async def register(payload: RegisterRequest):
 
 
 @api_router.post("/auth/login")
-async def login(payload: LoginRequest):
+@_rl.limit("10/minute")
+async def login(request: Request, payload: LoginRequest):
     email = payload.email.lower().strip()
+    # Best-effort client IP (reads X-Forwarded-For when behind nginx/k8s ingress).
+    client_ip = (request.headers.get("x-forwarded-for") or request.client.host if request.client else None or "").split(",")[0].strip() or None
     user = await db.users.find_one({"email": email})
     # IMPORTANT: use `user.get("password_hash") or ""` instead of indexing the
     # field directly.  Accounts created via Google OAuth (POST /auth/google/
@@ -325,6 +337,16 @@ async def login(payload: LoginRequest):
     # gets the proper 401 "Invalid credentials" message.  This was the exact
     # bug a deployed user hit when trying to log in.
     if not user or not verify_password(payload.password, user.get("password_hash") or ""):
+        # Log every failed login for incident-response. Cheap insert into
+        # security_events; never blocks the response.
+        await _security_event(
+            "auth.failed_login",
+            user_id=user["id"] if user else None,
+            email=email,
+            ip=client_ip,
+            details={"reason": "bad_credentials" if user else "unknown_email"},
+            severity="warning",
+        )
         # Before returning a generic 401, check if this email belongs to a rejected
         # registration archive record — give the user a category-specific message
         # so they know why they can't log in. Only do this on a plain not-found case
@@ -356,6 +378,27 @@ async def login(payload: LoginRequest):
         }
         raise HTTPException(status_code=403, detail=msg_map.get(cat, msg_map["other"]))
     token = create_access_token(user["id"], email, user.get("role", "user"))
+    # Multi-IP anomaly check: if the user has logged-in from a different IP
+    # within the last 15 minutes, flag it (informational — does not block).
+    try:
+        recent_ip = user.get("last_login_ip")
+        if client_ip and recent_ip and recent_ip != client_ip:
+            await _security_event(
+                "auth.multi_ip_login",
+                user_id=user["id"],
+                email=email,
+                ip=client_ip,
+                details={"previous_ip": recent_ip},
+                severity="warning",
+            )
+        # Stamp the user with the current login IP/time so future logins can
+        # diff against it (cheap upsert, no extra query).
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"last_login_ip": client_ip, "last_login_at": now_utc().isoformat()}},
+        )
+    except Exception:
+        pass
     return {"token": token, "user": serialize_user(user)}
 
 
@@ -363,7 +406,8 @@ async def login(payload: LoginRequest):
 
 
 @api_router.post("/auth/google/exchange")
-async def google_exchange(payload: GoogleExchange):
+@_rl.limit("10/minute")
+async def google_exchange(request: Request, payload: GoogleExchange):
     """Exchange an Emergent session_id for our JWT bearer token. Creates user on first sign-in."""
     # OAuth session-data URL is environment-configurable so the same code runs
     # in dev (Emergent demo) and prod (customer's own OAuth proxy if any).
@@ -1575,8 +1619,11 @@ async def update_bank(payload: BankUpdate, user: Dict[str, Any] = Depends(get_cu
 
 
 # ------------------ Withdrawals ------------------
+# 5 withdrawal requests per hour per user — generous for legitimate users
+# but tight enough to deter wallet-drain abuse scripts.
 @api_router.post("/withdrawals")
-async def request_withdrawal(payload: WithdrawalRequest, user: Dict[str, Any] = Depends(get_current_user)):
+@_rl.limit("5/hour")
+async def request_withdrawal(request: Request, payload: WithdrawalRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if not user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Complete registration payment first")
     if user.get("approval_status", "approved") != "approved":
@@ -5095,6 +5142,35 @@ async def admin_audit_logs(_: Dict[str, Any] = Depends(require_admin), limit: in
     return items
 
 
+# ------------------ Security events (auth failures, IP anomalies) ------------------
+@api_router.get("/admin/security-events")
+async def admin_security_events(
+    _: Dict[str, Any] = Depends(require_admin),
+    limit: int = 200,
+    action: Optional[str] = None,
+    email: Optional[str] = None,
+    severity: Optional[str] = None,
+):
+    """Returns the recent security event stream sorted newest-first.
+
+    Optional filters:
+      • action=auth.failed_login   → only failed login attempts.
+      • action=auth.multi_ip_login → only multi-IP anomalies.
+      • email=foo@bar              → events for one account.
+      • severity=warning|info|critical
+    """
+    q: Dict[str, Any] = {}
+    if action:
+        q["action"] = action
+    if email:
+        q["email"] = email.lower().strip()
+    if severity:
+        q["severity"] = severity
+    limit = max(1, min(limit, 1000))
+    items = await db.security_events.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    return {"items": items, "count": len(items)}
+
+
 # ------------------ Phase 1: Analytics ------------------
 @api_router.get("/admin/analytics")
 async def admin_analytics(_: Dict[str, Any] = Depends(require_admin), days: int = 30):
@@ -5875,6 +5951,71 @@ async def on_startup():
         await db.system_wallet_deposits.create_index("utr", unique=True, name="uniq_deposit_utr")
     except Exception as _idx_err:
         logger.warning(f"Transaction unique-index setup failed: {_idx_err}")
+
+    # ---------- Hot-query indexes (Phase 1 perf pass, 2026-05-27) ----------
+    # These are non-unique compound indexes that accelerate the most
+    # frequently-served list endpoints. Every one of them is keyed by
+    # (user_id, created_at DESC) or (status, created_at DESC) because that's
+    # the shape of 95% of the dashboard / admin list queries.
+    try:
+        # Transactions list — "my transactions" tab + admin transaction view.
+        await db.transactions.create_index(
+            [("user_id", 1), ("created_at", -1)], name="ix_txn_user_created",
+        )
+        await db.transactions.create_index([("type", 1)], name="ix_txn_type")
+        await db.transactions.create_index([("created_at", -1)], name="ix_txn_created")
+
+        # Withdrawals — user history + admin queue.
+        await db.withdrawals.create_index(
+            [("user_id", 1), ("created_at", -1)], name="ix_wd_user_created",
+        )
+        await db.withdrawals.create_index(
+            [("status", 1), ("created_at", -1)], name="ix_wd_status_created",
+        )
+
+        # Notifications — unread badge + drawer.
+        await db.notifications.create_index(
+            [("user_id", 1), ("read", 1)], name="ix_notif_user_read",
+        )
+        await db.notifications.create_index(
+            [("user_id", 1), ("created_at", -1)], name="ix_notif_user_created",
+        )
+
+        # Orders — user history + admin queue.
+        await db.orders.create_index(
+            [("user_id", 1), ("created_at", -1)], name="ix_order_user_created",
+        )
+        await db.orders.create_index(
+            [("status", 1), ("created_at", -1)], name="ix_order_status_created",
+        )
+
+        # Manual UPI payments — admin pending queue.
+        await db.manual_payments.create_index(
+            [("status", 1), ("created_at", -1)], name="ix_mpay_status_created",
+        )
+        await db.manual_payments.create_index(
+            [("user_id", 1)], name="ix_mpay_user",
+        )
+
+        # Audit logs + security events — admin investigation queries.
+        await db.audit_logs.create_index([("created_at", -1)], name="ix_audit_created")
+        await db.audit_logs.create_index([("admin_id", 1)], name="ix_audit_admin")
+        await db.security_events.create_index([("created_at", -1)], name="ix_sec_created")
+        await db.security_events.create_index(
+            [("email", 1), ("created_at", -1)], name="ix_sec_email_created",
+        )
+        await db.security_events.create_index(
+            [("ip", 1), ("created_at", -1)], name="ix_sec_ip_created",
+        )
+
+        # Cart — every authenticated GET /api/cart query.
+        await db.cart.create_index([("user_id", 1)], name="ix_cart_user")
+
+        # Products — admin search + public sorted listing.
+        await db.products.create_index([("category", 1)], name="ix_prod_cat")
+        await db.products.create_index([("is_in_stock", 1)], name="ix_prod_stock")
+    except Exception as _idx_err:
+        logger.warning(f"Hot-query index setup failed (non-fatal): {_idx_err}")
 
     # === DEPLOYMENT-CRITICAL: ALL the heavy work below (admin-prefix
     # backfill, duplicate reg-fee cleanup, phantom-amount cleanup, pincode
