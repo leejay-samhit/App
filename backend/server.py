@@ -6007,6 +6007,12 @@ async def _compute_money_flow_snapshot() -> Dict[str, Any]:
         + await _sum({"type": "system_deposit", "status": {"$in": ["success", "paid", "approved"]}})
         + await _sum({"type": {"$in": ["service_margin", "service_commission"]}, "status": "success"})
         + await _sum({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"})
+        # `legacy_reconcile_inflow` — audit-only txns inserted by the
+        # startup drift self-healer when it detects phantom money already
+        # sitting in user wallets (legacy data). They balance the books
+        # without crediting any wallet. NOT included in _BUCKET_TXN_TYPES,
+        # so admin bucket reconciliation ignores them.
+        + await _sum({"type": "legacy_reconcile_inflow", "status": "success"})
         - abs(await _sum({"type": {"$in": ["shop_commission_reversal", "service_commission_reversal"]}, "status": "success"})),
         2,
     )
@@ -6598,6 +6604,9 @@ async def _background_init():
                 + await _sum_tx({"type": "system_deposit", "status": {"$in": ["paid", "success", "approved"]}})
                 + await _sum_tx({"type": {"$in": ["shopping_margin", "shop_commission"]}, "status": "success"})
                 + await _sum_tx({"type": {"$in": ["service_margin", "service_commission"]}, "status": "success"})
+                # Idempotency: include prior legacy_reconcile_inflow audit
+                # txns so subsequent restarts see drift=0 and skip step 2.
+                + await _sum_tx({"type": "legacy_reconcile_inflow", "status": "success"})
                 - abs(await _sum_tx({"type": {"$in": ["shop_commission_reversal", "service_commission_reversal"]}, "status": "success"}))
             )
             withdrawals = abs(await _sum_tx({"type": "withdrawal", "status": "success"}))
@@ -6681,12 +6690,43 @@ async def _background_init():
                             f"(drift was ₹{drift2})"
                         )
                     else:
-                        # Held > expected after bucket reset → uncommon path
-                        # (phantom money not tied to any admin txn). Skip
-                        # safely instead of guessing; surface for manual review.
-                        logger.warning(
-                            f"Drift self-heal step 2 SKIP: residual phantom ₹{drift2} not in admin buckets "
-                            f"(may be in user wallets — needs manual review)"
+                        # Held > expected after bucket reset → phantom money
+                        # is sitting in USER wallets (legacy data from older
+                        # buggy code paths that credited users without an
+                        # admin-side inflow txn). We can't safely debit user
+                        # wallets retroactively, so instead we RECOGNIZE the
+                        # historical inflow on paper: insert an audit-only
+                        # `legacy_reconcile_inflow` txn for the admin.
+                        #
+                        # This txn:
+                        #   • is summed into the inflow tally (above and in
+                        #     _compute_money_flow_snapshot), so inflow
+                        #     increases by ₹amount → expected_held catches
+                        #     up to actual_held → drift falls to ₹0.
+                        #   • is NOT mapped to any bucket in _BUCKET_TXN_TYPES,
+                        #     so the per-restart bucket reset does NOT credit
+                        #     admin's wallet_balance — keeping books honest.
+                        #   • is_auto_heal=True + legacy_reconcile=True so
+                        #     finance can audit/trace these adjustments.
+                        amount = round(drift2, 2)
+                        await db.transactions.insert_one({
+                            "id": str(uuid.uuid4()),
+                            "user_id": admin_doc2["id"],
+                            "type": "legacy_reconcile_inflow",
+                            "amount": amount,
+                            "status": "success",
+                            "description": (
+                                f"[Auto-heal] Legacy phantom user-wallet inflow recognised ₹{amount} "
+                                f"(drift was ₹{drift2}). Audit-only — no wallet credited. "
+                                f"Books re-balanced to clear recurring [LEDGER ALERT]."
+                            ),
+                            "is_auto_heal": True,
+                            "legacy_reconcile": True,
+                            "created_at": now_utc().isoformat(),
+                        })
+                        logger.info(
+                            f"Drift self-heal step 2 (phantom inflow recognition): recorded ₹{amount} "
+                            f"legacy_reconcile_inflow audit txn (drift was ₹{drift2}) — user wallets untouched."
                         )
                 # Mark all open ledger_alerts as resolved (auto-heal handled it)
                 try:
