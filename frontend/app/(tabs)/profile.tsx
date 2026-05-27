@@ -75,7 +75,7 @@ export default function ProfileScreen() {
           keyboardShouldPersistTaps="handled"
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
         >
-          <GradientCard variant="royal" style={{ marginBottom: 18, padding: 24 }}>
+          <GradientCard variant="royal" style={{ marginBottom: spacing.cardPad, padding: 24 }}>
             <View style={{ flexDirection: "row", alignItems: "center" }}>
               <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center", marginRight: 16, borderWidth: 2, borderColor: "rgba(255,255,255,0.4)" }}>
                 <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff" }}>{(user?.name || "U").charAt(0).toUpperCase()}</Text>
@@ -99,92 +99,102 @@ export default function ProfileScreen() {
             </View>
           </GradientCard>
 
-          <TouchableOpacity onPress={() => router.push("/kyc")} style={styles.kycCard} testID="profile-kyc-link">
-            <View style={[styles.kycDot, { backgroundColor: (user as any)?.kyc_status === "approved" ? colors.success : (user as any)?.kyc_status === "pending" ? colors.warning : (user as any)?.kyc_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.kycTitle}>KYC Verification</Text>
-              <Text style={styles.kycSub}>{(user as any)?.kyc_status ? ((user as any).kyc_status as string).toUpperCase() : "NOT SUBMITTED"}</Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={() => router.push("/tickets" as any)} style={styles.kycCard} testID="profile-tickets-link">
-            <View style={[styles.kycDot, { backgroundColor: colors.primary }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.kycTitle}>Support &amp; Help</Text>
-              <Text style={styles.kycSub}>RAISE A TICKET · MY CONVERSATIONS</Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={() => router.push((((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "/vendor/dashboard" : "/vendor/apply") as any)}
-            style={styles.kycCard}
-            testID="profile-vendor-link"
-          >
-            <View style={[styles.kycDot, { backgroundColor: ((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? colors.success : (user as any)?.vendor_status === "pending" ? colors.warning : (user as any)?.vendor_status === "suspended" ? "#B3261E" : "#94A3B8" }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.kycTitle}>{((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "Vendor Panel" : "Become a Vendor"}</Text>
-              <Text style={styles.kycSub}>{(user as any)?.vendor_status ? ((user as any).vendor_status as string).toUpperCase() : "SELL ON OUR PLATFORM"}</Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-
-          {/* Service Provider entry — moved here from the Services tab banner. */}
-          <TouchableOpacity
-            onPress={() => router.push("/services/apply" as any)}
-            style={styles.kycCard}
-            testID="profile-service-provider-link"
-          >
-            <View style={[styles.kycDot, { backgroundColor: (user as any)?.service_provider_status === "approved" ? colors.success : (user as any)?.service_provider_status === "pending" ? colors.warning : (user as any)?.service_provider_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.kycTitle}>
-                {(user as any)?.service_provider_status === "approved" ? "You're a Service Provider" : "Become a Service Provider"}
-              </Text>
-              <Text style={styles.kycSub}>
-                {(user as any)?.service_provider_status === "approved" ? "TAP TO UPDATE OR VIEW BOOKINGS"
-                  : (user as any)?.service_provider_status === "pending" ? "APPLICATION UNDER REVIEW"
-                  : (user as any)?.service_provider_status === "rejected" ? "APPLY AGAIN"
-                  : "EARN — LIST YOUR SERVICE"}
-              </Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={() => router.push("/more" as any)} style={styles.kycCard} testID="profile-more-link">
-            <View style={[styles.kycDot, { backgroundColor: colors.textMuted }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.kycTitle}>More</Text>
-              <Text style={styles.kycSub}>ABOUT · CONTACT · LEGAL & POLICIES</Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-
-          <Text style={styles.sectionLabel}>PAYOUT DETAILS</Text>
-          <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
-
-          <View style={styles.formGroup}>
-            <Text style={styles.label}>UPI ID</Text>
-            <TextInput testID="profile-upi" value={upi} onChangeText={setUpi} placeholder="name@upi" placeholderTextColor={colors.textMuted} autoCapitalize="none" style={styles.input} />
-          </View>
-          <View style={styles.formGroup}>
-            <Text style={styles.label}>Bank account number</Text>
-            <TextInput testID="profile-bank" value={bank} onChangeText={setBank} placeholder="XXXXXXXXXX" placeholderTextColor={colors.textMuted} keyboardType="numeric" style={styles.input} />
-          </View>
-          <View style={styles.formGroup}>
-            <Text style={styles.label}>IFSC code</Text>
-            <TextInput testID="profile-ifsc" value={ifsc} onChangeText={(t) => setIfsc(t.toUpperCase())} placeholder="HDFC0000123" placeholderTextColor={colors.textMuted} autoCapitalize="characters" style={styles.input} />
-          </View>
-          <View style={styles.formGroup}>
-            <Text style={styles.label}>Account holder name</Text>
-            <TextInput testID="profile-holder" value={holder} onChangeText={setHolder} placeholder="As per bank record" placeholderTextColor={colors.textMuted} style={styles.input} />
+          {/* ───── ACCOUNT GROUP ───── */}
+          <Text style={styles.groupLabel}>ACCOUNT</Text>
+          <View style={styles.groupCard}>
+            <TouchableOpacity onPress={() => router.push("/kyc")} style={styles.rowItem} testID="profile-kyc-link">
+              <View style={[styles.kycDot, { backgroundColor: (user as any)?.kyc_status === "approved" ? colors.success : (user as any)?.kyc_status === "pending" ? colors.warning : (user as any)?.kyc_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>KYC Verification</Text>
+                <Text style={styles.kycSub}>{(user as any)?.kyc_status ? ((user as any).kyc_status as string).toUpperCase() : "NOT SUBMITTED"}</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
+            <TouchableOpacity onPress={() => router.push("/tickets" as any)} style={styles.rowItem} testID="profile-tickets-link">
+              <View style={[styles.kycDot, { backgroundColor: colors.primary }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>Support &amp; Help</Text>
+                <Text style={styles.kycSub}>RAISE A TICKET · MY CONVERSATIONS</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
+            <TouchableOpacity onPress={() => router.push("/more" as any)} style={styles.rowItem} testID="profile-more-link">
+              <View style={[styles.kycDot, { backgroundColor: colors.textMuted }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>More</Text>
+                <Text style={styles.kycSub}>ABOUT · CONTACT · LEGAL &amp; POLICIES</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
           </View>
 
-          {msg ? <Text style={[styles.msg, { color: msg === "Saved successfully" ? colors.success : "#B3261E" }]} testID="profile-msg">{msg}</Text> : null}
+          {/* ───── EARN MORE GROUP ───── */}
+          <Text style={styles.groupLabel}>EARN MORE</Text>
+          <View style={styles.groupCard}>
+            <TouchableOpacity
+              onPress={() => router.push((((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "/vendor/dashboard" : "/vendor/apply") as any)}
+              style={styles.rowItem}
+              testID="profile-vendor-link"
+            >
+              <View style={[styles.kycDot, { backgroundColor: ((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? colors.success : (user as any)?.vendor_status === "pending" ? colors.warning : (user as any)?.vendor_status === "suspended" ? "#B3261E" : "#94A3B8" }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>{((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "Vendor Panel" : "Become a Vendor"}</Text>
+                <Text style={styles.kycSub}>{(user as any)?.vendor_status ? ((user as any).vendor_status as string).toUpperCase() : "SELL ON OUR PLATFORM"}</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
+            {/* Service Provider entry — moved here from the Services tab banner. */}
+            <TouchableOpacity
+              onPress={() => router.push("/services/apply" as any)}
+              style={styles.rowItem}
+              testID="profile-service-provider-link"
+            >
+              <View style={[styles.kycDot, { backgroundColor: (user as any)?.service_provider_status === "approved" ? colors.success : (user as any)?.service_provider_status === "pending" ? colors.warning : (user as any)?.service_provider_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>
+                  {(user as any)?.service_provider_status === "approved" ? "You're a Service Provider" : "Become a Service Provider"}
+                </Text>
+                <Text style={styles.kycSub}>
+                  {(user as any)?.service_provider_status === "approved" ? "TAP TO UPDATE OR VIEW BOOKINGS"
+                    : (user as any)?.service_provider_status === "pending" ? "APPLICATION UNDER REVIEW"
+                    : (user as any)?.service_provider_status === "rejected" ? "APPLY AGAIN"
+                    : "EARN — LIST YOUR SERVICE"}
+                </Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
 
-          <TouchableOpacity onPress={onSave} disabled={saving} style={[styles.saveBtn, saving && { opacity: 0.7 }]} testID="profile-save">
-            {saving ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={styles.saveBtnText}>Save details</Text>}
-          </TouchableOpacity>
+          <Text style={styles.groupLabel}>PAYOUT DETAILS</Text>
+          <View style={styles.payoutCard}>
+            <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
+
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>UPI ID</Text>
+              <TextInput testID="profile-upi" value={upi} onChangeText={setUpi} placeholder="name@upi" placeholderTextColor={colors.textMuted} autoCapitalize="none" style={styles.input} />
+            </View>
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>Bank account number</Text>
+              <TextInput testID="profile-bank" value={bank} onChangeText={setBank} placeholder="XXXXXXXXXX" placeholderTextColor={colors.textMuted} keyboardType="numeric" style={styles.input} />
+            </View>
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>IFSC code</Text>
+              <TextInput testID="profile-ifsc" value={ifsc} onChangeText={(t) => setIfsc(t.toUpperCase())} placeholder="HDFC0000123" placeholderTextColor={colors.textMuted} autoCapitalize="characters" style={styles.input} />
+            </View>
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>Account holder name</Text>
+              <TextInput testID="profile-holder" value={holder} onChangeText={setHolder} placeholder="As per bank record" placeholderTextColor={colors.textMuted} style={styles.input} />
+            </View>
+
+            {msg ? <Text style={[styles.msg, { color: msg === "Saved successfully" ? colors.success : "#B3261E" }]} testID="profile-msg">{msg}</Text> : null}
+
+            <TouchableOpacity onPress={onSave} disabled={saving} style={[styles.saveBtn, saving && { opacity: 0.7 }]} testID="profile-save">
+              {saving ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={styles.saveBtnText}>Save details</Text>}
+            </TouchableOpacity>
+          </View>
 
           <TouchableOpacity onPress={onLogout} style={styles.logoutBtn} testID="profile-logout">
             <Feather name="log-out" size={16} color="#B3261E" />
@@ -206,17 +216,34 @@ const styles = StyleSheet.create({
   codeLabel: { color: "rgba(255,255,255,0.7)", fontSize: 10, letterSpacing: 2, fontWeight: "700" },
   code: { color: colors.primaryFg, fontSize: 26, fontWeight: "800", letterSpacing: 3, marginTop: 4 },
   kycCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 16, borderRadius: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginBottom: 28 },
+  // ─── Phase 2B UX polish: grouped settings list ───
+  // Section labels above logical groups (ACCOUNT, EARN MORE).
+  groupLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginTop: spacing.sectionGap, marginBottom: 10, paddingHorizontal: 4 },
+  // Group container: white card holding several rows separated by hairlines.
+  // Replaces the previous pattern where each row was its own card with
+  // marginBottom: 28 — created a "stranded" disconnected feel.
+  groupCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16, overflow: "hidden" },
+  // Single row inside a groupCard.
+  rowItem: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: spacing.cardPad, paddingVertical: 14 },
+  // Hairline divider between rows in the same group.
+  rowDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginLeft: spacing.cardPad + 22 /* dot + gap */ },
   kycDot: { width: 10, height: 10, borderRadius: 5 },
   kycTitle: { fontSize: 14, fontWeight: "700", color: colors.textMain },
   kycSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, letterSpacing: 1, fontWeight: "700" },
-  sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 6 },
+  sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginTop: spacing.sectionGap, marginBottom: 6 },
+  // White card wrapping the entire payout-details form so it visually
+  // belongs to the same group as the section label above (matches the
+  // groupCard pattern used by ACCOUNT / EARN MORE).
+  payoutCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16, padding: spacing.cardPad },
   helperText: { fontSize: 13, color: colors.textMuted, marginBottom: 16 },
   formGroup: { marginBottom: 14 },
   label: { fontSize: 12, color: colors.textMuted, marginBottom: 6, fontWeight: "600" },
-  input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 16, paddingVertical: 14, fontSize: 15, color: colors.textMain },
+  input: { backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 16, paddingVertical: 14, fontSize: 15, color: colors.textMain },
   msg: { fontSize: 13, marginTop: 8 },
   saveBtn: { backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 16, alignItems: "center", marginTop: 16 },
   saveBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 15 },
-  logoutBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 16, padding: 12 },
+  // Logout: subtle outlined button instead of naked text — clearer affordance
+  // and visually anchors the bottom of the screen.
+  logoutBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: spacing.sectionGap, marginBottom: 8, paddingVertical: 14, borderRadius: radii.button, borderWidth: 1, borderColor: "#F2B8B5", backgroundColor: "#FFF6F5" },
   logoutText: { color: "#B3261E", fontSize: 14, fontWeight: "700" },
 });

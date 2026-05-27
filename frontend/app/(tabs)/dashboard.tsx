@@ -472,7 +472,7 @@ const styles = StyleSheet.create({
   approvalBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, lineHeight: 16 },
   heroCard: { marginBottom: 16, padding: 24 },
   // ---- New compact total earnings card ----
-  heroCardCompact: { marginBottom: 18, padding: 16, borderRadius: 18 },
+  heroCardCompact: { marginBottom: spacing.sectionGap, padding: spacing.cardPad, borderRadius: 18 },
   heroLabelCompact: { color: "rgba(255,255,255,0.75)", fontSize: 10, letterSpacing: 1.6, fontWeight: "800" },
   heroAmountCompact: { color: colors.primaryFg, fontSize: 26, fontWeight: "900", marginTop: 2, letterSpacing: -0.8 },
   heroSubRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
@@ -507,7 +507,7 @@ const styles = StyleSheet.create({
   chartTotalLabel: { fontSize: 10, color: colors.textMuted, marginTop: 2, fontWeight: "600" },
   dayLabelsRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 6, paddingHorizontal: 4 },
   dayLabel: { fontSize: 10, color: colors.textMuted, fontWeight: "700" },
-  progressCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 20, marginBottom: 24 },
+  progressCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: spacing.cardPad, marginBottom: spacing.sectionGap },
   cardTitle: { fontSize: 15, fontWeight: "700", color: colors.textMain },
   cardSub: { fontSize: 14, fontWeight: "700", color: colors.accent },
   progressInfo: { color: colors.textMuted, fontSize: 13, marginTop: 8, marginBottom: 12 },

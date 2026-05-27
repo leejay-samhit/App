@@ -46,6 +46,17 @@ export const spacing = {
   // banner → product strips). Sits between md (16) and lg (24) so the page
   // scrolls feel rhythmic, not crowded.
   sectionGap: 20,
+  // Phase 2B UX polish (2026-05-27).
+  // Canonical inner padding for "card" surfaces (KPI tile, balance card,
+  // settings row, list-row, etc.). Picked at 16 to match the iOS HIG
+  // "regular" inset and keep cards consistent across Wallet / Dashboard /
+  // Profile / Admin. Override per-card only when there's a deliberate
+  // visual reason (e.g. hero gradient cards still use 24 for prominence).
+  cardPad: 16,
+  // Inter-card vertical gap inside a related group (e.g. settings rows
+  // belonging to the same logical section). Same value as `sm` (8) — kept
+  // separate so future tuning doesn't spill into other 8-px usages.
+  rowGap: 8,
 };
 
 export const formatINR = (n: number) => {
