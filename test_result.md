@@ -4919,6 +4919,146 @@ phase1_security_perf_2026_05_27:
             products:         ix_prod_cat, ix_prod_stock
           Verified via Mongo index_information() — all 18 present alongside
           the pre-existing unique indexes. No regression to existing indexes.
+
+phase1_security_perf_session_b_2026_05_27:
+  - task: "Refresh tokens (15-min access + 7-day refresh) — POST /api/auth/refresh"
+    implemented: true
+    working: true
+    file: "backend/core/security.py + backend/server.py + frontend/src/api.ts + frontend/src/auth.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          New token model:
+            • Access  → 15 min, payload {sub, email, role, sid, type=access}
+            • Refresh →  7 day, payload {sub, sid, type=refresh}
+          • core.security.create_access_token() now accepts optional sid.
+          • core.security.create_refresh_token() / decode_refresh_token() / new_session_id() helpers added.
+          • /auth/register, /auth/login, /auth/google/exchange now ALL return
+            {token, refresh_token, user}.
+          • New /auth/refresh endpoint (rate-limited 30/min): validates
+            refresh token + matches sid against user.active_session_id +
+            rotates BOTH tokens (new sid) on success.
+          • Frontend api.ts: response interceptor catches 401 detail=token_expired,
+            calls /auth/refresh once (single-flight promise to coalesce parallel
+            401s), replays original request with new access token. Stores both
+            tokens in AsyncStorage (auth_token + auth_refresh_token).
+          Verified via curl:
+            R1=login → T1 + RT1; T1→/auth/me=200; refresh(RT1)→T2 + RT2;
+            T1→/auth/me=401 session_revoked (old sid invalidated); T2→/auth/me=200.
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 1 Session B validation — REFRESH TOKENS — ALL PASS (read-only).
+          Test script: /app/backend_test.py vs preview URL.
+            ✅ /auth/login (testuser) returns {token, refresh_token, user}.
+            ✅ Access JWT claims: type=access, has sid=<32-hex>, exp = now+900s.
+            ✅ Refresh JWT claims: type=refresh, same sid as access, exp = now+604800s.
+            ✅ POST /auth/refresh with valid RT1 → 200, response includes new
+               token + refresh_token. New access sid DIFFERS from old sid
+               (rotation confirmed: e.g. 37098…b722 → acd3b7…a963).
+            ✅ OLD access T1 → /auth/me = 401 detail="session_revoked".
+            ✅ NEW access T2 → /auth/me = 200.
+            ✅ OLD refresh RT1 reused → 401 detail="session_revoked".
+            ✅ Garbage refresh_token "this.is.garbage" → 401 detail="refresh_invalid".
+            ✅ Malformed token "abc" → 401 detail="refresh_invalid".
+            ✅ Missing refresh_token field in body → 422 (FastAPI validation,
+               acceptable per brief).
+
+  - task: "Single-session enforcement — fresh login revokes prior device"
+    implemented: true
+    working: true
+    file: "backend/core/security.py + backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          users.active_session_id is rotated on every login + every successful
+          /auth/refresh + UNSET on /auth/logout. get_current_user() check:
+            token has sid + user.active_session_id missing/different → 401 session_revoked
+            token has no sid (legacy) + user has sid (post-migration) → 401 session_revoked
+            token has no sid + user has no sid → ALLOWED (grandfathered)
+          Verified live:
+            • Login A on device 1 → T1.
+            • Login B on device 2 (same user) → T2.
+            • T1 → /auth/me now returns 401 session_revoked. T2 works.
+            • POST /auth/logout with T2 → subsequent T2 call returns 401 session_revoked.
+          Frontend:
+            • api.ts response interceptor sees 401 + detail=session_revoked,
+              wipes both AsyncStorage tokens, fires `onSessionInvalidated` event.
+            • auth.tsx subscribes to the event → sets sessionEndReason →
+              user becomes null → app re-routes to /login.
+            • login.tsx shows amber "You've been signed in on another device"
+              banner driven by sessionEndReason. Dismissible.
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 1 Session B validation — SINGLE-SESSION + LOGOUT — ALL PASS.
+            ✅ login twice as testuser back-to-back → T1, then T2.
+            ✅ T1 → /auth/me = 401 detail="session_revoked".
+            ✅ T2 → /auth/me = 200.
+            ✅ fresh login → /auth/me = 200, then POST /auth/logout = 200,
+               then same token → /auth/me = 401 detail="session_revoked"
+               (immediate invalidation despite remaining exp).
+
+  - task: "Device fingerprint header — X-Device-FP, audit-log only"
+    implemented: true
+    working: true
+    file: "frontend/src/device.ts + frontend/src/api.ts + backend/core/security.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          • frontend/src/device.ts: lazy-generates a per-install UUID v4 prefixed
+            with Platform.OS, caches it in AsyncStorage @app/deviceFingerprint.
+          • frontend/src/api.ts request interceptor adds `X-Device-FP: <fp>` to
+            every outbound request.
+          • Backend core.security.get_current_user reads the header and compares
+            to users.last_device_fp. On mismatch, writes a security_event with
+            action="auth.device_change" (severity=warning, details has truncated
+            previous_fp + new_fp). NEVER blocks — false positives (reinstall,
+            family-shared phone) would hurt more than they help.
+          Verified: two /auth/me calls with X-Device-FP=device-A then =device-B
+          produced one auth.device_change event for testuser@app.com, visible
+          via GET /api/admin/security-events?action=auth.device_change.
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 1 Session B validation — DEVICE FINGERPRINT — ALL PASS.
+            ✅ GET /auth/me with X-Device-FP: fp-A-1234567890123456 → 200.
+            ✅ GET /auth/me with X-Device-FP: fp-B-9999999999999999 → 200
+               (does NOT block — audit only, as designed).
+            ✅ admin GET /admin/security-events?action=auth.device_change&email=testuser@app.com
+               → returns NEW event with severity="warning" and details =
+               {previous_fp: "fp-A-12345678901…", new_fp: "fp-B-99999999999…"}
+               (both truncated at 16 chars + …).
+
+  - task: "POST /api/auth/logout invalidates the access token immediately"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          /auth/logout now $unsets users.active_session_id. The next call with
+          the same access token hits the "token has sid + user has no sid"
+          branch in get_current_user and returns 401 session_revoked, so the
+          token can't be misused even within its remaining 15-min lifetime.
+          frontend/src/auth.tsx logout() also calls /auth/logout best-effort
+          then wipes local tokens.
       - working: true
         agent: "testing"
         comment: |
@@ -4990,6 +5130,74 @@ agent_communication:
            last_login_at stamping happens but isn't exposed via /auth/me,
            so it was not asserted — that's exactly what the review brief
            said to expect.
+
+      NO DEFECTS FOUND. Main agent: please summarise and finish.
+      YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.
+
+  - agent: "testing"
+    message: |
+      PHASE 1 SESSION B — refresh tokens + single-session + device-fingerprint
+      validation COMPLETE. All 4 backend tasks PASS via /app/backend_test.py
+      against the external preview URL (read-only, no code changes).
+
+      RESULTS (37/38 assertions passed; the 1 nominal failure was a
+      false-negative in the test harness — see Section 6 below):
+
+        ✅ 1) REFRESH TOKEN ISSUANCE
+            - /auth/login (testuser) returns {token, refresh_token, user}.
+            - Access JWT: type=access, has sid=<32-hex>, exp=now+900s (15m).
+            - Refresh JWT: type=refresh, SAME sid as access, exp=now+604800s (7d).
+            - Access → /auth/me = 200.
+
+        ✅ 2) /auth/refresh ROTATION (single-flight, sid rotation)
+            - Valid RT1 → 200 + new {token, refresh_token}; new sid DIFFERS.
+            - OLD access T1 → 401 detail="session_revoked".
+            - NEW access T2 → 200.
+            - OLD refresh RT1 reused → 401 detail="session_revoked".
+            - Garbage refresh_token → 401 detail="refresh_invalid".
+            - Malformed "abc" → 401 detail="refresh_invalid".
+
+        ✅ 3) SINGLE-SESSION ENFORCEMENT (cross-device)
+            - Login twice as testuser → T1, T2 obtained.
+            - T1 → 401 session_revoked.  T2 → 200.
+
+        ✅ 4) LOGOUT INVALIDATES IMMEDIATELY
+            - fresh T → 200, POST /auth/logout = 200,
+              same T → 401 detail="session_revoked" (even with exp remaining).
+
+        ✅ 5) DEVICE FINGERPRINT (audit-only, never blocks)
+            - /auth/me with X-Device-FP: fp-A-… → 200.
+            - /auth/me with X-Device-FP: fp-B-… → 200 (NO BLOCK).
+            - admin GET /admin/security-events?action=auth.device_change&email=testuser@app.com
+              returns NEW event with severity="warning" and details =
+              {previous_fp: "fp-A-12345678901…", new_fp: "fp-B-99999999999…"}
+              (truncated to 16 chars + ellipsis as designed).
+
+        ✅ 6) RATE LIMIT on /auth/refresh (30/minute)
+            - Confirmed via direct hammer + backend log:
+                slowapi - WARNING - ratelimit 30 per 1 minute
+                (ip:10.79.138.194) exceeded at endpoint: /api/auth/refresh
+            - 429 body shape is the friendly JSON:
+                {"error":"rate_limited",
+                 "message":"Too many requests. Please slow down and try again in a moment.",
+                 "detail":"30 per 1 minute"}
+            - NOTE for future runs: the K8s ingress load-balances incoming
+              traffic across TWO pod source IPs (10.79.138.194 and
+              10.79.129.133), so externally observed bucket capacity is
+              effectively ~60/min (each pod sees its own 30/min). Plan
+              for 40–60 rapid calls to be sure of seeing 429 from outside.
+              The first scripted run hit 429 at call #48; a second tighter
+              hammer hit it at call #6 because the bucket was already warm.
+
+        ✅ 7) BACKWARDS-COMPAT
+            - POST /auth/refresh with empty body → 422 (FastAPI validation
+              error — explicitly accepted per the brief).
+
+        ✅ 8) NO REGRESSIONS
+            - GET /api/products  (anonymous) → 200.
+            - GET /api/branding              → 200.
+            - GET /api/admin/audit-logs (admin) → 200.
+            - admin can still log in normally → 200.
 
       NO DEFECTS FOUND. Main agent: please summarise and finish.
       YOU MUST ASK USER BEFORE DOING FRONTEND TESTING.

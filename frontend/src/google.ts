@@ -12,6 +12,7 @@ export type GoogleResult = {
   ok: boolean;
   cancelled?: boolean;
   token?: string;
+  refresh_token?: string;
   user?: any;
   is_new?: boolean;
   error?: string;
@@ -74,7 +75,7 @@ export async function signInWithGoogle(referralCode?: string): Promise<GoogleRes
       session_id: sessionId,
       referral_code: referralCode || undefined,
     });
-    return { ok: true, token: data.token, user: data.user, is_new: data.is_new };
+    return { ok: true, token: data.token, refresh_token: data.refresh_token, user: data.user, is_new: data.is_new };
   } catch (e: any) {
     return { ok: false, error: e?.response?.data?.detail || e?.message || "Google sign-in failed" };
   }

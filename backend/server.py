@@ -115,6 +115,9 @@ from core.security import (  # noqa: E402
     hash_password,
     verify_password,
     create_access_token,
+    create_refresh_token,
+    decode_refresh_token,
+    new_session_id,
     get_current_user,
     require_admin,
     require_admin_role,
@@ -318,8 +321,12 @@ async def register(request: Request, payload: RegisterRequest):
     }
     await db.users.insert_one(user_doc)
 
-    token = create_access_token(user_id, email, "user")
-    return {"token": token, "user": serialize_user(user_doc)}
+    # Mint a fresh session — registration immediately logs the user in.
+    sid = new_session_id()
+    await db.users.update_one({"id": user_id}, {"$set": {"active_session_id": sid}})
+    token = create_access_token(user_id, email, "user", sid=sid)
+    refresh = create_refresh_token(user_id, sid)
+    return {"token": token, "refresh_token": refresh, "user": serialize_user(user_doc)}
 
 
 @api_router.post("/auth/login")
@@ -378,6 +385,14 @@ async def login(request: Request, payload: LoginRequest):
         }
         raise HTTPException(status_code=403, detail=msg_map.get(cat, msg_map["other"]))
     token = create_access_token(user["id"], email, user.get("role", "user"))
+    # Single-session enforcement: mint a fresh session id and persist it on
+    # the user doc. Any previously-issued access token for this user that
+    # carried a different `sid` will fail get_current_user with
+    # detail="session_revoked" — the FE turns that into a "Signed in
+    # elsewhere" banner and forces a clean logout on the old device.
+    sid = new_session_id()
+    token = create_access_token(user["id"], email, user.get("role", "user"), sid=sid)
+    refresh = create_refresh_token(user["id"], sid)
     # Multi-IP anomaly check: if the user has logged-in from a different IP
     # within the last 15 minutes, flag it (informational — does not block).
     try:
@@ -391,15 +406,19 @@ async def login(request: Request, payload: LoginRequest):
                 details={"previous_ip": recent_ip},
                 severity="warning",
             )
-        # Stamp the user with the current login IP/time so future logins can
-        # diff against it (cheap upsert, no extra query).
+        # Stamp the user with the current login IP/time + session id so future
+        # logins can diff against it (single upsert).
         await db.users.update_one(
             {"id": user["id"]},
-            {"$set": {"last_login_ip": client_ip, "last_login_at": now_utc().isoformat()}},
+            {"$set": {
+                "last_login_ip": client_ip,
+                "last_login_at": now_utc().isoformat(),
+                "active_session_id": sid,
+            }},
         )
     except Exception:
         pass
-    return {"token": token, "user": serialize_user(user)}
+    return {"token": token, "refresh_token": refresh, "user": serialize_user(user)}
 
 
 # REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
@@ -516,8 +535,11 @@ async def google_exchange(request: Request, payload: GoogleExchange):
         reason = user.get("block_reason") or "Contact support."
         raise HTTPException(status_code=403, detail=f"Account blocked: {reason}")
 
-    token = create_access_token(user["id"], email, user.get("role", "user"))
-    return {"token": token, "user": serialize_user(user), "is_new": is_new}
+    sid = new_session_id()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"active_session_id": sid}})
+    token = create_access_token(user["id"], email, user.get("role", "user"), sid=sid)
+    refresh = create_refresh_token(user["id"], sid)
+    return {"token": token, "refresh_token": refresh, "user": serialize_user(user), "is_new": is_new}
 
 
 @api_router.get("/auth/google/callback")
@@ -540,7 +562,60 @@ async def me(user: Dict[str, Any] = Depends(get_current_user)):
 
 @api_router.post("/auth/logout")
 async def logout(user: Dict[str, Any] = Depends(get_current_user)):
+    # Invalidate the device session — wipes active_session_id so even if the
+    # old access token is still inside its 15-min window, it'll be rejected
+    # by the single-session check on the very next request.
+    try:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$unset": {"active_session_id": ""}},
+        )
+    except Exception:
+        pass
     return {"ok": True}
+
+
+# ─────────────── Token refresh (Phase 1 Session B, 2026-05-27) ───────────────
+class _RefreshPayload(BaseModel):
+    refresh_token: str
+
+
+@api_router.post("/auth/refresh")
+@_rl.limit("30/minute")
+async def refresh_token(request: Request, payload: _RefreshPayload):
+    """Exchange a valid refresh token for a fresh access token (and a rotated
+    refresh token). The submitted refresh token's `sid` MUST match the user's
+    `active_session_id` — otherwise the session has been revoked (because the
+    user logged in from another device or explicitly logged out) and we
+    respond 401 detail=session_revoked so the FE can clean its local state.
+
+    Refresh-token rotation: every successful call mints a brand-new refresh
+    token AND assigns the user a brand-new `active_session_id`. This means an
+    attacker who steals a refresh token can only use it once — on next legit
+    use, the real user's session will already have been rotated and the
+    attacker's call returns session_revoked.
+    """
+    data = decode_refresh_token(payload.refresh_token)
+    user_id = data.get("sub")
+    sid = data.get("sid")
+    if not user_id or not sid:
+        raise HTTPException(status_code=401, detail="refresh_invalid")
+    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="refresh_invalid")
+    if user.get("is_blocked"):
+        raise HTTPException(status_code=403, detail="Account blocked")
+    # The user's current sid must match the one in this refresh token.
+    if user.get("active_session_id") and user.get("active_session_id") != sid:
+        raise HTTPException(status_code=401, detail="session_revoked")
+    # Rotate: new sid, new refresh + access.
+    new_sid = new_session_id()
+    await db.users.update_one({"id": user_id}, {"$set": {"active_session_id": new_sid}})
+    email = user.get("email", "")
+    role = user.get("role", "user")
+    new_access = create_access_token(user_id, email, role, sid=new_sid)
+    new_refresh = create_refresh_token(user_id, new_sid)
+    return {"token": new_access, "refresh_token": new_refresh}
 
 
 # ------------------ Payment (Mock) ------------------

@@ -21,13 +21,24 @@ import { GradientCard } from "../src/gradient-card";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, sessionEndReason, clearSessionEnd } = useAuth();
   const { app_name, tagline, login_subtitle } = useBranding();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Friendly banner shown when the user landed here because their session
+  // was ended remotely (signed in on another device, refresh token expired,
+  // explicit admin kick, etc.). Reset on next successful login or when
+  // dismissed.
+  const sessionBanner =
+    sessionEndReason === "session_revoked"
+      ? "You’ve been signed in on another device. Please log in again."
+      : sessionEndReason === "refresh_failed"
+      ? "Your session has expired. Please log in again."
+      : null;
 
   const navigateAfter = (u: any) => {
     if (u.role === "admin") router.replace("/admin/home");
@@ -76,6 +87,19 @@ export default function Login() {
           </Animated.View>
 
           <Animated.View entering={FadeInDown.duration(400).delay(120)}>
+          {sessionBanner ? (
+            <View style={styles.sessionBanner} testID="session-end-banner">
+              <Feather name="info" size={16} color="#92400E" />
+              <Text style={styles.sessionBannerText} numberOfLines={2}>{sessionBanner}</Text>
+              <TouchableOpacity
+                onPress={clearSessionEnd}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                testID="session-end-banner-dismiss"
+              >
+                <Feather name="x" size={16} color="#92400E" />
+              </TouchableOpacity>
+            </View>
+          ) : null}
           <View style={styles.formGroup}>
             <Text style={styles.label}>Email</Text>
             <TextInput
@@ -198,4 +222,19 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   helperText: { color: colors.textMuted, fontSize: 12 },
+  // Phase 1 Session B — banner shown when the user was kicked out involuntarily
+  // (signed in on another device, refresh expired, etc.). Amber warning style.
+  sessionBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 14,
+  },
+  sessionBannerText: { flex: 1, fontSize: 12.5, color: "#92400E", fontWeight: "600", lineHeight: 17 },
 });

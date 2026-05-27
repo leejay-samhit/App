@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { api, setAuthToken } from "./api";
+import { api, setAuthToken, setSessionTokens, onSessionInvalidated } from "./api";
 
 export type User = {
   id: string;
@@ -28,7 +29,15 @@ type AuthState = {
   register: (data: { name: string; email: string; password: string; phone?: string; referral_code?: string }) => Promise<User>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
-  setSession: (token: string, user: User) => Promise<void>;
+  setSession: (token: string, user: User, refreshToken?: string | null) => Promise<void>;
+  /**
+   * Reason for the most recent involuntary sign-out. Drives the "Signed in
+   * elsewhere — please log in again" banner shown on the login screen.
+   * Reset by calling clearSessionEnd() after the banner is dismissed or
+   * the next successful login.
+   */
+  sessionEndReason: "session_revoked" | "refresh_failed" | null;
+  clearSessionEnd: () => void;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -36,6 +45,7 @@ const AuthContext = createContext<AuthState | null>(null);
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [loading, setLoading] = useState(false);
+  const [sessionEndReason, setSessionEndReason] = useState<AuthState["sessionEndReason"]>(null);
 
   const refresh = async () => {
     try {
@@ -43,7 +53,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       setUser(data);
     } catch {
       setUser(null);
-      await setAuthToken(null);
+      await setSessionTokens(null, null);
     }
   };
 
@@ -58,12 +68,31 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     })();
   }, []);
 
+  // Subscribe to involuntary sign-out events broadcast by the api layer.
+  // The interceptor wipes tokens itself; here we just flip state so the UI
+  // re-renders to /login and shows the "session ended" banner.
+  useEffect(() => {
+    const unsubscribe = onSessionInvalidated((reason) => {
+      setUser(null);
+      setSessionEndReason(reason);
+    });
+    return unsubscribe;
+  }, []);
+
+  const _persistLogin = async (data: any) => {
+    // Backend returns { token, refresh_token, user }. Older responses (legacy
+    // OAuth flow) may omit refresh_token — still works, that token will fall
+    // back to the 401-token_expired path which gracefully logs the user out.
+    await setSessionTokens(data.token ?? null, data.refresh_token ?? null);
+    setUser(data.user);
+    setSessionEndReason(null);
+  };
+
   const login = async (email: string, password: string) => {
     setLoading(true);
     try {
       const { data } = await api.post("/auth/login", { email, password });
-      await setAuthToken(data.token);
-      setUser(data.user);
+      await _persistLogin(data);
       return data.user as User;
     } finally {
       setLoading(false);
@@ -74,26 +103,39 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setLoading(true);
     try {
       const { data } = await api.post("/auth/register", payload);
-      await setAuthToken(data.token);
-      setUser(data.user);
+      await _persistLogin(data);
       return data.user as User;
     } finally {
       setLoading(false);
     }
   };
 
-  const setSession = async (token: string, u: User) => {
-    await setAuthToken(token);
+  const setSession = async (token: string, u: User, refreshToken: string | null = null) => {
+    await setSessionTokens(token, refreshToken);
     setUser(u);
+    setSessionEndReason(null);
   };
 
   const logout = async () => {
-    await setAuthToken(null);
+    // Best-effort: tell the server to wipe active_session_id so the access
+    // token dies immediately. Don't block the UI on it — even if this fails
+    // (offline), the local wipe below will sign the user out on this device.
+    try { await api.post("/auth/logout"); } catch { /* ignore */ }
+    await setSessionTokens(null, null);
     setUser(null);
+    setSessionEndReason(null);
   };
 
+  const clearSessionEnd = () => setSessionEndReason(null);
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, refresh, setSession }}>
+    <AuthContext.Provider
+      value={{
+        user, loading,
+        login, register, logout, refresh, setSession,
+        sessionEndReason, clearSessionEnd,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -104,3 +146,6 @@ export const useAuth = () => {
   if (!ctx) throw new Error("useAuth must be inside AuthProvider");
   return ctx;
 };
+
+// Avoid unused import warnings on the bundled output.
+void Platform; void setAuthToken;
