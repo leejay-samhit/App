@@ -1,402 +1,440 @@
 """
-Ledger Drift Self-Heal Upgrade — End-to-End Test (v2, dynamic-seed)
-====================================================================
-Verifies the new behaviour added in /app/backend/server.py at the
-startup `_background_init` self-healer (lines 6579-6744):
+Backend test harness for THREE features (see /app/test_result.md request):
 
-  1) `_compute_money_flow_snapshot` adds `legacy_reconcile_inflow`
-     to its inflow sum (server.py:6015).
-  2) Startup self-heal inflow tally also adds `legacy_reconcile_inflow`
-     for idempotency on restart (server.py:6609).
-  3) Step 2 positive-drift branch now INSERTS one
-     `legacy_reconcile_inflow` txn instead of SKIPping with a warning
-     (server.py:6692-6730).
+  F1 — Public (guest) Support Ticket endpoint POST /api/tickets/public
+  F2 — Splash image remove fix (PUT /api/admin/branding with splash_image="")
+  F3 — Authenticated ticket regression
 
-Because the test env may already carry pre-existing drift that
-step-1 won't move, we compute the seed dynamically so step-2 always
-fires with a predictable amount.
+Credentials read from /app/memory/test_credentials.md:
+  admin@app.com / Admin@123
+  testuser@app.com / Test@123
 """
+from __future__ import annotations
+
+import sys
+import uuid
 import asyncio
-import time
-import subprocess
-import requests
+from typing import Any, Dict, List, Optional
+
+import httpx
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# ─── Config ─────────────────────────────────────────────────────
 BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
-MONGO_URL = "mongodb://localhost:27017"
-DB_NAME = "referral_ecom_db"
-
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASS = "Admin@123"
 USER_EMAIL = "testuser@app.com"
 USER_PASS = "Test@123"
 
-# Target Step-2 audit-txn amount (must equal post-step-1 drift)
-TARGET_AUDIT = 50.0
-BACKEND_OUT_LOG = "/var/log/supervisor/backend.out.log"
-BACKEND_ERR_LOG = "/var/log/supervisor/backend.err.log"
+MONGO_URL: Optional[str] = None
+DB_NAME: Optional[str] = None
+try:
+    with open("/app/backend/.env", "r") as f:
+        for ln in f:
+            ln = ln.strip()
+            if ln.startswith("MONGO_URL="):
+                MONGO_URL = ln.split("=", 1)[1].strip().strip('"').strip("'")
+            elif ln.startswith("DB_NAME="):
+                DB_NAME = ln.split("=", 1)[1].strip().strip('"').strip("'")
+except Exception:
+    pass
 
-PASS = 0
-FAIL = 0
-FAILS = []
+if not MONGO_URL:
+    MONGO_URL = "mongodb://localhost:27017"
+if not DB_NAME:
+    DB_NAME = "test_database"
+
+PASSED: List[str] = []
+FAILED: List[str] = []
 
 
-def _p(tag, ok, msg=""):
-    global PASS, FAIL
-    if ok:
-        PASS += 1
-        print(f"  ✅ {tag}  {msg}")
+def ok(label: str) -> None:
+    PASSED.append(label)
+    print(f"  ✅ {label}")
+
+
+def fail(label: str, detail: str = "") -> None:
+    FAILED.append(f"{label} — {detail}" if detail else label)
+    print(f"  ❌ {label} — {detail}")
+
+
+def assert_eq(label: str, got: Any, want: Any) -> None:
+    if got == want:
+        ok(f"{label} (={got!r})")
     else:
-        FAIL += 1
-        FAILS.append(f"{tag} — {msg}")
-        print(f"  ❌ {tag}  {msg}")
+        fail(label, f"expected={want!r} got={got!r}")
 
 
-def post(path, body=None, token=None):
-    h = {"Authorization": f"Bearer {token}"} if token else {}
-    return requests.post(BASE + path, json=body, headers=h, timeout=30)
+def section(title: str) -> None:
+    print()
+    print("=" * 70)
+    print(title)
+    print("=" * 70)
 
 
-def get(path, token=None):
-    h = {"Authorization": f"Bearer {token}"} if token else {}
-    return requests.get(BASE + path, headers=h, timeout=30)
-
-
-def login(email, pw):
-    r = post("/auth/login", {"email": email, "password": pw})
+async def login(client: httpx.AsyncClient, email: str, password: str) -> Optional[str]:
+    r = await client.post(f"{BASE}/auth/login", json={"email": email, "password": password})
     if r.status_code != 200:
-        print(f"LOGIN FAILED {email}: {r.status_code} {r.text[:200]}")
+        print(f"  ! login {email} → {r.status_code} {r.text[:200]}")
         return None
-    j = r.json()
-    return j.get("token") or j.get("access_token")
+    return r.json().get("token")
 
 
-# ── mongo helpers ───────────────────────────────────────────────
-async def _state():
-    c = AsyncIOMotorClient(MONGO_URL)
-    db = c[DB_NAME]
-    admin = await db.users.find_one({"email": ADMIN_EMAIL})
-    user = await db.users.find_one({"email": USER_EMAIL})
-    cnt = await db.transactions.count_documents({"type": "legacy_reconcile_inflow"})
-    rows = await db.transactions.find(
-        {"type": "legacy_reconcile_inflow"}, {"_id": 0}
-    ).to_list(50)
-    c.close()
-    return {
-        "admin_id": admin["id"],
-        "admin_balance": float(admin.get("wallet_balance") or 0),
-        "admin_buckets": admin.get("wallet_buckets") or {},
-        "user_id": user["id"],
-        "user_balance": float(user.get("wallet_balance") or 0),
-        "user_role": user.get("role"),
-        "lri_count": cnt,
-        "lri_rows": rows,
+async def db_get(coll: str, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    cli = AsyncIOMotorClient(MONGO_URL)
+    try:
+        return await cli[DB_NAME][coll].find_one(query)
+    finally:
+        cli.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# FEATURE 1 — PUBLIC GUEST TICKET
+# ──────────────────────────────────────────────────────────────────────
+async def feature1_guest_tickets(client: httpx.AsyncClient) -> List[str]:
+    created_guest_ids: List[str] = []
+    section("FEATURE 1 — POST /api/tickets/public (guest)")
+
+    # ── A: HAPPY PATH (category=other + custom_category)
+    print("\n[A] Happy path — category='other' with custom_category")
+    test_uuid = uuid.uuid4().hex[:8]
+    a_email = f"guest-a-{test_uuid}@example.com"
+    a_name = "Asha Patel"
+    a_subject = "App keeps crashing"
+    a_custom_cat = "Splash crash"
+    a_message = "App crashes immediately after splash on Android 13 device."  # ≥10 chars
+    payload_a = {
+        "email": a_email,
+        "name": a_name,
+        "subject": a_subject,
+        "category": "other",
+        "custom_category": a_custom_cat,
+        "message": a_message,
     }
+    r = await client.post(f"{BASE}/tickets/public", json=payload_a)
+    if r.status_code == 200:
+        body = r.json()
+        if body.get("ok") is True and body.get("ticket_id"):
+            tid_a = body["ticket_id"]
+            ok(f"A1 POST /tickets/public 200 ticket_id={tid_a[:8]}…")
+            created_guest_ids.append(tid_a)
+            try:
+                uuid.UUID(tid_a)
+                ok("A2 ticket_id is a uuid")
+            except ValueError:
+                fail("A2 ticket_id is a uuid", f"got={tid_a!r}")
+
+            await asyncio.sleep(0.3)
+            t = await db_get("tickets", {"id": tid_a})
+            if not t:
+                fail("A3 tickets row exists")
+            else:
+                ok("A3 tickets row exists")
+                assert_eq("A4 is_guest", t.get("is_guest"), True)
+                assert_eq("A5 guest_email", t.get("guest_email"), a_email)
+                assert_eq("A6 guest_name", t.get("guest_name"), a_name)
+                assert_eq("A7 guest_custom_category", t.get("guest_custom_category"), a_custom_cat)
+                if isinstance(t.get("user_id"), str) and t["user_id"].startswith("guest:"):
+                    ok(f"A8 user_id starts with 'guest:' ({t['user_id']})")
+                else:
+                    fail("A8 user_id starts with 'guest:'", f"got={t.get('user_id')!r}")
+                assert_eq("A9 category", t.get("category"), "other")
+                assert_eq("A10 subject", t.get("subject"), a_subject)
+                assert_eq("A11 status", t.get("status"), "open")
+                assert_eq("A12 priority", t.get("priority"), "normal")
+
+            tm = await db_get("ticket_messages", {"ticket_id": tid_a})
+            if not tm:
+                fail("A13 ticket_messages row exists")
+            else:
+                ok("A13 ticket_messages row exists")
+                assert_eq("A14 message.is_guest", tm.get("is_guest"), True)
+                assert_eq("A15 message.sender_type", tm.get("sender_type"), "user")
+                assert_eq("A16 message.message", tm.get("message"), a_message)
+        else:
+            fail("A1 happy path body", f"body={body!r}")
+    else:
+        fail("A1 POST /tickets/public 200", f"status={r.status_code} body={r.text[:200]}")
+
+    # ── B: STANDARD CATEGORY (withdrawal)
+    print("\n[B] Standard category — withdrawal, no custom_category")
+    b_email = f"guest-b-{uuid.uuid4().hex[:8]}@example.com"
+    payload_b = {
+        "email": b_email,
+        "category": "withdrawal",
+        "message": "I cannot withdraw my payout amount — UPI failed yesterday.",
+    }
+    r = await client.post(f"{BASE}/tickets/public", json=payload_b)
+    if r.status_code == 200 and r.json().get("ticket_id"):
+        tid_b = r.json()["ticket_id"]
+        ok(f"B1 POST 200 ticket_id={tid_b[:8]}…")
+        created_guest_ids.append(tid_b)
+        await asyncio.sleep(0.3)
+        t = await db_get("tickets", {"id": tid_b})
+        if not t:
+            fail("B2 tickets row exists")
+        else:
+            ok("B2 tickets row exists")
+            assert_eq("B3 category", t.get("category"), "withdrawal")
+            gcc = t.get("guest_custom_category")
+            if gcc is None or gcc == "":
+                ok(f"B4 guest_custom_category None/missing (got={gcc!r})")
+            else:
+                fail("B4 guest_custom_category None/missing", f"got={gcc!r}")
+    else:
+        fail("B1 POST standard category 200", f"status={r.status_code} body={r.text[:200]}")
+
+    # ── C: VALIDATION — each must 400
+    print("\n[C] Validation — each must 400")
+    val_cases = [
+        ("C1 invalid email", {"email": "not-an-email", "category": "other", "message": "This is a valid msg >=10 chars"}),
+        ("C2 missing email", {"category": "other", "message": "This is a valid msg >=10 chars"}),
+        ("C3 empty email", {"email": "", "category": "other", "message": "This is a valid msg >=10 chars"}),
+        ("C4 short message", {"email": "x@x.com", "category": "other", "message": "too short"}),
+        ("C5 5001-char message", {"email": "x@x.com", "category": "other", "message": "a" * 5001}),
+    ]
+    for label, body in val_cases:
+        r = await client.post(f"{BASE}/tickets/public", json=body)
+        if r.status_code == 400:
+            ok(f"{label} → 400")
+        else:
+            fail(label, f"expected 400, got {r.status_code} body={r.text[:160]}")
+
+    # ── D: RATE LIMIT
+    print("\n[D] Rate limit — 5 OK, 6th = 429")
+    rl_email = f"rate-{uuid.uuid4().hex[:8]}@example.com"
+    rl_payload = {
+        "email": rl_email,
+        "category": "other",
+        "custom_category": "rate test",
+        "message": "Rate-limit test message — exceeds ten chars easily.",
+    }
+    statuses: List[int] = []
+    for i in range(6):
+        r = await client.post(f"{BASE}/tickets/public", json=rl_payload)
+        statuses.append(r.status_code)
+        if i < 5 and r.status_code == 200:
+            tid = r.json().get("ticket_id")
+            if tid:
+                created_guest_ids.append(tid)
+    print(f"  statuses[0..5] = {statuses}")
+    if statuses[:5] == [200, 200, 200, 200, 200]:
+        ok("D1 first 5 POSTs all 200")
+    else:
+        fail("D1 first 5 POSTs all 200", f"got={statuses[:5]}")
+    if statuses[5] == 429:
+        ok("D2 6th POST → 429")
+    else:
+        fail("D2 6th POST → 429", f"got={statuses[5]}")
+
+    return created_guest_ids
 
 
-def mongo_state():
-    return asyncio.run(_state())
+async def feature1_admin_visibility(
+    client: httpx.AsyncClient, admin_tok: str, guest_ids: List[str]
+) -> None:
+    section("FEATURE 1 — E: Admin visibility of guest tickets")
+    headers = {"Authorization": f"Bearer {admin_tok}"}
 
+    r = await client.get(f"{BASE}/admin/tickets", headers=headers)
+    if r.status_code != 200:
+        fail("E1 GET /admin/tickets 200", f"status={r.status_code} body={r.text[:200]}")
+        return
+    items = r.json().get("items", []) or []
+    ok(f"E1 GET /admin/tickets 200 items={len(items)}")
 
-async def _seed(amount):
-    c = AsyncIOMotorClient(MONGO_URL)
-    db = c[DB_NAME]
-    await db.users.update_one({"email": USER_EMAIL}, {"$inc": {"wallet_balance": amount}})
-    c.close()
-
-
-async def _cleanup(seed_amt, restore_admin_to):
-    """Restore env: debit seed from user, delete LRI rows, set admin balance back."""
-    c = AsyncIOMotorClient(MONGO_URL)
-    db = c[DB_NAME]
-    await db.users.update_one({"email": USER_EMAIL}, {"$inc": {"wallet_balance": -seed_amt}})
-    await db.transactions.delete_many({"type": "legacy_reconcile_inflow"})
-    if restore_admin_to is not None:
-        await db.users.update_one(
-            {"email": ADMIN_EMAIL}, {"$set": {"wallet_balance": float(restore_admin_to)}}
+    items_by_id = {t.get("id"): t for t in items}
+    sample = [gid for gid in guest_ids if gid in items_by_id][:2]
+    if len(sample) >= 1:
+        ok(f"E2 Guest tickets surfaced in admin list ({len(sample)} found of {len(guest_ids)})")
+        for s in sample:
+            t = items_by_id[s]
+            if t.get("is_guest") is True and t.get("guest_email"):
+                ok(f"E3 ticket {s[:8]}… is_guest=True, guest_email={t['guest_email']}")
+            else:
+                fail(
+                    f"E3 ticket {s[:8]}… is_guest+guest_email",
+                    f"is_guest={t.get('is_guest')} guest_email={t.get('guest_email')!r}",
+                )
+    else:
+        fail(
+            "E2 Guest tickets surfaced in admin list",
+            f"none of {len(guest_ids)} guest ids appeared in items[]",
         )
-    c.close()
+        return
 
+    pick = sample[0]
+    r = await client.get(f"{BASE}/tickets/{pick}", headers=headers)
+    if r.status_code == 200:
+        body = r.json()
+        if body.get("ticket") and body.get("messages") is not None:
+            ok(f"E4 Admin GET /tickets/{pick[:8]}… 200")
+        else:
+            fail("E4 Admin GET ticket body", f"body keys={list(body.keys())}")
+    else:
+        fail(f"E4 Admin GET /tickets/{pick[:8]}…", f"status={r.status_code} body={r.text[:200]}")
 
-async def _find_user(email):
-    c = AsyncIOMotorClient(MONGO_URL)
-    db = c[DB_NAME]
-    u = await db.users.find_one({"email": email})
-    c.close()
-    return u
-
-
-def restart_backend(wait=40):
-    print(f"\n  ⟳ supervisorctl restart backend (wait up to {wait}s)…")
-    subprocess.run(
-        ["sudo", "supervisorctl", "restart", "backend"],
-        capture_output=True, text=True, timeout=60,
+    r = await client.post(
+        f"{BASE}/tickets/{pick}/reply",
+        headers=headers,
+        json={"message": "Hi — we have received your issue and are looking into it."},
     )
-    time.sleep(wait)
-    for _ in range(20):
-        try:
-            if requests.get(BASE + "/branding", timeout=5).status_code == 200:
-                break
-        except Exception:
-            pass
-        time.sleep(2)
-    # extra grace for _background_init to complete self-heal
-    time.sleep(12)
+    if r.status_code == 200 and r.json().get("ok") is True:
+        ok(f"E5 Admin POST /tickets/{pick[:8]}…/reply 200")
+    else:
+        fail("E5 Admin POST reply", f"status={r.status_code} body={r.text[:200]}")
 
 
-def tail_logs():
-    out = ""
-    for f in (BACKEND_OUT_LOG, BACKEND_ERR_LOG):
-        try:
-            res = subprocess.run(["tail", "-n", "800", f], capture_output=True, text=True, timeout=10)
-            out += res.stdout + "\n"
-        except Exception:
-            pass
-    return out
+# ──────────────────────────────────────────────────────────────────────
+# FEATURE 2
+# ──────────────────────────────────────────────────────────────────────
+PNG_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
 
 
-def section(name):
-    print(f"\n══════════ {name} ══════════")
+async def feature2_splash_image(client: httpx.AsyncClient, admin_tok: str) -> None:
+    section("FEATURE 2 — Splash image remove via empty string")
+    headers = {"Authorization": f"Bearer {admin_tok}"}
 
+    print("\n[F] SET splash_image first")
+    r = await client.put(
+        f"{BASE}/admin/branding", headers=headers, json={"splash_image": PNG_DATA_URI}
+    )
+    if r.status_code != 200:
+        fail("F1 PUT /admin/branding {splash_image:<png>}", f"status={r.status_code} body={r.text[:200]}")
+        return
+    ok("F1 PUT /admin/branding {splash_image:<png>} 200")
+    r2 = await client.get(f"{BASE}/branding")
+    if r2.status_code == 200 and r2.json().get("splash_image"):
+        ok(f"F2 GET /branding has splash_image set (len={len(r2.json()['splash_image'])})")
+    else:
+        fail("F2 GET /branding has splash_image set", f"status={r2.status_code} body={r2.text[:200]}")
+        return
 
-def main():
-    section("Phase 0 — Pre-state snapshot (and baseline drift)")
-    pre = mongo_state()
-    print(f"  admin_balance pre   = ₹{pre['admin_balance']}")
-    print(f"  user_balance  pre   = ₹{pre['user_balance']}")
-    print(f"  user_role           = {pre['user_role']}")
-    print(f"  lri_count     pre   = {pre['lri_count']}")
-    _p("P0.1 user is role=user", pre["user_role"] == "user", f"role={pre['user_role']}")
+    print("\n[G] CLEAR via empty string")
+    r = await client.put(
+        f"{BASE}/admin/branding", headers=headers, json={"splash_image": ""}
+    )
+    if r.status_code == 200:
+        ok("G1 PUT /admin/branding {splash_image:''} 200")
+    else:
+        fail("G1 PUT /admin/branding {splash_image:''} 200", f"status={r.status_code} body={r.text[:200]}")
+        return
+    r2 = await client.get(f"{BASE}/branding")
+    if r2.status_code == 200:
+        si = r2.json().get("splash_image", None)
+        if si is None or si == "":
+            ok(f"G2 GET /branding splash_image cleared (got={si!r})")
+        else:
+            fail("G2 GET /branding splash_image cleared", f"got={si!r}")
+    else:
+        fail("G2 GET /branding 200", f"status={r2.status_code}")
 
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
-    user_tok = login(USER_EMAIL, USER_PASS)
-    _p("P0.2 admin login 200", admin_tok is not None)
-    _p("P0.3 user  login 200", user_tok is not None)
-
-    r = get("/admin/ledger-alerts", admin_tok)
-    _p("P0.4 GET /admin/ledger-alerts 200", r.status_code == 200, f"status={r.status_code}")
-    snap = r.json().get("current", {}) if r.status_code == 200 else {}
-    baseline_drift = float(snap.get("drift") or 0)
-    baseline_inflow = float(snap.get("inflow") or 0)
-    print(f"  baseline_drift      = ₹{baseline_drift}")
-    print(f"  baseline_inflow     = ₹{baseline_inflow}")
-
-    # Choose seed so post-restart drift2 == TARGET_AUDIT (₹50)
-    # drift_after_seed = baseline_drift + seed. We want it = TARGET_AUDIT.
-    seed_amount = round(TARGET_AUDIT - baseline_drift, 2)
-    if seed_amount <= 0:
-        seed_amount = TARGET_AUDIT  # safety
-    print(f"  seed_amount         = ₹{seed_amount}  (expected step-2 audit ₹{TARGET_AUDIT})")
-
-    # Pre-clean: ensure no leftover LRI rows from any prior attempt
-    asyncio.run(_cleanup(0, None))
-
-    # ── Phase A+B ───────────────────────────────────────────
-    section("Phase A+B — Seed phantom into user wallet (bypass txn)")
-    asyncio.run(_seed(seed_amount))
-    after_seed = mongo_state()
-    print(f"  user_balance after seed = ₹{after_seed['user_balance']}")
-    _p("A.1 user wallet incremented by seed",
-       round(after_seed["user_balance"] - pre["user_balance"], 2) == seed_amount,
-       f"delta=₹{after_seed['user_balance'] - pre['user_balance']}")
-    _p("A.2 admin wallet_balance unchanged after seed",
-       round(after_seed["admin_balance"], 2) == round(pre["admin_balance"], 2))
-
-    pre_restart_admin_balance = after_seed["admin_balance"]
-    pre_restart_user_balance = after_seed["user_balance"]
-
-    # ── Phase C: Restart #1 ─────────────────────────────────
-    section("Phase C — Restart backend #1 (trigger startup self-heal)")
-    restart_backend(wait=42)
-
-    rh = get("/branding")
-    _p("C.0 backend healthy after restart#1", rh.status_code == 200, f"status={rh.status_code}")
-
-    after_r1 = mongo_state()
-    print(f"  admin_balance after R1 = ₹{after_r1['admin_balance']}")
-    print(f"  user_balance  after R1 = ₹{after_r1['user_balance']}")
-    print(f"  lri_count     after R1 = {after_r1['lri_count']}")
-    for row in after_r1["lri_rows"]:
-        print(
-            f"    row → amount=₹{row.get('amount')} status={row.get('status')} "
-            f"type={row.get('type')} is_auto_heal={row.get('is_auto_heal')} "
-            f"legacy_reconcile={row.get('legacy_reconcile')} "
-            f"user_id={row.get('user_id')}"
+    print("\n[H] Backward compat — PUT without splash_image key keeps existing")
+    r = await client.put(
+        f"{BASE}/admin/branding", headers=headers, json={"splash_image": PNG_DATA_URI}
+    )
+    if r.status_code != 200:
+        fail("H0 setup re-set splash_image", f"status={r.status_code} body={r.text[:200]}")
+        return
+    r = await client.put(
+        f"{BASE}/admin/branding",
+        headers=headers,
+        json={"tagline": "Track your referrals, earnings and grow your team."},
+    )
+    if r.status_code != 200:
+        fail("H1 PUT {tagline:…} (no splash_image key)", f"status={r.status_code} body={r.text[:200]}")
+        return
+    ok("H1 PUT {tagline:…} (no splash_image key) 200")
+    r2 = await client.get(f"{BASE}/branding")
+    if r2.status_code == 200 and r2.json().get("splash_image"):
+        ok("H2 GET /branding splash_image preserved")
+    else:
+        fail(
+            "H2 GET /branding splash_image preserved",
+            f"si={r2.json().get('splash_image')!r}",
         )
 
-    _p("C.1 exactly ONE legacy_reconcile_inflow txn",
-       after_r1["lri_count"] == 1, f"count={after_r1['lri_count']}")
+    # cleanup — leave splash cleared
+    await client.put(
+        f"{BASE}/admin/branding", headers=headers, json={"splash_image": ""}
+    )
 
-    if after_r1["lri_rows"]:
-        row = after_r1["lri_rows"][0]
-        _p(f"C.2 amount ≈ ₹{TARGET_AUDIT} (matches drift2)",
-           abs(round(float(row.get("amount") or 0), 2) - TARGET_AUDIT) <= 1.0,
-           f"amount={row.get('amount')}")
-        _p("C.3 status = success", row.get("status") == "success",
-           f"status={row.get('status')}")
-        _p("C.4 is_auto_heal = True", row.get("is_auto_heal") is True,
-           f"={row.get('is_auto_heal')}")
-        _p("C.5 legacy_reconcile = True", row.get("legacy_reconcile") is True,
-           f"={row.get('legacy_reconcile')}")
-        _p("C.6 user_id = admin.id", row.get("user_id") == pre["admin_id"],
-           f"got={row.get('user_id')} expected={pre['admin_id']}")
-        _p("C.7 type = legacy_reconcile_inflow",
-           row.get("type") == "legacy_reconcile_inflow", f"type={row.get('type')}")
+
+# ──────────────────────────────────────────────────────────────────────
+# FEATURE 3
+# ──────────────────────────────────────────────────────────────────────
+async def feature3_auth_tickets(client: httpx.AsyncClient, user_tok: str) -> None:
+    section("FEATURE 3 — Authenticated ticket regression")
+    headers = {"Authorization": f"Bearer {user_tok}"}
+
+    subject = f"Regression check {uuid.uuid4().hex[:6]}"
+    body_msg = "Following up on a withdrawal that hasn't landed in my bank yet."
+    r = await client.post(
+        f"{BASE}/tickets",
+        headers=headers,
+        json={"subject": subject, "category": "withdrawal", "message": body_msg},
+    )
+    if r.status_code != 200:
+        fail("I1 POST /tickets (auth)", f"status={r.status_code} body={r.text[:200]}")
+        return
+    body = r.json()
+    tid = (body.get("ticket") or {}).get("id")
+    if body.get("ok") is True and tid:
+        ok(f"I1 POST /tickets (auth) 200 ticket.id={tid[:8]}…")
+        assert_eq("I2 ticket.subject", body["ticket"].get("subject"), subject)
     else:
-        for tag in ("C.2", "C.3", "C.4", "C.5", "C.6", "C.7"):
-            _p(tag, False, "no legacy_reconcile_inflow row to inspect")
+        fail("I1 body shape", f"body={body!r}")
+        return
 
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
-    r = get("/admin/ledger-alerts", admin_tok)
-    if r.status_code == 200:
-        cur_drift = float(r.json().get("current", {}).get("drift") or 0)
-        print(f"  drift after R1 = ₹{cur_drift}")
-        _p("C.8 live drift ≤ ₹1", abs(cur_drift) <= 1.0, f"drift={cur_drift}")
+    r = await client.get(f"{BASE}/tickets/me", headers=headers)
+    if r.status_code != 200:
+        fail("J1 GET /tickets/me", f"status={r.status_code} body={r.text[:200]}")
+        return
+    items = r.json().get("items", []) or []
+    if any(t.get("id") == tid for t in items):
+        ok(f"J1 GET /tickets/me 200 — new ticket appears (items={len(items)})")
     else:
-        _p("C.8 /admin/ledger-alerts 200 post-R1", False,
-           f"status={r.status_code} body={r.text[:200]}")
+        fail("J1 new ticket appears in /tickets/me", f"items={len(items)}")
 
-    # Admin balance unchanged across restart (bucket reset shouldn't shift
-    # admin if buckets were already matching sum(txns), AND audit txn must
-    # NOT credit admin)
-    _p("C.9 admin wallet_balance UNCHANGED across restart "
-       "(audit txn did NOT inflate admin)",
-       round(after_r1["admin_balance"], 2) == round(pre_restart_admin_balance, 2),
-       f"pre=₹{pre_restart_admin_balance} post=₹{after_r1['admin_balance']}")
 
-    _p("C.10 user wallet_balance UNCHANGED (no debit applied)",
-       round(after_r1["user_balance"], 2) == round(pre_restart_user_balance, 2),
-       f"pre=₹{pre_restart_user_balance} post=₹{after_r1['user_balance']}")
+# ──────────────────────────────────────────────────────────────────────
+async def main() -> int:
+    print(f"BASE = {BASE}")
+    print(f"MONGO = {MONGO_URL}  DB = {DB_NAME}")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        admin_tok = await login(client, ADMIN_EMAIL, ADMIN_PASS)
+        if not admin_tok:
+            print("FATAL: admin login failed — aborting")
+            return 2
+        print(f"✓ admin logged in (token len={len(admin_tok)})")
 
-    logs = tail_logs()
-    has_recognition = "Drift self-heal step 2 (phantom inflow recognition)" in logs
-    has_skip = "Drift self-heal step 2 SKIP" in logs
-    _p("C.11 log line 'Drift self-heal step 2 (phantom inflow recognition)' present",
-       has_recognition)
-    _p("C.12 log line 'Drift self-heal step 2 SKIP' NOT present", not has_skip)
+        user_tok = await login(client, USER_EMAIL, USER_PASS)
+        if not user_tok:
+            print(f"!! {USER_EMAIL} login failed — falling back to demo user aarav@demo.app/Demo@123")
+            user_tok = await login(client, "aarav@demo.app", "Demo@123")
+        if not user_tok:
+            print("FATAL: no working test-user credentials — aborting")
+            return 2
+        print(f"✓ test user logged in (token len={len(user_tok)})")
 
-    # Print the relevant heal lines for evidence
-    print("\n  ── Heal-related log lines ──")
-    for line in logs.splitlines():
-        if "Drift self-heal" in line or "[LEDGER ALERT]" in line:
-            print(f"    {line[:240]}")
+        guest_ids = await feature1_guest_tickets(client)
+        await feature1_admin_visibility(client, admin_tok, guest_ids)
+        await feature2_splash_image(client, admin_tok)
+        await feature3_auth_tickets(client, user_tok)
 
-    # ── Phase D: Idempotency ────────────────────────────────
-    section("Phase D — Restart backend #2 (idempotency)")
-    snapshot_admin_before_r2 = after_r1["admin_balance"]
-    restart_backend(wait=42)
-    rh = get("/branding")
-    _p("D.0 backend healthy after restart#2", rh.status_code == 200, f"status={rh.status_code}")
-
-    after_r2 = mongo_state()
-    print(f"  lri_count     after R2 = {after_r2['lri_count']}")
-    print(f"  admin_balance after R2 = ₹{after_r2['admin_balance']}")
-    _p("D.1 still exactly ONE legacy_reconcile_inflow txn after R2",
-       after_r2["lri_count"] == 1, f"count={after_r2['lri_count']}")
-    _p("D.2 admin wallet_balance still unchanged after R2",
-       round(after_r2["admin_balance"], 2) == round(snapshot_admin_before_r2, 2),
-       f"R1=₹{snapshot_admin_before_r2} R2=₹{after_r2['admin_balance']}")
-
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
-    r = get("/admin/ledger-alerts", admin_tok)
-    if r.status_code == 200:
-        d2 = float(r.json().get("current", {}).get("drift") or 0)
-        print(f"  drift after R2 = ₹{d2}")
-        _p("D.3 live drift still ≤ ₹1 after R2", abs(d2) <= 1.0, f"drift={d2}")
-
-    # ── Phase E: Regression ─────────────────────────────────
-    section("Phase E — Regression sweep")
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
-    user_tok = login(USER_EMAIL, USER_PASS)
-    _p("E.1 POST /auth/login admin 200", admin_tok is not None)
-    _p("E.2 POST /auth/login user  200", user_tok is not None)
-
-    r = get("/admin/system-wallet", admin_tok)
-    _p("E.3 GET /admin/system-wallet 200", r.status_code == 200, f"status={r.status_code}")
-
-    r = get("/admin/ledger-alerts", admin_tok)
-    _p("E.4 GET /admin/ledger-alerts 200", r.status_code == 200, f"status={r.status_code}")
-
-    r = get("/admin/users?limit=5", admin_tok)
-    _p("E.5 GET /admin/users 200", r.status_code == 200, f"status={r.status_code}")
-
-    # MLM network endpoint (correct path)
-    r = get("/users/me/network", user_tok)
-    _p("E.6 GET /users/me/network 200", r.status_code == 200, f"status={r.status_code}")
-
-    r = get("/products")
-    _p("E.7 GET /products (public) 200", r.status_code == 200, f"status={r.status_code}")
-
-    r = get("/services")
-    _p("E.8 GET /services 200/404 (env-dependent)",
-       r.status_code in (200, 404), f"status={r.status_code}")
-
-    r = get("/admin/distributors", admin_tok)
-    _p("E.8b GET /admin/distributors 200", r.status_code == 200, f"status={r.status_code}")
-
-    # Offline-create regression — use admin's real referral code 'EARN'
-    import random
-    sfx = random.randint(100000, 999999)
-    test_email = f"ledger_drift_qa_{sfx}@app.com"
-    body = {
-        "name": "Ledger Drift QA",
-        "email": test_email,
-        "password": "Test@1234",
-        "phone": f"9{sfx}",
-        "referral_code": "EARN",
-        "mark_paid_offline": True,
-        "registration_source": "offline_cash",
-    }
-    r = post("/admin/users/create", body, admin_tok)
-    print(f"  /admin/users/create → {r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        _p("E.9 POST /admin/users/create (offline) 200", True)
-        u_doc = asyncio.run(_find_user(test_email))
-        marker = (u_doc or {}).get("offline_pre_credit_amount")
-        _p("E.10 offline_pre_credit_amount stamped on new user",
-           marker is not None and float(marker) > 0,
-           f"offline_pre_credit_amount={marker}")
-        # Cleanup created user
-        if u_doc:
-            d = requests.delete(
-                BASE + f"/admin/users/{u_doc['id']}",
-                headers={"Authorization": f"Bearer {admin_tok}"},
-                timeout=30,
-            )
-            print(f"  cleanup user delete → {d.status_code}")
-            # If delete endpoint missing, drop directly from Mongo to avoid lingering test users
-            if d.status_code not in (200, 204):
-                async def _drop():
-                    c = AsyncIOMotorClient(MONGO_URL); db = c[DB_NAME]
-                    await db.users.delete_one({"email": test_email})
-                    await db.transactions.delete_many({"user_id": u_doc["id"]})
-                    await db.system_wallet_deposits.delete_many({"linked_user_id": u_doc["id"]})
-                    c.close()
-                asyncio.run(_drop())
-                print(f"  fallback Mongo cleanup performed")
-    else:
-        _p("E.9 POST /admin/users/create (offline) 200",
-           False, f"status={r.status_code} body={r.text[:200]}")
-        _p("E.10 offline_pre_credit_amount stamped on new user", False, "skipped — create failed")
-
-    # ── Phase F: Cleanup ────────────────────────────────────
-    section("Phase F — Cleanup (restore env to pre-test state)")
-    asyncio.run(_cleanup(seed_amount, pre["admin_balance"]))
-    final = mongo_state()
-    print(f"  user_balance final  = ₹{final['user_balance']}")
-    print(f"  admin_balance final = ₹{final['admin_balance']}")
-    print(f"  lri_count    final  = {final['lri_count']}")
-
-    section("RESULTS")
-    print(f"PASS: {PASS}  FAIL: {FAIL}")
-    if FAILS:
-        print("\nFAILURES:")
-        for f in FAILS:
-            print(f"  • {f}")
-    return FAIL == 0
+    print()
+    print("=" * 70)
+    print(f"PASS: {len(PASSED)}    FAIL: {len(FAILED)}")
+    print("=" * 70)
+    if FAILED:
+        print("FAILURES:")
+        for f in FAILED:
+            print(f"  ❌ {f}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    ok = main()
-    raise SystemExit(0 if ok else 1)
+    sys.exit(asyncio.run(main()))

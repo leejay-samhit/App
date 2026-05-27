@@ -12,6 +12,7 @@ type Ticket = {
   user_email?: string; user_name?: string; assigned_to_email?: string | null;
   message_count: number; last_message_at: string; last_message_preview: string;
   has_unread_admin: boolean; created_at: string; updated_at: string;
+  is_guest?: boolean; guest_email?: string; guest_custom_category?: string | null;
 };
 
 const STATUSES = ["all", "open", "in_progress", "resolved", "closed"] as const;
@@ -78,9 +79,19 @@ export default function AdminTickets() {
         <View style={{ flex: 1 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             <Text style={styles.subject} numberOfLines={1}>{item.subject}</Text>
+            {item.is_guest ? (
+              <View style={styles.guestBadge}>
+                <Feather name="user" size={9} color="#7A4A0E" />
+                <Text style={styles.guestBadgeText}>{"  "}GUEST</Text>
+              </View>
+            ) : null}
             {item.has_unread_admin ? <View style={styles.dot} /> : null}
           </View>
-          <Text style={styles.userRow} numberOfLines={1}>{item.user_name || item.user_email}  ·  {item.category}</Text>
+          <Text style={styles.userRow} numberOfLines={1}>
+            {item.is_guest
+              ? `${item.guest_email || item.user_email}  ·  ${item.guest_custom_category || item.category}`
+              : `${item.user_name || item.user_email}  ·  ${item.category}`}
+          </Text>
           <Text style={styles.preview} numberOfLines={1}>{item.last_message_preview}</Text>
           <View style={styles.metaRow}>
             <View style={[styles.badge, { backgroundColor: st.bg }]}><Text style={[styles.badgeText, { color: st.fg }]}>{st.label}</Text></View>
@@ -161,6 +172,8 @@ const styles = StyleSheet.create({
   iconWrap: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#F1F6F2" },
   subject: { fontSize: 13, fontWeight: "800", color: colors.textMain, flex: 1 },
   dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.primary },
+  guestBadge: { flexDirection: "row", alignItems: "center", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: "#FFF4E5", borderWidth: 1, borderColor: "#F5BB6A" },
+  guestBadgeText: { fontSize: 9, fontWeight: "800", color: "#7A4A0E", letterSpacing: 0.5 },
   userRow: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   preview: { fontSize: 12, color: colors.textMain, marginTop: 4 },
   metaRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" },

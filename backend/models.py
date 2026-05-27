@@ -346,6 +346,16 @@ class TicketCreateRequest(BaseModel):
     attachment_b64: Optional[str] = None  # optional image screenshot
 
 
+class PublicTicketCreateRequest(BaseModel):
+    """Guest (unauthenticated) ticket submission from the pre-login Contact page."""
+    email: str                                 # mandatory — used to email back
+    name: Optional[str] = None
+    subject: str = "ISSUE"
+    category: str = "other"                    # one of the standard slugs OR "other"
+    custom_category: Optional[str] = None      # free-text label when category=="other"
+    message: str
+
+
 class TicketReplyRequest(BaseModel):
     message: str
     attachment_b64: Optional[str] = None

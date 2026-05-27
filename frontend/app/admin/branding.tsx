@@ -77,7 +77,7 @@ export default function AdminBranding() {
         colors: draft.colors,
         font: draft.font,
         tabs: draft.tabs,
-        splash_image: draft.splash_image,
+        splash_image: draft.splash_image ?? "",
         splash_duration_ms: draft.splash_duration_ms,
         splash_bg: draft.splash_bg,
         // ⬇️ THIS WAS MISSING — the whole reason payee_upi_id wasn't

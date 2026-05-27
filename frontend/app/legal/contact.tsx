@@ -29,24 +29,15 @@ export default function Contact() {
           <TouchableOpacity style={styles.cardBtn} onPress={() => open(`mailto:${b.support_email || "support@example.com"}`)}><Text style={styles.cardBtnText}>Email</Text></TouchableOpacity>
         </View>
 
-        {b.support_phone ? (
-          <View style={styles.card}>
-            <View style={styles.iconBox}><Feather name="phone" size={18} color={colors.primary} /></View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardLabel}>Phone</Text>
-              <Text style={styles.cardValue}>{b.support_phone}</Text>
-            </View>
-            <TouchableOpacity style={styles.cardBtn} onPress={() => open(`tel:${b.support_phone}`)}><Text style={styles.cardBtnText}>Call</Text></TouchableOpacity>
-          </View>
-        ) : null}
+        {b.support_phone ? null : null}
 
         <View style={styles.card}>
           <View style={styles.iconBox}><Feather name="message-circle" size={18} color={colors.primary} /></View>
           <View style={{ flex: 1 }}>
             <Text style={styles.cardLabel}>Raise a support ticket</Text>
-            <Text style={styles.cardValue}>Fastest turnaround — we respond within 24 hours</Text>
+            <Text style={styles.cardValue}>Fastest turnaround — we respond within 48 hours</Text>
           </View>
-          <TouchableOpacity style={styles.cardBtn} onPress={() => router.push("/tickets" as any)}><Text style={styles.cardBtnText}>Open</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.cardBtn} onPress={() => router.push("/legal/support-ticket" as any)}><Text style={styles.cardBtnText}>Open</Text></TouchableOpacity>
         </View>
 
         {address ? (

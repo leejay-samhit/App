@@ -28,7 +28,7 @@ from core.db import db
 from core.notifications import create_notification
 from core.security import get_current_user, require_admin_role
 from core.utils import now_utc
-from models import TicketCreateRequest, TicketReplyRequest, TicketUpdateRequest
+from models import TicketCreateRequest, TicketReplyRequest, TicketUpdateRequest, PublicTicketCreateRequest
 
 
 router = APIRouter(tags=["tickets"])
@@ -122,6 +122,114 @@ async def create_ticket(
     )
 
     return {"ok": True, "ticket": _sanitize_ticket(doc)}
+
+
+# ──────────────────────────── PUBLIC (guest) endpoint ──────────────────────── #
+
+import re as _re_email
+import time as _time_throttle
+
+# Simple in-memory rate limit: max 5 guest tickets / 10 min / email (best-effort).
+_GUEST_TKT_RATE: Dict[str, List[float]] = {}
+_GUEST_TKT_WINDOW_S = 600
+_GUEST_TKT_MAX = 5
+
+
+def _is_email(s: str) -> bool:
+    return bool(_re_email.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", (s or "").strip()))
+
+
+@router.post("/tickets/public")
+async def create_public_ticket(payload: PublicTicketCreateRequest):
+    """Unauthenticated ticket submission — used from the pre-login Contact page.
+
+    Anyone with a valid email can raise an issue without signing up. Tickets
+    land in the same `tickets` collection (flagged `is_guest=True`) so the
+    admin Tickets screen surfaces them alongside authenticated users' tickets.
+    """
+    email = (payload.email or "").strip().lower()
+    name = (payload.name or "").strip()[:80] or None
+    subject = (payload.subject or "ISSUE").strip()[:120] or "ISSUE"
+    message = (payload.message or "").strip()
+    category_in = (payload.category or "other").strip().lower()
+    custom_label = (payload.custom_category or "").strip()[:60]
+
+    if not _is_email(email):
+        raise HTTPException(status_code=400, detail="A valid email is required")
+    if len(message) < 10:
+        raise HTTPException(status_code=400, detail="Please describe the issue in at least 10 characters")
+    if len(message) > 5000:
+        raise HTTPException(status_code=400, detail="Message is too long (max 5000 chars)")
+
+    # Rate-limit by email (best-effort, in-memory; resets on restart).
+    now_t = _time_throttle.time()
+    bucket = [t for t in _GUEST_TKT_RATE.get(email, []) if (now_t - t) < _GUEST_TKT_WINDOW_S]
+    if len(bucket) >= _GUEST_TKT_MAX:
+        raise HTTPException(status_code=429, detail="Too many tickets from this email. Please wait a few minutes.")
+    bucket.append(now_t)
+    _GUEST_TKT_RATE[email] = bucket
+
+    # Map category: standard slug OR "other" with optional free-text label.
+    if category_in not in TICKET_CATEGORIES:
+        custom_label = (custom_label or category_in)[:60]
+        category_in = "other"
+
+    tid = str(uuid.uuid4())
+    ts = now_utc().isoformat()
+    preview = _short_preview(message)
+    display_name = name or email.split("@")[0]
+    doc = {
+        "id": tid,
+        # Guest tickets are NOT tied to a real user — use a stable sentinel
+        # user_id so existing admin queries (which filter by user_id) still
+        # work without special-casing.
+        "user_id": f"guest:{email}",
+        "user_email": email,
+        "user_name": display_name,
+        "is_guest": True,
+        "guest_email": email,
+        "guest_name": name,
+        "guest_custom_category": custom_label or None,
+        "subject": subject,
+        "category": category_in,
+        "priority": "normal",
+        "status": "open",
+        "assigned_to": None,
+        "assigned_to_email": None,
+        "message_count": 1,
+        "last_message_at": ts,
+        "last_message_by": "user",
+        "last_message_preview": preview,
+        "has_unread_admin": True,
+        "has_unread_user": False,
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    await db.tickets.insert_one(doc)
+
+    await db.ticket_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "ticket_id": tid,
+        "sender_id": f"guest:{email}",
+        "sender_type": "user",
+        "sender_name": display_name,
+        "sender_email": email,
+        "is_guest": True,
+        "message": message,
+        "attachment_b64": None,
+        "created_at": ts,
+    })
+
+    try:
+        await _notify_support_admins(
+            "New guest support ticket",
+            f"{display_name} ({email}): {subject}",
+            tid,
+        )
+    except Exception:
+        pass
+
+    return {"ok": True, "ticket_id": tid}
 
 
 @router.get("/tickets/me")
