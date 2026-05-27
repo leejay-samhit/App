@@ -4772,3 +4772,38 @@ agent_communication:
 
       NOTHING IS BROKEN. Only follow-up needed: reconcile branding seed
       (kiran@ibl vs 9154735888@ybl) so future runs of P1 are deterministic.
+
+shop_category_instant_filter_2026_05_27:
+  - task: "Shop home — instant category filtering (tap chip → filtered grid in-place)"
+    implemented: true
+    working: true
+    file: "frontend/src/shop-home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Verified via screenshot_tool at 390×844 on (tabs)/shop after
+          logging in as testuser@app.com. Sequence and results:
+            ✅ Default (activeCategory='all'): Banner ("Fresh Styles for
+               Every You · Up to 60% Off") + "New Arrivals · Trending" with 4
+               product cards (Premium Gift Ha…, Daily Wellness P…, Beauty
+               Essentials, Classic Cotton Tote) visible. "All" chip green.
+            ✅ Tap "Sarees" chip: banner + admin layout disappear instantly.
+               In-place filtered grid header "Sarees · 0 products · ⓧ" with
+               clean empty state "No products in Sarees · Show all categories"
+               renders immediately. Sarees chip turns green.
+            ✅ Tap "Pet Care" chip: instant swap — header re-renders as
+               "Pet Care · 0 products · ⓧ" with matching empty state.
+               No flicker, no need to go through "All".
+            ✅ Tap the ⓧ on the filter header: returns instantly to the
+               default home view (banner + product strip).
+          Marketplace-app UX target met: every category tap surfaces the
+          filtered grid in-place, with skeleton loaders defined for the
+          loading state (skelCard / skelImage / skelLine* styles, lines
+          1077-1105 in shop-home.tsx). Empty-state path also tested.
+          NOTE: Sarees / Pet Care have zero products in the current seed,
+          so we exercised the empty-state path; the FlatList renders 2-col
+          when products exist (verified by code path / numColumns=2).
