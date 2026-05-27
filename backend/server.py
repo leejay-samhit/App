@@ -5395,18 +5395,29 @@ async def integrity_report(
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     verdict = _evaluate_integrity(payload.checks)
-    # Server-side Play Integrity verification is feature-flagged off by
-    # default — flip PLAY_INTEGRITY_ENABLED=1 in backend/.env once the GCP
-    # project + service-account JSON is in place. Until then we accept the
-    # FE's verdict at face value (still useful: root/emulator detection
-    # works without server attestation).
-    if os.environ.get("PLAY_INTEGRITY_ENABLED") == "1" and payload.play_integrity_token:
-        # TODO Session B: call Google Play Integrity API to verify the token
-        # server-side, extract verdicts, override the FE's claim if needed.
-        # Skeleton intentionally left as a no-op so the route shape stays
-        # stable — flipping the env var + adding the verifier code is a
-        # one-file change in core/play_integrity.py.
-        pass
+    # Server-side Play Integrity verification. Enabled when:
+    #   1. PLAY_INTEGRITY_ENABLED=1 in backend/.env
+    #   2. google-auth + httpx are installed
+    #   3. GOOGLE_APPLICATION_CREDENTIALS points to a valid service-account JSON
+    # See backend/core/play_integrity.py for activation steps. Until enabled
+    # this is a no-op — we still accept the FE's verdict (jail-monkey already
+    # catches most tampering).
+    if payload.play_integrity_token:
+        try:
+            from core.play_integrity import is_enabled as _pi_enabled, verify_integrity_token, evaluate_verdicts
+            if _pi_enabled():
+                decoded = await verify_integrity_token(payload.play_integrity_token)
+                if decoded is not None:
+                    pi_result = evaluate_verdicts(decoded)
+                    if not pi_result["passed"]:
+                        # Server overrides client claim — Play Integrity is the
+                        # strongest signal we have. Promote to hard_block.
+                        if "play_integrity:hard_block" not in verdict["reasons"]:
+                            verdict["reasons"].append("play_integrity:hard_block")
+                        verdict["reasons"].extend([f"play_integrity:{r}" for r in pi_result["reasons"]])
+                        verdict["block_level"] = "hard_block"
+        except Exception as _pi_err:
+            logger.warning(f"play integrity verification failed: {_pi_err}")
 
     now_iso = now_utc().isoformat()
     # Stamp the user doc — financial endpoints will read this.

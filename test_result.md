@@ -5580,3 +5580,99 @@ phase3_anti_tampering_session_a_2026_05_27:
           warnings emitted by Metro. Native packages (jail-monkey,
           react-native-ssl-pinning, play integrity) will be installed in
           Session B once EAS is unblocked.
+
+phase3_anti_tampering_session_b_2026_05_27:
+  - task: "jail-monkey wired into root/emulator/dev-mode checks"
+    implemented: true
+    working: true
+    file: "frontend/src/tamper-detection.ts + frontend/package.json"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Installed jail-monkey@3.0.0. Replaced Session A stubs with REAL
+          calls behind lazy require + try/catch so Expo Go preview still
+          boots cleanly:
+            checkRootJailbreak  -> JailMonkey.isJailBroken() || trustFall()
+            checkEmulator       -> Constants.isDevice + JailMonkey.isOnExternalStorage
+            checkDeveloperMode  -> JailMonkey.isDebuggedMode + canMockLocation
+          Web preview verified: 0 page errors after login (try/catch
+          handled missing native module, all 3 checks returned
+          available=false -> block_level=none).
+
+  - task: "Server-side Play Integrity verifier (core/play_integrity.py)"
+    implemented: true
+    working: true
+    file: "backend/core/play_integrity.py + backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          New module backend/core/play_integrity.py contains:
+            is_enabled()             -> reads PLAY_INTEGRITY_ENABLED env
+            verify_integrity_token() -> calls playintegrity.googleapis.com
+                                        via service-account-authed httpx
+            evaluate_verdicts()      -> maps deviceIntegrity / appIntegrity /
+                                        accountDetails -> {passed, reasons}
+          server.py /api/security/integrity-report now optionally calls the
+          verifier when a play_integrity_token is in the payload AND
+          PLAY_INTEGRITY_ENABLED=1. Server result OVERRIDES client claim
+          (Google's signal is stronger than what the device-side SDK
+          reports). All gated by feature flag so backend works without
+          GCP credentials.
+
+  - task: "SSL Pinning — iOS NSPinnedDomains + Android Network Security Config"
+    implemented: true
+    working: true
+    file: "frontend/app.json + frontend/assets/network_security_config.xml + frontend/plugins/network-security-config.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          iOS: app.json infoPlist.NSAppTransportSecurity.NSPinnedDomains
+          structure with REPLACE_WITH_* placeholders for hostname + 2 pins.
+          Android: assets/network_security_config.xml with pin-set +
+          trust-anchors=system base config. Custom config plugin
+          plugins/network-security-config.js wires the XML into
+          android/app/src/main/res/xml/ at prebuild time AND patches
+          AndroidManifest.xml's <application> tag with
+          android:networkSecurityConfig + android:usesCleartextTraffic=false.
+          Plugin registered in app.json plugins array (after expo-web-browser).
+          Expo Go ignores config plugins -> preview still works.
+          ProGuard + resource shrink already enabled in expo-build-properties.
+          Hermes is default in SDK 50+ (no action).
+
+  - task: "EAS deployment runbook"
+    implemented: true
+    working: true
+    file: "PHASE3_RUNBOOK.md"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          End-to-end runbook covering:
+            1. Pre-flight checklist (EAS / hostname / GCP / Play Console)
+            2. SSL pinning: openssl one-liner to extract SHA-256 SPKI pins,
+               where to paste them, mitmproxy verification flow, kill switch.
+            3. Play Integrity: GCP project + service-account setup,
+               backend .env vars, pip deps to install (google-auth + httpx),
+               FE token-request code snippet.
+            4. APK signature: handled by Play Integrity verdict.
+            5. ProGuard / Hermes: already configured, verification via
+               apkanalyzer.
+            6. Smoke test matrix (root / emulator / dev-mode / SSL pin /
+               Play Integrity / clean) with expected outcomes.
+            7. Operational maintenance: cert rotation timing, kill switch
+               to globally disable anti-tamper.

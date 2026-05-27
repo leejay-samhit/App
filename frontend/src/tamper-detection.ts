@@ -48,31 +48,47 @@ export type IntegrityVerdict = {
 
 /**
  * Detect rooted (Android) / jailbroken (iOS) device using jail-monkey.
- * Stub for now — Session B will replace with real native call:
- *   const JailMonkey = require("jail-monkey").default;
- *   const passed = !JailMonkey.isJailBroken();
+ *
+ * jail-monkey is a pure-native module — it works in EAS Dev Client + EAS
+ * production builds, but throws "Native module cannot be null" in Expo Go.
+ * The whole call is wrapped in try/catch so an Expo-Go preview reports
+ * `available: false` and the backend correctly treats it as "unknown".
+ *
+ * Signals OR-ed together (any positive = device flagged):
+ *   • isJailBroken()           — su binary / Cydia / Magisk Manager / etc.
+ *   • canMockLocation()        — strong indicator of a developer-tooled phone
+ *   • trustFall()              — bundles the above two with a few more heuristics
  */
 async function checkRootJailbreak(): Promise<IntegrityCheck> {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   try {
-    // Defer native require so Expo Go bundling doesn't choke.
-    // const JailMonkey = require("jail-monkey").default; // <-- enable in Session B
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const JailMonkey = require("jail-monkey").default || require("jail-monkey");
+    if (!JailMonkey || typeof JailMonkey.isJailBroken !== "function") {
+      return { name: "root_jailbreak", passed: true, available: false, detail: "jail-monkey not linked (Expo Go?)" };
+    }
+    const broken = !!JailMonkey.isJailBroken();
+    // trustFall() is the all-in-one verdict — uses a wider net than isJailBroken
+    // alone. Available on jail-monkey 2.7+. Falls back gracefully if absent.
+    const trust = typeof JailMonkey.trustFall === "function" ? !!JailMonkey.trustFall() : false;
+    const failed = broken || trust;
     return {
       name: "root_jailbreak",
-      passed: true,
-      available: false,
-      detail: "jail-monkey not installed (Expo Go / pre-EAS build)",
+      passed: !failed,
+      available: true,
+      detail: failed ? `jail-monkey isJailBroken=${broken} trustFall=${trust}` : undefined,
     };
   } catch (e: any) {
-    return { name: "root_jailbreak", passed: true, available: false, detail: e?.message };
+    return { name: "root_jailbreak", passed: true, available: false, detail: e?.message || "jail-monkey missing" };
   }
 }
 
 /**
- * Detect emulator / simulator. We use Constants.isDevice which works in
- * Expo Go and is augmented by jail-monkey in production builds (Session B).
- * Note: For now, web previews always have isDevice=false → would always
- * fail the emulator check. We special-case Platform.OS === "web" → skip.
+ * Detect emulator / simulator. Combines:
+ *   • Constants.isDevice (Expo + EAS — works in all build types)
+ *   • JailMonkey.isOnExternalStorage() — leaks that APK was installed via
+ *     adb push to /sdcard, a strong tampering signal on Android.
+ * In Expo Go we only get Constants.isDevice (the JM call falls back).
+ * Web preview is special-cased to skip the check entirely.
  */
 async function checkEmulator(): Promise<IntegrityCheck> {
   if (Platform.OS === "web") {
@@ -80,27 +96,66 @@ async function checkEmulator(): Promise<IntegrityCheck> {
   }
   try {
     const isDevice = (Constants as any).isDevice ?? true;
+    let onExternal = false;
+    let jmAvailable = false;
+    try {
+      const JailMonkey = require("jail-monkey").default || require("jail-monkey");
+      if (JailMonkey && typeof JailMonkey.isOnExternalStorage === "function") {
+        onExternal = !!JailMonkey.isOnExternalStorage();
+        jmAvailable = true;
+      }
+    } catch { /* not linked — fine */ }
+
     if (isDevice === false) {
       return { name: "emulator", passed: false, available: true, detail: "Constants.isDevice=false" };
     }
-    // Real device. In Session B we'll AND this with JailMonkey.isOnExternalStorage()
-    // and JailMonkey.isDebuggedMode() for stronger signals.
-    return { name: "emulator", passed: true, available: true };
+    if (onExternal) {
+      return { name: "emulator", passed: false, available: true, detail: "jail-monkey isOnExternalStorage=true" };
+    }
+    return {
+      name: "emulator",
+      passed: true,
+      available: true,
+      detail: jmAvailable ? "Constants.isDevice + JailMonkey clean" : "Constants.isDevice only (no JailMonkey)",
+    };
   } catch (e: any) {
     return { name: "emulator", passed: true, available: false, detail: e?.message };
   }
 }
 
 /**
- * Detect Android developer mode (USB debugging, mock locations).
- * Stub — Session B uses jail-monkey's isDebuggedMode() + isOnExternalStorage().
+ * Detect Android developer mode (USB debugging, mock locations enabled,
+ * adb daemon running, etc). jail-monkey rolls all of these into
+ * isDebuggedMode() + canMockLocation().
+ *
+ * __DEV__ is special-cased — we never flag the developer's own machine.
+ * On a release build __DEV__ is false but jail-monkey still reports the
+ * real device flags, which is exactly what we want.
  */
 async function checkDeveloperMode(): Promise<IntegrityCheck> {
   if (__DEV__) {
-    // Expo dev mode is the developer's own machine — never flag.
-    return { name: "developer_mode", passed: true, available: false, detail: "__DEV__ build" };
+    return { name: "developer_mode", passed: true, available: false, detail: "__DEV__ build — skipped" };
   }
-  return { name: "developer_mode", passed: true, available: false, detail: "stub — Session B" };
+  if (Platform.OS === "web") {
+    return { name: "developer_mode", passed: true, available: false, detail: "web" };
+  }
+  try {
+    const JailMonkey = require("jail-monkey").default || require("jail-monkey");
+    if (!JailMonkey) {
+      return { name: "developer_mode", passed: true, available: false, detail: "jail-monkey not linked" };
+    }
+    const debugged = typeof JailMonkey.isDebuggedMode === "function" ? !!JailMonkey.isDebuggedMode() : false;
+    const mockLoc  = typeof JailMonkey.canMockLocation === "function" ? !!JailMonkey.canMockLocation() : false;
+    const failed = debugged || mockLoc;
+    return {
+      name: "developer_mode",
+      passed: !failed,
+      available: true,
+      detail: failed ? `isDebuggedMode=${debugged} canMockLocation=${mockLoc}` : undefined,
+    };
+  } catch (e: any) {
+    return { name: "developer_mode", passed: true, available: false, detail: e?.message };
+  }
 }
 
 /**
