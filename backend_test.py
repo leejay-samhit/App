@@ -1,335 +1,341 @@
-"""Phase 2B Iter 4 refactor regression test.
-
-Validates 5 read endpoints moved from server.py into:
-  • routes/wallet.py        — /transactions/me, /transactions/{id},
-                              /transactions/{id}/invoice, /transactions/{id}/invoice.pdf
-  • routes/withdrawals.py   — /withdrawals/me
-  • routes/cart.py          — /cart, /cart/add, /cart/remove, /cart/clear, /orders/me
-
-Plus regression checks on endpoints that STAYED in server.py.
-
-Single login per role to respect 10/min/IP rate limit.
 """
-from __future__ import annotations
+Phase 2B Modular Refactor — wallet/withdrawals/cart routes regression test.
+
+Goal: confirm endpoints extracted into routes/wallet.py, routes/withdrawals.py
+and routes/cart.py behave identically to their pre-refactor counterparts, and
+that previously-working sibling endpoints (POST /withdrawals, POST
+/wallet/transfer, GET /admin/system-wallet/breakdown) did not regress.
+
+Run:  python /app/backend_test.py
+Backend URL is read from /app/frontend/.env (EXPO_PUBLIC_BACKEND_URL).
+"""
 
 import os
+import re
 import sys
-from typing import Dict, Optional
+import json
+import time
+import traceback
+from typing import Any, Dict, Optional
 
 import requests
 
 
-BASE = os.environ.get("BACKEND_URL", "https://vendor-network-app-1.preview.emergentagent.com").rstrip("/") + "/api"
+# ───────── config ─────────
+def _load_backend_url() -> str:
+    path = "/app/frontend/.env"
+    base = None
+    with open(path, "r") as fh:
+        for line in fh:
+            line = line.strip()
+            for key in ("EXPO_PUBLIC_BACKEND_URL", "REACT_APP_BACKEND_URL", "EXPO_BACKEND_URL"):
+                if line.startswith(key + "="):
+                    base = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+            if base:
+                break
+    if not base:
+        raise RuntimeError("No backend URL found in /app/frontend/.env")
+    return base.rstrip("/") + "/api"
+
+
+BASE = _load_backend_url()
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASSWORD = "Admin@123"
+ADMIN_PASS = "Admin@123"
 USER_EMAIL = "testuser@app.com"
-USER_PASSWORD = "Test@123"
-QR_EMAIL = "qrtest@app.com"
-QR_PASSWORD = "Qr@1234"
+USER_PASS = "Test@123"
+
+results = []  # (name, passed, detail)
 
 
-_results: list[tuple[str, bool, str]] = []
+def record(name: str, passed: bool, detail: str = "") -> None:
+    results.append((name, passed, detail))
+    icon = "PASS" if passed else "FAIL"
+    print(f"[{icon}] {name}  {('— ' + detail) if detail else ''}")
 
 
-def record(name: str, ok: bool, detail: str = "") -> None:
-    icon = "PASS" if ok else "FAIL"
-    print(f"  [{icon}] {name}  {detail}")
-    _results.append((name, ok, detail))
-
-
-def login(email: str, password: str) -> Optional[dict]:
-    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": password}, timeout=30)
-    if r.status_code != 200:
-        print(f"  login {email} HTTP {r.status_code}: {r.text[:200]}")
+def login(email: str, password: str) -> Optional[str]:
+    try:
+        r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": password}, timeout=20)
+        if r.status_code != 200:
+            return None
+        body = r.json()
+        return body.get("access_token") or body.get("token")
+    except Exception:
         return None
-    return r.json()
 
 
 def auth(token: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-print(f"\nBASE = {BASE}\n")
+# ───────── 1. AUTH ─────────
+print(f"\n=== BASE: {BASE} ===\n")
+admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
+record("1.admin_login", bool(admin_tok), f"token_len={len(admin_tok or '')}")
+user_tok = login(USER_EMAIL, USER_PASS)
+record("1.user_login", bool(user_tok), f"token_len={len(user_tok or '')}")
 
-print("=== LOGIN (single login per role) ===")
-admin_body = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-record("Login admin", admin_body is not None)
-testuser_body = login(USER_EMAIL, USER_PASSWORD)
-record("Login testuser", testuser_body is not None)
-qruser_body = login(QR_EMAIL, QR_PASSWORD)
-record("Login qrtest", qruser_body is not None)
-
-if not (admin_body and testuser_body and qruser_body):
-    print("\nCannot continue without all three logins — aborting.")
+if not admin_tok or not user_tok:
+    print("\nAUTH FAILED — aborting remaining tests.")
     sys.exit(1)
 
-admin_token = admin_body.get("token") or admin_body.get("access_token")
-testuser_token = testuser_body.get("token") or testuser_body.get("access_token")
-qruser_token = qruser_body.get("token") or qruser_body.get("access_token")
-admin_refresh = admin_body.get("refresh_token")
 
-# ────────── 1) GET /transactions/me ──────────
-print("\n=== 1) GET /transactions/me  (routes/wallet.py) ===")
-r = requests.get(f"{BASE}/transactions/me", headers=auth(testuser_token), timeout=30)
-default_list = r.json() if r.status_code == 200 else []
-record("transactions/me default → 200 array", r.status_code == 200 and isinstance(default_list, list), f"HTTP {r.status_code} len={len(default_list)}")
+# ───────── 2. /transactions/me ─────────
+try:
+    r = requests.get(f"{BASE}/transactions/me", headers=auth(user_tok), timeout=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    txs_default = r.json() if ok else []
+    record("2a.transactions/me default", ok, f"status={r.status_code} count={len(txs_default) if ok else 0}")
+except Exception as e:
+    record("2a.transactions/me default", False, f"exc={e}")
+    txs_default = []
 
-if len(default_list) >= 2:
-    dates = [t.get("created_at") or "" for t in default_list]
-    sorted_ok = all(dates[i] >= dates[i + 1] for i in range(len(dates) - 1))
-    record("transactions/me newest-first", sorted_ok, f"first={dates[0]} last={dates[-1]}")
+try:
+    r = requests.get(f"{BASE}/transactions/me?include_pending=true", headers=auth(user_tok), timeout=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    txs_pending = r.json() if ok else []
+    # include_pending should be >= default count
+    cmp_ok = ok and len(txs_pending) >= len(txs_default)
+    record("2b.transactions/me include_pending=true", cmp_ok, f"status={r.status_code} count={len(txs_pending) if ok else 0} vs default={len(txs_default)}")
+except Exception as e:
+    record("2b.transactions/me include_pending=true", False, f"exc={e}")
+
+try:
+    r = requests.get(f"{BASE}/transactions/me?limit=10&offset=0", headers=auth(user_tok), timeout=20)
+    body = r.json() if r.status_code == 200 else None
+    ok = r.status_code == 200 and isinstance(body, list) and len(body) <= 10
+    record("2c.transactions/me limit=10&offset=0", ok, f"status={r.status_code} count={len(body) if isinstance(body, list) else 'n/a'}")
+except Exception as e:
+    record("2c.transactions/me limit=10&offset=0", False, f"exc={e}")
+
+
+# Pick a txn id we can use for detail/invoice tests. Prefer an invoiceable one.
+sample_txn = None
+invoiceable_txn = None
+non_invoiceable_txn = None  # status in {created, failed} -> not invoiceable
+
+# Fetch all txns (admin scope, include_pending so we see created/failed rows too)
+try:
+    r = requests.get(f"{BASE}/admin/transactions?include_pending=true&limit=200", headers=auth(admin_tok), timeout=20)
+    admin_txs = r.json() if r.status_code == 200 else []
+    if isinstance(admin_txs, dict):
+        admin_txs = admin_txs.get("items", [])
+except Exception:
+    admin_txs = []
+
+# Search for invoiceable txn (registration_fee or service_booking with status not in created/failed)
+for t in admin_txs:
+    if not sample_txn:
+        sample_txn = t
+    ttype = (t.get("type") or "").lower()
+    status = (t.get("status") or "").lower()
+    if not invoiceable_txn and ttype in ("registration_fee", "service_booking") and status not in ("created", "failed"):
+        invoiceable_txn = t
+    # Non-invoiceable per is_invoiceable() = type not in INVOICEABLE list.
+    # Easiest reliable non-invoiceable: status=created/failed registration_fee → won't render invoice
+    # But really the check is on TYPE — look for an unknown / non-listed type. Use 'order' if present (NOT in invoiceable list).
+    if not non_invoiceable_txn and ttype == "order":
+        non_invoiceable_txn = t
+
+
+# ───────── 3. /transactions/{id} enriched detail ─────────
+if sample_txn:
+    txn_id = sample_txn["id"]
+    # Use the owner's token to fetch — if owner is admin, use admin_tok, else find via user
+    owner_tok = admin_tok if sample_txn.get("user_id") and admin_txs and any(t["id"] == txn_id for t in admin_txs) else user_tok
+    # Use admin token (super_admin can read any txn per route logic)
+    try:
+        r = requests.get(f"{BASE}/transactions/{txn_id}", headers=auth(admin_tok), timeout=20)
+        body = r.json() if r.status_code == 200 else {}
+        keys_ok = (
+            r.status_code == 200
+            and "transaction" in body
+            and "auto_remarks" in body
+            and "counter_party" in body
+            and "invoiceable" in body
+        )
+        record("3.transactions/{id} enriched detail", keys_ok,
+               f"status={r.status_code} keys={list(body.keys()) if isinstance(body, dict) else 'n/a'}")
+    except Exception as e:
+        record("3.transactions/{id} enriched detail", False, f"exc={e}")
 else:
-    record("transactions/me newest-first", True, f"only {len(default_list)} rows — vacuous")
-
-r = requests.get(f"{BASE}/transactions/me?limit=5&offset=0", headers=auth(testuser_token), timeout=30)
-page1 = r.json() if r.status_code == 200 else []
-record("transactions/me ?limit=5&offset=0 ≤5", r.status_code == 200 and len(page1) <= 5, f"HTTP {r.status_code} len={len(page1)}")
-
-r = requests.get(f"{BASE}/transactions/me?limit=5&offset=5", headers=auth(testuser_token), timeout=30)
-page2 = r.json() if r.status_code == 200 else []
-record("transactions/me ?limit=5&offset=5 ≤5", r.status_code == 200 and len(page2) <= 5, f"HTTP {r.status_code} len={len(page2)}")
-
-r = requests.get(f"{BASE}/transactions/me?limit=0", headers=auth(testuser_token), timeout=30)
-unbounded = r.json() if r.status_code == 200 else []
-record("transactions/me ?limit=0 unbounded", r.status_code == 200 and isinstance(unbounded, list), f"HTTP {r.status_code} len={len(unbounded)}")
-
-r = requests.get(f"{BASE}/transactions/me?include_pending=true", headers=auth(testuser_token), timeout=30)
-with_pending = r.json() if r.status_code == 200 else []
-record("transactions/me ?include_pending=true", r.status_code == 200 and isinstance(with_pending, list), f"HTTP {r.status_code} len={len(with_pending)} (≥ default {len(default_list)})")
-
-r = requests.get(f"{BASE}/transactions/me", timeout=30)
-record("transactions/me no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
+    record("3.transactions/{id} enriched detail", False, "no sample transaction found in admin/user history")
 
 
-# Helper: fetch admin's own transactions and an invoiceable registration_fee txn
-# (from admin/transactions feed) so we can validate the routes even though testuser
-# happens to have 0 txns in this env.
-admin_my_txns_resp = requests.get(f"{BASE}/transactions/me?include_pending=true&limit=20", headers=auth(admin_token), timeout=30)
-admin_my_txns = admin_my_txns_resp.json() if admin_my_txns_resp.status_code == 200 else []
-admin_owned_id = admin_my_txns[0].get("id") if admin_my_txns else None
+# ───────── 4. /transactions/{id}/invoice (HTML) ─────────
+if invoiceable_txn:
+    inv_id = invoiceable_txn["id"]
+    try:
+        r = requests.get(f"{BASE}/transactions/{inv_id}/invoice", headers=auth(admin_tok), timeout=20)
+        ok = r.status_code == 200 and ("text/html" in (r.headers.get("content-type", "")).lower() or "<html" in r.text.lower())
+        record("4a.invoice HTML (invoiceable txn)", ok,
+               f"status={r.status_code} ctype={r.headers.get('content-type','')} body_head={r.text[:60]!r}")
+    except Exception as e:
+        record("4a.invoice HTML (invoiceable txn)", False, f"exc={e}")
+else:
+    record("4a.invoice HTML (invoiceable txn)", False, "no registration_fee or service_booking txn found")
 
-admin_feed_resp = requests.get(f"{BASE}/admin/transactions?limit=50", headers=auth(admin_token), timeout=30)
-admin_feed = admin_feed_resp.json() if admin_feed_resp.status_code == 200 else []
-# pick a registration_fee paid txn (invoiceable) NOT owned by admin / testuser / qruser
-admin_user_id = admin_my_txns[0]["user_id"] if admin_my_txns else None
-foreign_invoiceable = None
-foreign_invoiceable_owner_email = None
-for t in admin_feed:
-    if t.get("type") == "registration_fee" and t.get("status") == "paid":
-        if t.get("user_id") != admin_user_id:
-            foreign_invoiceable = t
-            foreign_invoiceable_owner_email = t.get("user_email")
-            break
+# Negative — non-invoiceable should 400. Use the non_invoiceable_txn found above (e.g. 'order' type)
+non_inv = non_invoiceable_txn
 
-# ────────── 2) GET /transactions/{txn_id} ──────────
-print("\n=== 2) GET /transactions/{txn_id}  (routes/wallet.py) ===")
-sample_id = default_list[0].get("id") if default_list else admin_owned_id
+if non_inv:
+    try:
+        r = requests.get(f"{BASE}/transactions/{non_inv['id']}/invoice", headers=auth(admin_tok), timeout=20)
+        record("4b.invoice non-invoiceable -> 400", r.status_code == 400,
+               f"status={r.status_code} body={r.text[:120]}")
+    except Exception as e:
+        record("4b.invoice non-invoiceable -> 400", False, f"exc={e}")
+else:
+    record("4b.invoice non-invoiceable -> 400", False, "no non-invoiceable txn found to test 400 path")
 
-if sample_id and admin_owned_id:
-    # As owner (admin viewing one of its own txns)
-    r = requests.get(f"{BASE}/transactions/{admin_owned_id}", headers=auth(admin_token), timeout=30)
+
+# ───────── 5. /withdrawals/me ─────────
+try:
+    r = requests.get(f"{BASE}/withdrawals/me", headers=auth(user_tok), timeout=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    base_w = r.json() if ok else []
+    record("5a.withdrawals/me (default)", ok, f"status={r.status_code} count={len(base_w) if ok else 0}")
+except Exception as e:
+    record("5a.withdrawals/me (default)", False, f"exc={e}")
+
+try:
+    r = requests.get(f"{BASE}/withdrawals/me?limit=5&offset=0", headers=auth(user_tok), timeout=20)
+    body = r.json() if r.status_code == 200 else None
+    ok = r.status_code == 200 and isinstance(body, list) and len(body) <= 5
+    record("5b.withdrawals/me limit=5&offset=0", ok, f"status={r.status_code} count={len(body) if isinstance(body, list) else 'n/a'}")
+except Exception as e:
+    record("5b.withdrawals/me limit=5&offset=0", False, f"exc={e}")
+
+
+# ───────── 6. Cart flow ─────────
+# First find any product to add
+try:
+    r = requests.get(f"{BASE}/products", timeout=20)
+    products = r.json() if r.status_code == 200 else []
+    if isinstance(products, dict):
+        products = products.get("items", [])
+    sample_product = next((p for p in products if p.get("stock", 0) > 0), products[0] if products else None)
+except Exception:
+    sample_product = None
+
+if not sample_product:
+    record("6.cart flow setup", False, "no product available")
+else:
+    pid = sample_product["id"]
+    # Start clean
+    requests.post(f"{BASE}/cart/clear", headers=auth(user_tok), timeout=20)
+
+    try:
+        r = requests.post(f"{BASE}/cart/add", headers=auth(user_tok),
+                          json={"product_id": pid, "qty": 1}, timeout=20)
+        record("6a.cart/add", r.status_code == 200 and r.json().get("ok") is True,
+               f"status={r.status_code} body={r.text[:80]}")
+    except Exception as e:
+        record("6a.cart/add", False, f"exc={e}")
+
+    try:
+        r = requests.get(f"{BASE}/cart", headers=auth(user_tok), timeout=20)
+        body = r.json() if r.status_code == 200 else {}
+        ok = (r.status_code == 200 and isinstance(body, dict)
+              and "count" in body and "total" in body and body.get("count", 0) >= 1)
+        record("6b.cart GET (after add)", ok, f"status={r.status_code} count={body.get('count')} total={body.get('total')}")
+    except Exception as e:
+        record("6b.cart GET (after add)", False, f"exc={e}")
+
+    try:
+        r = requests.post(f"{BASE}/cart/remove", headers=auth(user_tok),
+                          json={"product_id": pid}, timeout=20)
+        record("6c.cart/remove", r.status_code == 200 and r.json().get("ok") is True,
+               f"status={r.status_code} body={r.text[:80]}")
+    except Exception as e:
+        record("6c.cart/remove", False, f"exc={e}")
+
+    # Add again to test clear
+    requests.post(f"{BASE}/cart/add", headers=auth(user_tok),
+                  json={"product_id": pid, "qty": 2}, timeout=20)
+    try:
+        r = requests.post(f"{BASE}/cart/clear", headers=auth(user_tok), timeout=20)
+        record("6d.cart/clear", r.status_code == 200 and r.json().get("ok") is True,
+               f"status={r.status_code} body={r.text[:80]}")
+    except Exception as e:
+        record("6d.cart/clear", False, f"exc={e}")
+
+    try:
+        r = requests.get(f"{BASE}/cart", headers=auth(user_tok), timeout=20)
+        body = r.json() if r.status_code == 200 else {}
+        ok = r.status_code == 200 and body.get("count", -1) == 0
+        record("6e.cart GET count==0 after clear", ok,
+               f"status={r.status_code} count={body.get('count')}")
+    except Exception as e:
+        record("6e.cart GET count==0 after clear", False, f"exc={e}")
+
+
+# ───────── 7. /orders/me ─────────
+try:
+    r = requests.get(f"{BASE}/orders/me", headers=auth(user_tok), timeout=20)
+    ok = r.status_code == 200 and isinstance(r.json(), list)
+    record("7.orders/me", ok, f"status={r.status_code} count={len(r.json()) if ok else 'n/a'}")
+except Exception as e:
+    record("7.orders/me", False, f"exc={e}")
+
+
+# ───────── 8. Negative tests ─────────
+try:
+    r = requests.get(f"{BASE}/transactions/bogus-id-does-not-exist", headers=auth(admin_tok), timeout=20)
+    record("8a.transactions/{bogus} -> 404", r.status_code == 404,
+           f"status={r.status_code} body={r.text[:80]}")
+except Exception as e:
+    record("8a.transactions/{bogus} -> 404", False, f"exc={e}")
+
+# Auth-less endpoint hits
+for ep in ["/transactions/me", "/withdrawals/me", "/cart", "/orders/me"]:
+    try:
+        r = requests.get(f"{BASE}{ep}", timeout=20)
+        record(f"8b.{ep} no-auth -> 401/403", r.status_code in (401, 403),
+               f"status={r.status_code}")
+    except Exception as e:
+        record(f"8b.{ep} no-auth -> 401/403", False, f"exc={e}")
+
+
+# ───────── 9. Sibling regression checks ─────────
+# 9a. POST /withdrawals with valid amount — should 200 OR 4xx (not 5xx). Many users won't have wallet
+try:
+    r = requests.post(f"{BASE}/withdrawals", headers=auth(user_tok),
+                      json={"amount": 100}, timeout=20)
+    ok = r.status_code < 500
+    record("9a.POST /withdrawals no-5xx", ok, f"status={r.status_code} body={r.text[:120]}")
+except Exception as e:
+    record("9a.POST /withdrawals no-5xx", False, f"exc={e}")
+
+# 9b. POST /wallet/transfer with bogus payload — must 4xx (not 5xx)
+try:
+    r = requests.post(f"{BASE}/wallet/transfer", headers=auth(user_tok),
+                      json={"to_email": "doesnotexist-xyz@nowhere.invalid", "amount": 1}, timeout=20)
+    ok = 400 <= r.status_code < 500
+    record("9b.POST /wallet/transfer bogus -> 4xx (not 5xx)", ok,
+           f"status={r.status_code} body={r.text[:120]}")
+except Exception as e:
+    record("9b.POST /wallet/transfer bogus -> 4xx (not 5xx)", False, f"exc={e}")
+
+# 9c. GET /admin/system-wallet/breakdown
+try:
+    r = requests.get(f"{BASE}/admin/system-wallet/breakdown", headers=auth(admin_tok), timeout=30)
     body = r.json() if r.status_code == 200 else {}
-    required_keys = {"transaction", "owner", "counter_party", "counter_role", "auto_remarks", "utr", "invoice_number", "invoiceable"}
-    record("transactions/{id} as owner → 200", r.status_code == 200, f"HTTP {r.status_code} owner=admin")
-    record("transactions/{id} payload shape", required_keys.issubset(body.keys()), f"missing={required_keys - set(body.keys())}")
-
-    # As admin viewing a DIFFERENT user's txn → 200 (admin_view branch)
-    if foreign_invoiceable:
-        r = requests.get(f"{BASE}/transactions/{foreign_invoiceable['id']}", headers=auth(admin_token), timeout=30)
-        record("transactions/{id} as admin (other user's txn) → 200", r.status_code == 200, f"HTTP {r.status_code}")
-    else:
-        record("transactions/{id} as admin (other user's txn) → 200", False, "no foreign txn available")
-
-    # As a different non-admin user → 403 (use qrtest against admin's txn OR against a foreign txn)
-    target_for_403 = foreign_invoiceable["id"] if foreign_invoiceable else admin_owned_id
-    r = requests.get(f"{BASE}/transactions/{target_for_403}", headers=auth(qruser_token), timeout=30)
-    record("transactions/{id} as DIFFERENT non-admin → 403", r.status_code == 403, f"HTTP {r.status_code}")
-else:
-    record("transactions/{id} as owner → 200", False, "no sample available")
-    record("transactions/{id} payload shape", False, "no sample")
-    record("transactions/{id} as admin (other user's txn) → 200", False, "no sample")
-    record("transactions/{id} as DIFFERENT non-admin → 403", False, "no sample")
-
-r = requests.get(f"{BASE}/transactions/nonexistent-id-zzz-999", headers=auth(testuser_token), timeout=30)
-record("transactions/{id} nonexistent → 404", r.status_code == 404, f"HTTP {r.status_code}")
+    ok = r.status_code == 200 and "inflow" in body and "outflow" in body
+    record("9c.admin/system-wallet/breakdown", ok,
+           f"status={r.status_code} keys={list(body.keys()) if isinstance(body, dict) else 'n/a'}")
+except Exception as e:
+    record("9c.admin/system-wallet/breakdown", False, f"exc={e}")
 
 
-# ────────── 3) GET /transactions/{txn_id}/invoice (HTML) ──────────
-print("\n=== 3) GET /transactions/{txn_id}/invoice  (routes/wallet.py) ===")
-invoiceable_id = foreign_invoiceable["id"] if foreign_invoiceable else None
-non_invoiceable_id = None
-# search admin's own txns for a non-invoiceable type
-for t in admin_my_txns:
-    if t.get("type") in ("withdrawal", "referral_payout", "cascade_overflow", "fee_residual", "direct_signup_credit", "gst_collected") and not non_invoiceable_id:
-        non_invoiceable_id = t.get("id")
-        break
-
-if invoiceable_id:
-    # Owner test impossible (we don't have that user's password), so test via admin_view (allowed)
-    r = requests.get(f"{BASE}/transactions/{invoiceable_id}/invoice", headers=auth(admin_token), timeout=30)
-    ctype = r.headers.get("content-type", "")
-    record("invoice HTML as owner/admin → 200", r.status_code == 200, f"HTTP {r.status_code} (admin_view used since no test user owns a registration_fee txn)")
-    record("invoice HTML content-type text/html", "text/html" in ctype, f"ctype={ctype}")
-
-    r = requests.get(f"{BASE}/transactions/{invoiceable_id}/invoice", timeout=30)
-    record("invoice HTML no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
-
-    r = requests.get(f"{BASE}/transactions/{invoiceable_id}/invoice", headers=auth(qruser_token), timeout=30)
-    record("invoice HTML other non-admin → 403", r.status_code == 403, f"HTTP {r.status_code}")
-else:
-    record("invoice HTML as owner/admin → 200", False, "no registration_fee paid txn in admin feed")
-
-if non_invoiceable_id:
-    r = requests.get(f"{BASE}/transactions/{non_invoiceable_id}/invoice", headers=auth(admin_token), timeout=30)
-    record("invoice non-invoiceable txn no 5xx", r.status_code < 500, f"HTTP {r.status_code}")
-else:
-    record("invoice non-invoiceable txn no 5xx", True, "no non-invoiceable txn to test — skip")
-
-
-# ────────── 4) GET /transactions/{txn_id}/invoice.pdf ──────────
-print("\n=== 4) GET /transactions/{txn_id}/invoice.pdf  (routes/wallet.py) ===")
-if invoiceable_id:
-    r = requests.get(f"{BASE}/transactions/{invoiceable_id}/invoice.pdf", headers=auth(admin_token), timeout=60)
-    ctype = r.headers.get("content-type", "")
-    cdisp = r.headers.get("content-disposition", "")
-    record("invoice.pdf as owner/admin → 200", r.status_code == 200, f"HTTP {r.status_code}")
-    record("invoice.pdf content-type application/pdf", "application/pdf" in ctype, f"ctype={ctype}")
-    record("invoice.pdf Content-Disposition has filename", "filename=" in cdisp, f"cdisp={cdisp[:80]}")
-
-    r = requests.get(f"{BASE}/transactions/{invoiceable_id}/invoice.pdf", headers=auth(qruser_token), timeout=30)
-    record("invoice.pdf other non-admin → 403", r.status_code == 403, f"HTTP {r.status_code}")
-else:
-    record("invoice.pdf as owner/admin → 200", False, "no invoiceable txn")
-
-
-# ────────── 5) GET /withdrawals/me ──────────
-print("\n=== 5) GET /withdrawals/me  (routes/withdrawals.py) ===")
-r = requests.get(f"{BASE}/withdrawals/me", headers=auth(testuser_token), timeout=30)
-wd_default = r.json() if r.status_code == 200 else []
-record("withdrawals/me default 200", r.status_code == 200 and isinstance(wd_default, list), f"HTTP {r.status_code} len={len(wd_default)}")
-
-r = requests.get(f"{BASE}/withdrawals/me?limit=3", headers=auth(testuser_token), timeout=30)
-wd_p1 = r.json() if r.status_code == 200 else []
-record("withdrawals/me ?limit=3 ≤3", r.status_code == 200 and len(wd_p1) <= 3, f"HTTP {r.status_code} len={len(wd_p1)}")
-
-r = requests.get(f"{BASE}/withdrawals/me?limit=3&offset=3", headers=auth(testuser_token), timeout=30)
-wd_p2 = r.json() if r.status_code == 200 else []
-record("withdrawals/me ?limit=3&offset=3 ≤3", r.status_code == 200 and len(wd_p2) <= 3, f"HTTP {r.status_code} len={len(wd_p2)}")
-
-r = requests.get(f"{BASE}/withdrawals/me", timeout=30)
-record("withdrawals/me no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
-
-
-# ────────── 6) Cart endpoints ──────────
-print("\n=== 6) Cart endpoints  (routes/cart.py) ===")
-r = requests.get(f"{BASE}/cart", headers=auth(testuser_token), timeout=30)
-cart0 = r.json() if r.status_code == 200 else {}
-required_cart = {"items", "total", "count"}
-record("GET /cart → 200 shape", r.status_code == 200 and required_cart.issubset(cart0.keys()), f"HTTP {r.status_code} keys={list(cart0.keys()) if isinstance(cart0, dict) else cart0}")
-original_count = cart0.get("count", 0) if isinstance(cart0, dict) else 0
-
-r = requests.get(f"{BASE}/products", timeout=30)
-products_raw = r.json() if r.status_code == 200 else []
-products = products_raw if isinstance(products_raw, list) else products_raw.get("items", [])
-record("GET /products → 200", r.status_code == 200 and len(products) > 0, f"HTTP {r.status_code} count={len(products)}")
-
-product_id = None
-for p in products:
-    if p.get("is_in_stock") and (p.get("stock") or 0) > 0:
-        product_id = p.get("id")
-        break
-if not product_id and products:
-    product_id = products[0].get("id")
-
-if product_id:
-    r = requests.post(f"{BASE}/cart/add", json={"product_id": product_id, "qty": 1}, headers=auth(testuser_token), timeout=30)
-    add_ok = r.status_code == 200 and r.json().get("ok") is True
-    record("POST /cart/add → 200 {ok:true}", add_ok, f"HTTP {r.status_code} body={r.text[:120]}")
-
-    r = requests.get(f"{BASE}/cart", headers=auth(testuser_token), timeout=30)
-    cart1 = r.json() if r.status_code == 200 else {}
-    record("GET /cart after add (count incremented)", cart1.get("count", -1) > original_count, f"orig={original_count} now={cart1.get('count')}")
-
-    r = requests.post(f"{BASE}/cart/remove", json={"product_id": product_id}, headers=auth(testuser_token), timeout=30)
-    record("POST /cart/remove → 200", r.status_code == 200 and r.json().get("ok") is True, f"HTTP {r.status_code}")
-
-    r = requests.get(f"{BASE}/cart", headers=auth(testuser_token), timeout=30)
-    cart2 = r.json() if r.status_code == 200 else {}
-    record("GET /cart after remove (back to original)", cart2.get("count", -1) == original_count, f"orig={original_count} now={cart2.get('count')}")
-
-    r = requests.post(f"{BASE}/cart/clear", headers=auth(testuser_token), timeout=30)
-    record("POST /cart/clear → 200", r.status_code == 200 and r.json().get("ok") is True, f"HTTP {r.status_code}")
-
-    r = requests.get(f"{BASE}/cart", headers=auth(testuser_token), timeout=30)
-    cart3 = r.json() if r.status_code == 200 else {}
-    record("GET /cart after clear (items=[])", cart3.get("items") == [] and cart3.get("count", -1) == 0, f"items_len={len(cart3.get('items', []))} count={cart3.get('count')}")
-else:
-    record("cart add/remove/clear flow", False, "no product available")
-
-r = requests.get(f"{BASE}/cart", timeout=30)
-record("GET /cart no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
-r = requests.post(f"{BASE}/cart/add", json={"product_id": product_id or "x", "qty": 1}, timeout=30)
-record("POST /cart/add no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
-r = requests.post(f"{BASE}/cart/remove", json={"product_id": product_id or "x"}, timeout=30)
-record("POST /cart/remove no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
-r = requests.post(f"{BASE}/cart/clear", timeout=30)
-record("POST /cart/clear no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
-
-
-# ────────── 7) GET /orders/me ──────────
-print("\n=== 7) GET /orders/me  (routes/cart.py) ===")
-r = requests.get(f"{BASE}/orders/me", headers=auth(testuser_token), timeout=30)
-record("orders/me as testuser → 200 array", r.status_code == 200 and isinstance(r.json(), list), f"HTTP {r.status_code} len={len(r.json()) if r.status_code==200 else 'n/a'}")
-
-r = requests.get(f"{BASE}/orders/me", timeout=30)
-record("orders/me no-auth → 401", r.status_code in (401, 403), f"HTTP {r.status_code}")
-
-
-# ────────── 8) REGRESSION ──────────
-print("\n=== 8) REGRESSION (endpoints still in server.py) ===")
-
-# Admin source-breakdown FIRST (before refresh, in case refresh invalidates the access token)
-r = requests.get(f"{BASE}/admin/system-wallet/source-breakdown", headers=auth(admin_token), timeout=30)
-record("GET /admin/system-wallet/source-breakdown 200", r.status_code == 200, f"HTTP {r.status_code}")
-
-# /products + /shop-categories
-r = requests.get(f"{BASE}/products", timeout=30)
-record("GET /products 200", r.status_code == 200, f"HTTP {r.status_code}")
-r = requests.get(f"{BASE}/shop-categories", timeout=30)
-record("GET /shop-categories 200", r.status_code == 200, f"HTTP {r.status_code}")
-
-# POST /withdrawals (works OR expected 400 for ineligible)
-r = requests.post(f"{BASE}/withdrawals", json={"amount": 1}, headers=auth(testuser_token), timeout=30)
-record("POST /withdrawals still works or expected 400/422", r.status_code in (200, 400, 422), f"HTTP {r.status_code} body={r.text[:160]}")
-
-# POST /orders/checkout (works OR expected 400)
-r = requests.post(f"{BASE}/orders/checkout", headers=auth(testuser_token), timeout=30)
-record("POST /orders/checkout still works or expected 400", r.status_code in (200, 400, 422), f"HTTP {r.status_code} body={r.text[:160]}")
-
-# POST /wallet/transfer (works OR expected 400). Use the model field 'recipient'.
-r = requests.post(f"{BASE}/wallet/transfer", json={"recipient": "ADMIN001", "amount": 1}, headers=auth(testuser_token), timeout=30)
-record("POST /wallet/transfer still works or expected 400", r.status_code in (200, 400, 403, 404, 422), f"HTTP {r.status_code} body={r.text[:160]}")
-
-# Already validated /auth/login above. Validate /auth/refresh rotates LAST (it may invalidate tokens).
-if admin_refresh:
-    r = requests.post(f"{BASE}/auth/refresh", json={"refresh_token": admin_refresh}, timeout=30)
-    body = r.json() if r.status_code == 200 else {}
-    new_refresh = body.get("refresh_token")
-    record("POST /auth/refresh → 200", r.status_code == 200, f"HTTP {r.status_code}")
-    record("auth/refresh rotates refresh_token", bool(new_refresh) and new_refresh != admin_refresh, f"rotated={new_refresh != admin_refresh}")
-else:
-    record("POST /auth/refresh → 200", False, "no refresh_token on initial login response")
-    record("auth/refresh rotates refresh_token", False, "no refresh_token")
-
-
-# ────────── Summary ──────────
+# ───────── Summary ─────────
 print("\n" + "=" * 70)
-total = len(_results)
-passed = sum(1 for _, ok, _ in _results if ok)
-print(f"PHASE 2B ITER 4 REGRESSION: {passed}/{total} PASS")
+passed = sum(1 for _, ok, _ in results if ok)
+total = len(results)
+print(f"SUMMARY: {passed}/{total} PASS\n")
+for name, ok, detail in results:
+    if not ok:
+        print(f"  FAIL  {name}  — {detail}")
 print("=" * 70)
-if passed < total:
-    print("\nFAILURES:")
-    for name, ok, detail in _results:
-        if not ok:
-            print(f"  [FAIL] {name}  {detail}")
+sys.exit(0 if passed == total else 1)

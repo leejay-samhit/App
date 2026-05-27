@@ -3378,10 +3378,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     return order
 
 
-@api_router.get("/orders/me")
-async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
-    items = await db.orders.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return items
+# GET /orders/me extracted to /app/backend/routes/cart.py during Phase 2B refactor.
 
 
 # ------------------ Notifications ------------------
