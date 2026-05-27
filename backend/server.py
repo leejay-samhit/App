@@ -163,6 +163,9 @@ from routes import tickets as tickets_router  # noqa: E402
 from routes import pincodes as pincodes_router  # noqa: E402
 from routes import legal_pages as legal_pages_router  # noqa: E402
 from routes import upi_manual as upi_manual_router  # noqa: E402
+from routes import wallet as wallet_router  # noqa: E402
+from routes import withdrawals as withdrawals_router  # noqa: E402
+from routes import cart as cart_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -1740,183 +1743,15 @@ async def request_withdrawal(request: Request, payload: WithdrawalRequest, user:
     return doc
 
 
-@api_router.get("/withdrawals/me")
-async def my_withdrawals(
-    user: Dict[str, Any] = Depends(get_current_user),
-    limit: int = 0,
-    offset: int = 0,
-):
-    """User withdrawal history. Pagination is opt-in: when limit is omitted
-    (or 0) we return the legacy unbounded list (capped at 1000) so existing
-    clients keep working. New FE infinite-scroll passes limit=20."""
-    cursor = db.withdrawals.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1)
-    if limit and limit > 0:
-        cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
-        return await cursor.to_list(min(limit, 200))
-    return await cursor.to_list(1000)
+# /withdrawals/me — moved to routes/withdrawals.py (Phase 2B Iter 4)
 
 
-@api_router.get("/transactions/me")
-async def my_transactions(
-    user: Dict[str, Any] = Depends(get_current_user),
-    include_pending: bool = False,
-    limit: int = 0,
-    offset: int = 0,
-):
-    """User wallet history. By default we hide pre-payment / failed registration
-    rows (status in {created, failed}) so the wallet view shows only money that
-    actually moved. Pass ?include_pending=true to see all rows for debugging.
-
-    Pagination: opt-in via limit (1..200) + offset. Omit to get the legacy
-    unbounded list (capped at 1000)."""
-    q: Dict[str, Any] = {"user_id": user["id"]}
-    if not include_pending:
-        q["status"] = {"$nin": ["created", "failed"]}
-    cursor = db.transactions.find(q, {"_id": 0}).sort("created_at", -1)
-    if limit and limit > 0:
-        cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
-        return await cursor.to_list(min(limit, 200))
-    return await cursor.to_list(1000)
-
-
-def _auto_remarks_for(tx: Dict[str, Any]) -> str:
-    """Generate a human-readable summary line for any transaction. Used in
-    the transaction-detail modal so users always see context even if the
-    description is terse."""
-    t = (tx.get("type") or "").lower()
-    amt = tx.get("amount") or 0
-    sign = "+" if (amt or 0) >= 0 else "-"
-    abs_amt = abs(float(amt or 0))
-    src = tx.get("source_user_name") or ""
-    ref = tx.get("reference_number") or ""
-    lvl = tx.get("level")
-    pretty = {
-        "registration_fee": f"Registration fee paid · ₹{int(abs_amt)}",
-        "referral_payout": f"Level {lvl} referral payout from {src or 'a downline member'} · {sign}₹{int(abs_amt)}",
-        "service_booking": f"Service booking · {sign}₹{int(abs_amt)}{(' · ref ' + ref) if ref else ''}",
-        "service_earning": f"Service earning · {sign}₹{int(abs_amt)}",
-        "service_commission": f"Service platform fee from {src or 'customer'} · {sign}₹{int(abs_amt)}",
-        "shop_commission": f"Shop margin from order {tx.get('order_id', '')[:8]} · {sign}₹{int(abs_amt)}",
-        "vendor_sale": f"Vendor share · {sign}₹{int(abs_amt)}",
-        "order": f"Shop order placed · {sign}₹{int(abs_amt)}",
-        "admin_credit": tx.get("remarks") or f"Credit ₹{int(abs_amt)} from admin",
-        "admin_debit": tx.get("remarks") or f"Debit ₹{int(abs_amt)} by admin",
-        "system_deposit": f"System wallet top-up · UTR {ref or 'n/a'} · {sign}₹{int(abs_amt)}",
-        "withdrawal": f"Withdrawal · {sign}₹{int(abs_amt)}{(' · UTR ' + ref) if ref else ''}",
-    }
-    return pretty.get(t, tx.get("description") or f"{t.replace('_', ' ').title()} · {sign}₹{int(abs_amt)}")
-
-
-@api_router.get("/transactions/{txn_id}")
-async def transaction_detail(txn_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    """Return a single transaction with enriched counter-party info + auto-remarks.
-    Visible to: the owning user, super_admin, and finance roles."""
-    tx = await db.transactions.find_one({"id": txn_id}, {"_id": 0})
-    if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-    is_owner = tx.get("user_id") == user["id"]
-    is_admin_view = user.get("role") == "admin" and user.get("admin_role") in ("super_admin", "finance", "manager", "support")
-    if not is_owner and not is_admin_view:
-        raise HTTPException(status_code=403, detail="Not allowed")
-
-    # Owner basics
-    owner = await db.users.find_one({"id": tx.get("user_id")}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
-
-    # Counter-party inference
-    counter: Optional[Dict[str, Any]] = None
-    counter_role = ""
-    if tx.get("from_admin_id"):
-        c = await db.users.find_one({"id": tx["from_admin_id"]}, {"_id": 0, "id": 1, "name": 1, "email": 1, "admin_role": 1})
-        if c:
-            counter = c
-            counter_role = "admin"
-    elif tx.get("booking_id"):
-        booking = await db.service_bookings.find_one({"id": tx["booking_id"]}, {"_id": 0})
-        if booking:
-            other_id = booking["provider_id"] if tx.get("user_id") == booking.get("customer_id") else booking.get("customer_id")
-            other_role = "provider" if tx.get("user_id") == booking.get("customer_id") else "customer"
-            c = await db.users.find_one({"id": other_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
-            if c:
-                counter = c
-                counter_role = other_role
-    elif tx.get("order_id"):
-        order = await db.orders.find_one({"id": tx["order_id"]}, {"_id": 0})
-        if order and order.get("user_id") != tx.get("user_id"):
-            c = await db.users.find_one({"id": order.get("user_id")}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
-            if c:
-                counter = c
-                counter_role = "buyer"
-
-    return {
-        "transaction": tx,
-        "owner": owner,
-        "counter_party": counter,
-        "counter_role": counter_role,
-        "auto_remarks": _auto_remarks_for(tx),
-        "utr": tx.get("reference_number"),
-        "invoice_number": _invoice_number_for(tx),
-        "invoiceable": _is_invoiceable(tx),
-    }
-
-
-# ------------------ GST Invoices ------------------
-async def _resolve_invoice_data(txn_id: str, user: Dict[str, Any]):
-    """Shared helper: fetch txn + permission check + resolve owner/counter/branding."""
-    tx = await db.transactions.find_one({"id": txn_id}, {"_id": 0})
-    if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-    is_owner = tx.get("user_id") == user["id"]
-    is_admin_view = user.get("role") == "admin" and user.get("admin_role") in ("super_admin", "finance")
-    if not is_owner and not is_admin_view:
-        raise HTTPException(status_code=403, detail="Not allowed")
-    if not _is_invoiceable(tx):
-        raise HTTPException(status_code=400, detail="No invoice available for this transaction type")
-    owner = await db.users.find_one(
-        {"id": tx.get("user_id")},
-        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1},
-    )
-    # Counter-party (mirrors the logic in transaction_detail)
-    counter: Optional[Dict[str, Any]] = None
-    if tx.get("from_admin_id"):
-        counter = await db.users.find_one({"id": tx["from_admin_id"]}, {"_id": 0, "id": 1, "name": 1, "email": 1})
-    elif tx.get("booking_id"):
-        booking = await db.service_bookings.find_one({"id": tx["booking_id"]}, {"_id": 0})
-        if booking:
-            other_id = booking["provider_id"] if tx.get("user_id") == booking.get("customer_id") else booking.get("customer_id")
-            counter = await db.users.find_one({"id": other_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
-    elif tx.get("order_id"):
-        order = await db.orders.find_one({"id": tx["order_id"]}, {"_id": 0})
-        if order and order.get("user_id") != tx.get("user_id"):
-            counter = await db.users.find_one({"id": order.get("user_id")}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "referral_code": 1})
-
-    # Branding
-    branding_doc = await db.settings.find_one({"id": "branding"}, {"_id": 0}) or {}
-    return tx, owner, counter, branding_doc
-
-
-@api_router.get("/transactions/{txn_id}/invoice", response_class=HTMLResponse)
-async def transaction_invoice_html(txn_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    """Render an HTML GST invoice for the given transaction. Visible to: owner,
-    super_admin, finance roles. Auto-applies 18% GST per Indian GST law."""
-    tx, owner, counter, branding = await _resolve_invoice_data(txn_id, user)
-    html = _build_invoice_html(tx, owner, branding, counter)
-    return HTMLResponse(content=html, status_code=200)
-
-
-@api_router.get("/transactions/{txn_id}/invoice.pdf")
-async def transaction_invoice_pdf(txn_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    """Render a PDF GST invoice for the given transaction. Same access as HTML version."""
-    tx, owner, counter, branding = await _resolve_invoice_data(txn_id, user)
-    pdf_bytes = _build_invoice_pdf(tx, owner, branding, counter)
-    inv_no = _invoice_number_for(tx).replace("/", "-")
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'inline; filename="{inv_no}.pdf"',
-            "Cache-Control": "no-store",
-        },
-    )
+# /transactions/me — moved to routes/wallet.py (Phase 2B Iter 4)
+# /transactions/{txn_id} — moved to routes/wallet.py
+# /transactions/{txn_id}/invoice — moved to routes/wallet.py
+# /transactions/{txn_id}/invoice.pdf — moved to routes/wallet.py
+# Helpers _auto_remarks_for() and _resolve_invoice_data() also live in
+# routes/wallet.py now — they were only used by the four endpoints above.
 
 
 # ------------------ Wallet-to-wallet transfer ------------------
@@ -3310,52 +3145,10 @@ async def admin_update_settings(payload: SettingsUpdate, admin: Dict[str, Any] =
 
 
 # ------------------ Cart & Orders ------------------
-@api_router.post("/cart/add")
-async def cart_add(payload: CartItem, user: Dict[str, Any] = Depends(get_current_user)):
-    product = await db.products.find_one({"id": payload.product_id}, {"_id": 0})
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    existing = await db.cart_items.find_one({"user_id": user["id"], "product_id": payload.product_id})
-    if existing:
-        await db.cart_items.update_one(
-            {"user_id": user["id"], "product_id": payload.product_id},
-            {"$inc": {"qty": payload.qty}}
-        )
-    else:
-        await db.cart_items.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": user["id"],
-            "product_id": payload.product_id,
-            "qty": payload.qty,
-            "created_at": now_utc().isoformat(),
-        })
-    return {"ok": True}
-
-
-@api_router.get("/cart")
-async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
-    items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
-    enriched = []
-    total = 0.0
-    for it in items:
-        product = await db.products.find_one({"id": it["product_id"]}, {"_id": 0})
-        if product:
-            line_total = product["price"] * it["qty"]
-            total += line_total
-            enriched.append({**it, "product": product, "line_total": line_total})
-    return {"items": enriched, "total": total, "count": sum(i["qty"] for i in items)}
-
-
-@api_router.post("/cart/remove")
-async def cart_remove(payload: CartRemove, user: Dict[str, Any] = Depends(get_current_user)):
-    await db.cart_items.delete_one({"user_id": user["id"], "product_id": payload.product_id})
-    return {"ok": True}
-
-
-@api_router.post("/cart/clear")
-async def cart_clear(user: Dict[str, Any] = Depends(get_current_user)):
-    await db.cart_items.delete_many({"user_id": user["id"]})
-    return {"ok": True}
+# /cart/add, /cart, /cart/remove, /cart/clear, /orders/me — moved to
+# routes/cart.py (Phase 2B Iter 4). POST /orders/checkout stays here for
+# now because it depends on _trigger_referral_commissions (commission engine
+# extraction is planned for the next refactor pass).
 
 
 @api_router.post("/orders/checkout")
@@ -8369,6 +8162,10 @@ app.include_router(tickets_router.router, prefix="/api")
 app.include_router(pincodes_router.router, prefix="/api")
 app.include_router(legal_pages_router.router, prefix="/api")
 app.include_router(upi_manual_router.router, prefix="/api")
+# Phase 2B Iter 4 (2026-05-27) — wallet / withdrawals / cart routers
+app.include_router(wallet_router.router, prefix="/api")
+app.include_router(withdrawals_router.router, prefix="/api")
+app.include_router(cart_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
