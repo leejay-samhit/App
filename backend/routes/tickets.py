@@ -245,7 +245,7 @@ async def create_public_ticket(payload: PublicTicketCreateRequest):
 _RE_PHONE      = _re_email.compile(r"\b(\+?\d[\d\-\s]{7,14}\d)\b")
 _RE_EMAIL_TXT  = _re_email.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _RE_UPI        = _re_email.compile(r"\b[a-zA-Z0-9._-]{3,}@[a-zA-Z][a-zA-Z0-9]{2,15}\b")  # vpa@bank
-_RE_REFCODE    = _re_email.compile(r"(?i)\b(ref(?:erral)?\s*(?:code|no\.?|#)?\s*[:\-]?\s*)([A-Z0-9]{4,12})\b")
+_RE_REFCODE    = _re_email.compile(r"(?i)\b(ref(?:erral)?\b(?:\s+(?:code|no\.?|#|id|is|=|:|\-))?\s*[:\-=#]?\s*)([A-Z0-9]{4,12})\b")
 _RE_UTR        = _re_email.compile(r"(?i)\b(utr\s*(?:no\.?|#)?\s*[:\-]?\s*)([A-Z0-9]{8,22})\b")
 _RE_PAN        = _re_email.compile(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b")
 _RE_AADHAAR    = _re_email.compile(r"\b(\d{4}\s?\d{4}\s?\d{4})\b")
