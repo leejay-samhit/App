@@ -101,6 +101,17 @@ DEFAULT_BRANDING: Dict[str, Any] = {
         "border": "#E5E4E0",
     },
     "font": "system",
+    # ─── Premium theme controls (June 2026) ───
+    # Lets admin set a hero gradient, button shape and home-screen banner
+    # so the app's onboarding/payment screens can be themed without code.
+    "gradient": {
+        "start":  "#0A0E27",   # Deep blue
+        "middle": "#1E2A78",   # Mid royal
+        "end":    "#5B21B6",   # Purple
+        "glow":   "#06B6D4",   # Cyan glow blob
+    },
+    "button_style": "rounded",   # "rounded" | "pill" | "square"
+    "home_banner_b64": None,     # base64 image overlay on home screen
     # Custom splash overlay shown for `splash_duration_ms` after the native
     # Expo splash dismisses. Admin can upload a base64 image + tweak duration.
     # Recommended resolution: 1080×1920 (9:16 portrait, ~500KB max).

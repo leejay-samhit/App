@@ -124,6 +124,33 @@ async def admin_update_branding(
             raise HTTPException(status_code=400, detail="At least one tab must be visible")
         update["tabs"] = cleaned
 
+    # ─── Premium theme: gradient ───
+    if payload.gradient is not None:
+        clean_g: Dict[str, str] = {}
+        for k, v in (payload.gradient or {}).items():
+            if k in {"start", "middle", "end", "glow"} and isinstance(v, str):
+                v = v.strip()
+                if re.match(r"^#[0-9A-Fa-f]{3,8}$", v):
+                    clean_g[k] = v
+        if clean_g:
+            existing_g = (await get_branding_doc()).get("gradient") or {}
+            existing_g.update(clean_g)
+            update["gradient"] = existing_g
+    # ─── Premium theme: button style ───
+    if payload.button_style is not None:
+        bs = (payload.button_style or "").strip().lower()
+        if bs not in {"rounded", "pill", "square"}:
+            raise HTTPException(status_code=400, detail="button_style must be one of: rounded, pill, square")
+        update["button_style"] = bs
+    # ─── Premium theme: home banner ───
+    if payload.home_banner_b64 is not None:
+        img = (payload.home_banner_b64 or "").strip()
+        if img and not (img.startswith("data:") or img.startswith("http://") or img.startswith("https://")):
+            raise HTTPException(status_code=400, detail="home_banner_b64 must be a data: URI or http(s) URL")
+        if len(img) > 1_200_000:
+            raise HTTPException(status_code=400, detail="home_banner_b64 too large — please use < 800 KB after base64")
+        update["home_banner_b64"] = img or None
+
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
 

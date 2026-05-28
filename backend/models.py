@@ -136,6 +136,10 @@ class BrandingPayload(BaseModel):
     splash_bg: Optional[str] = None         # hex colour
     # ─── Payment methods config (Feb-2026) ───
     payment_methods: Optional[Dict[str, Any]] = None
+    # ─── Premium theme extensions (June 2026) ───
+    gradient: Optional[Dict[str, str]] = None     # {start, middle, end, glow}
+    button_style: Optional[str] = None            # rounded | pill | square
+    home_banner_b64: Optional[str] = None         # base64 PNG/JPG for home hero
 
 
 class GoogleExchange(BaseModel):

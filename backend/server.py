@@ -7599,6 +7599,12 @@ DEFAULT_SERVICE_CATEGORIES = [
     {"name": "Toilet Cleaner",        "slug": "toilet-cleaner",        "icon": "shield",       "color": "#65A30D"},
     {"name": "House Construction Labour", "slug": "house-construction-labour", "icon": "home", "color": "#DC2626"},
     {"name": "Mobile Repair",         "slug": "mobile-repair",         "icon": "smartphone",   "color": "#DB2777"},
+    # ── June 2026 expansion (modern service icons) ──
+    {"name": "Appliance Repair",      "slug": "appliance-repair",      "icon": "refresh-ccw",  "color": "#7C3AED"},
+    {"name": "Delivery",              "slug": "delivery",              "icon": "package",      "color": "#F97316"},
+    {"name": "Vehicle Repair",        "slug": "vehicle-repair",        "icon": "truck",        "color": "#1F2937"},
+    {"name": "Home Maintenance",      "slug": "home-maintenance",      "icon": "clipboard",    "color": "#0F766E"},
+    {"name": "Labour",                "slug": "labour",                "icon": "users",        "color": "#B45309"},
 ]
 
 
@@ -8856,6 +8862,77 @@ async def admin_ai_image(payload: AIImageRequest, admin: Dict[str, Any] = Depend
         "text": (text or "").strip()[:200],
         "image_b64": img0.get("data"),
         "mime_type": img0.get("mime_type") or "image/png",
+    }
+
+
+@api_router.get("/admin/service-analytics")
+async def admin_service_analytics(admin: Dict[str, Any] = Depends(require_admin)):
+    """Compact analytics for the Service Management screen.
+
+    Returns:
+      - provider counts by availability (available / busy / offline / unset)
+      - top categories by provider count and recent activity (last 30d)
+      - phone-reveal invoice totals (last 30d + lifetime)
+      - service application counts by status
+    """
+    # Provider availability bucket
+    avail_pipeline = [
+        {"$match": {"is_service_provider": True}},
+        {"$group": {"_id": "$availability_status", "count": {"$sum": 1}}},
+    ]
+    avail_rows = await db.users.aggregate(avail_pipeline).to_list(20)
+    avail = {"available": 0, "busy": 0, "offline": 0, "unset": 0}
+    for r in avail_rows:
+        key = (r.get("_id") or "unset")
+        if key not in avail:
+            key = "unset"
+        avail[key] = int(r.get("count") or 0)
+
+    # Top categories by provider count
+    cats = await db.service_categories.find({}, {"_id": 0}).to_list(200)
+    cat_rows = []
+    for c in cats:
+        cnt = await db.users.count_documents({
+            "is_service_provider": True,
+            "$or": [{"category_id": c.get("id")}, {"service_category": c.get("name")}],
+        })
+        cat_rows.append({
+            "id": c.get("id"), "name": c.get("name"),
+            "icon": c.get("icon"), "color": c.get("color"),
+            "provider_count": cnt,
+            "active": bool(c.get("active", True)),
+        })
+    cat_rows.sort(key=lambda x: -x["provider_count"])
+
+    # Phone-reveal invoices
+    cutoff = (now_utc() - timedelta(days=30)).isoformat()
+    last30_cursor = db.phone_reveal_invoices.find({"created_at": {"$gte": cutoff}})
+    last30 = await last30_cursor.to_list(2000)
+    lifetime_cnt = await db.phone_reveal_invoices.count_documents({})
+    reveal_stats = {
+        "count_30d":    len(last30),
+        "amount_30d":   round(sum(float(r.get("total") or 0) for r in last30), 2),
+        "fee_30d":      round(sum(float(r.get("fee") or 0) for r in last30), 2),
+        "gst_30d":      round(sum(float(r.get("gst_amount") or 0) for r in last30), 2),
+        "count_lifetime": lifetime_cnt,
+    }
+
+    # Service applications by status
+    app_pipeline = [
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+    ]
+    app_rows = await db.service_applications.aggregate(app_pipeline).to_list(20)
+    apps = {"pending": 0, "approved": 0, "rejected": 0}
+    for r in app_rows:
+        s = (r.get("_id") or "pending").lower()
+        apps[s] = int(r.get("count") or 0)
+
+    return {
+        "availability":  avail,
+        "categories":    cat_rows,
+        "reveal_stats":  reveal_stats,
+        "applications":  apps,
+        "generated_at":  now_utc().isoformat(),
     }
 
 

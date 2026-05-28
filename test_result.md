@@ -7231,3 +7231,50 @@ agent_communication:
            3. Optional: expose `is_service_provider` toggle in PATCH /admin/users/{id} so QA can flip it
               (or seed a known approved provider account for automated tests).
 
+
+
+    - agent: "testing"
+      message: |
+        ── BACKEND TEST RUN — June 2026 Phase D pending items ──────────────────
+        Vs https://vendor-network-app-1.preview.emergentagent.com/api
+        Script: /app/backend_test.py
+        Result: 47 / 47 checks PASSED, 0 FAILED.
+
+        Coverage:
+
+        1) GET /api/admin/service-analytics
+           • Admin → 200 with full shape: availability {available, busy, offline, unset},
+             categories[] (13), reveal_stats {count_30d, amount_30d, fee_30d, gst_30d, count_lifetime},
+             applications {pending, approved, rejected}, generated_at — all present.
+           • testuser → 403 {"detail":"Admin access required"} ✓
+
+        2) PUT /api/admin/branding (new June-2026 fields)
+           • {gradient:{start,middle,end,glow}} → 200, response.gradient echoed verbatim. ✓
+           • {button_style:"pill"} → 200, response.button_style=="pill". ✓
+           • {button_style:"xyz"} → 400 "button_style must be one of: rounded, pill, square". ✓
+           • {gradient:{start:"not-a-color", end:"#FF0000"}} → 200, invalid 'start' silently ignored
+             (start retained previous value "#0A0E27"), valid 'end' applied as "#FF0000". ✓
+           • {home_banner_b64:"https://example.com/banner.png"} → 200. ✓
+           • {home_banner_b64:"ftp://bad"} → 400 "home_banner_b64 must be a data: URI or http(s) URL". ✓
+
+        3) GET /api/branding (public)
+           • Returns gradient (dict), button_style ("pill"), home_banner_b64 (https URL) — values persisted
+             from the PUT operations above. ✓
+
+        4) GET /api/services/categories (public)
+           • 200 with 13 categories. (Informational: the 5 specific June-2026 entries
+             [Appliance Repair, Delivery, Vehicle Repair, Home Maintenance, Labour] were NOT
+             found among the seeded names — env has [Construction Labour, …] etc.
+             Per review-request instructions this is acceptable since the test only requires
+             ≥5 categories when seed hasn't run fresh. No code change needed.)
+
+        5) GET /api/payment/config (any authed user)
+           • Returned amount=118.0, amount_paise=11800 → both meet the ₹118 hard-floor guard. ✓
+
+        6) Subcategory CRUD regression
+           • GET /admin/service-categories → 200, first id used as parent.
+           • POST /admin/service-subcategories {parent_id, name:"QA_PHASE_D_TEST"} → 200 with subcategory.id. ✓
+           • GET /admin/service-subcategories?parent_id=… contains the new id. ✓
+           • DELETE /admin/service-subcategories/{id} → 200 ok:true (cleanup verified). ✓
+
+        No regressions observed; all six Phase-D endpoint groups behave as designed.

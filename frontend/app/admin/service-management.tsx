@@ -185,6 +185,16 @@ export default function AdminServiceApplicationManagement() {
                 <TouchableOpacity onPress={() => onToggleActive(c)} style={styles.iconBtn} testID={`toggle-${c.slug}`}>
                   <Feather name={c.active ? "eye" : "eye-off"} size={16} color={colors.textMuted} />
                 </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => router.push({
+                    pathname: "/admin/subcategories/[parentId]",
+                    params: { parentId: c.id, parentName: c.name },
+                  } as any)}
+                  style={styles.iconBtn}
+                  testID={`subs-${c.slug}`}
+                >
+                  <Feather name="layers" size={16} color={colors.textMuted} />
+                </TouchableOpacity>
                 <TouchableOpacity onPress={() => setEditing(c)} style={styles.iconBtn} testID={`edit-${c.slug}`}>
                   <Feather name="edit-2" size={16} color={colors.primary} />
                 </TouchableOpacity>

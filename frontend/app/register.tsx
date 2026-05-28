@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { useRouter, Link, useLocalSearchParams } from "expo-router";
 import { Feather } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing } from "../src/theme";
@@ -64,11 +65,20 @@ export default function Register() {
             <Feather name="arrow-left" size={20} color={colors.textMain} />
           </TouchableOpacity>
 
-          <Text style={styles.overline}>JOIN THE NETWORK</Text>
-          <Text style={styles.h1}>Create your{"\n"}account</Text>
-          <Text style={styles.subtitle}>
-            Refer 4 friends to unlock recurring rewards.
-          </Text>
+          {/* Premium gradient hero — Deep Blue + Purple + Cyan glow (June 2026) */}
+          <LinearGradient
+            colors={["#0A0E27", "#1E2A78", "#5B21B6"]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.gradHero}
+          >
+            <View style={styles.gradGlow} pointerEvents="none" />
+            <Text style={styles.gradOverline}>JOIN THE NETWORK</Text>
+            <Text style={styles.gradH1}>Create your{"\n"}account</Text>
+            <Text style={styles.gradSub}>
+              Refer 4 friends to unlock recurring rewards.
+            </Text>
+          </LinearGradient>
 
           <View style={styles.formGroup}>
             <Text style={styles.label}>Full name</Text>
@@ -112,7 +122,18 @@ export default function Register() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   container: { padding: spacing.screen, paddingTop: 16, paddingBottom: 60 },
-  backBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginBottom: 24 },
+  backBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginBottom: 18 },
+  // Premium gradient hero (June 2026)
+  gradHero: {
+    borderRadius: 24, padding: 22, marginBottom: 22,
+    overflow: "hidden", position: "relative",
+    shadowColor: "#5B21B6", shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.30, shadowRadius: 28, elevation: 10,
+  },
+  gradGlow: { position: "absolute", top: -60, right: -40, width: 200, height: 200, borderRadius: 100, backgroundColor: "#06B6D4", opacity: 0.18 },
+  gradOverline: { fontSize: 10, fontWeight: "900", color: "#A5F3FC", letterSpacing: 2 },
+  gradH1: { fontSize: 32, fontWeight: "900", color: "#fff", letterSpacing: -0.5, marginTop: 10 },
+  gradSub: { fontSize: 12, color: "#C7D2FE", marginTop: 6, lineHeight: 18 },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 10 },
   h1: { fontSize: 34, fontWeight: "800", color: colors.textMain, lineHeight: 40, letterSpacing: -1 },
   subtitle: { fontSize: 15, color: colors.textMuted, marginTop: 12, marginBottom: 28, lineHeight: 22 },

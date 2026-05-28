@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, RefreshControl } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
@@ -78,21 +79,53 @@ export default function PendingApproval() {
           </TouchableOpacity>
         </View>
 
-        <View style={[styles.hero, { backgroundColor: tintBg }]}>
-          <View style={[styles.heroIconWrap, { backgroundColor: "#fff" }]}>
-            {refreshing ? (
-              <ActivityIndicator color={tint} />
-            ) : (
-              <Feather name={iconName} size={28} color={tint} />
-            )}
+        {isRejected ? (
+          <View style={[styles.hero, { backgroundColor: tintBg }]}>
+            <View style={[styles.heroIconWrap, { backgroundColor: "#fff" }]}>
+              {refreshing ? (
+                <ActivityIndicator color={tint} />
+              ) : (
+                <Feather name={iconName} size={28} color={tint} />
+              )}
+            </View>
+            <Text style={[styles.h1, { color: "#7A1F18" }]}>{title}</Text>
+            <Text style={styles.subtitle}>
+              Unfortunately, your registration was not approved. Review the details below or contact support.
+            </Text>
           </View>
-          <Text style={[styles.h1, { color: isRejected ? "#7A1F18" : colors.textMain }]}>{title}</Text>
-          <Text style={styles.subtitle}>
-            {isRejected
-              ? "Unfortunately, your registration was not approved. Review the details below or contact support."
-              : "Your payment has been received. A member of our finance team is reviewing your account. You'll get access as soon as it's approved — usually within a few hours."}
-          </Text>
-        </View>
+        ) : (
+          // Premium gradient hero — Deep Blue + Purple + Cyan glow (June 2026)
+          <LinearGradient
+            colors={["#0A0E27", "#1E2A78", "#5B21B6"]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.gradHero}
+          >
+            <View style={styles.gradGlow} pointerEvents="none" />
+            <View style={styles.gradIconWrap}>
+              {refreshing ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Feather name="check" size={32} color="#fff" />
+              )}
+            </View>
+            <Text style={styles.gradH1}>Payment submitted</Text>
+            <Text style={styles.gradSub}>
+              Your payment is received. Finance team is reviewing your account.
+              You'll get access as soon as it's approved — usually within a few hours.
+            </Text>
+            <View style={styles.gradPillRow}>
+              <View style={styles.gradPill}>
+                <Feather name="shield" size={11} color="#A5F3FC" />
+                <Text style={styles.gradPillText}>{"  "}Verified</Text>
+              </View>
+              <View style={styles.gradPill}>
+                <Feather name="clock" size={11} color="#A5F3FC" />
+                <Text style={styles.gradPillText}>{"  "}Under review</Text>
+              </View>
+            </View>
+          </LinearGradient>
+        )}
 
         {isRejected ? (
           <View style={styles.card}>
@@ -173,6 +206,20 @@ const styles = StyleSheet.create({
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700" },
   iconBtn: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   hero: { borderRadius: radii.card, padding: 24, alignItems: "center", marginBottom: 20 },
+  // Premium gradient hero (June 2026) — "Payment submitted" success state
+  gradHero: {
+    borderRadius: 24, padding: 24, alignItems: "center", marginBottom: 20,
+    overflow: "hidden", position: "relative",
+    shadowColor: "#5B21B6", shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.30, shadowRadius: 28, elevation: 10,
+  },
+  gradGlow: { position: "absolute", top: -50, right: -40, width: 200, height: 200, borderRadius: 100, backgroundColor: "#06B6D4", opacity: 0.20 },
+  gradIconWrap: { width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center", marginBottom: 12, borderWidth: 1, borderColor: "rgba(165,243,252,0.4)" },
+  gradH1: { fontSize: 24, fontWeight: "900", color: "#fff", textAlign: "center", letterSpacing: -0.3 },
+  gradSub: { fontSize: 12, color: "#C7D2FE", marginTop: 8, lineHeight: 18, textAlign: "center", paddingHorizontal: 8 },
+  gradPillRow: { flexDirection: "row", gap: 8, marginTop: 16 },
+  gradPill: { flexDirection: "row", alignItems: "center", backgroundColor: "rgba(255,255,255,0.10)", borderWidth: 1, borderColor: "rgba(165,243,252,0.30)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999 },
+  gradPillText: { fontSize: 11, color: "#E0E7FF", fontWeight: "700" },
   heroIconWrap: { width: 72, height: 72, borderRadius: 36, alignItems: "center", justifyContent: "center", marginBottom: 16 },
   h1: { fontSize: 26, fontWeight: "800", letterSpacing: -1, textAlign: "center", marginBottom: 10 },
   subtitle: { fontSize: 14, color: colors.textMuted, lineHeight: 21, textAlign: "center" },
