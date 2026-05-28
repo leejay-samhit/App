@@ -8889,15 +8889,30 @@ async def admin_service_analytics(admin: Dict[str, Any] = Depends(require_admin)
         avail[key] = int(r.get("count") or 0)
 
     # Top categories by provider count
+    # Fast path (June 2026): batch both groupings up-front instead of N+1
+    # count_documents per category (the previous loop made 200+ MongoDB
+    # round-trips for analytics — slow under admin load).
     cats = await db.service_categories.find({}, {"_id": 0}).to_list(200)
+    counts_by_id: Dict[str, int] = {}
+    counts_by_name: Dict[str, int] = {}
+    async for r in db.users.aggregate([
+        {"$match": {"is_service_provider": True}},
+        {"$group": {"_id": "$category_id", "count": {"$sum": 1}}},
+    ]):
+        if r.get("_id"):
+            counts_by_id[str(r["_id"])] = int(r.get("count") or 0)
+    async for r in db.users.aggregate([
+        {"$match": {"is_service_provider": True, "category_id": {"$in": [None, ""]}}},
+        {"$group": {"_id": "$service_category", "count": {"$sum": 1}}},
+    ]):
+        if r.get("_id"):
+            counts_by_name[str(r["_id"])] = int(r.get("count") or 0)
     cat_rows = []
     for c in cats:
-        cnt = await db.users.count_documents({
-            "is_service_provider": True,
-            "$or": [{"category_id": c.get("id")}, {"service_category": c.get("name")}],
-        })
+        cid = c.get("id")
+        cnt = int(counts_by_id.get(cid, 0)) + int(counts_by_name.get(c.get("name"), 0))
         cat_rows.append({
-            "id": c.get("id"), "name": c.get("name"),
+            "id": cid, "name": c.get("name"),
             "icon": c.get("icon"), "color": c.get("color"),
             "provider_count": cnt,
             "active": bool(c.get("active", True)),
