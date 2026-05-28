@@ -367,6 +367,37 @@ class TicketUpdateRequest(BaseModel):
     assigned_to: Optional[str] = None  # admin user id or null to unassign
 
 
+class PublicTicketLookupRequest(BaseModel):
+    """Guest looks up their own tickets by email (no OTP — informational only)."""
+    email: str
+
+
+class PublicTicketReplyRequest(BaseModel):
+    """Guest replies to their own ticket — must supply the same email used at creation."""
+    email: str
+    message: str
+
+
+class RevealPhoneRequest(BaseModel):
+    """Customer pays a small fee + GST to reveal a service-provider's phone."""
+    accept_terms: bool = False
+
+
+class AdminTallyWithdrawRequest(BaseModel):
+    """Admin debits System Wallet for off-platform usage / account tally."""
+    amount: float
+    note: str
+    bucket: Optional[str] = None  # default = "direct_added"
+
+
+class AddressUpdateRequest(BaseModel):
+    """User can edit their delivery / contact address."""
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+
+
 class PaymentGatewayPayload(BaseModel):
     key_id: str
     key_secret: str

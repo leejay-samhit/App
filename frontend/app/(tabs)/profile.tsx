@@ -111,6 +111,15 @@ export default function ProfileScreen() {
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
             <View style={styles.rowDivider} />
+            <TouchableOpacity onPress={() => router.push("/edit-address" as any)} style={styles.rowItem} testID="profile-address-link">
+              <View style={[styles.kycDot, { backgroundColor: "#0EA5E9" }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>My Address</Text>
+                <Text style={styles.kycSub}>{(user as any)?.address ? `${(user as any).address || ""}${(user as any).city ? ", " + (user as any).city : ""}`.slice(0, 50) || "NOT SET" : "NOT SET — TAP TO ADD"}</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
             <TouchableOpacity onPress={() => router.push("/tickets" as any)} style={styles.rowItem} testID="profile-tickets-link">
               <View style={[styles.kycDot, { backgroundColor: colors.primary }]} />
               <View style={{ flex: 1 }}>

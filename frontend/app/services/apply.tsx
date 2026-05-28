@@ -41,9 +41,10 @@ export default function ServiceApply() {
   const [categoryName, setCategoryName] = useState("");
   const [categories, setCategories] = useState<Category[]>([]);
   const [pincode, setPincode] = useState("");
-  const [charge, setCharge] = useState("");
   const [description, setDescription] = useState("");
   const [languages, setLanguages] = useState<string[]>([]);
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [revealCfg, setRevealCfg] = useState<{ fee: number; total: number; gst_pct: number } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [existing, setExisting] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,6 +58,11 @@ export default function ServiceApply() {
         // load categories first
         const c = await api.get<{ categories: Category[] }>("/services/categories");
         setCategories(c.data.categories || []);
+        // Reveal fee config for the T&C banner
+        try {
+          const rc = await api.get("/services/reveal-config");
+          setRevealCfg({ fee: rc.data.fee, total: rc.data.total, gst_pct: rc.data.gst_pct });
+        } catch {}
         // also check registration / approval status — apply requires both
         const me = await api.get<any>("/auth/me");
         setRegistrationPaid(!!me.data?.registration_paid);
@@ -95,11 +101,10 @@ export default function ServiceApply() {
       return showError("Please pick a category from the list.");
     if (!/^\d{6}$/.test(pincode))
       return showError("Pincode must be 6 digits.");
-    const c = Number(charge);
-    if (!c || c <= 0)
-      return showError("Charge must be a positive number greater than 0.");
     if (languages.length === 0)
       return showError("Pick at least one language you can speak with customers.");
+    if (!acceptTerms)
+      return showError("Please tick the terms & conditions checkbox to continue.");
     setSubmitting(true);
     try {
       await api.post("/service/apply", {
@@ -107,7 +112,10 @@ export default function ServiceApply() {
         service_category: categoryName,
         category_id: categoryId,
         pincode,
-        charge: c,
+        // Charge is no longer collected from the provider — the platform
+        // monetises via the customer-side phone-reveal fee. Backend still
+        // expects a positive number, so we send 1 as a placeholder.
+        charge: 1,
         description: description.trim() || null,
         languages,
       });
@@ -237,32 +245,53 @@ export default function ServiceApply() {
             })}
           </View>
 
-          <View style={{ flexDirection: "row", gap: 12 }}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Pincode</Text>
-              <TextInput
-                style={styles.input}
-                value={pincode}
-                onChangeText={setPincode}
-                placeholder="6 digits"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="numeric"
-                maxLength={6}
-                editable={!locked}
-              />
+          <Text style={styles.label}>Pincode</Text>
+          <TextInput
+            style={styles.input}
+            value={pincode}
+            onChangeText={setPincode}
+            placeholder="6 digits"
+            placeholderTextColor={colors.textMuted}
+            keyboardType="numeric"
+            maxLength={6}
+            editable={!locked}
+          />
+
+          {/* Phone-reveal model — replaces the old "charge per booking" field.
+              Customers pay a small platform fee to unlock the provider's number;
+              the provider keeps 100% of whatever they earn off-platform. */}
+          <View style={styles.tncCard}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Feather name="info" size={16} color={colors.primary} />
+              <Text style={styles.tncTitle}>How it works</Text>
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Charge (₹)</Text>
-              <TextInput
-                style={styles.input}
-                value={charge}
-                onChangeText={setCharge}
-                placeholder="500"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="numeric"
-                editable={!locked}
-              />
-            </View>
+            <Text style={styles.tncBody}>
+              When a customer wants to call you, the app collects{" "}
+              <Text style={{ fontWeight: "800", color: colors.textMain }}>
+                {revealCfg
+                  ? `₹${revealCfg.total.toFixed(2)} (₹${revealCfg.fee.toFixed(2)} fee + ${revealCfg.gst_pct.toFixed(0)}% GST)`
+                  : "₹1 + 18% GST"}
+              </Text>{" "}
+              from them to reveal your phone number. You keep{" "}
+              <Text style={{ fontWeight: "800", color: colors.success }}>100%</Text> of whatever
+              you charge the customer directly after that. There's no booking fee or commission
+              on your earnings.
+            </Text>
+            <TouchableOpacity
+              onPress={() => setAcceptTerms((v) => !v)}
+              style={styles.tncCheckRow}
+              testID="apply-tnc-checkbox"
+              disabled={locked}
+            >
+              <View style={[styles.tncCheckBox, acceptTerms && styles.tncCheckBoxOn]}>
+                {acceptTerms ? <Feather name="check" size={13} color="#fff" /> : null}
+              </View>
+              <Text style={styles.tncCheckText}>
+                I agree to the{" "}
+                <Text style={{ fontWeight: "800", color: colors.primary }}>terms & conditions</Text>
+                : customer pays ₹1 to my profile to reveal my number; I provide my service privately.
+              </Text>
+            </TouchableOpacity>
           </View>
 
           <Text style={styles.label}>Description (optional)</Text>
@@ -386,4 +415,24 @@ const styles = StyleSheet.create({
   },
   locManageBtnText: { color: colors.primary, fontWeight: "700", fontSize: 13 },
   help: { fontSize: 11, color: colors.textMuted, marginTop: 16, lineHeight: 16 },
+  // Phone-reveal model T&C card
+  tncCard: {
+    marginTop: 18,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: colors.primary + "0A",
+    borderWidth: 1,
+    borderColor: colors.primary + "33",
+  },
+  tncTitle: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  tncBody: { fontSize: 12, color: colors.textMain, marginTop: 8, lineHeight: 18 },
+  tncCheckRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, marginTop: 12 },
+  tncCheckBox: {
+    width: 22, height: 22, borderRadius: 6,
+    borderWidth: 2, borderColor: colors.border,
+    alignItems: "center", justifyContent: "center",
+    marginTop: 1,
+  },
+  tncCheckBoxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  tncCheckText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 18 },
 });

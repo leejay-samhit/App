@@ -82,6 +82,9 @@ from models import (
     ProviderLocationUpdate,
     DistributorAreaAssign,
     DistributorPromote,
+    AdminTallyWithdrawRequest,
+    RevealPhoneRequest,
+    AddressUpdateRequest,
 )
 
 
@@ -3364,8 +3367,13 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     # COD orders defer this until delivery — credit only on wallet-paid orders
     # so admin's "earned" only reflects money actually collected. COD orders
     # will credit on status → "delivered" via _settle_order_commission.
+    # NOTE (June 2026): platform shop margin is now controlled by the
+    # `shop_margin_enabled` setting. When False (default), margin stays with
+    # the vendor and nothing flows to the admin System Wallet.
+    settings_now = await get_settings()
+    shop_margin_on = bool(settings_now.get("shop_margin_enabled", False))
     platform_total = round(sum(float(it.get("platform_share") or 0) for it in enriched), 2)
-    if platform_total > 0 and payment_method == "wallet":
+    if shop_margin_on and platform_total > 0 and payment_method == "wallet":
         admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin_doc:
             await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
@@ -4924,9 +4932,11 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
             {"id": order_id},
             {"$set": {"payment_status": "paid", "commission_settled": True}},
         )
-        # 2) Admin platform commission
+        # 2) Admin platform commission (skipped when shop_margin_enabled=False)
+        settings_now2 = await get_settings()
+        shop_margin_on2 = bool(settings_now2.get("shop_margin_enabled", False))
         platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
-        if platform_total > 0:
+        if shop_margin_on2 and platform_total > 0:
             admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
             if admin_doc:
                 await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
@@ -8176,8 +8186,10 @@ async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict
         })
     except DuplicateKeyError:
         pass
-    # Credit admin platform fee
-    if admin_share > 0:
+    # Credit admin platform fee (skipped when service_booking_margin_enabled=False)
+    settings_now3 = await get_settings()
+    svc_margin_on = bool(settings_now3.get("service_booking_margin_enabled", False))
+    if svc_margin_on and admin_share > 0:
         admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin:
             await credit_admin_bucket("service_margin", admin_share, also_total_earned=True)
@@ -8240,6 +8252,322 @@ async def my_service_bookings(role: Optional[str] = "all", user: Dict[str, Any] 
         q = {"$or": [{"customer_id": user["id"]}, {"provider_id": user["id"]}]}
     rows = await db.service_bookings.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
     return {"items": rows, "total": len(rows)}
+
+
+# ============================================================
+# Phone-number Reveal Fee (June 2026)
+# Replaces the old "Book full service" flow. Customer pays a small fee
+# (default ₹1 + 18% GST) from their wallet; base fee credits the System
+# Wallet `service_margin` bucket, GST goes into `gst_collected`. The
+# transaction generates an invoice surfaced under "My Service Bills"
+# (collection: phone_reveal_invoices).
+# ============================================================
+@api_router.get("/services/reveal-config")
+async def get_phone_reveal_config(user: Dict[str, Any] = Depends(get_current_user)):
+    """Return fee + GST + user balance + already-revealed providers."""
+    settings = await get_settings()
+    fee = float(settings.get("phone_reveal_fee") or 1.0)
+    gst_pct = float(settings.get("phone_reveal_gst_pct") or 18.0)
+    gst_amt = round(fee * gst_pct / 100.0, 2)
+    total = round(fee + gst_amt, 2)
+    # Providers already revealed by this user (so we can show without re-charging)
+    revealed_rows = await db.phone_reveal_invoices.find(
+        {"user_id": user["id"]}, {"_id": 0, "provider_id": 1}
+    ).to_list(500)
+    return {
+        "fee": fee,
+        "gst_pct": gst_pct,
+        "gst_amount": gst_amt,
+        "total": total,
+        "wallet_balance": float(user.get("wallet_balance") or 0),
+        "revealed_provider_ids": list({r.get("provider_id") for r in revealed_rows if r.get("provider_id")}),
+    }
+
+
+@api_router.post("/services/{provider_id}/reveal-phone")
+async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    """Charge wallet, credit System Wallet (service_margin + gst_collected),
+    write a phone_reveal_invoices doc and return the provider's phone number.
+
+    Idempotent per (user_id, provider_id): if the user has already paid for
+    this provider's phone we just return the existing invoice — no double
+    charge. T&C must be explicitly accepted via `accept_terms=true`.
+    """
+    if not payload.accept_terms:
+        raise HTTPException(status_code=400, detail="You must accept the terms & conditions.")
+    if provider_id == user["id"]:
+        raise HTTPException(status_code=400, detail="You can't reveal your own number")
+    provider = await db.users.find_one({"id": provider_id, "is_service_provider": True})
+    if not provider:
+        raise HTTPException(status_code=404, detail="Service provider not found")
+    if user.get("wallet_frozen"):
+        raise HTTPException(status_code=400, detail="Your wallet is frozen")
+
+    # Idempotency — already revealed once
+    existing = await db.phone_reveal_invoices.find_one(
+        {"user_id": user["id"], "provider_id": provider_id}, {"_id": 0}
+    )
+    if existing:
+        return {
+            "ok": True,
+            "already_revealed": True,
+            "invoice": existing,
+            "provider_phone": provider.get("phone"),
+            "provider_name": provider.get("name"),
+        }
+
+    settings = await get_settings()
+    fee = float(settings.get("phone_reveal_fee") or 1.0)
+    gst_pct = float(settings.get("phone_reveal_gst_pct") or 18.0)
+    gst_amt = round(fee * gst_pct / 100.0, 2)
+    total = round(fee + gst_amt, 2)
+    bal = float(user.get("wallet_balance") or 0)
+    if bal < total:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient wallet balance — need ₹{total:.2f} (₹{fee:.2f} + ₹{gst_amt:.2f} GST). Please top up.",
+        )
+
+    # Atomic wallet debit guarded by balance condition
+    debit_res = await db.users.update_one(
+        {"id": user["id"], "wallet_balance": {"$gte": total}},
+        {"$inc": {"wallet_balance": -total}},
+    )
+    if debit_res.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Insufficient wallet balance — please top up.")
+
+    inv_id = str(uuid.uuid4())
+    ts = now_utc().isoformat()
+    invoice_no = f"PR-{ts[:10].replace('-', '')}-{inv_id[:6].upper()}"
+
+    # Credit admin buckets: fee → service_margin, gst → gst_collected
+    await credit_admin_bucket("service_margin", fee, also_total_earned=True)
+    if gst_amt > 0:
+        await credit_admin_bucket("gst_collected", gst_amt, also_total_earned=False)
+
+    # Customer-side debit transaction
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "phone_reveal_fee",
+            "amount": -total,
+            "status": "success",
+            "description": f"Phone reveal fee for {provider.get('name')} (₹{fee:.2f} + ₹{gst_amt:.2f} GST)",
+            "provider_id": provider_id,
+            "invoice_id": inv_id,
+            "invoice_no": invoice_no,
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
+    # Admin-side credit transaction (records the income side for ledger sums)
+    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if admin_doc:
+        try:
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": admin_doc["id"],
+                "type": "service_margin",
+                "amount": fee,
+                "status": "success",
+                "description": f"Phone reveal fee from {user.get('name')} for {provider.get('name')}",
+                "provider_id": provider_id,
+                "invoice_id": inv_id,
+                "invoice_no": invoice_no,
+                "source_user_name": user.get("name"),
+                "created_at": ts,
+            })
+            if gst_amt > 0:
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": admin_doc["id"],
+                    "type": "gst_collected",
+                    "amount": gst_amt,
+                    "status": "success",
+                    "description": f"GST on phone reveal fee from {user.get('name')}",
+                    "provider_id": provider_id,
+                    "invoice_id": inv_id,
+                    "invoice_no": invoice_no,
+                    "source_user_name": user.get("name"),
+                    "created_at": ts,
+                })
+        except DuplicateKeyError:
+            pass
+
+    branding = await db.branding.find_one({"id": "global"}, {"_id": 0}) or {}
+    invoice = {
+        "id":              inv_id,
+        "invoice_no":      invoice_no,
+        "user_id":         user["id"],
+        "user_name":       user.get("name"),
+        "user_email":      user.get("email"),
+        "provider_id":     provider_id,
+        "provider_name":   provider.get("name"),
+        "provider_phone":  provider.get("phone"),
+        "service_name":    provider.get("service_name"),
+        "service_category": provider.get("service_category"),
+        "fee":             fee,
+        "gst_pct":         gst_pct,
+        "gst_amount":      gst_amt,
+        "total":           total,
+        "currency":        "INR",
+        "biller_name":     branding.get("business_name") or branding.get("app_name") or "NetworkPay",
+        "biller_gst":      branding.get("business_gst"),
+        "biller_address":  branding.get("business_address"),
+        "biller_city":     branding.get("business_city"),
+        "biller_state":    branding.get("business_state"),
+        "biller_pincode":  branding.get("business_pincode"),
+        "created_at":      ts,
+    }
+    await db.phone_reveal_invoices.insert_one(invoice)
+    invoice.pop("_id", None)
+
+    # Notify provider that someone unlocked their number (no PII exchange)
+    try:
+        await _create_notification(
+            provider_id, "service", "Someone got your number",
+            f"{user.get('name')} unlocked your phone via the platform.",
+        )
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "already_revealed": False,
+        "invoice": invoice,
+        "provider_phone": provider.get("phone"),
+        "provider_name":  provider.get("name"),
+    }
+
+
+@api_router.get("/services/reveals/me")
+async def my_phone_reveals(user: Dict[str, Any] = Depends(get_current_user)):
+    """User's phone-reveal invoice history."""
+    items = await db.phone_reveal_invoices.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(200)
+    return {"items": items, "total": len(items)}
+
+
+@api_router.get("/services/reveals/invoice/{invoice_id}")
+async def get_phone_reveal_invoice(invoice_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    inv = await db.phone_reveal_invoices.find_one({"id": invoice_id}, {"_id": 0})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.get("user_id") != user["id"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Not allowed")
+    return inv
+
+
+# ============================================================
+# Admin: Withdraw funds from System Wallet for Account Tally
+# Lets the admin record an off-platform usage of System Wallet funds
+# (e.g. owner withdrew money for personal/business use). Properly
+# audit-logged and reflected in a new collection so the ledger stays
+# transparent.
+# ============================================================
+SYSTEM_WALLET_TALLY_DEFAULT_BUCKET = "direct_added"
+
+
+@api_router.post("/admin/system-wallet/tally-withdraw")
+async def admin_tally_withdraw(
+    payload: AdminTallyWithdrawRequest,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance")),
+):
+    amount = round(float(payload.amount or 0), 2)
+    note = (payload.note or "").strip()
+    bucket = (payload.bucket or SYSTEM_WALLET_TALLY_DEFAULT_BUCKET).strip()
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+    if len(note) < 3:
+        raise HTTPException(status_code=400, detail="Please add a note explaining this withdrawal")
+    if bucket not in SYSTEM_WALLET_BUCKETS:
+        raise HTTPException(status_code=400, detail=f"Invalid bucket. Allowed: {', '.join(SYSTEM_WALLET_BUCKETS)}")
+    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if not admin_doc:
+        raise HTTPException(status_code=500, detail="Admin user not found")
+    bucket_balance = float((admin_doc.get("wallet_buckets") or {}).get(bucket) or 0)
+    if bucket_balance < amount:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient balance in bucket '{bucket}' (₹{bucket_balance:.2f} available)",
+        )
+    ok = await debit_admin_bucket(bucket, amount)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Race condition — try again")
+    wid = str(uuid.uuid4())
+    ts = now_utc().isoformat()
+    record = {
+        "id":            wid,
+        "amount":        amount,
+        "bucket":        bucket,
+        "note":          note[:500],
+        "admin_id":      admin["id"],
+        "admin_email":   admin.get("email"),
+        "created_at":    ts,
+    }
+    await db.system_wallet_tally_withdrawals.insert_one(record)
+    # Mirror as a transaction so reports stay coherent.
+    try:
+        await db.transactions.insert_one({
+            "id":          str(uuid.uuid4()),
+            "user_id":     admin_doc["id"],
+            "type":        "system_wallet_tally_withdraw",
+            "amount":      -amount,
+            "status":      "success",
+            "description": f"Account tally: {note[:120]}",
+            "tally_id":    wid,
+            "bucket":      bucket,
+            "created_at":  ts,
+        })
+    except DuplicateKeyError:
+        pass
+    await _audit_log(
+        admin, "system_wallet.tally_withdraw", "wallet", admin_doc["id"],
+        {"amount": amount, "bucket": bucket, "note": note[:120]},
+    )
+    record.pop("_id", None)
+    return {"ok": True, "withdrawal": record}
+
+
+@api_router.get("/admin/system-wallet/tally-withdrawals")
+async def admin_list_tally_withdrawals(
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance", "manager", "support")),
+):
+    rows = await db.system_wallet_tally_withdrawals.find(
+        {}, {"_id": 0}
+    ).sort("created_at", -1).to_list(500)
+    total = round(sum(float(r.get("amount") or 0) for r in rows), 2)
+    return {"items": rows, "total_count": len(rows), "total_amount": total}
+
+
+# ============================================================
+# Address Edit (authenticated user)
+# Lets a regular user update their delivery / contact address from
+# the Profile screen. KYC-related identity fields are NOT touched.
+# ============================================================
+@api_router.patch("/users/me/address")
+async def update_my_address(payload: AddressUpdateRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    update: Dict[str, Any] = {}
+    if payload.address is not None:
+        update["address"] = (payload.address or "").strip()[:300]
+    if payload.city is not None:
+        update["city"] = (payload.city or "").strip()[:80]
+    if payload.state is not None:
+        update["state"] = (payload.state or "").strip()[:80]
+    if payload.pincode is not None:
+        pc = (payload.pincode or "").strip()
+        if pc and not pc.isdigit():
+            raise HTTPException(status_code=400, detail="Pincode must be numeric")
+        if pc and (len(pc) < 4 or len(pc) > 10):
+            raise HTTPException(status_code=400, detail="Pincode looks invalid")
+        update["pincode"] = pc
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["address_updated_at"] = now_utc().isoformat()
+    await db.users.update_one({"id": user["id"]}, {"$set": update})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    return {"ok": True, "user": fresh}
 
 
 # Include router

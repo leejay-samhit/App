@@ -571,10 +571,109 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Phase 1 Session C — pagination + search across 5 list endpoints"
+    - "Phone-Reveal Fee Flow (POST /services/{id}/reveal-phone, GET /services/reveal-config, GET /services/reveals/me, GET /services/reveals/invoice/{id})"
+    - "Public Ticket Tracker by Email (POST /tickets/public/lookup, GET /tickets/public/{id}, POST /tickets/public/{id}/reply) — verify PII masking"
+    - "Admin System-Wallet Tally Withdraw (POST /admin/system-wallet/tally-withdraw, GET /admin/system-wallet/tally-withdrawals)"
+    - "Address Edit (PATCH /users/me/address)"
+    - "Verify shop_margin_enabled=False and service_booking_margin_enabled=False prevent System Wallet credits on shop checkout / service booking"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+phone_reveal_and_public_tickets_2026_05_28:
+  - task: "Phone reveal fee flow + invoice"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py (~line 8245+)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW endpoints added:
+            GET  /api/services/reveal-config   → returns fee + GST % + total + balance + already-revealed ids
+            POST /api/services/{provider_id}/reveal-phone (body: {accept_terms: true})
+                  → debits wallet (fee + GST), credits System Wallet service_margin + gst_collected
+                    buckets, generates phone_reveal_invoices doc, returns provider phone
+                  → idempotent per (user_id, provider_id) — no double charge
+                  → 400 with "T&C" / "Insufficient wallet" wording
+            GET  /api/services/reveals/me                → user's reveal invoice history
+            GET  /api/services/reveals/invoice/{id}      → single invoice (owner or admin only)
+          Default settings: phone_reveal_fee=1.0, phone_reveal_gst_pct=18.0.
+
+  - task: "Public ticket tracker (email lookup + masked thread + guest reply)"
+    implemented: true
+    working: "NA"
+    file: "backend/routes/tickets.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          NEW endpoints in tickets router:
+            POST /api/tickets/public/lookup    (body: {email})  → 200 list of slim tickets
+            GET  /api/tickets/public/{id}?email=...           → ticket + masked messages
+            POST /api/tickets/public/{id}/reply (body: {email, message}) → adds guest reply
+          PII masking on body text: phone, email, UPI handle, referral code, UTR, PAN, Aadhaar,
+          account-number patterns → replaced with [hidden]. Admin replies pass through unchanged
+          so support's free-text response is readable. 403 returned when email doesn't match
+          the ticket's guest_email/user_email. Reply blocked on closed tickets.
+
+  - task: "Admin: Withdraw for Account Tally"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py (~line 8230+)"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          POST /api/admin/system-wallet/tally-withdraw  (body: {amount, note, bucket})
+            → super_admin / finance only
+            → 400 on amount<=0, short note, or insufficient bucket balance
+            → debits admin's wallet_buckets[<bucket>] AND wallet_balance via debit_admin_bucket
+            → writes a doc to system_wallet_tally_withdrawals AND a mirror txn
+            → audit-logged
+          GET /api/admin/system-wallet/tally-withdrawals → list of recorded withdrawals + totals.
+
+  - task: "Address edit endpoint"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          PATCH /api/users/me/address  (body: {address, city, state, pincode})
+            → updates only fields supplied
+            → 400 on non-numeric or out-of-length pincode
+
+  - task: "Disable shop + service margins by default"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py, backend/core/config.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          New settings: shop_margin_enabled (default False),
+          service_booking_margin_enabled (default False). The /orders/checkout
+          wallet-paid path and the COD settlement path now read this setting
+          before crediting shopping_margin to the admin System Wallet; same
+          for /services/{id}/book and service_margin. Existing margin entries
+          are NOT reversed — only future activity is affected.
 
 phase_1_session_c_pagination_2026_05_27:
   - task: "Phase 1 Session C — pagination + search across 5 list endpoints"
@@ -6757,4 +6856,193 @@ ledger_drift_offline_pre_credit_fix_2026_06:
         edge case, which is a cosmetic Pydantic detail — the call is
         still rejected. Main agent can decide whether to relax the
         model to make this strict 400. Stale credential file noted.
+
+
+backend:
+  - task: "Phone-reveal model: GET /api/services/reveal-config"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ 200 with fee=1.0, gst_pct=18.0, gst_amount=0.18, total=1.18, wallet_balance, revealed_provider_ids. Auth required (401 without bearer)."
+
+  - task: "Phone-reveal model: POST /api/services/{provider_id}/reveal-phone"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Without accept_terms → 400 'You must accept the terms & conditions.' With accept_terms and sufficient wallet (₹50 seeded) → 200; wallet drops by exactly ₹1.18; admin wallet_buckets.service_margin +1.00; gst_collected +0.18. Idempotency confirmed: same provider second call → 200 with already_revealed=true, same invoice id, NO double charge. Invoice carries id/invoice_no/user_id/provider_id/provider_name/provider_phone. Low-balance branch tested separately (₹0 user) returns 400 'Insufficient wallet balance — need ₹1.18 (₹1.00 + ₹0.18 GST). Please top up.' Note: no approved provider existed in env — seeded one directly via Mongo (is_service_provider=True, service_status='approved') to exercise the full flow."
+
+  - task: "Phone-reveal model: GET /api/services/reveals/me & invoice ACL"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ /services/reveals/me returns {items,total}; created invoice present. GET /services/reveals/invoice/{id} returns 200 to owner, 403 to a freshly-registered other user ('Not allowed')."
+
+  - task: "Public guest ticket lookup: POST /api/tickets/public/lookup"
+    implemented: true
+    working: true
+    file: "backend/routes/tickets.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Valid email → 200 with items list (and total). Invalid email 'not-an-email' → 400 'A valid email is required'. No auth required."
+
+  - task: "Public guest ticket thread: GET /api/tickets/public/{id}?email=…"
+    implemented: true
+    working: false
+    file: "backend/routes/tickets.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: false
+          agent: "testing"
+          comment: "❌ PII masking in messages[0].message has a real defect for referral codes. Test input: 'My phone is 9876543210 and my referral is ABC123 and my email is test@gmail.com'. After GET with correct email the masked output is: 'My phone is [phone hidden] and my ref[hidden] is ABC123 and my email is [email hidden] — please help'. Phone ✅ and email ✅ are masked. BUT the referral regex (_RE_REFCODE = r'(?i)\\b(ref(?:erral)?\\s*(?:code|no\\.?|#)?\\s*[:\\-]?\\s*)([A-Z0-9]{4,12})\\b' at backend/routes/tickets.py:248) makes (?:erral)? optional AND the trailing [A-Z0-9]{4,12} is matched case-insensitively. So on 'referral is ABC123' the engine matches group1='ref', group2='erral' — i.e. it eats the letters 'erral' as if they were the code, replaces them with '[hidden]', and leaves the REAL code 'ABC123' completely exposed. Repro: `import re; re.compile(r'(?i)\\b(ref(?:erral)?\\s*(?:code|no\\.?|#)?\\s*[:\\-]?\\s*)([A-Z0-9]{4,12})\\b').search('my referral is ABC123').groups()` → ('ref','erral'). FIX: require the prefix word 'referral'/'ref' to be fully matched and force at least one whitespace/colon before the code, e.g. r'(?i)\\b(ref(?:erral)?\\b\\s*(?:code|no\\.?|#)?\\s*[:\\-]?\\s+)([A-Z0-9]{4,12})\\b' — adding the \\b after `(?:erral)?` and requiring \\s+ between prefix and code stops the engine from consuming 'erral' as the code. The wrong-email 403 path and the rest of the endpoint work correctly."
+        - working: true
+          agent: "testing"
+          comment: "Correct-email returns 200 and ticket payload; wrong-email returns 403 'Email does not match this ticket'. Phone & email masking work. Only referral-code masking is broken — see status entry above."
+
+  - task: "Public guest ticket reply: POST /api/tickets/public/{id}/reply"
+    implemented: true
+    working: true
+    file: "backend/routes/tickets.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Wrong email → 403. Correct email + valid message → 200; message_count increments by exactly 1 (pre=1, post=2)."
+
+  - task: "Admin tally withdraw: POST /api/admin/system-wallet/tally-withdraw"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ amount<=0 → 400 'Amount must be greater than 0'. Short note ('x') → 400 'Please add a note explaining this withdrawal'. Non-admin → 403 'Admin access required'. Real call with bucket='direct_added' returned 400 'Insufficient balance in bucket direct_added (₹0.00 available)' which matches spec (acceptable when bucket is empty). No destructive seeding performed to validate the success path; review explicitly allowed this fallback."
+
+  - task: "Admin tally listing: GET /api/admin/system-wallet/tally-withdrawals"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ 200 returns {items:[], total_count:0, total_amount:0} — all required keys present. Non-admin → 403."
+
+  - task: "User address PATCH: PATCH /api/users/me/address"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ {address,city,state,pincode} → 200 and user.address/city/state/pincode persisted exactly. Invalid pincode 'abc' → 400 'Pincode must be numeric'. Empty body → 400 'Nothing to update'."
+
+  - task: "Margin / phone-reveal toggles in /api/admin/settings"
+    implemented: true
+    working: true
+    file: "backend/core/config.py, backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ /api/admin/settings response now exposes phone_reveal_fee=1.0, phone_reveal_gst_pct=18.0, shop_margin_enabled=False (default), service_booking_margin_enabled=False (default). All four keys present."
+
+metadata:
+  created_by: "testing_agent"
+  version: "1.1"
+  test_sequence: 12
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Public guest ticket thread: GET /api/tickets/public/{id}?email=… (referral-code masking regex bug)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "stuck_first"
+
+agent_communication:
+    - agent: "testing"
+      message: |
+        ── BACKEND TEST RUN — June 2026 endpoint batch ──────────────────
+        62 / 63 checks passed (see /app/backend_test_new.py).
+        FAILURE — PII masking regex for referral codes is broken in
+          /app/backend/routes/tickets.py:248
+            _RE_REFCODE = r"(?i)\b(ref(?:erral)?\s*(?:code|no\.?|#)?\s*[:\-]?\s*)([A-Z0-9]{4,12})\b"
+          For input "my referral is ABC123" the engine matches
+          group1="ref" and group2="erral", replacing 'erral' with
+          '[hidden]' and leaving the real code 'ABC123' UNMASKED. The
+          ticket thread now reads "...my ref[hidden] is ABC123..." which
+          is the opposite of the desired behaviour and a true PII leak.
+          Suggested fix: anchor the word with \b after (?:erral)? AND
+          require at least one whitespace between the prefix and the
+          code, e.g.
+            r"(?i)\b(ref(?:erral)?\b\s*(?:code|no\.?|#)?\s*[:\-]?\s+)([A-Z0-9]{4,12})\b"
+          With that change, 'referral is ABC123' yields
+          'referral is [hidden]'. Please verify the new pattern still
+          matches "ref code ABC123", "ref: ABC123", "ref#ABC123", etc.
+
+        Everything else works as designed:
+          • reveal-config (auth + defaults)
+          • reveal-phone (terms guard, charge ₹1.18, admin buckets
+            +₹1/+₹0.18, idempotency, low-balance branch)
+          • reveals/me, owner-vs-other invoice ACL (403)
+          • /tickets/public/lookup valid+invalid email
+          • /tickets/public/{id} correct vs wrong email (200/403),
+            phone & email masking
+          • /tickets/public/{id}/reply (200 + message_count +1)
+          • tally-withdraw validation (amount, note, non-admin)
+            and bucket-insufficient path
+          • tally-withdrawals listing structure + admin-only
+          • /users/me/address (persist, invalid pincode, empty body)
+          • settings flags phone_reveal_fee, phone_reveal_gst_pct,
+            shop_margin_enabled, service_booking_margin_enabled all
+            present, latter two default to False.
+
+        SEEDING NOTES (so main agent doesn't accidentally re-fix):
+          • There were no approved service providers in the env, so
+            the test seeded ONE user directly in Mongo with
+            is_service_provider=True, service_status='approved' to
+            exercise the reveal flow. This was test-side seeding only;
+            no code was modified.
+          • testuser had ₹0 wallet — seeded ₹50 directly in Mongo
+            (admin /admin/users/{id}/wallet credit requires
+            direct_added bucket which is also ₹0 in this env).
+          • Verified there are no funds in direct_added bucket, so the
+            success path of tally-withdraw could not be exercised; the
+            400 'Insufficient' path was verified.
 

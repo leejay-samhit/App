@@ -40,6 +40,15 @@ export default function Contact() {
           <TouchableOpacity style={styles.cardBtn} onPress={() => router.push("/legal/support-ticket" as any)}><Text style={styles.cardBtnText}>Open</Text></TouchableOpacity>
         </View>
 
+        <View style={styles.card}>
+          <View style={styles.iconBox}><Feather name="search" size={18} color={colors.primary} /></View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cardLabel}>Track my ticket</Text>
+            <Text style={styles.cardValue}>Search by your email to check status & reply</Text>
+          </View>
+          <TouchableOpacity style={styles.cardBtn} onPress={() => router.push("/legal/track-ticket" as any)}><Text style={styles.cardBtnText}>Track</Text></TouchableOpacity>
+        </View>
+
         {address ? (
           <View style={[styles.card, { alignItems: "flex-start" }]}>
             <View style={styles.iconBox}><Feather name="map-pin" size={18} color={colors.primary} /></View>

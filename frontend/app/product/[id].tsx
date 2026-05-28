@@ -283,7 +283,7 @@ export default function ProductDetailScreen() {
           </View>
 
           {/* Styled summary blocks — only show those the admin/vendor filled in */}
-          <StyledBlock icon="dollar-sign" label="PRICE INFO" block={product.price_summary} />
+          <StyledBlock icon="tag" label="PRICE INFO" block={product.price_summary} />
           <StyledBlock icon="shield" label="SERVICE PROTECTION" block={product.protection_summary} />
           <StyledBlock icon="award" label="WARRANTY" block={product.warranty_summary} />
           <StyledBlock icon="truck" label="ESTIMATED DELIVERY" block={product.delivery_summary} />

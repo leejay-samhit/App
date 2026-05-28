@@ -135,7 +135,7 @@ export default function VendorDashboard() {
           <View style={styles.statsGrid}>
             <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
             <StatCard icon="package" label="TODAY ORDERS" value={String(stats.today_orders)} color="#1F5E9E" />
-            <StatCard icon="dollar-sign" label="LIFETIME EARNINGS" value={formatINR(stats.total_earnings)} color={colors.primary} />
+            <StatCard icon="tag" label="LIFETIME EARNINGS" value={formatINR(stats.total_earnings)} color={colors.primary} />
             <StatCard icon="shopping-cart" label="LIFETIME SALES" value={formatINR(stats.total_sales)} color="#7A4A0E" />
             <StatCard icon="box" label="PRODUCTS" value={`${stats.published_count}/${stats.products_count}`} color="#1F5E9E" />
             <StatCard icon="credit-card" label="WALLET" value={formatINR(stats.wallet_balance)} color="#1F6B44" />

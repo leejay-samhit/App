@@ -28,7 +28,7 @@ from core.db import db
 from core.notifications import create_notification
 from core.security import get_current_user, require_admin_role
 from core.utils import now_utc
-from models import TicketCreateRequest, TicketReplyRequest, TicketUpdateRequest, PublicTicketCreateRequest
+from models import TicketCreateRequest, TicketReplyRequest, TicketUpdateRequest, PublicTicketCreateRequest, PublicTicketLookupRequest, PublicTicketReplyRequest
 
 
 router = APIRouter(tags=["tickets"])
@@ -230,6 +230,184 @@ async def create_public_ticket(payload: PublicTicketCreateRequest):
         pass
 
     return {"ok": True, "ticket_id": tid}
+
+
+# ──────────────────────────── PUBLIC ticket TRACKER (by email) ──────────── #
+# Anyone can look up tickets they previously raised using just the email
+# address they entered. PII inside the message body is masked before display
+# to prevent third-party impersonation when the same email is queried by
+# another party. Email is treated as a low-friction identifier — NOT a
+# strong authentication factor. For sensitive workflows users should sign
+# up & use the authenticated `/tickets` endpoints.
+
+# PII masking patterns: phone, email, UPI handle, 10-char alphanumeric
+# referral codes ([A-Z0-9]{6,12} preceded by "referral"/"code"/"ref").
+_RE_PHONE      = _re_email.compile(r"\b(\+?\d[\d\-\s]{7,14}\d)\b")
+_RE_EMAIL_TXT  = _re_email.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_RE_UPI        = _re_email.compile(r"\b[a-zA-Z0-9._-]{3,}@[a-zA-Z][a-zA-Z0-9]{2,15}\b")  # vpa@bank
+_RE_REFCODE    = _re_email.compile(r"(?i)\b(ref(?:erral)?\s*(?:code|no\.?|#)?\s*[:\-]?\s*)([A-Z0-9]{4,12})\b")
+_RE_UTR        = _re_email.compile(r"(?i)\b(utr\s*(?:no\.?|#)?\s*[:\-]?\s*)([A-Z0-9]{8,22})\b")
+_RE_PAN        = _re_email.compile(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b")
+_RE_AADHAAR    = _re_email.compile(r"\b(\d{4}\s?\d{4}\s?\d{4})\b")
+_RE_GENERIC_ID = _re_email.compile(r"(?i)\b(account\s*(?:no\.?|number)?\s*[:\-]?\s*)(\d{6,18})\b")
+
+
+def _mask_pii(text: str) -> str:
+    """Mask phone / email / UPI / referral code / UTR / PAN / Aadhaar etc.
+
+    Replaces each match with a "•••" placeholder so guests reading the
+    public thread don't see another guest's private details if they happen
+    to know the email. Admin replies pass through unchanged so support can
+    answer normally.
+    """
+    if not text:
+        return text
+    s = text
+    s = _RE_PHONE.sub("[phone hidden]", s)
+    s = _RE_EMAIL_TXT.sub("[email hidden]", s)
+    # NOTE: UPI regex overlaps email — apply after email replacement.
+    s = _RE_UPI.sub("[UPI hidden]", s)
+    s = _RE_REFCODE.sub(lambda m: f"{m.group(1)}[hidden]", s)
+    s = _RE_UTR.sub(lambda m: f"{m.group(1)}[hidden]", s)
+    s = _RE_PAN.sub("[PAN hidden]", s)
+    s = _RE_AADHAAR.sub("[Aadhaar hidden]", s)
+    s = _RE_GENERIC_ID.sub(lambda m: f"{m.group(1)}[hidden]", s)
+    return s
+
+
+def _public_safe_ticket(t: Dict[str, Any]) -> Dict[str, Any]:
+    """Public-safe slim view of a ticket — no PII fields exposed."""
+    return {
+        "id": t.get("id"),
+        "subject": t.get("subject"),
+        "category": t.get("category"),
+        "guest_custom_category": t.get("guest_custom_category"),
+        "priority": t.get("priority"),
+        "status": t.get("status"),
+        "message_count": t.get("message_count", 1),
+        "created_at": t.get("created_at"),
+        "updated_at": t.get("updated_at"),
+        "last_message_at": t.get("last_message_at"),
+        "last_message_by": t.get("last_message_by"),
+        "last_message_preview": _mask_pii(t.get("last_message_preview") or ""),
+        "is_guest": True,
+    }
+
+
+def _public_safe_message(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Public-safe view of a single thread message — masks PII from guests,
+    leaves admin replies untouched."""
+    sender = m.get("sender_type") or "user"
+    raw = m.get("message") or ""
+    display = raw if sender == "admin" else _mask_pii(raw)
+    return {
+        "id": m.get("id"),
+        "sender_type": sender,
+        "sender_name": "Support team" if sender == "admin" else "You",
+        "message": display,
+        "created_at": m.get("created_at"),
+    }
+
+
+@router.post("/tickets/public/lookup")
+async def public_ticket_lookup(payload: PublicTicketLookupRequest):
+    """Return tickets created with this email (slim list — no thread)."""
+    email = (payload.email or "").strip().lower()
+    if not _is_email(email):
+        raise HTTPException(status_code=400, detail="A valid email is required")
+    rows = await db.tickets.find(
+        {"$or": [{"guest_email": email}, {"user_email": email}]},
+        {"_id": 0},
+    ).sort("updated_at", -1).to_list(200)
+    items = [_public_safe_ticket(t) for t in rows]
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/tickets/public/{ticket_id}")
+async def public_ticket_thread(ticket_id: str, email: str = ""):
+    """Return the thread for a ticket — only if the caller knows the email."""
+    email = (email or "").strip().lower()
+    if not _is_email(email):
+        raise HTTPException(status_code=400, detail="A valid email is required")
+    t = await db.tickets.find_one({"id": ticket_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if (t.get("guest_email") or t.get("user_email") or "").lower() != email:
+        raise HTTPException(status_code=403, detail="Email does not match this ticket")
+    msgs = await db.ticket_messages.find(
+        {"ticket_id": ticket_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(500)
+    return {
+        "ticket": _public_safe_ticket(t),
+        "messages": [_public_safe_message(m) for m in msgs],
+    }
+
+
+@router.post("/tickets/public/{ticket_id}/reply")
+async def public_ticket_reply(ticket_id: str, payload: PublicTicketReplyRequest):
+    """Guest replies on a public ticket — requires the same email used at creation."""
+    email = (payload.email or "").strip().lower()
+    msg = (payload.message or "").strip()
+    if not _is_email(email):
+        raise HTTPException(status_code=400, detail="A valid email is required")
+    if len(msg) < 2:
+        raise HTTPException(status_code=400, detail="Message is required")
+    if len(msg) > 5000:
+        raise HTTPException(status_code=400, detail="Message is too long (max 5000 chars)")
+    t = await db.tickets.find_one({"id": ticket_id})
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if (t.get("guest_email") or t.get("user_email") or "").lower() != email:
+        raise HTTPException(status_code=403, detail="Email does not match this ticket")
+    if t.get("status") == "closed":
+        raise HTTPException(status_code=400, detail="Ticket is closed — cannot reply")
+
+    # Per-email reply rate limit (shares the same in-memory bucket as creation).
+    now_t = _time_throttle.time()
+    bucket = [t2 for t2 in _GUEST_TKT_RATE.get(email, []) if (now_t - t2) < _GUEST_TKT_WINDOW_S]
+    if len(bucket) >= (_GUEST_TKT_MAX * 3):  # allow ~15 replies per 10min window
+        raise HTTPException(status_code=429, detail="Too many messages from this email. Please wait a few minutes.")
+    bucket.append(now_t)
+    _GUEST_TKT_RATE[email] = bucket
+
+    ts = now_utc().isoformat()
+    preview = _short_preview(msg)
+    display_name = t.get("guest_name") or t.get("user_name") or email.split("@")[0]
+    await db.ticket_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "ticket_id": ticket_id,
+        "sender_id": t.get("user_id"),
+        "sender_type": "user",
+        "sender_name": display_name,
+        "sender_email": email,
+        "is_guest": True,
+        "message": msg,
+        "attachment_b64": None,
+        "created_at": ts,
+    })
+    update: Dict[str, Any] = {
+        "last_message_at": ts,
+        "last_message_by": "user",
+        "last_message_preview": preview,
+        "updated_at": ts,
+        "has_unread_admin": True,
+        "has_unread_user": False,
+    }
+    if t.get("status") == "resolved":
+        update["status"] = "in_progress"
+    await db.tickets.update_one(
+        {"id": ticket_id}, {"$set": update, "$inc": {"message_count": 1}}
+    )
+    try:
+        await _notify_support_admins(
+            "Guest replied to ticket",
+            f"{display_name} ({email}): {t.get('subject', 'Ticket update')}",
+            ticket_id,
+        )
+    except Exception:
+        pass
+    t2 = await db.tickets.find_one({"id": ticket_id}, {"_id": 0})
+    return {"ok": True, "ticket": _public_safe_ticket(t2 or t)}
 
 
 @router.get("/tickets/me")

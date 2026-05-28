@@ -121,6 +121,36 @@ export default function AdminSystemWallet() {
   const [remarks, setRemarks] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Account-tally withdraw modal — debits the System Wallet when admin uses
+  // platform money for personal/business reasons. Properly audit-logged.
+  const [tallyOpen, setTallyOpen] = useState(false);
+  const [tallyAmount, setTallyAmount] = useState("");
+  const [tallyNote, setTallyNote] = useState("");
+  const [tallyBucket, setTallyBucket] = useState<string>("direct_added");
+  const [tallyBusy, setTallyBusy] = useState(false);
+
+  const submitTally = async () => {
+    const amt = Number(tallyAmount);
+    if (!amt || amt <= 0) return Alert.alert("Amount required");
+    if (tallyNote.trim().length < 3) return Alert.alert("Please add a short note (min 3 chars).");
+    setTallyBusy(true);
+    try {
+      await api.post("/admin/system-wallet/tally-withdraw", {
+        amount: amt,
+        note: tallyNote.trim(),
+        bucket: tallyBucket,
+      });
+      setTallyOpen(false);
+      setTallyAmount(""); setTallyNote(""); setTallyBucket("direct_added");
+      await load();
+      Alert.alert("Recorded", `Withdrew ${formatINR(amt)} from System Wallet for account tally.`);
+    } catch (e) {
+      Alert.alert("Could not record", formatApiError(e));
+    } finally {
+      setTallyBusy(false);
+    }
+  };
+
   // Reconcile state
   const [reconciling, setReconciling] = useState(false);
 
@@ -556,6 +586,19 @@ export default function AdminSystemWallet() {
         <Text style={styles.helpText}>Only Direct-Added funds can be posted to user wallets.</Text>
 
         <TouchableOpacity
+          style={[styles.depositBtn, { backgroundColor: "#B45309", marginTop: 12 }]}
+          onPress={() => setTallyOpen(true)}
+          testID="open-tally-withdraw"
+        >
+          <Feather name="minus-circle" size={18} color="#fff" />
+          <Text style={styles.depositBtnText}>Withdraw for Account Tally</Text>
+        </TouchableOpacity>
+        <Text style={styles.helpText}>
+          Use this when the System Wallet's money has been spent off-platform (e.g.
+          for personal or business use). Properly audit-logged.
+        </Text>
+
+        <TouchableOpacity
           style={[styles.reconcileBtn, reconciling && { opacity: 0.6 }]}
           onPress={runReconcile}
           disabled={reconciling}
@@ -592,7 +635,7 @@ export default function AdminSystemWallet() {
                 const fan = sourceBreakdown.fan_out?.[s];
                 const amt = row?.amount || 0;
                 const cnt = row?.count || 0;
-                const icon = s === "razorpay" ? "credit-card" : s === "upi_manual" ? "smartphone" : "dollar-sign";
+                const icon = s === "razorpay" ? "credit-card" : s === "upi_manual" ? "smartphone" : "tag";
                 const label = s === "razorpay" ? "Razorpay Gateway" : s === "upi_manual" ? "UPI Manual" : "Offline / Cash";
                 return (
                   <View key={s} style={localStyles.srcRow} testID={`src-row-${s}`}>
@@ -692,6 +735,98 @@ export default function AdminSystemWallet() {
             <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
               <TouchableOpacity style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} onPress={() => setDepositOpen(false)}><Text style={{ fontWeight: "700", color: colors.textMain }}>Cancel</Text></TouchableOpacity>
               <TouchableOpacity style={[styles.modalBtn, { backgroundColor: colors.primary }, submitting && { opacity: 0.6 }]} onPress={submitDeposit} disabled={submitting}>{submitting ? <ActivityIndicator color="#fff" /> : <Text style={{ fontWeight: "800", color: "#fff" }}>Deposit</Text>}</TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ───────── Account-Tally Withdraw modal ───────── */}
+      <Modal visible={tallyOpen} transparent animationType="slide" onRequestClose={() => setTallyOpen(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.modalBg}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <Text style={styles.modalTitle}>Withdraw for Account Tally</Text>
+            <Text style={styles.modalSub}>
+              Record a withdrawal from the System Wallet for off-platform usage. Audit-logged.
+            </Text>
+            <Text style={styles.label}>Amount (₹)</Text>
+            <TextInput
+              style={styles.input}
+              value={tallyAmount}
+              onChangeText={setTallyAmount}
+              placeholder="1000"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="numeric"
+              testID="tally-amount"
+            />
+            <Text style={styles.label}>From bucket</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+              {[
+                { k: "direct_added", l: "Direct-Added (UTR)" },
+                { k: "service_margin", l: "Service Margin" },
+                { k: "shopping_margin", l: "Sales Margin" },
+                { k: "referral_commission", l: "Admin Wallet" },
+              ].map((b) => (
+                <TouchableOpacity
+                  key={b.k}
+                  onPress={() => setTallyBucket(b.k)}
+                  style={[
+                    {
+                      paddingHorizontal: 12,
+                      paddingVertical: 7,
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: tallyBucket === b.k ? colors.primary : colors.border,
+                      backgroundColor: tallyBucket === b.k ? colors.primary : colors.surface,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      fontWeight: "700",
+                      color: tallyBucket === b.k ? "#fff" : colors.textMain,
+                    }}
+                  >
+                    {b.l}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.label}>Note (audit log)</Text>
+            <TextInput
+              style={[styles.input, { minHeight: 70, textAlignVertical: "top" }]}
+              value={tallyNote}
+              onChangeText={setTallyNote}
+              placeholder="What was this used for?"
+              placeholderTextColor={colors.textMuted}
+              multiline
+              maxLength={500}
+              testID="tally-note"
+            />
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}
+                onPress={() => setTallyOpen(false)}
+              >
+                <Text style={{ fontWeight: "700", color: colors.textMain }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.modalBtn,
+                  { backgroundColor: "#B45309" },
+                  tallyBusy && { opacity: 0.6 },
+                ]}
+                onPress={submitTally}
+                disabled={tallyBusy}
+                testID="tally-confirm"
+              >
+                {tallyBusy ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={{ fontWeight: "800", color: "#fff" }}>Record withdrawal</Text>
+                )}
+              </TouchableOpacity>
             </View>
           </View>
         </KeyboardAvoidingView>

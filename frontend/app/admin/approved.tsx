@@ -175,7 +175,7 @@ export default function AdminApproved() {
                 {item.phone ? <Meta icon="phone" text={item.phone} /> : null}
                 {item.referral_code ? <Meta icon="hash" text={item.referral_code} /> : null}
                 {item.referred_by ? <Meta icon="user-plus" text={`sponsor ${item.referred_by}`} /> : null}
-                {typeof item.wallet_balance_at_approval === "number" ? <Meta icon="dollar-sign" text={formatINR(item.wallet_balance_at_approval)} /> : null}
+                {typeof item.wallet_balance_at_approval === "number" ? <Meta icon="tag" text={formatINR(item.wallet_balance_at_approval)} /> : null}
                 {item.payment_method ? <Meta icon="credit-card" text={item.payment_method} /> : null}
                 {item.source ? <Meta icon="user-check" text={item.source} /> : null}
               </View>

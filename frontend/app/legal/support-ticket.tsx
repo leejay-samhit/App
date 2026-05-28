@@ -25,13 +25,14 @@ const CATEGORIES: { key: string; label: string; icon: any }[] = [
 ];
 
 const BODY_TEMPLATE =
-  "Hi Team\n\n" +
-  "Name :- \n" +
-  "My mail id :- \n" +
-  "Referral code :- \n" +
-  "Mobile No :- \n" +
-  "UTR No :- \n\n" +
-  "Please explain your detailed issue. We'll resolve it within 48 hours.";
+  "Hi Team,\n\n" +
+  "I'm facing the following issue:\n\n" +
+  "[Describe what happened]\n\n" +
+  "Steps I tried so far:\n" +
+  "- \n" +
+  "- \n\n" +
+  "Note: For your privacy, please DO NOT include your phone, referral code, " +
+  "UTR or UPI ID here. We can reach you via the email above.";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

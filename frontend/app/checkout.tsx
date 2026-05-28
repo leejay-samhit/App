@@ -217,7 +217,7 @@ export default function CheckoutScreen() {
             testID="pay-cod"
           >
             <View style={styles.radio}>{paymentMethod === "cod" ? <View style={styles.radioDot} /> : null}</View>
-            <Feather name="dollar-sign" size={20} color={colors.primary} />
+            <Feather name="tag" size={20} color={colors.primary} />
             <View style={{ flex: 1 }}>
               <Text style={styles.paymentTitle}>Cash on Delivery</Text>
               <Text style={styles.paymentSub}>Pay cash to the delivery agent on arrival</Text>

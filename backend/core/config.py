@@ -43,6 +43,19 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "directs_required": DIRECTS_REQUIRED,
     "vendor_commission_pct": 70,
     "auto_approve_on_payment": True,
+    # ── Service Provider — "Get phone number" reveal fee (June 2026 model) ──
+    # Customer pays this small fee to reveal a service-provider's phone number
+    # (replaces the old "book and charge full service rate" flow). GST is
+    # collected separately and credited to `gst_collected` bucket of the
+    # System Wallet. The base fee lands in `service_margin` bucket.
+    "phone_reveal_fee": 1.0,            # ₹ per reveal — admin-configurable
+    "phone_reveal_gst_pct": 18.0,       # GST percent on top of the base fee
+    # ── Platform margin toggles (June 2026 — admin can disable) ──
+    # When False, shop orders and service bookings will NOT route any
+    # share to the platform System Wallet. Existing transactions are
+    # untouched; this only affects future activity.
+    "shop_margin_enabled": False,
+    "service_booking_margin_enabled": False,
 }
 
 # ---- GST ----

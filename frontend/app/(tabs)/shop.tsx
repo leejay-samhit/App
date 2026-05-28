@@ -818,7 +818,7 @@ export default function ShopScreen() {
                   <Text style={styles.modalRowText}>Pincode {contactOf.service_pincode}</Text>
                 </View>
                 <View style={[styles.modalRow, { marginBottom: 14 }]}>
-                  <Feather name="dollar-sign" size={14} color={colors.textMuted} />
+                  <Feather name="tag" size={14} color={colors.textMuted} />
                   <Text style={[styles.modalRowText, { fontWeight: "800", color: colors.primary }]}>{formatINR(contactOf.service_charge || 0)}</Text>
                 </View>
 

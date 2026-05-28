@@ -10,7 +10,6 @@ import { colors, radii, spacing } from "../../src/theme";
 
 const ITEMS = [
   { icon: "message-circle", label: "Chat (team + users)", route: "/admin/chat" },
-  { icon: "credit-card",    label: "My wallet (personal)", route: "/admin/my-wallet" },
   { icon: "shield", label: "Admin access", route: "/admin/admins" },
   { icon: "user-check", label: "User approvals", route: "/admin/approvals" },
   { icon: "check-circle", label: "Approved registrations", route: "/admin/approved" },
@@ -21,7 +20,7 @@ const ITEMS = [
   { icon: "briefcase", label: "Service applications", route: "/admin/service-applications" },
   { icon: "grid", label: "Service Application Management", route: "/admin/service-management" },
   { icon: "map", label: "Distributor Network · Area Mapping", route: "/admin/area-mapping" },
-  { icon: "dollar-sign", label: "System Wallet (treasury)", route: "/admin/system-wallet" },
+  { icon: "briefcase", label: "System Wallet (treasury)", route: "/admin/system-wallet" },
   { icon: "users", label: "All vendors", route: "/admin/vendors" },
   { icon: "edit-3", label: "Branding & theme", route: "/admin/branding" },
   { icon: "hard-drive", label: "Data backups", route: "/admin/backups" },

@@ -391,7 +391,7 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
                         testID={`new-user-source-${s}`}
                       >
                         <Feather
-                          name={s === "razorpay" ? "credit-card" : s === "upi_manual" ? "smartphone" : "dollar-sign"}
+                          name={s === "razorpay" ? "credit-card" : s === "upi_manual" ? "smartphone" : "tag"}
                           size={13}
                           color={active ? "#fff" : colors.primary}
                         />

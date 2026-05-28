@@ -15,9 +15,10 @@ import {
   Image,
   KeyboardAvoidingView,
   Platform,
+  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Feather } from "@expo/vector-icons";
+import { Feather, MaterialIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
@@ -64,7 +65,15 @@ export default function ProviderProfileScreen() {
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [booking, setBooking] = useState(false);
+  const [revealing, setRevealing] = useState(false);
+  const [revealedPhone, setRevealedPhone] = useState<string | null>(null);
+  const [revealedInvoiceId, setRevealedInvoiceId] = useState<string | null>(null);
+  const [revealConfig, setRevealConfig] = useState<{
+    fee: number; gst_pct: number; gst_amount: number; total: number;
+    wallet_balance: number; revealed_provider_ids: string[];
+  } | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -77,6 +86,26 @@ export default function ProviderProfileScreen() {
       setRefreshing(false);
     }
   }, [id]);
+
+  // Pre-fetch reveal config so we can show fee + warn if already revealed.
+  useEffect(() => {
+    (async () => {
+      if (!user) return;
+      try {
+        const { data } = await api.get("/services/reveal-config");
+        setRevealConfig(data);
+        if (id && data?.revealed_provider_ids?.includes(id)) {
+          // Already paid for this provider — auto-show phone
+          try {
+            const prof = await api.get(`/services/${id}/profile`);
+            setRevealedPhone(prof.data?.phone ?? null);
+          } catch {}
+        }
+      } catch {
+        // non-fatal — endpoint may 401 on stale token
+      }
+    })();
+  }, [user, id]);
 
   useEffect(() => {
     load();
@@ -106,38 +135,64 @@ export default function ProviderProfileScreen() {
     }
   };
 
-  const handleBook = async () => {
+  const handleReveal = async () => {
     if (!user) {
-      Alert.alert("Login required", "Please log in to book a service.");
+      Alert.alert("Login required", "Please log in to get the provider's phone number.");
       return;
     }
-    if (!p?.service_charge || p.service_charge <= 0) {
-      Alert.alert("No fixed charge", "Please contact the provider directly to negotiate.");
+    if (!p) return;
+    // Already revealed earlier → just open dialer
+    if (revealedPhone) {
+      Linking.openURL(`tel:${revealedPhone}`).catch(() => Alert.alert("Cannot open dialer"));
       return;
     }
-    Alert.alert(
-      "Confirm booking",
-      `Book "${p.service_name}" for ${formatINR(p.service_charge)}? Amount will be debited from your wallet.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Book",
-          style: "default",
-          onPress: async () => {
-            setBooking(true);
-            try {
-              await api.post(`/services/${id}/book`, {});
-              Alert.alert("Booked!", "The provider has been notified.");
-              await load();
-            } catch (e) {
-              Alert.alert("Booking failed", formatApiError(e));
-            } finally {
-              setBooking(false);
-            }
-          },
-        },
-      ],
-    );
+    // Show confirm sheet with fee + GST breakdown + T&C
+    setTermsAccepted(false);
+    setConfirmOpen(true);
+  };
+
+  const confirmRevealAndPay = async () => {
+    if (!termsAccepted) {
+      Alert.alert("Terms required", "Please accept the terms & conditions to continue.");
+      return;
+    }
+    setRevealing(true);
+    try {
+      const { data } = await api.post<{
+        ok: boolean;
+        already_revealed: boolean;
+        invoice: { id: string };
+        provider_phone: string;
+      }>(`/services/${id}/reveal-phone`, { accept_terms: true });
+      setRevealedPhone(data.provider_phone);
+      setRevealedInvoiceId(data.invoice?.id || null);
+      setConfirmOpen(false);
+      // Refresh reveal-config so UI knows balance changed
+      try {
+        const { data: cfg } = await api.get("/services/reveal-config");
+        setRevealConfig(cfg);
+      } catch {}
+      // Auto open dialer after a brief pause
+      setTimeout(() => {
+        Linking.openURL(`tel:${data.provider_phone}`).catch(() => {});
+      }, 400);
+    } catch (e: any) {
+      const msg = formatApiError(e);
+      if (/insufficient/i.test(msg) || /top up/i.test(msg)) {
+        Alert.alert(
+          "Insufficient wallet balance",
+          msg,
+          [
+            { text: "Cancel", style: "cancel" },
+            { text: "Top up wallet", onPress: () => router.push("/(tabs)/wallet" as any) },
+          ],
+        );
+      } else {
+        Alert.alert("Couldn't unlock phone", msg);
+      }
+    } finally {
+      setRevealing(false);
+    }
   };
 
   if (loading) {
@@ -206,7 +261,7 @@ export default function ProviderProfileScreen() {
             <Text style={styles.factValue}>{p.service_pincode || "—"}</Text>
           </View>
           <View style={styles.factCard}>
-            <Feather name="dollar-sign" size={14} color={colors.primary} />
+            <MaterialIcons name="currency-rupee" size={16} color={colors.primary} />
             <Text style={styles.factLabel}>Charge</Text>
             <Text style={styles.factValue}>{p.service_charge ? formatINR(p.service_charge) : "On request"}</Text>
           </View>
@@ -273,17 +328,156 @@ export default function ProviderProfileScreen() {
         </View>
       </ScrollView>
 
-      {/* Fixed Book CTA */}
+      {/* Get-Phone-Number CTA */}
       <View style={styles.ctaBar}>
-        <View>
-          <Text style={styles.ctaPrice}>{p.service_charge ? formatINR(p.service_charge) : "On request"}</Text>
-          <Text style={styles.ctaSub}>per booking</Text>
+        <View style={{ flex: 1 }}>
+          {revealedPhone ? (
+            <>
+              <Text style={[styles.ctaPrice, { fontSize: 16 }]}>{revealedPhone}</Text>
+              <Text style={styles.ctaSub}>Tap to call</Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.ctaPrice}>
+                {revealConfig ? formatINR(revealConfig.total) : "₹1 + GST"}
+              </Text>
+              <Text style={styles.ctaSub}>
+                {revealConfig
+                  ? `₹${revealConfig.fee.toFixed(2)} fee + ₹${revealConfig.gst_amount.toFixed(2)} GST`
+                  : "to unlock phone"}
+              </Text>
+            </>
+          )}
         </View>
-        <TouchableOpacity onPress={handleBook} disabled={booking} style={[styles.ctaBtn, booking && { opacity: 0.6 }]} testID="book-btn">
-          <Feather name="calendar" size={16} color="#fff" />
-          <Text style={styles.ctaBtnText}>{booking ? "Booking…" : "Book Now"}</Text>
+        <TouchableOpacity
+          onPress={handleReveal}
+          disabled={revealing}
+          style={[styles.ctaBtn, revealing && { opacity: 0.6 }]}
+          testID="get-phone-btn"
+        >
+          <Feather name={revealedPhone ? "phone-call" : "phone"} size={16} color="#fff" />
+          <Text style={styles.ctaBtnText}>
+            {revealing
+              ? "Processing…"
+              : revealedPhone
+                ? "Call now"
+                : "Get phone number"}
+          </Text>
         </TouchableOpacity>
       </View>
+
+      {/* Confirm reveal modal — shows breakdown + T&C checkbox + Pay button */}
+      <Modal
+        visible={confirmOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setConfirmOpen(false)}
+      >
+        <View style={styles.modalBg}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <View style={styles.revealHero}>
+              <View style={styles.revealHeroIcon}>
+                <Feather name="phone" size={28} color="#fff" />
+              </View>
+              <Text style={styles.modalTitle}>Unlock provider's phone</Text>
+              <Text style={styles.revealSubtitle}>
+                Pay a one-time fee to get {p.name?.split(" ")[0] || "this provider"}'s direct number.
+                You'll be able to call them anytime after that.
+              </Text>
+            </View>
+            {/* Fee breakdown */}
+            <View style={styles.feeCard}>
+              <View style={styles.feeRow}>
+                <Text style={styles.feeLabel}>Service fee</Text>
+                <Text style={styles.feeValue}>
+                  {revealConfig ? formatINR(revealConfig.fee) : "—"}
+                </Text>
+              </View>
+              <View style={styles.feeRow}>
+                <Text style={styles.feeLabel}>
+                  GST ({revealConfig ? `${revealConfig.gst_pct.toFixed(0)}%` : "18%"})
+                </Text>
+                <Text style={styles.feeValue}>
+                  {revealConfig ? formatINR(revealConfig.gst_amount) : "—"}
+                </Text>
+              </View>
+              <View style={[styles.feeRow, styles.feeTotalRow]}>
+                <Text style={styles.feeTotalLabel}>Total payable</Text>
+                <Text style={styles.feeTotalValue}>
+                  {revealConfig ? formatINR(revealConfig.total) : "—"}
+                </Text>
+              </View>
+              <View style={styles.feeRow}>
+                <Text style={[styles.feeLabel, { color: colors.textMuted }]}>Your wallet</Text>
+                <Text
+                  style={[
+                    styles.feeValue,
+                    {
+                      color:
+                        revealConfig &&
+                        (revealConfig.wallet_balance ?? 0) < (revealConfig.total ?? 0)
+                          ? "#B3261E"
+                          : colors.textMuted,
+                    },
+                  ]}
+                >
+                  {revealConfig ? formatINR(revealConfig.wallet_balance) : "—"}
+                </Text>
+              </View>
+            </View>
+            {/* T&C */}
+            <TouchableOpacity
+              onPress={() => setTermsAccepted((v) => !v)}
+              style={styles.tncRow}
+              testID="reveal-tnc-checkbox"
+            >
+              <View style={[styles.tncBox, termsAccepted && styles.tncBoxOn]}>
+                {termsAccepted ? <Feather name="check" size={14} color="#fff" /> : null}
+              </View>
+              <Text style={styles.tncText}>
+                I agree that{" "}
+                <Text style={{ fontWeight: "800", color: colors.textMain }}>
+                  {revealConfig ? formatINR(revealConfig.total) : "the fee"}
+                </Text>{" "}
+                will be deducted from my wallet to unlock the provider's phone number.
+                Terms & conditions apply.
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={confirmRevealAndPay}
+              disabled={!termsAccepted || revealing}
+              style={[
+                styles.modalBtn,
+                (!termsAccepted || revealing) && { opacity: 0.5 },
+              ]}
+              testID="reveal-confirm-btn"
+            >
+              {revealing ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.modalBtnText}>Pay & unlock</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setConfirmOpen(false)}
+              style={{ paddingVertical: 12, alignItems: "center" }}
+            >
+              <Text style={{ color: colors.textMuted, fontWeight: "700" }}>Cancel</Text>
+            </TouchableOpacity>
+            {revealedInvoiceId ? (
+              <TouchableOpacity
+                onPress={() => router.push(`/services/invoice/${revealedInvoiceId}` as any)}
+                style={{ paddingVertical: 6, alignItems: "center" }}
+              >
+                <Text style={{ color: colors.primary, fontWeight: "700", fontSize: 12 }}>
+                  View invoice
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
 
       {/* Review modal */}
       <Modal visible={reviewOpen} transparent animationType="slide" onRequestClose={() => setReviewOpen(false)}>
@@ -375,4 +569,19 @@ const styles = StyleSheet.create({
   modalInput: { borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 12, minHeight: 90, textAlignVertical: "top", fontSize: 14, color: colors.textMain, backgroundColor: colors.surface },
   modalBtn: { backgroundColor: colors.primary, paddingVertical: 14, borderRadius: 999, alignItems: "center", marginTop: 14 },
   modalBtnText: { color: "#fff", fontWeight: "900", fontSize: 14, letterSpacing: 0.3 },
+  // Get-Phone-Number flow
+  revealHero: { alignItems: "center", marginBottom: 16 },
+  revealHeroIcon: { width: 60, height: 60, borderRadius: 30, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center", marginBottom: 12 },
+  revealSubtitle: { fontSize: 13, color: colors.textMuted, textAlign: "center", marginTop: 8, paddingHorizontal: 12, lineHeight: 19 },
+  feeCard: { backgroundColor: colors.surfaceMuted, padding: 14, borderRadius: 14, marginVertical: 12 },
+  feeRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 6 },
+  feeLabel: { fontSize: 13, color: colors.textMain, fontWeight: "600" },
+  feeValue: { fontSize: 13, color: colors.textMain, fontWeight: "800" },
+  feeTotalRow: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: 4, paddingTop: 10 },
+  feeTotalLabel: { fontSize: 14, color: colors.textMain, fontWeight: "900" },
+  feeTotalValue: { fontSize: 16, color: colors.primary, fontWeight: "900" },
+  tncRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, paddingHorizontal: 4, paddingVertical: 8 },
+  tncBox: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.border, alignItems: "center", justifyContent: "center", marginTop: 2 },
+  tncBoxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  tncText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 18 },
 });
