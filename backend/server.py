@@ -85,6 +85,13 @@ from models import (
     AdminTallyWithdrawRequest,
     RevealPhoneRequest,
     AddressUpdateRequest,
+    ProviderAvailabilityRequest,
+    UserLocationUpdate,
+    ServiceSubcategoryCreate,
+    ServiceSubcategoryUpdate,
+    CategoryReorderRequest,
+    AITextRequest,
+    AIImageRequest,
 )
 
 
@@ -7501,6 +7508,11 @@ async def list_services(
         "service_pincode": 1, "service_charge": 1, "service_description": 1,
         "service_approved_at": 1,
         "service_location": 1, "location_sharing": 1, "location_updated_at": 1,
+        # Provider availability (June 2026) — independent of live location.
+        # Drives the green/yellow/gray dot shown next to a provider in the
+        # services listing & detail screen.
+        "availability_status": 1,
+        "availability_updated_at": 1,
     }
 
     # ----- Geo path ----------------------------------------------------------
@@ -8059,6 +8071,7 @@ async def get_service_provider_profile(provider_id: str):
             "service_languages": 1, "service_pincode": 1, "service_charge": 1,
             "service_description": 1, "service_approved_at": 1,
             "location_updated_at": 1, "profile_image": 1, "kyc_status": 1,
+            "availability_status": 1, "availability_updated_at": 1,
         },
     )
     if not p:
@@ -8568,6 +8581,282 @@ async def update_my_address(payload: AddressUpdateRequest, user: Dict[str, Any] 
     await db.users.update_one({"id": user["id"]}, {"$set": update})
     fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
     return {"ok": True, "user": fresh}
+
+
+# ============================================================
+# Provider Availability (Available / Busy / Offline)
+# ============================================================
+_AVAIL_STATUSES = {"available", "busy", "offline"}
+
+
+@api_router.patch("/services/me/availability")
+async def update_my_availability(payload: ProviderAvailabilityRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    """Provider toggles their own visibility status. Independent of location
+    sharing — this is the green/yellow/gray dot users see next to them.
+    """
+    if not user.get("is_service_provider"):
+        raise HTTPException(status_code=403, detail="Only service providers can set availability")
+    status = (payload.status or "").lower().strip()
+    if status not in _AVAIL_STATUSES:
+        raise HTTPException(status_code=400, detail="status must be one of: available, busy, offline")
+    ts = now_utc().isoformat()
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"availability_status": status, "availability_updated_at": ts}},
+    )
+    return {"ok": True, "availability_status": status, "availability_updated_at": ts}
+
+
+# ============================================================
+# Customer Location Capture (foreground GPS — no background tracking)
+# ============================================================
+@api_router.post("/users/me/location")
+async def save_user_location(payload: UserLocationUpdate, user: Dict[str, Any] = Depends(get_current_user)):
+    """Persist a single foreground GPS sample. Frontend should call this
+    only when the user explicitly taps "Use my location" — never on app
+    resume / background.
+    """
+    try:
+        lat = float(payload.latitude)
+        lng = float(payload.longitude)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid latitude / longitude")
+    if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+        raise HTTPException(status_code=400, detail="Latitude or longitude out of range")
+    ts = now_utc().isoformat()
+    update: Dict[str, Any] = {
+        "user_location": {"type": "Point", "coordinates": [lng, lat]},
+        "user_location_lat": lat,
+        "user_location_lng": lng,
+        "user_location_updated_at": ts,
+    }
+    if payload.accuracy_m is not None:
+        update["user_location_accuracy_m"] = float(payload.accuracy_m)
+    if payload.address:  update["address"] = payload.address.strip()[:300]
+    if payload.city:     update["city"]    = payload.city.strip()[:80]
+    if payload.state:    update["state"]   = payload.state.strip()[:80]
+    if payload.pincode:  update["pincode"] = payload.pincode.strip()[:10]
+    await db.users.update_one({"id": user["id"]}, {"$set": update})
+    fresh = await db.users.find_one(
+        {"id": user["id"]},
+        {"_id": 0, "user_location_lat": 1, "user_location_lng": 1, "address": 1,
+         "city": 1, "state": 1, "pincode": 1, "user_location_updated_at": 1},
+    )
+    return {"ok": True, "location": fresh}
+
+
+# ============================================================
+# Service Subcategories  (CRUD + reorder)
+# ============================================================
+@api_router.get("/service-subcategories")
+async def list_service_subcategories(parent_id: Optional[str] = None):
+    """Public — used by the user app when picking a sub-category."""
+    filt: Dict[str, Any] = {"active": True}
+    if parent_id:
+        filt["parent_id"] = parent_id
+    rows = await db.service_subcategories.find(
+        filt, {"_id": 0}
+    ).sort([("sort_order", 1), ("name", 1)]).to_list(500)
+    return {"items": rows, "total": len(rows)}
+
+
+@api_router.get("/admin/service-subcategories")
+async def admin_list_service_subcategories(parent_id: Optional[str] = None, admin: Dict[str, Any] = Depends(require_admin)):
+    filt: Dict[str, Any] = {}
+    if parent_id:
+        filt["parent_id"] = parent_id
+    rows = await db.service_subcategories.find(
+        filt, {"_id": 0}
+    ).sort([("sort_order", 1), ("name", 1)]).to_list(500)
+    return {"items": rows, "total": len(rows)}
+
+
+@api_router.post("/admin/service-subcategories")
+async def admin_create_subcategory(payload: ServiceSubcategoryCreate, admin: Dict[str, Any] = Depends(require_admin)):
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    parent = await db.service_categories.find_one({"id": payload.parent_id})
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent category not found")
+    slug = (payload.slug or re.sub(r"[^a-z0-9-]+", "-", name.lower())).strip("-")[:60]
+    dup = await db.service_subcategories.find_one({"parent_id": payload.parent_id, "name": name})
+    if dup:
+        raise HTTPException(status_code=400, detail="A subcategory with this name already exists under that parent")
+    cnt = await db.service_subcategories.count_documents({"parent_id": payload.parent_id})
+    doc = {
+        "id":          str(uuid.uuid4()),
+        "parent_id":   payload.parent_id,
+        "name":        name,
+        "slug":        slug,
+        "icon":        payload.icon,
+        "image_b64":   payload.image_b64,
+        "description": (payload.description or "").strip()[:500],
+        "sort_order":  payload.sort_order if payload.sort_order is not None else cnt,
+        "active":      bool(payload.active),
+        "created_at":  now_utc().isoformat(),
+    }
+    await db.service_subcategories.insert_one(doc)
+    doc.pop("_id", None)
+    await _audit_log(admin, "service_subcategory.create", "subcategory", doc["id"], {"name": name})
+    return {"ok": True, "subcategory": doc}
+
+
+@api_router.patch("/admin/service-subcategories/{sub_id}")
+async def admin_update_subcategory(sub_id: str, payload: ServiceSubcategoryUpdate, admin: Dict[str, Any] = Depends(require_admin)):
+    existing = await db.service_subcategories.find_one({"id": sub_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Not found")
+    update: Dict[str, Any] = {}
+    if payload.name is not None:        update["name"] = payload.name.strip()[:80]
+    if payload.icon is not None:        update["icon"] = payload.icon
+    if payload.image_b64 is not None:   update["image_b64"] = payload.image_b64 or None
+    if payload.description is not None: update["description"] = payload.description.strip()[:500]
+    if payload.sort_order is not None:  update["sort_order"] = int(payload.sort_order)
+    if payload.active is not None:      update["active"] = bool(payload.active)
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_utc().isoformat()
+    await db.service_subcategories.update_one({"id": sub_id}, {"$set": update})
+    fresh = await db.service_subcategories.find_one({"id": sub_id}, {"_id": 0})
+    await _audit_log(admin, "service_subcategory.update", "subcategory", sub_id, update)
+    return {"ok": True, "subcategory": fresh}
+
+
+@api_router.delete("/admin/service-subcategories/{sub_id}")
+async def admin_delete_subcategory(sub_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    existing = await db.service_subcategories.find_one({"id": sub_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Not found")
+    await db.service_subcategories.delete_one({"id": sub_id})
+    await _audit_log(admin, "service_subcategory.delete", "subcategory", sub_id, {"name": existing.get("name")})
+    return {"ok": True}
+
+
+@api_router.post("/admin/service-categories/reorder")
+async def admin_reorder_categories(payload: CategoryReorderRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    """Bulk update `sort_order` on a list of categories — used by admin drag-drop."""
+    for it in payload.items[:200]:
+        cid = str(it.get("id") or "").strip()
+        try:
+            so = int(it.get("sort_order") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not cid:
+            continue
+        await db.service_categories.update_one({"id": cid}, {"$set": {"sort_order": so}})
+    await _audit_log(admin, "service_category.reorder", "category", "bulk", {"count": len(payload.items)})
+    return {"ok": True, "updated": len(payload.items)}
+
+
+@api_router.post("/admin/service-subcategories/reorder")
+async def admin_reorder_subcategories(payload: CategoryReorderRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    for it in payload.items[:500]:
+        sid = str(it.get("id") or "").strip()
+        try:
+            so = int(it.get("sort_order") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not sid:
+            continue
+        await db.service_subcategories.update_one({"id": sid}, {"$set": {"sort_order": so}})
+    return {"ok": True, "updated": len(payload.items)}
+
+
+# ============================================================
+# AI Generation — Service Descriptions / Category Copy / Icons
+# Uses the Emergent LLM Key (loaded by load_dotenv at startup).
+# ============================================================
+_AI_TEXT_SYSTEM_PROMPTS: Dict[str, str] = {
+    "service_description": (
+        "You write concise, persuasive descriptions for Indian local service "
+        "providers (plumber, electrician, AC repair etc). Keep it under "
+        "{max_words} words. Tone: {tone}. Avoid emojis."
+    ),
+    "category_description": (
+        "You write short (under {max_words} words) descriptions of service "
+        "categories on a marketplace app. Tone: {tone}. Be specific about "
+        "what's covered."
+    ),
+    "marketing": (
+        "Write punchy {tone} marketing copy under {max_words} words for an "
+        "Indian fintech / services marketplace."
+    ),
+    "service_title": (
+        "Suggest a short (3-6 word) service title. Tone: {tone}. Output ONLY "
+        "the title, no quotes or punctuation."
+    ),
+    "improve": (
+        "Improve the following text. Make it more {tone} and clearer. Keep "
+        "under {max_words} words. Output ONLY the improved text."
+    ),
+}
+
+
+@api_router.post("/admin/ai/text")
+async def admin_ai_text(payload: AITextRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    """Generate or refine text with GPT-5.4 via Emergent LLM Key."""
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI library not available on server")
+    api_key = os.getenv("EMERGENT_LLM_KEY") or ""
+    if not api_key:
+        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY is not configured")
+    kind = (payload.kind or "service_description").lower()
+    tmpl = _AI_TEXT_SYSTEM_PROMPTS.get(kind, _AI_TEXT_SYSTEM_PROMPTS["service_description"])
+    system = tmpl.format(max_words=max(20, min(payload.max_words or 80, 250)), tone=(payload.tone or "professional"))
+    user_text = payload.prompt.strip()
+    if kind == "improve" and payload.existing:
+        user_text = f"{payload.existing}\n\n[Refine this. Context: {payload.prompt}]"
+    if not user_text:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+    try:
+        chat = LlmChat(api_key=api_key, session_id=f"ai-text-{admin['id']}-{uuid.uuid4().hex[:6]}", system_message=system)
+        chat.with_model("openai", "gpt-4o-mini")
+        out = await chat.send_message(UserMessage(text=user_text))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI provider error: {str(e)[:120]}")
+    return {"ok": True, "text": (out or "").strip()}
+
+
+@api_router.post("/admin/ai/image")
+async def admin_ai_image(payload: AIImageRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    """Generate a category icon or service banner with Gemini Nano Banana.
+    Returns base64 PNG that the admin can attach to the category doc directly.
+    """
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI library not available on server")
+    api_key = os.getenv("EMERGENT_LLM_KEY") or ""
+    if not api_key:
+        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY is not configured")
+    style = (payload.style or "flat-icon").lower()
+    style_hint = {
+        "flat-icon":   "flat vector icon, single subject, no text, transparent-feeling background, vibrant color, centred, 1024x1024",
+        "banner":      "horizontal banner, marketing photo, professional lighting, no text, clean composition",
+        "illustration":"clean modern flat illustration, no text, vibrant colours",
+        "hero":        "premium hero image, professional, no text, dramatic lighting",
+    }.get(style, "")
+    final_prompt = f"{payload.prompt.strip()}. {style_hint}".strip()
+    if not final_prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+    try:
+        chat = LlmChat(api_key=api_key, session_id=f"ai-img-{admin['id']}-{uuid.uuid4().hex[:6]}", system_message="You are an icon designer.")
+        chat.with_model("gemini", "gemini-3.1-flash-image-preview").with_params(modalities=["image", "text"])
+        text, images = await chat.send_message_multimodal_response(UserMessage(text=final_prompt))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI provider error: {str(e)[:120]}")
+    if not images:
+        raise HTTPException(status_code=502, detail="AI returned no image")
+    img0 = images[0]
+    return {
+        "ok": True,
+        "text": (text or "").strip()[:200],
+        "image_b64": img0.get("data"),
+        "mime_type": img0.get("mime_type") or "image/png",
+    }
 
 
 # Include router

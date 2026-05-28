@@ -16,7 +16,7 @@ ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@app.com')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Admin@123')
 
 # ---- MLM / payout config ----
-REGISTRATION_FEE = float(os.environ.get('REGISTRATION_FEE', 100))
+REGISTRATION_FEE = float(os.environ.get('REGISTRATION_FEE', 118))
 PAYOUT_PER_LEVEL = float(os.environ.get('PAYOUT_PER_LEVEL', 400))
 LEVEL_2_PAYOUT = float(os.environ.get('LEVEL_2_PAYOUT', 100))
 LEVEL_3_PAYOUT = float(os.environ.get('LEVEL_3_PAYOUT', 50))

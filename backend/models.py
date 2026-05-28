@@ -398,6 +398,74 @@ class AddressUpdateRequest(BaseModel):
     pincode: Optional[str] = None
 
 
+# ─────────────── Provider Availability (June 2026) ─────────────── #
+class ProviderAvailabilityRequest(BaseModel):
+    """Service-provider self-toggle for visibility status. Independent of
+    live-location sharing — this is purely an "I'm taking jobs / I'm busy /
+    I'm offline" flag the provider controls from their dashboard.
+    """
+    status: str  # "available" | "busy" | "offline"
+
+
+# ─────────────── User location capture (foreground GPS) ────────── #
+class UserLocationUpdate(BaseModel):
+    """Customer 'Use my location' tap — captures one foreground GPS sample.
+    Used to prioritise nearby providers. Not for background tracking.
+    """
+    latitude: float
+    longitude: float
+    accuracy_m: Optional[float] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+
+
+# ─────────────── Service Subcategory CRUD ─────────────────────── #
+class ServiceSubcategoryCreate(BaseModel):
+    parent_id: str
+    name: str
+    slug: Optional[str] = None
+    icon: Optional[str] = None
+    image_b64: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    active: bool = True
+
+
+class ServiceSubcategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    image_b64: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    active: Optional[bool] = None
+
+
+class CategoryReorderRequest(BaseModel):
+    """Bulk reorder — admin drags & drops categories or subcategories.
+    Items: [{id: str, sort_order: int}, …]"""
+    items: List[Dict[str, Any]]
+
+
+# ─────────────── AI Generation (Emergent LLM Key) ─────────────── #
+class AITextRequest(BaseModel):
+    """Generate / improve service descriptions, category copy, marketing
+    text. `kind` hints the prompt scaffolding to use server-side."""
+    kind: str  # "service_description" | "category_description" | "marketing" | "service_title" | "improve"
+    prompt: str
+    existing: Optional[str] = None  # used by "improve" — original text to refine
+    tone: Optional[str] = "professional"  # professional | friendly | bold | concise
+    max_words: Optional[int] = 80
+
+
+class AIImageRequest(BaseModel):
+    """Generate a category icon / service banner image with Nano Banana.
+    Returns base64 PNG that the admin can save into the category doc."""
+    prompt: str
+    style: Optional[str] = "flat-icon"  # flat-icon | banner | illustration | hero
+
+
 class PaymentGatewayPayload(BaseModel):
     key_id: str
     key_secret: str

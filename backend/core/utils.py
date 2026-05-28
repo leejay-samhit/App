@@ -33,6 +33,16 @@ async def get_settings() -> Dict[str, Any]:
         return {**DEFAULT_SETTINGS, "id": "global"}
     # Backfill any missing level keys with defaults so older docs still work
     merged = {**DEFAULT_SETTINGS, **doc}
+    # ── Safety guard (June 2026) ──
+    # If admin ever saves the registration fee as 0 (or somehow ends up empty
+    # in storage) the UI will display "Scan to Pay ₹0", which breaks the
+    # entire onboarding funnel. Coerce to the platform default so the
+    # payment flow always shows a sensible amount.
+    try:
+        if float(merged.get("registration_fee") or 0) <= 0:
+            merged["registration_fee"] = DEFAULT_SETTINGS["registration_fee"]
+    except (TypeError, ValueError):
+        merged["registration_fee"] = DEFAULT_SETTINGS["registration_fee"]
     return merged
 
 

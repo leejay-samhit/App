@@ -62,6 +62,9 @@ type ServiceProvider = {
   distance_km?: number | null;
   is_active?: boolean;
   location_updated_at?: string | null;
+  // June 2026 — provider-controlled availability dot.
+  availability_status?: "available" | "busy" | "offline" | null;
+  availability_updated_at?: string | null;
 };
 type Mode = "shop" | "services";
 
@@ -210,6 +213,17 @@ export default function ShopScreen() {
         return;
       }
       setMyCoords({ lat: c.lat, lng: c.lng });
+      // June 2026 — persist the foreground sample so backend can show
+      // nearby providers in the user panel even after re-login.
+      try {
+        await api.post("/users/me/location", {
+          latitude: c.lat,
+          longitude: c.lng,
+          accuracy_m: c.accuracy_m ?? null,
+        });
+      } catch {
+        // non-fatal: nearby still works from in-memory coords
+      }
     } finally {
       setLocating(false);
     }
@@ -741,6 +755,20 @@ export default function ShopScreen() {
                           </View>
                           <View style={{ flex: 1 }}>
                             <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                              {/* June 2026 availability dot — green/yellow/gray. */}
+                              {(() => {
+                                const av = s.availability_status || "available";
+                                const dotBg = av === "available" ? "#16A34A" : av === "busy" ? "#F59E0B" : "#9CA3AF";
+                                return (
+                                  <View
+                                    style={{
+                                      width: 9, height: 9, borderRadius: 5,
+                                      backgroundColor: dotBg,
+                                      borderWidth: 1.5, borderColor: "#fff",
+                                    }}
+                                  />
+                                );
+                              })()}
                               <Text style={styles.serviceName} numberOfLines={1}>{s.name}</Text>
                               {s.is_active ? (
                                 <View style={styles.activeDot}>

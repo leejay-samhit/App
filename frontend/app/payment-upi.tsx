@@ -29,6 +29,7 @@ import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { useSmsUtrListener, isSmsConsentAvailable } from "../src/sms-utr";
 import QRCode from "react-native-qrcode-svg";
+import { LinearGradient } from "expo-linear-gradient";
 
 type Config = {
   methods_enabled: { razorpay: boolean; upi_manual: boolean };
@@ -242,12 +243,29 @@ export default function UpiManualPayment() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
 
-          {/* Header */}
-          <View style={styles.header}>
-            <Text style={styles.eyebrow}>{(brand.app_name || "App").toUpperCase()}</Text>
-            <Text style={styles.h1}>Pay {formatINR(cfg.amount)} to activate</Text>
-            <Text style={styles.subtle}>UPI manual payment · approval by admin</Text>
-          </View>
+          {/* Premium gradient header — Deep Blue + Purple + Cyan glow (June 2026) */}
+          <LinearGradient
+            colors={["#0A0E27", "#1E2A78", "#5B21B6"]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.heroGradient}
+          >
+            {/* Subtle cyan glow blob — gives a fintech "PhonePe / Cred" feel. */}
+            <View style={styles.heroGlow} pointerEvents="none" />
+            <Text style={styles.heroEyebrow}>{(brand.app_name || "App").toUpperCase()} · PAY TO ACTIVATE</Text>
+            <Text style={styles.heroAmount}>{formatINR(cfg.amount)}</Text>
+            <Text style={styles.heroSub}>Registration fee · paid once, refundable per policy</Text>
+            <View style={styles.heroPillRow}>
+              <View style={styles.heroPill}>
+                <Feather name="shield" size={11} color="#A5F3FC" />
+                <Text style={styles.heroPillText}>{"  "}Secure UPI</Text>
+              </View>
+              <View style={styles.heroPill}>
+                <Feather name="zap" size={11} color="#A5F3FC" />
+                <Text style={styles.heroPillText}>{"  "}Instant verify</Text>
+              </View>
+            </View>
+          </LinearGradient>
 
           {/* Pending banner */}
           {isPending ? (
@@ -342,7 +360,7 @@ export default function UpiManualPayment() {
 
             {cfg.deeplink_prefix ? (
               <View style={styles.qrCard}>
-                <Text style={styles.qrCardTitle}>Scan to pay ₹{formatINR(cfg.registration_fee)}</Text>
+                <Text style={styles.qrCardTitle}>Scan to pay {formatINR(cfg.amount)}</Text>
                 <Text style={styles.qrCardSub}>Open Google Pay / PhonePe / Paytm → tap "Scan QR" → point at this code</Text>
                 <View style={styles.qrBox}>
                   <QRCode
@@ -468,6 +486,38 @@ const styles = StyleSheet.create({
   eyebrow: { fontSize: 11, fontWeight: "900", color: colors.textMuted, letterSpacing: 1.6 },
   h1: { fontSize: 26, fontWeight: "900", color: colors.textMain, letterSpacing: -0.5, marginTop: 6 },
   subtle: { fontSize: 13, color: colors.textMuted, lineHeight: 19, marginTop: 6 },
+  // Premium gradient hero (June 2026) — Deep Blue + Purple + Cyan glow
+  heroGradient: {
+    borderRadius: 24,
+    padding: 22,
+    marginBottom: 16,
+    overflow: "hidden",
+    position: "relative",
+    shadowColor: "#5B21B6",
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.30,
+    shadowRadius: 28,
+    elevation: 12,
+  },
+  heroGlow: {
+    position: "absolute",
+    top: -60, right: -40,
+    width: 200, height: 200, borderRadius: 100,
+    backgroundColor: "#06B6D4",
+    opacity: 0.18,
+  },
+  heroEyebrow: { fontSize: 10, fontWeight: "900", color: "#A5F3FC", letterSpacing: 2 },
+  heroAmount: { fontSize: 44, fontWeight: "900", color: "#fff", letterSpacing: -1, marginTop: 10 },
+  heroSub: { fontSize: 12, color: "#C7D2FE", marginTop: 6, lineHeight: 17 },
+  heroPillRow: { flexDirection: "row", gap: 8, marginTop: 16 },
+  heroPill: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1, borderColor: "rgba(165,243,252,0.30)",
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 999,
+  },
+  heroPillText: { fontSize: 11, color: "#E0E7FF", fontWeight: "700" },
 
   banner: { flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 14, borderRadius: 14, borderWidth: 1, marginBottom: 14 },
   bannerTitle: { fontSize: 14, fontWeight: "900" },

@@ -175,6 +175,30 @@ export default function ProfileScreen() {
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
+            {/* Provider availability — only relevant when already an approved service provider. */}
+            {(user as any)?.service_provider_status === "approved" ? (
+              <>
+                <View style={styles.rowDivider} />
+                <TouchableOpacity
+                  onPress={() => router.push("/service-availability" as any)}
+                  style={styles.rowItem}
+                  testID="profile-availability-link"
+                >
+                  {(() => {
+                    const av = (user as any)?.availability_status || "available";
+                    const c = av === "available" ? "#16A34A" : av === "busy" ? "#F59E0B" : "#9CA3AF";
+                    return <View style={[styles.kycDot, { backgroundColor: c }]} />;
+                  })()}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.kycTitle}>My Availability</Text>
+                    <Text style={styles.kycSub}>
+                      {((user as any)?.availability_status || "available").toUpperCase()} — TAP TO CHANGE
+                    </Text>
+                  </View>
+                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                </TouchableOpacity>
+              </>
+            ) : null}
           </View>
 
           <Text style={styles.groupLabel}>PAYOUT DETAILS</Text>
