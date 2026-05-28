@@ -506,6 +506,10 @@ class ServiceCategoryCreate(BaseModel):
     color: Optional[str] = Field(default="#2563EB", max_length=12)
     sort_order: Optional[int] = 0
     active: Optional[bool] = True
+    # ─── Premium image fields (June 2026) ───
+    image_b64: Optional[str] = None        # category card image (small, ~256x256)
+    banner_b64: Optional[str] = None       # category banner image (1200x400)
+    description: Optional[str] = Field(default=None, max_length=500)
 
 
 class ServiceCategoryUpdate(BaseModel):
@@ -515,6 +519,9 @@ class ServiceCategoryUpdate(BaseModel):
     color: Optional[str] = Field(default=None, max_length=12)
     sort_order: Optional[int] = None
     active: Optional[bool] = None
+    image_b64: Optional[str] = None
+    banner_b64: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=500)
 
 
 class ProviderLocationUpdate(BaseModel):

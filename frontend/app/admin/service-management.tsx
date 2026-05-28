@@ -309,6 +309,25 @@ function CategoryEditor({
                 maxLength={40}
               />
 
+              {/* June 2026 — quick AI helper: opens the dedicated AI Tools screen
+                  pre-filled with this category's name so admin can copy back the
+                  generated description / icon. Keeps the category form simple. */}
+              <TouchableOpacity
+                onPress={() => router.push("/admin/ai-tools" as any)}
+                style={{
+                  flexDirection: "row", alignItems: "center", justifyContent: "center",
+                  backgroundColor: "#0EA5E9",
+                  paddingVertical: 10, paddingHorizontal: 14,
+                  borderRadius: 999, marginTop: 10, alignSelf: "flex-start",
+                }}
+                testID="cat-ai-helper"
+              >
+                <Feather name="zap" size={13} color="#fff" />
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>
+                  {"  "}Generate description / icon with AI
+                </Text>
+              </TouchableOpacity>
+
               <Text style={styles.label}>Icon</Text>
               <View style={styles.pickerGrid}>
                 {ICON_PRESETS.map((i) => {

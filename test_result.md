@@ -7296,3 +7296,40 @@ agent_communication:
            • DELETE /admin/service-subcategories/{id} → 200 ok:true (cleanup verified). ✓
 
         No regressions observed; all six Phase-D endpoint groups behave as designed.
+
+
+    - agent: "testing"
+      message: |
+        ── BACKEND TEST RUN — Small additions follow-up (May 2026) ─────────────
+        Vs https://vendor-network-app-1.preview.emergentagent.com/api
+        Script: /app/tests/category_image_smoke.py
+        Result: 34 / 34 checks PASSED, 0 FAILED.
+
+        1) Category image/description fields (admin):
+           • POST /api/admin/service-categories with {image_b64, banner_b64, description} → 200,
+             response.category echoes all three fields verbatim. ✓
+           • GET /api/admin/service-categories → row contains image_b64, banner_b64, description. ✓
+           • Public GET /api/services/categories → same fields also present in the public payload. ✓
+           • DELETE /api/admin/service-categories/{id} → 200 cleanup. ✓
+
+        2) /api/services list filters (public):
+           • ?subcategory_id=NONEXISTENT → 200 with items=[] (no 4xx/5xx). ✓
+           • ?availability=available → 200; current DB returned 0 items (no approved providers
+             with availability_status=="available"). All inspected items honour the filter.
+           • ?availability=invalid → 200 (silently ignored, no 500). ✓
+
+        3) /api/admin/service-analytics pincode filter:
+           • Baseline → 200, keys=[availability, categories, reveal_stats, applications, generated_at].
+           • ?pincode=500001 → 200 with identical shape. ✓
+           • ?pincode=NONEXISTENT_ZIP → 200, availability={available:0,busy:0,offline:0,unset:0},
+             sum(category.provider_count)==0. ✓
+
+        4) Regression smoke:
+           • GET /api/branding → 200 with gradient (dict), button_style="pill", home_banner_b64 key present. ✓
+           • GET /api/payment/config (testuser) → 200, amount=118.0 (≥118). ✓
+           • POST /api/admin/ai/text {kind:"category_description", prompt:"AC repair home services",
+             tone:"friendly", max_words:40} → 200, returned 215-char text starting
+             "Beat the heat with our AC repair services!". ✓
+
+        No 4xx/5xx outside the expected admin-auth gate. All six review-request groups pass.
+

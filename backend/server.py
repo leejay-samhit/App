@@ -7474,6 +7474,8 @@ async def list_services(
     pincode: Optional[str] = None,
     category: Optional[str] = None,
     category_id: Optional[str] = None,
+    subcategory_id: Optional[str] = None,
+    availability: Optional[str] = None,  # filter to "available" | "busy" | "offline"
     language: Optional[str] = None,
     lat: Optional[float] = None,
     lng: Optional[float] = None,
@@ -7494,6 +7496,10 @@ async def list_services(
         base_filt["category_id"] = category_id
     elif category and category != "all":
         base_filt["service_category"] = category
+    if subcategory_id:
+        base_filt["service_subcategory_id"] = subcategory_id
+    if availability and availability in {"available", "busy", "offline"}:
+        base_filt["availability_status"] = availability
     if language:
         base_filt["service_languages"] = language
     if q:
@@ -7662,6 +7668,9 @@ async def admin_create_service_category(
         "color": payload.color or "#2563EB",
         "sort_order": int(payload.sort_order or 0),
         "active": True if payload.active is None else bool(payload.active),
+        "image_b64": payload.image_b64 or None,
+        "banner_b64": payload.banner_b64 or None,
+        "description": (payload.description or "").strip()[:500] if payload.description else None,
         "created_at": now_utc().isoformat(),
     }
     await db.service_categories.insert_one(doc)
@@ -8866,8 +8875,12 @@ async def admin_ai_image(payload: AIImageRequest, admin: Dict[str, Any] = Depend
 
 
 @api_router.get("/admin/service-analytics")
-async def admin_service_analytics(admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_service_analytics(pincode: Optional[str] = None, admin: Dict[str, Any] = Depends(require_admin)):
     """Compact analytics for the Service Management screen.
+
+    Optional `pincode` query parameter filters provider counts and revenue
+    to a single area — used by the admin's "live data filter" UI to spot
+    coverage gaps and demand pockets by location.
 
     Returns:
       - provider counts by availability (available / busy / offline / unset)
@@ -8875,9 +8888,13 @@ async def admin_service_analytics(admin: Dict[str, Any] = Depends(require_admin)
       - phone-reveal invoice totals (last 30d + lifetime)
       - service application counts by status
     """
-    # Provider availability bucket
+    pin_filter: Dict[str, Any] = {}
+    if pincode:
+        pin_filter["service_pincode"] = pincode.strip()
+
+    # Provider availability bucket (scoped by pincode when provided)
     avail_pipeline = [
-        {"$match": {"is_service_provider": True}},
+        {"$match": {"is_service_provider": True, **pin_filter}},
         {"$group": {"_id": "$availability_status", "count": {"$sum": 1}}},
     ]
     avail_rows = await db.users.aggregate(avail_pipeline).to_list(20)
@@ -8896,13 +8913,13 @@ async def admin_service_analytics(admin: Dict[str, Any] = Depends(require_admin)
     counts_by_id: Dict[str, int] = {}
     counts_by_name: Dict[str, int] = {}
     async for r in db.users.aggregate([
-        {"$match": {"is_service_provider": True}},
+        {"$match": {"is_service_provider": True, **pin_filter}},
         {"$group": {"_id": "$category_id", "count": {"$sum": 1}}},
     ]):
         if r.get("_id"):
             counts_by_id[str(r["_id"])] = int(r.get("count") or 0)
     async for r in db.users.aggregate([
-        {"$match": {"is_service_provider": True, "category_id": {"$in": [None, ""]}}},
+        {"$match": {"is_service_provider": True, "category_id": {"$in": [None, ""]}, **pin_filter}},
         {"$group": {"_id": "$service_category", "count": {"$sum": 1}}},
     ]):
         if r.get("_id"):

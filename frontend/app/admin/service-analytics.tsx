@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl,
+  ActivityIndicator, RefreshControl, TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -27,18 +27,22 @@ export default function ServiceAnalytics() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // June 2026 — pincode live-data filter (admin can scope KPIs to one area).
+  const [pincode, setPincode] = useState("");
+  const [appliedPincode, setAppliedPincode] = useState<string>("");
 
   const load = useCallback(async () => {
     try {
       setErr(null);
-      const { data } = await api.get<Analytics>("/admin/service-analytics");
+      const q = appliedPincode ? `?pincode=${encodeURIComponent(appliedPincode)}` : "";
+      const { data } = await api.get<Analytics>(`/admin/service-analytics${q}`);
       setData(data);
     } catch (e) {
       setErr(formatApiError(e));
     } finally {
       setLoading(false); setRefreshing(false);
     }
-  }, []);
+  }, [appliedPincode]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -72,6 +76,46 @@ export default function ServiceAnalytics() {
         contentContainerStyle={{ padding: spacing.screen, paddingBottom: 40 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
+        {/* June 2026 — pincode live filter */}
+        <View style={s.filterBar}>
+          <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Feather name="map-pin" size={14} color={colors.textMuted} />
+            <TextInput
+              style={s.pinInput}
+              value={pincode}
+              onChangeText={setPincode}
+              placeholder="Filter by pincode (e.g. 500001)"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="numeric"
+              maxLength={6}
+              returnKeyType="search"
+              onSubmitEditing={() => { setLoading(true); setAppliedPincode(pincode.trim()); }}
+              testID="analytics-pincode"
+            />
+          </View>
+          {appliedPincode ? (
+            <TouchableOpacity
+              onPress={() => { setPincode(""); setAppliedPincode(""); setLoading(true); }}
+              style={s.clearBtn}
+            >
+              <Feather name="x" size={13} color="#fff" />
+              <Text style={s.clearBtnText}>{"  "}Clear</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              onPress={() => { setLoading(true); setAppliedPincode(pincode.trim()); }}
+              style={s.applyBtn}
+              disabled={!pincode.trim()}
+            >
+              <Feather name="filter" size={13} color="#fff" />
+              <Text style={s.clearBtnText}>{"  "}Apply</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        {appliedPincode ? (
+          <Text style={s.scopeLine}>Showing live data scoped to pincode {appliedPincode}</Text>
+        ) : null}
+
         {/* Provider availability KPIs */}
         <Text style={s.section}>PROVIDER AVAILABILITY</Text>
         <View style={s.kpiRow}>
@@ -184,4 +228,27 @@ const s = StyleSheet.create({
   catIcon: { width: 32, height: 32, borderRadius: 10, alignItems: "center", justifyContent: "center" },
   catName: { flex: 1, fontSize: 13, color: colors.textMain, fontWeight: "700" },
   catCount: { fontSize: 13, fontWeight: "900", color: colors.primary },
+  // June 2026 — pincode filter bar
+  filterBar: { flexDirection: "row", gap: 8, alignItems: "center" },
+  pinInput: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: radii.input, paddingHorizontal: 14, paddingVertical: 11,
+    borderWidth: 1, borderColor: colors.border,
+    fontSize: 13, color: colors.textMain,
+  },
+  applyBtn: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: colors.primary,
+    paddingHorizontal: 14, paddingVertical: 11,
+    borderRadius: radii.input,
+  },
+  clearBtn: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: "#B45309",
+    paddingHorizontal: 14, paddingVertical: 11,
+    borderRadius: radii.input,
+  },
+  clearBtnText: { color: "#fff", fontWeight: "800", fontSize: 12 },
+  scopeLine: { fontSize: 10, color: colors.primary, fontWeight: "700", marginTop: 6 },
 });

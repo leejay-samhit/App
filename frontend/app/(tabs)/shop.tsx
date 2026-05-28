@@ -113,6 +113,9 @@ export default function ShopScreen() {
   const [searchQ, setSearchQ] = useState("");
   const [pincodeQ, setPincodeQ] = useState("");
   const [categoryId, setCategoryId] = useState<string | null>(null); // null = "all"
+  // June 2026 — second-level filter. Loaded when categoryId changes; null = no sub-filter.
+  const [subcategoryId, setSubcategoryId] = useState<string | null>(null);
+  const [subcategories, setSubcategories] = useState<{ id: string; name: string; icon?: string }[]>([]);
   const [languageQ, setLanguageQ] = useState<string | null>(null);
   // Language picker modal (replaces inline chips per UX redesign)
   const [langModalOpen, setLangModalOpen] = useState(false);
@@ -173,6 +176,7 @@ export default function ShopScreen() {
       if (searchQ) params.q = searchQ;
       if (pincodeQ) params.pincode = pincodeQ;
       if (categoryId) params.category_id = categoryId;
+      if (subcategoryId) params.subcategory_id = subcategoryId;
       if (languageQ) params.language = languageQ;
       if (myCoords) {
         params.lat = String(myCoords.lat);
@@ -233,6 +237,25 @@ export default function ShopScreen() {
     if (mode === "shop") loadShop();
     else loadServices();
   }, [mode, loadShop, loadServices]));
+
+  // June 2026 — load subcategories when category changes (user-side picker).
+  useEffect(() => {
+    if (!categoryId) {
+      setSubcategories([]); setSubcategoryId(null); return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get<{ items: { id: string; name: string; icon?: string }[] }>(
+          `/service-subcategories?parent_id=${encodeURIComponent(categoryId)}`,
+        );
+        if (!cancelled) setSubcategories(data.items || []);
+      } catch {
+        if (!cancelled) setSubcategories([]);
+      }
+    })();
+    setSubcategoryId(null);
+  }, [categoryId]);
 
   // Phase E: Real-time-ish stock sync — poll the shop list every 30s while the
   // tab is focused so vendor stock changes appear without the customer having
@@ -651,6 +674,40 @@ export default function ShopScreen() {
                   })}
                   {/* Language tile removed — moved to small icon button at top-right of services header */}
                 </View>
+                {/* June 2026 — subcategory chip strip, visible only after a category is picked */}
+                {categoryId && subcategories.length > 0 ? (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{ paddingHorizontal: 14, paddingTop: 6, paddingBottom: 4, gap: 6 }}
+                  >
+                    <TouchableOpacity
+                      onPress={() => { setSubcategoryId(null); loadServices(); }}
+                      style={[
+                        styles.subChip,
+                        subcategoryId === null && styles.subChipOn,
+                      ]}
+                    >
+                      <Text style={[styles.subChipText, subcategoryId === null && { color: "#fff" }]}>All</Text>
+                    </TouchableOpacity>
+                    {subcategories.map((s) => {
+                      const on = subcategoryId === s.id;
+                      return (
+                        <TouchableOpacity
+                          key={s.id}
+                          onPress={() => { setSubcategoryId(on ? null : s.id); loadServices(); }}
+                          style={[styles.subChip, on && styles.subChipOn]}
+                          testID={`subchip-${s.id}`}
+                        >
+                          {s.icon ? <Feather name={s.icon as any} size={12} color={on ? "#fff" : colors.textMain} /> : null}
+                          <Text style={[styles.subChipText, on && { color: "#fff" }]}>
+                            {s.icon ? "  " : ""}{s.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                ) : null}
               </View>
             )}
 
@@ -1053,6 +1110,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6, alignItems: "center", justifyContent: "center",
   },
   catCountText: { color: "#fff", fontSize: 10, fontWeight: "800" },
+  // June 2026 — subcategory chip strip (user side)
+  subChip: {
+    flexDirection: "row", alignItems: "center",
+    paddingHorizontal: 12, paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  subChipOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  subChipText: { fontSize: 12, fontWeight: "700", color: colors.textMain },
 
   // Language filter row
   langRow: {
