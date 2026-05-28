@@ -37,12 +37,15 @@ async def get_settings() -> Dict[str, Any]:
     # If admin ever saves the registration fee as 0 (or somehow ends up empty
     # in storage) the UI will display "Scan to Pay ₹0", which breaks the
     # entire onboarding funnel. Coerce to the platform default so the
-    # payment flow always shows a sensible amount.
+    # payment flow always shows a sensible amount. Hard floor of 118 so
+    # accidental low values can't ship.
+    HARD_FLOOR = 118.0
     try:
-        if float(merged.get("registration_fee") or 0) <= 0:
-            merged["registration_fee"] = DEFAULT_SETTINGS["registration_fee"]
+        fee = float(merged.get("registration_fee") or 0)
+        if fee < HARD_FLOOR:
+            merged["registration_fee"] = max(HARD_FLOOR, float(DEFAULT_SETTINGS.get("registration_fee") or HARD_FLOOR))
     except (TypeError, ValueError):
-        merged["registration_fee"] = DEFAULT_SETTINGS["registration_fee"]
+        merged["registration_fee"] = max(HARD_FLOOR, float(DEFAULT_SETTINGS.get("registration_fee") or HARD_FLOOR))
     return merged
 
 

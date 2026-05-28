@@ -8839,9 +8839,9 @@ async def admin_ai_image(payload: AIImageRequest, admin: Dict[str, Any] = Depend
         "illustration":"clean modern flat illustration, no text, vibrant colours",
         "hero":        "premium hero image, professional, no text, dramatic lighting",
     }.get(style, "")
-    final_prompt = f"{payload.prompt.strip()}. {style_hint}".strip()
-    if not final_prompt:
+    if not (payload.prompt or "").strip():
         raise HTTPException(status_code=400, detail="Prompt is required")
+    final_prompt = f"{payload.prompt.strip()}. {style_hint}".strip()
     try:
         chat = LlmChat(api_key=api_key, session_id=f"ai-img-{admin['id']}-{uuid.uuid4().hex[:6]}", system_message="You are an icon designer.")
         chat.with_model("gemini", "gemini-3.1-flash-image-preview").with_params(modalities=["image", "text"])
