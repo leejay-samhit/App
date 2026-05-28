@@ -84,6 +84,10 @@ export default function AdminBranding() {
         // saving. Without this key in the PUT body the backend never
         // received the UPI ID / payee name / toggles changes.
         payment_methods: draft.payment_methods,
+        // ─── Premium theme extensions (June 2026) ───
+        gradient: draft.gradient,
+        button_style: draft.button_style,
+        home_banner_b64: draft.home_banner_b64 ?? "",
       });
       setBranding(data);
       Alert.alert("Saved", "Branding updated. Users will see the new theme on next refresh.");
@@ -303,6 +307,90 @@ export default function AdminBranding() {
               testID="branding-splash-bg"
             />
           </View>
+
+          {/* ─── Premium theme (June 2026) — gradient, button style, banner ─── */}
+          <SectionHeader icon="layers" label="Premium theme" />
+          <Text style={styles.helper}>
+            Controls the gradient hero (login / register / payment) and the global button style.
+          </Text>
+
+          {/* Gradient preview */}
+          {(() => {
+            const g = draft.gradient || {};
+            return (
+              <View style={[styles.splashPreview, {
+                backgroundColor: g.start || "#0A0E27",
+                borderColor: g.glow || colors.primary,
+                borderWidth: 1,
+              }]}>
+                <View style={{ alignItems: "center" }}>
+                  <Text style={{ color: "#fff", fontWeight: "900", fontSize: 18 }}>Preview</Text>
+                  <Text style={{ color: "#C7D2FE", fontSize: 11, marginTop: 4 }}>Hero gradient</Text>
+                </View>
+              </View>
+            );
+          })()}
+
+          {(["start", "middle", "end", "glow"] as const).map((k) => (
+            <Field
+              key={k}
+              label={`Gradient ${k} colour (#hex)`}
+              value={(draft.gradient || {})[k] || ""}
+              placeholder={k === "start" ? "#0A0E27" : k === "middle" ? "#1E2A78" : k === "end" ? "#5B21B6" : "#06B6D4"}
+              onChangeText={(v) =>
+                setDraft((d) => ({
+                  ...d,
+                  gradient: { ...(d.gradient || {}), [k]: v.trim() },
+                }))
+              }
+              testID={`branding-gradient-${k}`}
+            />
+          ))}
+
+          <Text style={styles.helper}>Button shape</Text>
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
+            {(["rounded", "pill", "square"] as const).map((bs) => (
+              <TouchableOpacity
+                key={bs}
+                onPress={() => setDraft((d) => ({ ...d, button_style: bs }))}
+                style={{
+                  flex: 1, paddingVertical: 11,
+                  borderRadius: bs === "pill" ? 999 : bs === "rounded" ? 14 : 4,
+                  alignItems: "center",
+                  backgroundColor: draft.button_style === bs ? colors.primary : colors.surface,
+                  borderWidth: 1,
+                  borderColor: draft.button_style === bs ? colors.primary : colors.border,
+                }}
+                testID={`branding-btnstyle-${bs}`}
+              >
+                <Text
+                  style={{
+                    fontWeight: "800",
+                    fontSize: 12,
+                    color: draft.button_style === bs ? "#fff" : colors.textMain,
+                    textTransform: "capitalize",
+                  }}
+                >
+                  {bs}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Field
+            label="Home banner (image URL or data: URI, max 800KB)"
+            value={draft.home_banner_b64 || ""}
+            placeholder="https://… or data:image/png;base64,…"
+            onChangeText={(v) => setDraft((d) => ({ ...d, home_banner_b64: v.trim() || null }))}
+            testID="branding-home-banner"
+          />
+          {draft.home_banner_b64 ? (
+            <Image
+              source={{ uri: draft.home_banner_b64 }}
+              style={{ width: "100%", height: 140, borderRadius: 14, marginTop: 8, backgroundColor: colors.surfaceMuted }}
+              resizeMode="cover"
+            />
+          ) : null}
 
           {/* Tabs */}
           <SectionHeader icon="grid" label="Bottom navigation" />

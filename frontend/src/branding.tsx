@@ -60,6 +60,15 @@ export type Branding = {
   business_gst?: string;
   support_email?: string;
   support_phone?: string;
+  // ─── Premium theme extensions (June 2026) ───
+  gradient?: {
+    start?: string;
+    middle?: string;
+    end?: string;
+    glow?: string;
+  };
+  button_style?: "rounded" | "pill" | "square";
+  home_banner_b64?: string | null;
 };
 
 const DEFAULT_BRANDING: Branding = {

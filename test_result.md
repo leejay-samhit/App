@@ -1180,6 +1180,24 @@ l1_payout_funding_2026_02:
 agent_communication:
   - agent: "testing"
     message: |
+      BRANDING SMOKE TEST (post admin/branding.tsx UI extension) — 16/16 PASS.
+      Runner: /app/tests/branding_smoke.py.
+        1) PUT /api/admin/branding full payload (app_name, gradient{4 keys},
+           button_style='pill', home_banner_b64=unsplash URL) -> 200; response
+           echoes gradient full obj, button_style='pill', home_banner_b64=URL.
+        2) GET /api/branding (public) -> 200; gradient (dict with start/middle/
+           end/glow), button_style, home_banner_b64 all present.
+        3) PUT button_style='square' -> 200, updated to 'square'.
+        4) PUT button_style='round' -> 400 "button_style must be one of:
+           rounded, pill, square".
+        5) PUT home_banner_b64='' -> 200, stored as null (cleared).
+        6) Regression GET /admin/service-analytics -> 200.
+        7) Regression GET /payment/config (testuser) -> 200, amount=118.0
+           (>=118).
+      Restored button_style to 'pill' at end. No 4xx/5xx noise. No regressions.
+
+  - agent: "testing"
+    message: |
       L1 PAYOUT FUNDING — SECOND PASS (re-verify after fixes).
       Runner: /app/backend_test.py.  API: https://vendor-network-app-1.preview.emergentagent.com/api
 

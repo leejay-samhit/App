@@ -67,6 +67,12 @@ export default function AdminLayout() {
       <Tabs.Screen name="shop-category/[name]" options={{ href: null }} />
       <Tabs.Screen name="chat" options={{ href: null }} />
       <Tabs.Screen name="my-wallet" options={{ href: null }} />
+      {/* June 2026 — newly added admin screens hidden from bottom tab bar.
+         They are reachable from /admin/more.tsx so the bottom nav stays
+         locked to: Home · Users · Shop · Payouts · Wallet · More. */}
+      <Tabs.Screen name="ai-tools" options={{ href: null }} />
+      <Tabs.Screen name="service-analytics" options={{ href: null }} />
+      <Tabs.Screen name="subcategories/[parentId]" options={{ href: null }} />
     </Tabs>
   );
 }
