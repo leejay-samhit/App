@@ -23,6 +23,7 @@ import {
   Alert,
   Platform,
   KeyboardAvoidingView,
+  Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -238,14 +239,49 @@ function CategoryEditor({
   const [sortOrder, setSortOrder] = useState(String(category?.sort_order ?? 999));
   const [saving, setSaving] = useState(false);
 
-  // Re-init when opening for a new category / different category
-  useFocusEffect(useCallback(() => {}, []));
-  // simple: reset every time visible flips on
-  // (using key prop on Modal would also work but this keeps things simple)
-  // We re-init via a derived effect:
-  if (!visible && (name !== "" || icon !== "briefcase")) {
-    // skip — will be reset on next open via the Modal's onShow workaround below
-  }
+  // ── AI helpers (inline; June 2026 — replaces the standalone /admin/ai-tools page) ──
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiTab, setAiTab] = useState<"text" | "image">("text");
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiTone, setAiTone] = useState("professional");
+  const [aiOutput, setAiOutput] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiImgStyle, setAiImgStyle] = useState<"flat-icon" | "illustration" | "banner" | "hero">("flat-icon");
+  const [aiImgB64, setAiImgB64] = useState<string | null>(null);
+  const [aiImgBusy, setAiImgBusy] = useState(false);
+
+  const aiGenText = async () => {
+    const prompt = (aiPrompt || name).trim();
+    if (!prompt) return Alert.alert("Prompt or name required");
+    setAiBusy(true); setAiOutput("");
+    try {
+      const { data } = await api.post<{ ok: boolean; text: string }>("/admin/ai/text", {
+        kind: "category_description",
+        prompt,
+        tone: aiTone,
+      });
+      setAiOutput(data.text || "");
+    } catch (e) {
+      Alert.alert("AI error", formatApiError(e));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+  const aiGenImage = async () => {
+    const prompt = (aiPrompt || name).trim();
+    if (!prompt) return Alert.alert("Prompt or name required");
+    setAiImgBusy(true); setAiImgB64(null);
+    try {
+      const { data } = await api.post<{ ok: boolean; image_b64: string; mime_type: string }>("/admin/ai/image", {
+        prompt, style: aiImgStyle,
+      });
+      if (data.image_b64) setAiImgB64(`data:${data.mime_type || "image/png"};base64,${data.image_b64}`);
+    } catch (e) {
+      Alert.alert("AI error", formatApiError(e));
+    } finally {
+      setAiImgBusy(false);
+    }
+  };
 
   const save = async () => {
     if (!name.trim() || name.trim().length < 2) return Alert.alert("Name required", "At least 2 characters.");
@@ -282,6 +318,11 @@ function CategoryEditor({
         setIcon(category?.icon || "briefcase");
         setColor(category?.color || "#2563EB");
         setSortOrder(String(category?.sort_order ?? 999));
+        // reset AI panel between openings
+        setAiOpen(false);
+        setAiPrompt("");
+        setAiOutput("");
+        setAiImgB64(null);
       }}
     >
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }}>
@@ -309,24 +350,147 @@ function CategoryEditor({
                 maxLength={40}
               />
 
-              {/* June 2026 — quick AI helper: opens the dedicated AI Tools screen
-                  pre-filled with this category's name so admin can copy back the
-                  generated description / icon. Keeps the category form simple. */}
+              {/* June 2026 — inline AI helper (replaces the standalone
+                  /admin/ai-tools page per user request). Toggle the panel to
+                  generate category descriptions / icons inside the editor. */}
               <TouchableOpacity
-                onPress={() => router.push("/admin/ai-tools" as any)}
+                onPress={() => setAiOpen((v) => !v)}
                 style={{
                   flexDirection: "row", alignItems: "center", justifyContent: "center",
-                  backgroundColor: "#0EA5E9",
+                  backgroundColor: aiOpen ? colors.surfaceMuted : "#0EA5E9",
                   paddingVertical: 10, paddingHorizontal: 14,
                   borderRadius: 999, marginTop: 10, alignSelf: "flex-start",
+                  borderWidth: aiOpen ? 1 : 0, borderColor: colors.border,
                 }}
                 testID="cat-ai-helper"
               >
-                <Feather name="zap" size={13} color="#fff" />
-                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>
-                  {"  "}Generate description / icon with AI
+                <Feather name="zap" size={13} color={aiOpen ? colors.primary : "#fff"} />
+                <Text style={{ color: aiOpen ? colors.primary : "#fff", fontWeight: "800", fontSize: 12 }}>
+                  {"  "}{aiOpen ? "Hide AI helper" : "Generate description / icon with AI"}
                 </Text>
               </TouchableOpacity>
+
+              {aiOpen ? (
+                <View style={{
+                  marginTop: 10, padding: 12, borderRadius: 12,
+                  backgroundColor: colors.surface,
+                  borderWidth: 1, borderColor: colors.border,
+                }}>
+                  {/* Tab switcher */}
+                  <View style={{ flexDirection: "row", gap: 6, marginBottom: 10 }}>
+                    {(["text", "image"] as const).map((t) => (
+                      <TouchableOpacity
+                        key={t}
+                        onPress={() => setAiTab(t)}
+                        style={{
+                          flex: 1, paddingVertical: 8, borderRadius: 999,
+                          backgroundColor: aiTab === t ? colors.primary : colors.surfaceMuted,
+                          alignItems: "center", flexDirection: "row", justifyContent: "center",
+                        }}
+                      >
+                        <Feather name={t === "text" ? "type" : "image"} size={13} color={aiTab === t ? "#fff" : colors.textMain} />
+                        <Text style={{ fontSize: 12, fontWeight: "800", color: aiTab === t ? "#fff" : colors.textMain }}>
+                          {"  "}{t === "text" ? "Description" : "Image"}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  <Text style={{ fontSize: 10, letterSpacing: 1, fontWeight: "800", color: colors.textMuted, marginBottom: 6 }}>
+                    PROMPT (defaults to category name)
+                  </Text>
+                  <TextInput
+                    style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                    value={aiPrompt}
+                    onChangeText={setAiPrompt}
+                    placeholder={name ? `e.g. "${name} — home services"` : "Describe what to generate"}
+                    placeholderTextColor={colors.textMuted}
+                    multiline
+                  />
+
+                  {aiTab === "text" ? (
+                    <>
+                      <Text style={{ fontSize: 10, letterSpacing: 1, fontWeight: "800", color: colors.textMuted, marginTop: 10, marginBottom: 6 }}>TONE</Text>
+                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+                        {["professional", "friendly", "bold", "concise"].map((tn) => (
+                          <TouchableOpacity
+                            key={tn}
+                            onPress={() => setAiTone(tn)}
+                            style={{
+                              paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
+                              backgroundColor: aiTone === tn ? colors.primary : colors.surfaceMuted,
+                              borderWidth: 1, borderColor: aiTone === tn ? colors.primary : colors.border,
+                            }}
+                          >
+                            <Text style={{ fontSize: 11, fontWeight: "700", color: aiTone === tn ? "#fff" : colors.textMain }}>{tn}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      <TouchableOpacity
+                        onPress={aiGenText}
+                        disabled={aiBusy}
+                        style={{
+                          flexDirection: "row", alignItems: "center", justifyContent: "center",
+                          backgroundColor: colors.primary, paddingVertical: 12, borderRadius: 10, marginTop: 12,
+                          opacity: aiBusy ? 0.6 : 1,
+                        }}
+                        testID="cat-ai-text-gen"
+                      >
+                        {aiBusy ? <ActivityIndicator color="#fff" /> : <Feather name="zap" size={14} color="#fff" />}
+                        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{aiBusy ? "  Thinking…" : "  Generate"}</Text>
+                      </TouchableOpacity>
+                      {aiOutput ? (
+                        <View style={{ marginTop: 12, padding: 10, backgroundColor: colors.bg, borderRadius: 10, borderWidth: 1, borderColor: colors.border }}>
+                          <Text style={{ fontSize: 13, color: colors.textMain, lineHeight: 19 }} selectable>{aiOutput}</Text>
+                        </View>
+                      ) : null}
+                    </>
+                  ) : (
+                    <>
+                      <Text style={{ fontSize: 10, letterSpacing: 1, fontWeight: "800", color: colors.textMuted, marginTop: 10, marginBottom: 6 }}>STYLE</Text>
+                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+                        {(["flat-icon", "illustration", "banner", "hero"] as const).map((st) => (
+                          <TouchableOpacity
+                            key={st}
+                            onPress={() => setAiImgStyle(st)}
+                            style={{
+                              paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
+                              backgroundColor: aiImgStyle === st ? colors.primary : colors.surfaceMuted,
+                              borderWidth: 1, borderColor: aiImgStyle === st ? colors.primary : colors.border,
+                            }}
+                          >
+                            <Text style={{ fontSize: 11, fontWeight: "700", color: aiImgStyle === st ? "#fff" : colors.textMain }}>{st}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      <TouchableOpacity
+                        onPress={aiGenImage}
+                        disabled={aiImgBusy}
+                        style={{
+                          flexDirection: "row", alignItems: "center", justifyContent: "center",
+                          backgroundColor: colors.primary, paddingVertical: 12, borderRadius: 10, marginTop: 12,
+                          opacity: aiImgBusy ? 0.6 : 1,
+                        }}
+                        testID="cat-ai-image-gen"
+                      >
+                        {aiImgBusy ? <ActivityIndicator color="#fff" /> : <Feather name="image" size={14} color="#fff" />}
+                        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{aiImgBusy ? "  Painting…" : "  Generate image"}</Text>
+                      </TouchableOpacity>
+                      {aiImgB64 ? (
+                        <View style={{ marginTop: 12, padding: 10, backgroundColor: colors.bg, borderRadius: 10, borderWidth: 1, borderColor: colors.border, alignItems: "center" }}>
+                          {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+                          <View style={{ width: "100%", aspectRatio: 1.4, backgroundColor: colors.surfaceMuted, borderRadius: 8, overflow: "hidden" }}>
+                            <Image source={{ uri: aiImgB64 }} style={{ width: "100%", height: "100%" }} resizeMode="contain" />
+                          </View>
+                          <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 8, textAlign: "center" }}>
+                            Long-press the image to save / copy. Paste into the category banner field via Branding screen.
+                          </Text>
+                        </View>
+                      ) : null}
+                    </>
+                  )}
+                </View>
+              ) : null}
 
               <Text style={styles.label}>Icon</Text>
               <View style={styles.pickerGrid}>

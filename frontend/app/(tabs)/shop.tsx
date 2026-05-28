@@ -196,7 +196,7 @@ export default function ShopScreen() {
       // toggled `servicesLoading`, leaving the RefreshControl stuck.
       setRefreshing(false);
     }
-  }, [searchQ, pincodeQ, categoryId, languageQ, myCoords]);
+  }, [searchQ, pincodeQ, categoryId, subcategoryId, languageQ, myCoords]);
 
   const useMyLocation = useCallback(async () => {
     if (myCoords) {
@@ -272,7 +272,7 @@ export default function ShopScreen() {
       const t = setTimeout(loadServices, 300);
       return () => clearTimeout(t);
     }
-  }, [searchQ, pincodeQ, categoryId, languageQ, myCoords, mode, loadServices]);
+  }, [searchQ, pincodeQ, categoryId, subcategoryId, languageQ, myCoords, mode, loadServices]);
 
   const addToCart = async (p: Product) => {
     setAdding(p.id);
@@ -674,40 +674,8 @@ export default function ShopScreen() {
                   })}
                   {/* Language tile removed — moved to small icon button at top-right of services header */}
                 </View>
-                {/* June 2026 — subcategory chip strip, visible only after a category is picked */}
-                {categoryId && subcategories.length > 0 ? (
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={{ paddingHorizontal: 14, paddingTop: 6, paddingBottom: 4, gap: 6 }}
-                  >
-                    <TouchableOpacity
-                      onPress={() => { setSubcategoryId(null); loadServices(); }}
-                      style={[
-                        styles.subChip,
-                        subcategoryId === null && styles.subChipOn,
-                      ]}
-                    >
-                      <Text style={[styles.subChipText, subcategoryId === null && { color: "#fff" }]}>All</Text>
-                    </TouchableOpacity>
-                    {subcategories.map((s) => {
-                      const on = subcategoryId === s.id;
-                      return (
-                        <TouchableOpacity
-                          key={s.id}
-                          onPress={() => { setSubcategoryId(on ? null : s.id); loadServices(); }}
-                          style={[styles.subChip, on && styles.subChipOn]}
-                          testID={`subchip-${s.id}`}
-                        >
-                          {s.icon ? <Feather name={s.icon as any} size={12} color={on ? "#fff" : colors.textMain} /> : null}
-                          <Text style={[styles.subChipText, on && { color: "#fff" }]}>
-                            {s.icon ? "  " : ""}{s.name}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-                ) : null}
+                {/* Subcategory chip strip moved inside the providers modal below
+                    (since the modal opens immediately when a category is tapped). */}
               </View>
             )}
 
@@ -787,6 +755,42 @@ export default function ShopScreen() {
                       <Feather name="globe" size={16} color={languageQ ? colors.primary : colors.textMain} />
                     </TouchableOpacity>
                   </View>
+
+                  {/* June 2026 — subcategory chip strip inside the modal so users
+                      can refine the provider list AFTER picking a parent category. */}
+                  {subcategories.length > 0 ? (
+                    <View style={{ backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={{ paddingHorizontal: 14, paddingVertical: 10, gap: 6 }}
+                      >
+                        <TouchableOpacity
+                          onPress={() => setSubcategoryId(null)}
+                          style={[styles.subChip, subcategoryId === null && styles.subChipOn]}
+                          testID="subchip-all"
+                        >
+                          <Text style={[styles.subChipText, subcategoryId === null && { color: "#fff" }]}>All</Text>
+                        </TouchableOpacity>
+                        {subcategories.map((s) => {
+                          const on = subcategoryId === s.id;
+                          return (
+                            <TouchableOpacity
+                              key={s.id}
+                              onPress={() => setSubcategoryId(on ? null : s.id)}
+                              style={[styles.subChip, on && styles.subChipOn]}
+                              testID={`subchip-${s.id}`}
+                            >
+                              {s.icon ? <Feather name={s.icon as any} size={12} color={on ? "#fff" : colors.textMain} /> : null}
+                              <Text style={[styles.subChipText, on && { color: "#fff" }]}>
+                                {s.icon ? "  " : ""}{s.name}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </ScrollView>
+                    </View>
+                  ) : null}
 
                   <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 32 }}>
                     {servicesLoading && services.length === 0 ? (

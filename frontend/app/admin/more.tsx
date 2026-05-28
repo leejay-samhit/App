@@ -20,7 +20,7 @@ const ITEMS = [
   { icon: "briefcase", label: "Service applications", route: "/admin/service-applications" },
   { icon: "grid", label: "Service Application Management", route: "/admin/service-management" },
   { icon: "bar-chart-2", label: "Service Analytics", route: "/admin/service-analytics" },
-  { icon: "zap", label: "AI Tools (text + image)", route: "/admin/ai-tools" },
+  // AI Tools removed from More menu — now inline inside Service Application Management editor.
   { icon: "map", label: "Distributor Network · Area Mapping", route: "/admin/area-mapping" },
   { icon: "briefcase", label: "System Wallet (treasury)", route: "/admin/system-wallet" },
   { icon: "users", label: "All vendors", route: "/admin/vendors" },

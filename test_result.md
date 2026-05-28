@@ -569,16 +569,110 @@ metadata:
   test_sequence: 0
   run_ui: false
 
+agent_communication:
+    - agent: "main"
+      message: |
+        2026-05-28 (post-handoff polish): Implemented 3 user complaints from the previous fork:
+          1. Subcategory chip strip now lives INSIDE the providers modal (was hidden behind it before).
+             Added subcategoryId to loadServices() useCallback deps + debounce effect so picking
+             a chip actually triggers a fresh GET /api/services?subcategory_id=... call.
+          2. Removed the broken "Open AI Tools page" button from the Service Application Management
+             editor (it referenced an undefined router from outer scope). Replaced with an inline,
+             collapsible AI helper directly inside the CategoryEditor modal:
+                Description tab -> POST /api/admin/ai/text {kind:"category_description", tone}
+                Image tab -> POST /api/admin/ai/image {prompt, style}
+             Output renders below the buttons; admin can copy text or save the image preview.
+          3. Removed "AI Tools (text + image)" link from /admin/more (kept the file
+             /admin/ai-tools.tsx at href:null so existing route reference does not break).
+
+        No backend changes in this round - only frontend rewiring. Please re-test
+        POST /admin/ai/text, POST /admin/ai/image, GET /services?subcategory_id=... to
+        confirm they still respond correctly.
+
 test_plan:
-  current_focus:
-    - "Provider Availability (PATCH /services/me/availability) + listing dot"
-    - "User Location capture (POST /users/me/location)"
-    - "Service Subcategory CRUD (POST/GET/PATCH/DELETE /admin/service-subcategories) + reorder"
-    - "AI Tools (POST /admin/ai/text, POST /admin/ai/image with Emergent LLM Key)"
-    - "Registration fee guard — settings always returns >= ₹118 default; /payment/config returns 118 by default"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+regression_2026_05_28_frontend_refactor:
+  - task: "Re-verify: GET /services?subcategory_id=... still filters"
+    implemented: true
+    working: true
+    file: "backend/server.py L7471-7507"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. GET /api/services?subcategory_id=NONEXISTENT → 200
+          {items:[], total:0, geo:false} (correctly filters out — no provider
+          matches the bogus subcategory id). Baseline GET /api/services → 200
+          {items:[<1 provider>], total:1, geo:false}. Filter is honoured at
+          server.py L7499-7500 (base_filt["service_subcategory_id"]=subcategory_id).
+
+  - task: "Re-verify: PATCH /services/me/availability still works"
+    implemented: true
+    working: true
+    file: "backend/server.py L8607-8622"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS (expected 403 path). testuser@app.com is NOT a service provider
+          (is_service_provider=None/false on the user doc), so PATCH
+          /api/services/me/availability {status:"available"} returns 403
+          {"detail":"Only service providers can set availability"}. This is
+          the documented expected behaviour per the review brief ("if so,
+          document the 403 response and skip — that's expected"). The
+          guard at server.py:8612 is firing correctly; downstream validation
+          + persist path was not exercised this round because no provider
+          user was available, but the endpoint shape & auth gate are intact.
+
+  - task: "Re-verify: POST /admin/ai/text still works"
+    implemented: true
+    working: true
+    file: "backend/server.py L8811-8835"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. POST /api/admin/ai/text {kind:"category_description",
+          prompt:"plumber", tone:"professional"} as admin@app.com → 200
+          {ok:true, text:"Plumbing services encompass a wide range of
+          tasks…"} (534-char generated description). EMERGENT_LLM_KEY +
+          gpt-4o-mini integration is healthy.
+
+  - task: "Re-verify: POST /admin/ai/image still works"
+    implemented: true
+    working: true
+    file: "backend/server.py L8838-8874"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          PASS. POST /api/admin/ai/image {prompt:"plumber wrench icon",
+          style:"flat-icon"} as admin@app.com → 200 {ok:true,
+          image_b64:"/9j/4AAQSkZJRgABAQEBLAEsAAD/…" (309,372 chars),
+          mime_type:"image/jpeg", text:""}. Image generated successfully
+          via Gemini nano banana.
+          Minor: provider returned mime_type="image/jpeg" instead of the
+          "image/png" mentioned in the review brief — this is the actual
+          provider response (backend only falls back to image/png if the
+          provider omits mime_type); the image_b64 prefix /9j/ confirms it
+          is a valid JPEG. Functional outcome unchanged: admin can attach
+          the image to a category doc as-is.
 
 phase_abc_2026_05_28:
   - task: "Registration fee guard + default ₹118"
