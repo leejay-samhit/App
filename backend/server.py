@@ -176,6 +176,8 @@ from routes import upi_manual as upi_manual_router  # noqa: E402
 from routes import wallet as wallet_router  # noqa: E402
 from routes import withdrawals as withdrawals_router  # noqa: E402
 from routes import cart as cart_router  # noqa: E402
+from routes import admin_ai as admin_ai_router  # noqa: E402
+from routes import service_subcategories as service_subcategories_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -8661,217 +8663,14 @@ async def save_user_location(payload: UserLocationUpdate, user: Dict[str, Any] =
 
 
 # ============================================================
-# Service Subcategories  (CRUD + reorder)
+# Service Subcategories routes extracted to routes/service_subcategories.py
+# (2026-05-28 refactor)
 # ============================================================
-@api_router.get("/service-subcategories")
-async def list_service_subcategories(parent_id: Optional[str] = None):
-    """Public — used by the user app when picking a sub-category."""
-    filt: Dict[str, Any] = {"active": True}
-    if parent_id:
-        filt["parent_id"] = parent_id
-    rows = await db.service_subcategories.find(
-        filt, {"_id": 0}
-    ).sort([("sort_order", 1), ("name", 1)]).to_list(500)
-    return {"items": rows, "total": len(rows)}
-
-
-@api_router.get("/admin/service-subcategories")
-async def admin_list_service_subcategories(parent_id: Optional[str] = None, admin: Dict[str, Any] = Depends(require_admin)):
-    filt: Dict[str, Any] = {}
-    if parent_id:
-        filt["parent_id"] = parent_id
-    rows = await db.service_subcategories.find(
-        filt, {"_id": 0}
-    ).sort([("sort_order", 1), ("name", 1)]).to_list(500)
-    return {"items": rows, "total": len(rows)}
-
-
-@api_router.post("/admin/service-subcategories")
-async def admin_create_subcategory(payload: ServiceSubcategoryCreate, admin: Dict[str, Any] = Depends(require_admin)):
-    name = (payload.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Name is required")
-    parent = await db.service_categories.find_one({"id": payload.parent_id})
-    if not parent:
-        raise HTTPException(status_code=404, detail="Parent category not found")
-    slug = (payload.slug or re.sub(r"[^a-z0-9-]+", "-", name.lower())).strip("-")[:60]
-    dup = await db.service_subcategories.find_one({"parent_id": payload.parent_id, "name": name})
-    if dup:
-        raise HTTPException(status_code=400, detail="A subcategory with this name already exists under that parent")
-    cnt = await db.service_subcategories.count_documents({"parent_id": payload.parent_id})
-    doc = {
-        "id":          str(uuid.uuid4()),
-        "parent_id":   payload.parent_id,
-        "name":        name,
-        "slug":        slug,
-        "icon":        payload.icon,
-        "image_b64":   payload.image_b64,
-        "description": (payload.description or "").strip()[:500],
-        "sort_order":  payload.sort_order if payload.sort_order is not None else cnt,
-        "active":      bool(payload.active),
-        "created_at":  now_utc().isoformat(),
-    }
-    await db.service_subcategories.insert_one(doc)
-    doc.pop("_id", None)
-    await _audit_log(admin, "service_subcategory.create", "subcategory", doc["id"], {"name": name})
-    return {"ok": True, "subcategory": doc}
-
-
-@api_router.patch("/admin/service-subcategories/{sub_id}")
-async def admin_update_subcategory(sub_id: str, payload: ServiceSubcategoryUpdate, admin: Dict[str, Any] = Depends(require_admin)):
-    existing = await db.service_subcategories.find_one({"id": sub_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Not found")
-    update: Dict[str, Any] = {}
-    if payload.name is not None:        update["name"] = payload.name.strip()[:80]
-    if payload.icon is not None:        update["icon"] = payload.icon
-    if payload.image_b64 is not None:   update["image_b64"] = payload.image_b64 or None
-    if payload.description is not None: update["description"] = payload.description.strip()[:500]
-    if payload.sort_order is not None:  update["sort_order"] = int(payload.sort_order)
-    if payload.active is not None:      update["active"] = bool(payload.active)
-    if not update:
-        raise HTTPException(status_code=400, detail="Nothing to update")
-    update["updated_at"] = now_utc().isoformat()
-    await db.service_subcategories.update_one({"id": sub_id}, {"$set": update})
-    fresh = await db.service_subcategories.find_one({"id": sub_id}, {"_id": 0})
-    await _audit_log(admin, "service_subcategory.update", "subcategory", sub_id, update)
-    return {"ok": True, "subcategory": fresh}
-
-
-@api_router.delete("/admin/service-subcategories/{sub_id}")
-async def admin_delete_subcategory(sub_id: str, admin: Dict[str, Any] = Depends(require_admin)):
-    existing = await db.service_subcategories.find_one({"id": sub_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Not found")
-    await db.service_subcategories.delete_one({"id": sub_id})
-    await _audit_log(admin, "service_subcategory.delete", "subcategory", sub_id, {"name": existing.get("name")})
-    return {"ok": True}
-
-
-@api_router.post("/admin/service-categories/reorder")
-async def admin_reorder_categories(payload: CategoryReorderRequest, admin: Dict[str, Any] = Depends(require_admin)):
-    """Bulk update `sort_order` on a list of categories — used by admin drag-drop."""
-    for it in payload.items[:200]:
-        cid = str(it.get("id") or "").strip()
-        try:
-            so = int(it.get("sort_order") or 0)
-        except (TypeError, ValueError):
-            continue
-        if not cid:
-            continue
-        await db.service_categories.update_one({"id": cid}, {"$set": {"sort_order": so}})
-    await _audit_log(admin, "service_category.reorder", "category", "bulk", {"count": len(payload.items)})
-    return {"ok": True, "updated": len(payload.items)}
-
-
-@api_router.post("/admin/service-subcategories/reorder")
-async def admin_reorder_subcategories(payload: CategoryReorderRequest, admin: Dict[str, Any] = Depends(require_admin)):
-    for it in payload.items[:500]:
-        sid = str(it.get("id") or "").strip()
-        try:
-            so = int(it.get("sort_order") or 0)
-        except (TypeError, ValueError):
-            continue
-        if not sid:
-            continue
-        await db.service_subcategories.update_one({"id": sid}, {"$set": {"sort_order": so}})
-    return {"ok": True, "updated": len(payload.items)}
 
 
 # ============================================================
-# AI Generation — Service Descriptions / Category Copy / Icons
-# Uses the Emergent LLM Key (loaded by load_dotenv at startup).
+# AI Generation routes extracted to routes/admin_ai.py (2026-05-28 refactor)
 # ============================================================
-_AI_TEXT_SYSTEM_PROMPTS: Dict[str, str] = {
-    "service_description": (
-        "You write concise, persuasive descriptions for Indian local service "
-        "providers (plumber, electrician, AC repair etc). Keep it under "
-        "{max_words} words. Tone: {tone}. Avoid emojis."
-    ),
-    "category_description": (
-        "You write short (under {max_words} words) descriptions of service "
-        "categories on a marketplace app. Tone: {tone}. Be specific about "
-        "what's covered."
-    ),
-    "marketing": (
-        "Write punchy {tone} marketing copy under {max_words} words for an "
-        "Indian fintech / services marketplace."
-    ),
-    "service_title": (
-        "Suggest a short (3-6 word) service title. Tone: {tone}. Output ONLY "
-        "the title, no quotes or punctuation."
-    ),
-    "improve": (
-        "Improve the following text. Make it more {tone} and clearer. Keep "
-        "under {max_words} words. Output ONLY the improved text."
-    ),
-}
-
-
-@api_router.post("/admin/ai/text")
-async def admin_ai_text(payload: AITextRequest, admin: Dict[str, Any] = Depends(require_admin)):
-    """Generate or refine text with GPT-5.4 via Emergent LLM Key."""
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage  # type: ignore
-    except Exception:
-        raise HTTPException(status_code=500, detail="AI library not available on server")
-    api_key = os.getenv("EMERGENT_LLM_KEY") or ""
-    if not api_key:
-        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY is not configured")
-    kind = (payload.kind or "service_description").lower()
-    tmpl = _AI_TEXT_SYSTEM_PROMPTS.get(kind, _AI_TEXT_SYSTEM_PROMPTS["service_description"])
-    system = tmpl.format(max_words=max(20, min(payload.max_words or 80, 250)), tone=(payload.tone or "professional"))
-    user_text = payload.prompt.strip()
-    if kind == "improve" and payload.existing:
-        user_text = f"{payload.existing}\n\n[Refine this. Context: {payload.prompt}]"
-    if not user_text:
-        raise HTTPException(status_code=400, detail="Prompt is required")
-    try:
-        chat = LlmChat(api_key=api_key, session_id=f"ai-text-{admin['id']}-{uuid.uuid4().hex[:6]}", system_message=system)
-        chat.with_model("openai", "gpt-4o-mini")
-        out = await chat.send_message(UserMessage(text=user_text))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI provider error: {str(e)[:120]}")
-    return {"ok": True, "text": (out or "").strip()}
-
-
-@api_router.post("/admin/ai/image")
-async def admin_ai_image(payload: AIImageRequest, admin: Dict[str, Any] = Depends(require_admin)):
-    """Generate a category icon or service banner with Gemini Nano Banana.
-    Returns base64 PNG that the admin can attach to the category doc directly.
-    """
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage  # type: ignore
-    except Exception:
-        raise HTTPException(status_code=500, detail="AI library not available on server")
-    api_key = os.getenv("EMERGENT_LLM_KEY") or ""
-    if not api_key:
-        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY is not configured")
-    style = (payload.style or "flat-icon").lower()
-    style_hint = {
-        "flat-icon":   "flat vector icon, single subject, no text, transparent-feeling background, vibrant color, centred, 1024x1024",
-        "banner":      "horizontal banner, marketing photo, professional lighting, no text, clean composition",
-        "illustration":"clean modern flat illustration, no text, vibrant colours",
-        "hero":        "premium hero image, professional, no text, dramatic lighting",
-    }.get(style, "")
-    if not (payload.prompt or "").strip():
-        raise HTTPException(status_code=400, detail="Prompt is required")
-    final_prompt = f"{payload.prompt.strip()}. {style_hint}".strip()
-    try:
-        chat = LlmChat(api_key=api_key, session_id=f"ai-img-{admin['id']}-{uuid.uuid4().hex[:6]}", system_message="You are an icon designer.")
-        chat.with_model("gemini", "gemini-3.1-flash-image-preview").with_params(modalities=["image", "text"])
-        text, images = await chat.send_message_multimodal_response(UserMessage(text=final_prompt))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI provider error: {str(e)[:120]}")
-    if not images:
-        raise HTTPException(status_code=502, detail="AI returned no image")
-    img0 = images[0]
-    return {
-        "ok": True,
-        "text": (text or "").strip()[:200],
-        "image_b64": img0.get("data"),
-        "mime_type": img0.get("mime_type") or "image/png",
-    }
 
 
 @api_router.get("/admin/service-analytics")
@@ -8991,6 +8790,8 @@ app.include_router(upi_manual_router.router, prefix="/api")
 app.include_router(wallet_router.router, prefix="/api")
 app.include_router(withdrawals_router.router, prefix="/api")
 app.include_router(cart_router.router, prefix="/api")
+app.include_router(admin_ai_router.router, prefix="/api")
+app.include_router(service_subcategories_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,

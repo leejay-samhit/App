@@ -20,8 +20,12 @@
             "REPLACE_WITH_PROD_API_HOSTNAME": {
               "NSIncludesSubdomains": true,
               "NSPinnedCAIdentities": [
-                { "SPKI-SHA256-BASE64": "REPLACE_WITH_PRIMARY_PIN_SHA256_BASE64" },
-                { "SPKI-SHA256-BASE64": "REPLACE_WITH_BACKUP_PIN_SHA256_BASE64" }
+                {
+                  "SPKI-SHA256-BASE64": "REPLACE_WITH_PRIMARY_PIN_SHA256_BASE64"
+                },
+                {
+                  "SPKI-SHA256-BASE64": "REPLACE_WITH_BACKUP_PIN_SHA256_BASE64"
+                }
               ]
             }
           }
@@ -74,7 +78,8 @@
             "deploymentTarget": "15.1"
           }
         }
-      ]
+      ],
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true

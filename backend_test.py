@@ -1,223 +1,213 @@
-"""Phase D pending items (June 2026) — backend regression test.
-
-Endpoints under test:
-  1. GET  /admin/service-analytics
-  2. PUT  /admin/branding   (gradient / button_style / home_banner_b64)
-  3. GET  /branding
-  4. GET  /services/categories
-  5. GET  /payment/config       (registration fee floor of ₹118)
-  6. Subcategory CRUD regression
 """
-from __future__ import annotations
-
+Backend regression check (2026-05-28) — refactor verification for:
+  • routes/admin_ai.py
+  • routes/service_subcategories.py
+"""
 import sys
+import time
 import requests
 
 BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
-ADMIN_PASS = "Admin@123"
-USER_EMAIL = "testuser@app.com"
-USER_PASS = "Test@123"
-
-PASS = "PASS"
-FAIL = "FAIL"
-
-results: list[tuple[str, str, str]] = []
+ADMIN_PASSWORD = "Admin@123"
 
 
-def log(name: str, ok: bool, msg: str = ""):
-    results.append((PASS if ok else FAIL, name, msg))
-    print(f"[{PASS if ok else FAIL}] {name}  {msg}")
+def _print(label, ok, detail=""):
+    tag = "PASS" if ok else "FAIL"
+    print(f"[{tag}] {label}" + (f"  — {detail}" if detail else ""))
 
 
-def login(email: str, password: str) -> str | None:
-    r = requests.post(f"{BASE}/auth/login", json={"email": email, "password": password}, timeout=20)
-    if r.status_code != 200:
-        print(f"!! login {email} -> {r.status_code} {r.text[:200]}")
-        return None
-    j = r.json()
-    return j.get("access_token") or j.get("token")
+def login_admin():
+    r = requests.post(f"{BASE}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=20)
+    r.raise_for_status()
+    return r.json()["token"]
 
 
-def main() -> int:
-    admin_tok = login(ADMIN_EMAIL, ADMIN_PASS)
-    if not admin_tok:
-        print("ABORT: admin login failed")
-        return 1
-    user_tok = login(USER_EMAIL, USER_PASS)
-    if not user_tok:
-        print("ABORT: testuser login failed")
-        return 1
-    A = {"Authorization": f"Bearer {admin_tok}"}
-    U = {"Authorization": f"Bearer {user_tok}"}
+def main():
+    results = []
+    admin_token = login_admin()
+    H = {"Authorization": f"Bearer {admin_token}"}
 
-    # ─── 1. GET /admin/service-analytics ─────────────────────────────────────
-    r = requests.get(f"{BASE}/admin/service-analytics", headers=A, timeout=20)
-    log("1a admin GET /admin/service-analytics 200", r.status_code == 200,
-        f"status={r.status_code} body={r.text[:240]}")
-    if r.status_code == 200:
-        body = r.json()
-        avail = body.get("availability") or {}
-        for key in ("available", "busy", "offline", "unset"):
-            log(f"1a.availability.{key} present", key in avail,
-                f"got keys={list(avail.keys())}")
-        log("1a.categories is list", isinstance(body.get("categories"), list))
-        rs = body.get("reveal_stats") or {}
-        for key in ("count_30d", "amount_30d", "fee_30d", "gst_30d", "count_lifetime"):
-            log(f"1a.reveal_stats.{key} present", key in rs)
-        apps = body.get("applications") or {}
-        for key in ("pending", "approved", "rejected"):
-            log(f"1a.applications.{key} present", key in apps)
-        log("1a.generated_at present", "generated_at" in body)
+    # 1) POST /admin/ai/text
+    try:
+        r = requests.post(
+            f"{BASE}/admin/ai/text",
+            json={"kind": "category_description", "prompt": "plumber", "tone": "professional"},
+            headers=H, timeout=45,
+        )
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        ok = r.status_code == 200 and body.get("ok") is True and isinstance(body.get("text"), str) and len(body["text"]) > 10
+        results.append(("POST /admin/ai/text", ok))
+        _print("1) POST /admin/ai/text", ok, f"status={r.status_code} text_len={len(body.get('text','') or '')}")
+    except Exception as e:
+        results.append(("POST /admin/ai/text", False))
+        _print("1) POST /admin/ai/text", False, f"exception={e}")
 
-    r2 = requests.get(f"{BASE}/admin/service-analytics", headers=U, timeout=20)
-    log("1b testuser GET /admin/service-analytics 403", r2.status_code == 403,
-        f"status={r2.status_code} body={r2.text[:160]}")
+    # 2) POST /admin/ai/image (allow 60s)
+    try:
+        r = requests.post(
+            f"{BASE}/admin/ai/image",
+            json={"prompt": "plumber wrench icon", "style": "flat-icon"},
+            headers=H, timeout=90,
+        )
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        ok = (
+            r.status_code == 200
+            and body.get("ok") is True
+            and isinstance(body.get("image_b64"), str)
+            and len(body["image_b64"]) > 100
+            and isinstance(body.get("mime_type"), str)
+            and body["mime_type"].startswith("image/")
+        )
+        results.append(("POST /admin/ai/image", ok))
+        _print("2) POST /admin/ai/image", ok,
+               f"status={r.status_code} mime={body.get('mime_type')} b64_len={len(body.get('image_b64') or '')}")
+    except Exception as e:
+        results.append(("POST /admin/ai/image", False))
+        _print("2) POST /admin/ai/image", False, f"exception={e}")
 
-    # ─── 2. PUT /admin/branding ──────────────────────────────────────────────
-    body1 = {"gradient": {"start": "#0A0E27", "middle": "#1E2A78", "end": "#5B21B6", "glow": "#06B6D4"}}
-    r = requests.put(f"{BASE}/admin/branding", headers=A, json=body1, timeout=20)
-    log("2.body1 PUT branding gradient 200", r.status_code == 200,
-        f"status={r.status_code} body={r.text[:240]}")
-    if r.status_code == 200:
-        g = (r.json() or {}).get("gradient") or {}
-        log("2.body1 response.gradient present", isinstance(g, dict) and bool(g),
-            f"gradient={g}")
-        log("2.body1 gradient.start preserved", g.get("start") == "#0A0E27")
-        log("2.body1 gradient.middle preserved", g.get("middle") == "#1E2A78")
-        log("2.body1 gradient.end preserved", g.get("end") == "#5B21B6")
-        log("2.body1 gradient.glow preserved", g.get("glow") == "#06B6D4")
+    # 3) GET /service-subcategories (no auth)
+    try:
+        r = requests.get(f"{BASE}/service-subcategories", timeout=15)
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        ok = r.status_code == 200 and isinstance(body.get("items"), list) and "total" in body
+        results.append(("GET /service-subcategories (public)", ok))
+        _print("3) GET /service-subcategories (public)", ok,
+               f"status={r.status_code} total={body.get('total')} items_len={len(body.get('items') or [])}")
+    except Exception as e:
+        results.append(("GET /service-subcategories (public)", False))
+        _print("3) GET /service-subcategories (public)", False, f"exception={e}")
 
-    body2 = {"button_style": "pill"}
-    r = requests.put(f"{BASE}/admin/branding", headers=A, json=body2, timeout=20)
-    log("2.body2 button_style=pill 200", r.status_code == 200,
-        f"status={r.status_code} body={r.text[:160]}")
-    if r.status_code == 200:
-        log("2.body2 response.button_style==pill",
-            (r.json() or {}).get("button_style") == "pill",
-            f"button_style={(r.json() or {}).get('button_style')}")
+    # 4) GET /admin/service-subcategories
+    try:
+        r = requests.get(f"{BASE}/admin/service-subcategories", headers=H, timeout=15)
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        ok = r.status_code == 200 and isinstance(body.get("items"), list) and "total" in body
+        results.append(("GET /admin/service-subcategories", ok))
+        _print("4) GET /admin/service-subcategories", ok,
+               f"status={r.status_code} total={body.get('total')} items_len={len(body.get('items') or [])}")
+    except Exception as e:
+        results.append(("GET /admin/service-subcategories", False))
+        _print("4) GET /admin/service-subcategories", False, f"exception={e}")
 
-    body3 = {"button_style": "xyz"}
-    r = requests.put(f"{BASE}/admin/branding", headers=A, json=body3, timeout=20)
-    log("2.body3 button_style=xyz 400", r.status_code == 400,
-        f"status={r.status_code} body={r.text[:160]}")
-
-    body4 = {"gradient": {"start": "not-a-color", "end": "#FF0000"}}
-    r = requests.put(f"{BASE}/admin/branding", headers=A, json=body4, timeout=20)
-    log("2.body4 invalid hex silently ignored 200", r.status_code == 200,
-        f"status={r.status_code} body={r.text[:240]}")
-    if r.status_code == 200:
-        g = (r.json() or {}).get("gradient") or {}
-        log("2.body4 valid 'end' applied", g.get("end") == "#FF0000",
-            f"gradient={g}")
-        log("2.body4 invalid 'start' NOT overwritten with garbage",
-            g.get("start") != "not-a-color",
-            f"start={g.get('start')}")
-
-    body5 = {"home_banner_b64": "https://example.com/banner.png"}
-    r = requests.put(f"{BASE}/admin/branding", headers=A, json=body5, timeout=20)
-    log("2.body5 home_banner_b64 URL 200", r.status_code == 200,
-        f"status={r.status_code} body={r.text[:160]}")
-
-    body6 = {"home_banner_b64": "ftp://bad"}
-    r = requests.put(f"{BASE}/admin/branding", headers=A, json=body6, timeout=20)
-    log("2.body6 home_banner_b64 ftp 400", r.status_code == 400,
-        f"status={r.status_code} body={r.text[:160]}")
-
-    # ─── 3. GET /branding ────────────────────────────────────────────────────
-    r = requests.get(f"{BASE}/branding", timeout=20)
-    log("3 public GET /branding 200", r.status_code == 200,
-        f"status={r.status_code}")
-    if r.status_code == 200:
-        b = r.json() or {}
-        log("3.gradient field present", "gradient" in b and isinstance(b.get("gradient"), dict),
-            f"gradient={b.get('gradient')}")
-        log("3.button_style==pill", b.get("button_style") == "pill",
-            f"button_style={b.get('button_style')}")
-        log("3.home_banner_b64==https URL",
-            b.get("home_banner_b64") == "https://example.com/banner.png",
-            f"home_banner_b64={b.get('home_banner_b64')}")
-
-    # ─── 4. GET /services/categories ─────────────────────────────────────────
-    r = requests.get(f"{BASE}/services/categories", timeout=20)
-    log("4 GET /services/categories 200", r.status_code == 200,
-        f"status={r.status_code}")
-    if r.status_code == 200:
-        cats = (r.json() or {}).get("categories") or []
-        log("4 categories>=5", len(cats) >= 5, f"len={len(cats)}")
-        names = [c.get("name") for c in cats]
-        new_entries = ["Appliance Repair", "Delivery", "Vehicle Repair",
-                       "Home Maintenance", "Labour"]
-        present = [n for n in new_entries if n in names]
-        log(f"4 June-2026 entries present (informational, {len(present)}/5)",
-            True, f"present={present}")
-
-    # ─── 5. GET /payment/config (>=118 floor) ────────────────────────────────
-    r = requests.get(f"{BASE}/payment/config", headers=U, timeout=20)
-    log("5 user GET /payment/config 200", r.status_code == 200,
-        f"status={r.status_code} body={r.text[:200]}")
-    if r.status_code == 200:
-        cfg = r.json() or {}
-        amt = cfg.get("amount")
-        amt_paise = cfg.get("amount_paise")
-        log("5 cfg.amount >= 118", isinstance(amt, (int, float)) and amt >= 118,
-            f"amount={amt}")
-        log("5 cfg.amount_paise >= 11800",
-            isinstance(amt_paise, int) and amt_paise >= 11800,
-            f"amount_paise={amt_paise}")
-
-    # ─── 6. Subcategory CRUD regression ──────────────────────────────────────
-    r = requests.get(f"{BASE}/admin/service-categories", headers=A, timeout=20)
-    log("6a admin GET /admin/service-categories 200", r.status_code == 200,
-        f"status={r.status_code}")
+    # Look up a parent category id
     parent_id = None
-    if r.status_code == 200:
-        cats = (r.json() or {}).get("categories") or []
-        if cats:
-            parent_id = cats[0].get("id")
-        log("6a first category id found", bool(parent_id),
-            f"parent_id={parent_id}")
+    try:
+        r = requests.get(f"{BASE}/admin/service-categories", headers=H, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            cats = data if isinstance(data, list) else (data.get("items") or data.get("categories") or [])
+            if cats:
+                parent_id = cats[0].get("id")
+            _print("    parent lookup", parent_id is not None, f"parent_id={parent_id}")
+        else:
+            _print("    parent lookup", False, f"status={r.status_code} body={r.text[:120]}")
+    except Exception as e:
+        _print("    parent lookup", False, f"exception={e}")
 
-    sub_id = None
+    created_id = None
+
+    # 5) POST /admin/service-subcategories
     if parent_id:
-        r = requests.post(f"{BASE}/admin/service-subcategories", headers=A,
-                          json={"parent_id": parent_id, "name": "QA_PHASE_D_TEST"},
-                          timeout=20)
-        log("6b POST /admin/service-subcategories 200",
-            r.status_code == 200,
-            f"status={r.status_code} body={r.text[:240]}")
+        try:
+            r = requests.post(
+                f"{BASE}/admin/service-subcategories",
+                json={"parent_id": parent_id, "name": f"TestSub-Refactor-{int(time.time())}", "icon": "droplet"},
+                headers=H, timeout=20,
+            )
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            sub = body.get("subcategory") or {}
+            ok = r.status_code == 200 and body.get("ok") is True and isinstance(sub.get("id"), str) and sub.get("parent_id") == parent_id
+            created_id = sub.get("id")
+            results.append(("POST /admin/service-subcategories", ok))
+            _print("5) POST /admin/service-subcategories", ok,
+                   f"status={r.status_code} created_id={created_id} name={sub.get('name')}")
+        except Exception as e:
+            results.append(("POST /admin/service-subcategories", False))
+            _print("5) POST /admin/service-subcategories", False, f"exception={e}")
+    else:
+        results.append(("POST /admin/service-subcategories", False))
+        _print("5) POST /admin/service-subcategories", False, "no parent_id available")
+
+    # 6) PATCH
+    if created_id:
+        try:
+            r = requests.patch(
+                f"{BASE}/admin/service-subcategories/{created_id}",
+                json={"name": "TestSub-Refactor-Renamed"},
+                headers=H, timeout=15,
+            )
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            sub = body.get("subcategory") or {}
+            ok = r.status_code == 200 and body.get("ok") is True and sub.get("name") == "TestSub-Refactor-Renamed"
+            results.append(("PATCH /admin/service-subcategories/{id}", ok))
+            _print("6) PATCH /admin/service-subcategories/{id}", ok,
+                   f"status={r.status_code} new_name={sub.get('name')}")
+        except Exception as e:
+            results.append(("PATCH /admin/service-subcategories/{id}", False))
+            _print("6) PATCH /admin/service-subcategories/{id}", False, f"exception={e}")
+    else:
+        results.append(("PATCH /admin/service-subcategories/{id}", False))
+        _print("6) PATCH /admin/service-subcategories/{id}", False, "no created_id")
+
+    # 7) DELETE
+    if created_id:
+        try:
+            r = requests.delete(f"{BASE}/admin/service-subcategories/{created_id}", headers=H, timeout=15)
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            ok = r.status_code == 200 and body.get("ok") is True
+            results.append(("DELETE /admin/service-subcategories/{id}", ok))
+            _print("7) DELETE /admin/service-subcategories/{id}", ok, f"status={r.status_code}")
+        except Exception as e:
+            results.append(("DELETE /admin/service-subcategories/{id}", False))
+            _print("7) DELETE /admin/service-subcategories/{id}", False, f"exception={e}")
+    else:
+        results.append(("DELETE /admin/service-subcategories/{id}", False))
+        _print("7) DELETE /admin/service-subcategories/{id}", False, "no created_id")
+
+    # 8) POST /admin/service-categories/reorder
+    try:
+        r = requests.get(f"{BASE}/admin/service-categories", headers=H, timeout=15)
+        cats = []
         if r.status_code == 200:
-            sub_id = ((r.json() or {}).get("subcategory") or {}).get("id")
-            log("6b returned subcategory.id", bool(sub_id), f"sub_id={sub_id}")
+            data = r.json()
+            cats = data if isinstance(data, list) else (data.get("items") or data.get("categories") or [])
+        if cats:
+            cid = cats[0]["id"]
+            original_so = cats[0].get("sort_order", 0)
+            r = requests.post(
+                f"{BASE}/admin/service-categories/reorder",
+                json={"items": [{"id": cid, "sort_order": 999}]},
+                headers=H, timeout=15,
+            )
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            ok = r.status_code == 200 and body.get("ok") is True
+            results.append(("POST /admin/service-categories/reorder", ok))
+            _print("8) POST /admin/service-categories/reorder", ok,
+                   f"status={r.status_code} updated={body.get('updated')}")
+            # Restore the original sort_order
+            try:
+                requests.post(
+                    f"{BASE}/admin/service-categories/reorder",
+                    json={"items": [{"id": cid, "sort_order": original_so}]},
+                    headers=H, timeout=15,
+                )
+            except Exception:
+                pass
+        else:
+            results.append(("POST /admin/service-categories/reorder", False))
+            _print("8) POST /admin/service-categories/reorder", False, "no category to reorder")
+    except Exception as e:
+        results.append(("POST /admin/service-categories/reorder", False))
+        _print("8) POST /admin/service-categories/reorder", False, f"exception={e}")
 
-        r = requests.get(f"{BASE}/admin/service-subcategories",
-                         headers=A, params={"parent_id": parent_id}, timeout=20)
-        log("6c GET subcategories list 200", r.status_code == 200,
-            f"status={r.status_code}")
-        if r.status_code == 200:
-            items = (r.json() or {}).get("items") or []
-            ids = [it.get("id") for it in items]
-            log("6c created subcategory present in list",
-                sub_id in ids if sub_id else False,
-                f"sub_id in list = {sub_id in ids if sub_id else 'N/A'}")
-
-        if sub_id:
-            r = requests.delete(f"{BASE}/admin/service-subcategories/{sub_id}",
-                                headers=A, timeout=20)
-            log("6d DELETE created subcategory 200", r.status_code == 200,
-                f"status={r.status_code} body={r.text[:160]}")
-
-    print("\n=== SUMMARY ===")
-    n_pass = sum(1 for s, _, _ in results if s == PASS)
-    n_fail = sum(1 for s, _, _ in results if s == FAIL)
-    print(f"PASS: {n_pass}    FAIL: {n_fail}    TOTAL: {len(results)}")
-    if n_fail:
-        print("\n--- FAILED CASES ---")
-        for s, name, msg in results:
-            if s == FAIL:
-                print(f"  [{s}] {name}  {msg}")
-    return 0 if n_fail == 0 else 2
+    print()
+    passed = sum(1 for _, ok in results if ok)
+    print(f"==== SUMMARY: {passed}/{len(results)} PASS ====")
+    for label, ok in results:
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}")
+    sys.exit(0 if passed == len(results) else 1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

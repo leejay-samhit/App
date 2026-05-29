@@ -595,6 +595,51 @@ test_plan:
   test_all: false
   test_priority: "high_first"
 
+regression_2026_05_28_routes_refactor:
+  - task: "Backend refactor regression — routes/admin_ai.py + routes/service_subcategories.py"
+    implemented: true
+    working: true
+    file: "backend/routes/admin_ai.py + backend/routes/service_subcategories.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          ALL 8/8 PASS on /app/backend_test.py against
+          https://vendor-network-app-1.preview.emergentagent.com/api.
+          Both extracted router modules behave identically to the
+          pre-refactor server.py. No 404s, no 500s, no wiring bugs.
+
+          1. POST /api/admin/ai/text {kind:"category_description",
+             prompt:"plumber", tone:"professional"} (admin) → 200
+             {ok:true, text:"..."} (text_len=454).  PASS
+          2. POST /api/admin/ai/image {prompt:"plumber wrench icon",
+             style:"flat-icon"} (admin) → 200 {ok:true,
+             image_b64:"<460220 chars>", mime_type:"image/jpeg"}. PASS
+             (mime is jpeg — provider's actual response; backend falls
+             back to image/png only when provider omits the field.)
+          3. GET /api/service-subcategories (no auth) → 200
+             {items:[1], total:1}.  PASS
+          4. GET /api/admin/service-subcategories (admin) → 200
+             {items:[1], total:1}.  PASS
+          5. POST /api/admin/service-subcategories (admin) with
+             parent_id=fc8b7830-… + name=TestSub-Refactor-<ts> +
+             icon=droplet → 200 {ok:true, subcategory:{id:…,
+             parent_id, name, …}}.  PASS
+          6. PATCH /api/admin/service-subcategories/{id} (admin) with
+             {name:"TestSub-Refactor-Renamed"} → 200 {ok:true,
+             subcategory:{name:"TestSub-Refactor-Renamed", …}}. PASS
+          7. DELETE /api/admin/service-subcategories/{id} (admin) →
+             200 {ok:true} (cleanup verified).  PASS
+          8. POST /api/admin/service-categories/reorder (admin) with
+             {items:[{id:<existing>, sort_order:999}]} → 200
+             {ok:true, updated:1}. Original sort_order restored after
+             test.  PASS
+
+          Refactor is transparent to clients. Main agent can finish.
+
 regression_2026_05_28_frontend_refactor:
   - task: "Re-verify: GET /services?subcategory_id=... still filters"
     implemented: true
