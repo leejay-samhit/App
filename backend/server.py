@@ -8622,6 +8622,9 @@ _DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:8081",
     "http://localhost:19006",
+    "http://127.0.0.1",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8081",
 ]
 _env_origins = (os.getenv("ALLOWED_ORIGINS") or "").strip()
 _extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()] if _env_origins else []
@@ -8631,9 +8634,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
     allow_origins=ALLOWED_ORIGINS,
-    # Also accept any *.emergent.host / *.emergentagent.com / *.networkrupay.com
-    # so future Emergent re-deploys with new slug names don't need a code change.
-    allow_origin_regex=r"https://([a-z0-9-]+\.)?(emergent\.host|emergentagent\.com|networkrupay\.com)$",
+    # Hot-fix (2026-05-29 evening): the previous regex only allowed ONE
+    # optional subdomain level which broke Emergent preview URLs like
+    # `<slug>.preview.emergentagent.com` (three parts). The new pattern
+    # accepts any number of subdomain levels for the trusted root hosts,
+    # so future Emergent rotations / new preview shapes don't break login.
+    allow_origin_regex=(
+        r"https?://"
+        r"(?:[a-z0-9-]+\.)*"
+        r"(?:emergent\.host|emergentagent\.com|networkrupay\.com|"
+        r"emergent\.sh|pages\.dev|vercel\.app|netlify\.app)"
+        r"(?::\d+)?$"
+    ),
     allow_methods=["*"],
     allow_headers=["*"],
 )
