@@ -178,6 +178,8 @@ from routes import withdrawals as withdrawals_router  # noqa: E402
 from routes import cart as cart_router  # noqa: E402
 from routes import admin_ai as admin_ai_router  # noqa: E402
 from routes import service_subcategories as service_subcategories_router  # noqa: E402
+from routes import service_admin as service_admin_router  # noqa: E402
+from routes import service_provider as service_provider_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -7639,88 +7641,8 @@ async def seed_service_categories():
     return len(docs)
 
 
-@api_router.get("/admin/service-categories")
-async def admin_list_service_categories(_: Dict[str, Any] = Depends(require_admin)):
-    cats = await db.service_categories.find({}, {"_id": 0}).sort([("sort_order", 1), ("name", 1)]).to_list(200)
-    for c in cats:
-        c["provider_count"] = await db.users.count_documents({
-            "is_service_provider": True,
-            "$or": [{"category_id": c["id"]}, {"service_category": c["name"]}],
-        })
-    return {"categories": cats}
-
-
-@api_router.post("/admin/service-categories")
-async def admin_create_service_category(
-    payload: ServiceCategoryCreate,
-    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
-):
-    name = payload.name.strip()
-    slug = (payload.slug or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"))[:40]
-    # Reject duplicates by name or slug
-    dup = await db.service_categories.find_one({"$or": [{"name": name}, {"slug": slug}]})
-    if dup:
-        raise HTTPException(status_code=400, detail=f"Category '{dup.get('name')}' already exists")
-    cid = str(uuid.uuid4())
-    doc = {
-        "id": cid,
-        "name": name,
-        "slug": slug,
-        "icon": payload.icon or "briefcase",
-        "color": payload.color or "#2563EB",
-        "sort_order": int(payload.sort_order or 0),
-        "active": True if payload.active is None else bool(payload.active),
-        "image_b64": payload.image_b64 or None,
-        "banner_b64": payload.banner_b64 or None,
-        "description": (payload.description or "").strip()[:500] if payload.description else None,
-        "created_at": now_utc().isoformat(),
-    }
-    await db.service_categories.insert_one(doc)
-    await _audit_log(admin, "service_category.create", "service_category", cid, {"name": name})
-    doc.pop("_id", None)
-    return {"ok": True, "category": doc}
-
-
-@api_router.patch("/admin/service-categories/{cat_id}")
-async def admin_update_service_category(
-    cat_id: str,
-    payload: ServiceCategoryUpdate,
-    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "manager")),
-):
-    existing = await db.service_categories.find_one({"id": cat_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Category not found")
-    update = {k: v for k, v in payload.dict().items() if v is not None}
-    if "name" in update:
-        update["name"] = update["name"].strip()
-    if "slug" in update:
-        update["slug"] = re.sub(r"[^a-z0-9]+", "-", update["slug"].lower()).strip("-")[:40]
-    if not update:
-        raise HTTPException(status_code=400, detail="No fields provided")
-    await db.service_categories.update_one({"id": cat_id}, {"$set": update})
-    await _audit_log(admin, "service_category.update", "service_category", cat_id, update)
-    fresh = await db.service_categories.find_one({"id": cat_id}, {"_id": 0})
-    return {"ok": True, "category": fresh}
-
-
-@api_router.delete("/admin/service-categories/{cat_id}")
-async def admin_delete_service_category(
-    cat_id: str,
-    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
-):
-    existing = await db.service_categories.find_one({"id": cat_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Category not found")
-    # Check if any provider is currently linked
-    in_use = await db.users.count_documents({"is_service_provider": True, "category_id": cat_id})
-    if in_use > 0:
-        # Soft-delete instead of hard-delete to avoid orphaning providers
-        await db.service_categories.update_one({"id": cat_id}, {"$set": {"active": False}})
-        await _audit_log(admin, "service_category.deactivate", "service_category", cat_id, {"in_use": in_use})
-        return {"ok": True, "deactivated": True, "providers_using": in_use}
-    await db.service_categories.delete_one({"id": cat_id})
-    await _audit_log(admin, "service_category.delete", "service_category", cat_id, {"name": existing.get("name")})
-    return {"ok": True, "deleted": True}
+# Service Category CRUD + Service Analytics moved to routes/service_admin.py
+# (2026-05-28 refactor — extracted from server.py)
 
 
 # ----- Provider live-location broadcast (Phase 2 — GPS) ------------------
@@ -8470,23 +8392,8 @@ async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, use
     }
 
 
-@api_router.get("/services/reveals/me")
-async def my_phone_reveals(user: Dict[str, Any] = Depends(get_current_user)):
-    """User's phone-reveal invoice history."""
-    items = await db.phone_reveal_invoices.find(
-        {"user_id": user["id"]}, {"_id": 0}
-    ).sort("created_at", -1).to_list(200)
-    return {"items": items, "total": len(items)}
-
-
-@api_router.get("/services/reveals/invoice/{invoice_id}")
-async def get_phone_reveal_invoice(invoice_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    inv = await db.phone_reveal_invoices.find_one({"id": invoice_id}, {"_id": 0})
-    if not inv:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    if inv.get("user_id") != user["id"] and user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Not allowed")
-    return inv
+# my_phone_reveals + get_phone_reveal_invoice moved to routes/service_provider.py
+# (2026-05-28 refactor)
 
 
 # ============================================================
@@ -8601,65 +8508,11 @@ async def update_my_address(payload: AddressUpdateRequest, user: Dict[str, Any] 
 
 
 # ============================================================
-# Provider Availability (Available / Busy / Offline)
 # ============================================================
-_AVAIL_STATUSES = {"available", "busy", "offline"}
-
-
-@api_router.patch("/services/me/availability")
-async def update_my_availability(payload: ProviderAvailabilityRequest, user: Dict[str, Any] = Depends(get_current_user)):
-    """Provider toggles their own visibility status. Independent of location
-    sharing — this is the green/yellow/gray dot users see next to them.
-    """
-    if not user.get("is_service_provider"):
-        raise HTTPException(status_code=403, detail="Only service providers can set availability")
-    status = (payload.status or "").lower().strip()
-    if status not in _AVAIL_STATUSES:
-        raise HTTPException(status_code=400, detail="status must be one of: available, busy, offline")
-    ts = now_utc().isoformat()
-    await db.users.update_one(
-        {"id": user["id"]},
-        {"$set": {"availability_status": status, "availability_updated_at": ts}},
-    )
-    return {"ok": True, "availability_status": status, "availability_updated_at": ts}
-
-
+# Provider Availability + Customer Location moved to routes/service_provider.py
+# (2026-05-28 refactor — extracted from server.py)
 # ============================================================
-# Customer Location Capture (foreground GPS — no background tracking)
-# ============================================================
-@api_router.post("/users/me/location")
-async def save_user_location(payload: UserLocationUpdate, user: Dict[str, Any] = Depends(get_current_user)):
-    """Persist a single foreground GPS sample. Frontend should call this
-    only when the user explicitly taps "Use my location" — never on app
-    resume / background.
-    """
-    try:
-        lat = float(payload.latitude)
-        lng = float(payload.longitude)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid latitude / longitude")
-    if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
-        raise HTTPException(status_code=400, detail="Latitude or longitude out of range")
-    ts = now_utc().isoformat()
-    update: Dict[str, Any] = {
-        "user_location": {"type": "Point", "coordinates": [lng, lat]},
-        "user_location_lat": lat,
-        "user_location_lng": lng,
-        "user_location_updated_at": ts,
-    }
-    if payload.accuracy_m is not None:
-        update["user_location_accuracy_m"] = float(payload.accuracy_m)
-    if payload.address:  update["address"] = payload.address.strip()[:300]
-    if payload.city:     update["city"]    = payload.city.strip()[:80]
-    if payload.state:    update["state"]   = payload.state.strip()[:80]
-    if payload.pincode:  update["pincode"] = payload.pincode.strip()[:10]
-    await db.users.update_one({"id": user["id"]}, {"$set": update})
-    fresh = await db.users.find_one(
-        {"id": user["id"]},
-        {"_id": 0, "user_location_lat": 1, "user_location_lng": 1, "address": 1,
-         "city": 1, "state": 1, "pincode": 1, "user_location_updated_at": 1},
-    )
-    return {"ok": True, "location": fresh}
+_AVAIL_STATUSES = {"available", "busy", "offline"}  # kept for any in-file refs
 
 
 # ============================================================
@@ -8673,98 +8526,8 @@ async def save_user_location(payload: UserLocationUpdate, user: Dict[str, Any] =
 # ============================================================
 
 
-@api_router.get("/admin/service-analytics")
-async def admin_service_analytics(pincode: Optional[str] = None, admin: Dict[str, Any] = Depends(require_admin)):
-    """Compact analytics for the Service Management screen.
-
-    Optional `pincode` query parameter filters provider counts and revenue
-    to a single area — used by the admin's "live data filter" UI to spot
-    coverage gaps and demand pockets by location.
-
-    Returns:
-      - provider counts by availability (available / busy / offline / unset)
-      - top categories by provider count and recent activity (last 30d)
-      - phone-reveal invoice totals (last 30d + lifetime)
-      - service application counts by status
-    """
-    pin_filter: Dict[str, Any] = {}
-    if pincode:
-        pin_filter["service_pincode"] = pincode.strip()
-
-    # Provider availability bucket (scoped by pincode when provided)
-    avail_pipeline = [
-        {"$match": {"is_service_provider": True, **pin_filter}},
-        {"$group": {"_id": "$availability_status", "count": {"$sum": 1}}},
-    ]
-    avail_rows = await db.users.aggregate(avail_pipeline).to_list(20)
-    avail = {"available": 0, "busy": 0, "offline": 0, "unset": 0}
-    for r in avail_rows:
-        key = (r.get("_id") or "unset")
-        if key not in avail:
-            key = "unset"
-        avail[key] = int(r.get("count") or 0)
-
-    # Top categories by provider count
-    # Fast path (June 2026): batch both groupings up-front instead of N+1
-    # count_documents per category (the previous loop made 200+ MongoDB
-    # round-trips for analytics — slow under admin load).
-    cats = await db.service_categories.find({}, {"_id": 0}).to_list(200)
-    counts_by_id: Dict[str, int] = {}
-    counts_by_name: Dict[str, int] = {}
-    async for r in db.users.aggregate([
-        {"$match": {"is_service_provider": True, **pin_filter}},
-        {"$group": {"_id": "$category_id", "count": {"$sum": 1}}},
-    ]):
-        if r.get("_id"):
-            counts_by_id[str(r["_id"])] = int(r.get("count") or 0)
-    async for r in db.users.aggregate([
-        {"$match": {"is_service_provider": True, "category_id": {"$in": [None, ""]}, **pin_filter}},
-        {"$group": {"_id": "$service_category", "count": {"$sum": 1}}},
-    ]):
-        if r.get("_id"):
-            counts_by_name[str(r["_id"])] = int(r.get("count") or 0)
-    cat_rows = []
-    for c in cats:
-        cid = c.get("id")
-        cnt = int(counts_by_id.get(cid, 0)) + int(counts_by_name.get(c.get("name"), 0))
-        cat_rows.append({
-            "id": cid, "name": c.get("name"),
-            "icon": c.get("icon"), "color": c.get("color"),
-            "provider_count": cnt,
-            "active": bool(c.get("active", True)),
-        })
-    cat_rows.sort(key=lambda x: -x["provider_count"])
-
-    # Phone-reveal invoices
-    cutoff = (now_utc() - timedelta(days=30)).isoformat()
-    last30_cursor = db.phone_reveal_invoices.find({"created_at": {"$gte": cutoff}})
-    last30 = await last30_cursor.to_list(2000)
-    lifetime_cnt = await db.phone_reveal_invoices.count_documents({})
-    reveal_stats = {
-        "count_30d":    len(last30),
-        "amount_30d":   round(sum(float(r.get("total") or 0) for r in last30), 2),
-        "fee_30d":      round(sum(float(r.get("fee") or 0) for r in last30), 2),
-        "gst_30d":      round(sum(float(r.get("gst_amount") or 0) for r in last30), 2),
-        "count_lifetime": lifetime_cnt,
-    }
-
-    # Service applications by status
-    app_pipeline = [
-        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
-    ]
-    app_rows = await db.service_applications.aggregate(app_pipeline).to_list(20)
-    apps = {"pending": 0, "approved": 0, "rejected": 0}
-    for r in app_rows:
-        s = (r.get("_id") or "pending").lower()
-        apps[s] = int(r.get("count") or 0)
-
-    return {
-        "availability":  avail,
-        "categories":    cat_rows,
-        "reveal_stats":  reveal_stats,
-        "applications":  apps,
-        "generated_at":  now_utc().isoformat(),
-    }
+# Service Analytics endpoint moved to routes/service_admin.py
+# (2026-05-28 refactor — extracted from server.py)
 
 
 # Include router
@@ -8792,6 +8555,8 @@ app.include_router(withdrawals_router.router, prefix="/api")
 app.include_router(cart_router.router, prefix="/api")
 app.include_router(admin_ai_router.router, prefix="/api")
 app.include_router(service_subcategories_router.router, prefix="/api")
+app.include_router(service_admin_router.router, prefix="/api")
+app.include_router(service_provider_router.router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,

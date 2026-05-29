@@ -640,6 +640,52 @@ regression_2026_05_28_routes_refactor:
 
           Refactor is transparent to clients. Main agent can finish.
 
+regression_2026_05_28_phase2_refactor:
+  - task: "Phase-2 backend refactor — routes/service_admin.py + routes/service_provider.py"
+    implemented: true
+    working: true
+    file: "backend/routes/service_admin.py + backend/routes/service_provider.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          ALL 10/10 PASS on /app/backend_test.py against
+          https://vendor-network-app-1.preview.emergentagent.com/api.
+          Both newly-extracted router modules behave identically to the
+          pre-refactor server.py. No 404s, no 500s, no wiring bugs.
+
+          1. GET /api/admin/service-categories (admin) → 200
+             {categories:[13]} — every row has `provider_count` field. PASS
+          2. POST /api/admin/service-categories (admin) with
+             {name:"RefactorTest", icon:"box", color:"#999999"} → 200
+             {ok:true, category:{id:cc6b755b-…, slug:"refactortest",
+             icon:"box", color:"#999999", active:true, …}}. PASS
+          3. PATCH /api/admin/service-categories/{id} (admin) with
+             {color:"#000000"} → 200 {ok:true, category:{color:"#000000"}}. PASS
+          4. DELETE /api/admin/service-categories/{id} (admin) → 200
+             {ok:true, deleted:true} (cleanup verified). PASS
+          5. GET /api/admin/service-analytics (admin) → 200 with all four
+             expected top-level keys: availability, categories,
+             reveal_stats, applications (+ generated_at). PASS
+          6. GET /api/admin/service-analytics?pincode=110001 (admin) → 200
+             with the pincode filter honoured (same key structure). PASS
+          7. PATCH /api/services/me/availability {status:"available"} as
+             testuser (non-provider) → 403 with EXACT detail
+             "Only service providers can set availability". PASS
+          8. POST /api/users/me/location {latitude:28.6, longitude:77.2,
+             pincode:"110001"} as testuser → 200 {ok:true,
+             location:{user_location_lat:28.6, user_location_lng:77.2,
+             pincode:"110001", user_location_updated_at:"..."}}. PASS
+          9. POST /api/users/me/location {latitude:999, longitude:77.2}
+             as testuser → 400 "Latitude or longitude out of range". PASS
+          10. GET /api/services/reveals/me as testuser → 200
+             {items:[1 prior invoice], total:1}. PASS
+
+          Refactor is transparent to clients. Main agent can finish.
+
 regression_2026_05_28_frontend_refactor:
   - task: "Re-verify: GET /services?subcategory_id=... still filters"
     implemented: true
