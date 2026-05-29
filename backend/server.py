@@ -8558,10 +8558,40 @@ app.include_router(service_subcategories_router.router, prefix="/api")
 app.include_router(service_admin_router.router, prefix="/api")
 app.include_router(service_provider_router.router, prefix="/api")
 
+# ============================================================
+# CORS — explicit allowlist for production (June 2026 hardening)
+# Was wildcard "*"; tightened after networkrupay.com was linked
+# as the public domain. Driver: better browser-credentials handling
+# (wildcard + allow_credentials=True is rejected by some browsers)
+# and reduced attack surface vs. open CORS.
+# Env-var override: set ALLOWED_ORIGINS="https://a.com,https://b.com"
+# in backend/.env to extend without code changes.
+# ============================================================
+_DEFAULT_ALLOWED_ORIGINS = [
+    # Production custom domain
+    "https://www.networkrupay.com",
+    "https://networkrupay.com",
+    # Emergent deployment URL
+    "https://network-pay-1.emergent.host",
+    # Emergent preview (dev) URL
+    "https://vendor-network-app-1.preview.emergentagent.com",
+    # Local dev / Expo Go
+    "http://localhost",
+    "http://localhost:3000",
+    "http://localhost:8081",
+    "http://localhost:19006",
+]
+_env_origins = (os.getenv("ALLOWED_ORIGINS") or "").strip()
+_extra_origins = [o.strip() for o in _env_origins.split(",") if o.strip()] if _env_origins else []
+ALLOWED_ORIGINS = list({*_DEFAULT_ALLOWED_ORIGINS, *_extra_origins})
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    # Also accept any *.emergent.host / *.emergentagent.com / *.networkrupay.com
+    # so future Emergent re-deploys with new slug names don't need a code change.
+    allow_origin_regex=r"https://([a-z0-9-]+\.)?(emergent\.host|emergentagent\.com|networkrupay\.com)$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
