@@ -49,15 +49,9 @@ export default function Contact() {
           <TouchableOpacity style={styles.cardBtn} onPress={() => router.push("/legal/track-ticket" as any)}><Text style={styles.cardBtnText}>Track</Text></TouchableOpacity>
         </View>
 
-        {address ? (
-          <View style={[styles.card, { alignItems: "flex-start" }]}>
-            <View style={styles.iconBox}><Feather name="map-pin" size={18} color={colors.primary} /></View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardLabel}>Registered office</Text>
-              <Text style={styles.cardValue}>{address}{b.business_gst ? `\nGST: ${b.business_gst}` : ""}</Text>
-            </View>
-          </View>
-        ) : null}
+        {/* Registered Office card removed (June 2026) per business decision.
+            If a public-facing address is ever needed again it can be re-added
+            via the Admin Branding screen instead of being shown on Contact. */}
 
         <Text style={styles.footer}>We aim to respond within 24 business hours. For urgent KYC or withdrawal issues, use the “Support ticket” channel and mark priority as High.</Text>
       </ScrollView>

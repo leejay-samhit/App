@@ -493,6 +493,7 @@ class ServiceApplyRequest(BaseModel):
     service_name: str = Field(min_length=2, max_length=80)
     service_category: str = Field(min_length=2, max_length=40)  # e.g. "Plumber", "Tutor"
     category_id: Optional[str] = None  # FK → service_categories.id (preferred)
+    service_subcategory_id: Optional[str] = None  # FK → service_subcategories.id (June 2026)
     pincode: str = Field(pattern=r"^\d{6}$")
     charge: float = Field(ge=0, le=1_000_000)
     description: Optional[str] = Field(default=None, max_length=500)

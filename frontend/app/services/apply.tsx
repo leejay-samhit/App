@@ -40,6 +40,10 @@ export default function ServiceApply() {
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [categoryName, setCategoryName] = useState("");
   const [categories, setCategories] = useState<Category[]>([]);
+  // June 2026 — sub-category support
+  const [subcategoryId, setSubcategoryId] = useState<string | null>(null);
+  const [subcategoryName, setSubcategoryName] = useState<string>("");
+  const [subcategories, setSubcategories] = useState<{ id: string; name: string; icon?: string }[]>([]);
   const [pincode, setPincode] = useState("");
   const [description, setDescription] = useState("");
   const [languages, setLanguages] = useState<string[]>([]);
@@ -73,6 +77,8 @@ export default function ServiceApply() {
           setServiceName(data.application.service_name || "");
           setCategoryName(data.application.service_category || "");
           setCategoryId(data.application.category_id || null);
+          setSubcategoryId(data.application.service_subcategory_id || null);
+          setSubcategoryName(data.application.service_subcategory_name || "");
           setPincode(data.application.pincode || "");
           setCharge(String(data.application.charge || ""));
           setDescription(data.application.description || "");
@@ -87,6 +93,28 @@ export default function ServiceApply() {
   const toggleLanguage = (code: string) => {
     setLanguages((prev) => (prev.includes(code) ? prev.filter((x) => x !== code) : [...prev, code]));
   };
+
+  // Whenever the user picks a different parent category, fetch its
+  // sub-categories. We DON'T reset subcategoryId here on initial load so
+  // the form correctly hydrates from an existing pending application.
+  useEffect(() => {
+    if (!categoryId) {
+      setSubcategories([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get<{ items: { id: string; name: string; icon?: string }[] }>(
+          `/service-subcategories?parent_id=${encodeURIComponent(categoryId)}`,
+        );
+        if (!cancelled) setSubcategories(r.data.items || []);
+      } catch {
+        if (!cancelled) setSubcategories([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [categoryId]);
 
   const showError = (msg: string) => {
     setFormError(msg);
@@ -111,6 +139,7 @@ export default function ServiceApply() {
         service_name: serviceName.trim(),
         service_category: categoryName,
         category_id: categoryId,
+        service_subcategory_id: subcategoryId,
         pincode,
         // Charge is no longer collected from the provider — the platform
         // monetises via the customer-side phone-reveal fee. Backend still
@@ -209,6 +238,11 @@ export default function ServiceApply() {
                   key={c.id}
                   disabled={locked}
                   onPress={() => {
+                    if (c.id !== categoryId) {
+                      // New category picked — clear stale sub-category selection
+                      setSubcategoryId(null);
+                      setSubcategoryName("");
+                    }
                     setCategoryId(c.id);
                     setCategoryName(c.name);
                   }}
@@ -226,6 +260,48 @@ export default function ServiceApply() {
               );
             })}
           </View>
+
+          {/* June 2026 — Sub-category picker. Only shown when the chosen
+              parent category has sub-categories configured by the admin.
+              Optional: users can skip if no specific sub-category matches. */}
+          {categoryId && subcategories.length > 0 ? (
+            <>
+              <Text style={styles.label}>Sub-category <Text style={{ color: colors.textMuted, fontWeight: "600" }}>(optional)</Text></Text>
+              <View style={styles.langRow}>
+                <TouchableOpacity
+                  disabled={locked}
+                  onPress={() => { setSubcategoryId(null); setSubcategoryName(""); }}
+                  style={[
+                    styles.langChip,
+                    subcategoryId === null && styles.langChipActive,
+                    locked && { opacity: 0.55 },
+                  ]}
+                >
+                  <Text style={[styles.langChipText, subcategoryId === null && styles.langChipTextActive]}>
+                    Any / general
+                  </Text>
+                </TouchableOpacity>
+                {subcategories.map((s) => {
+                  const sel = subcategoryId === s.id;
+                  return (
+                    <TouchableOpacity
+                      key={s.id}
+                      disabled={locked}
+                      onPress={() => { setSubcategoryId(s.id); setSubcategoryName(s.name); }}
+                      style={[styles.langChip, sel && styles.langChipActive, locked && { opacity: 0.55 }]}
+                      testID={`apply-subcat-${s.id}`}
+                    >
+                      {sel ? <Feather name="check" size={12} color={colors.primaryFg} /> : null}
+                      {s.icon && !sel ? <Feather name={s.icon as any} size={12} color={colors.textMain} /> : null}
+                      <Text style={[styles.langChipText, sel && styles.langChipTextActive]}>
+                        {(sel || s.icon) ? "  " : ""}{s.name}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </>
+          ) : null}
 
           <Text style={styles.label}>Languages you speak</Text>
           <View style={styles.langRow}>

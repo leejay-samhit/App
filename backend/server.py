@@ -5856,9 +5856,10 @@ async def seed_demo_users():
     """Ensure 5 default demo users exist under admin. Idempotent:
     safe to call on every startup.
 
-    Disabled in production by setting env `SEED_DEMO_USERS=false`.
-    Default is enabled so dev/staging still have realistic data."""
-    if os.environ.get("SEED_DEMO_USERS", "true").lower() in ("0", "false", "no", "off"):
+    SAFE-BY-DEFAULT (June 2026 update): demo seeding is now OFF by default.
+    Production deployments must NOT carry seeded test users. Set the env
+    var `SEED_DEMO_USERS=true` (in backend/.env) ONLY for dev/staging."""
+    if os.environ.get("SEED_DEMO_USERS", "false").lower() not in ("1", "true", "yes", "on"):
         return
     admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not admin:
@@ -5910,6 +5911,32 @@ async def seed_demo_users():
             "created_at": ts,
         })
     logger.info("Demo users seeded (or already present)")
+
+
+@api_router.post("/admin/purge-demo-users")
+async def admin_purge_demo_users(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """One-shot cleanup endpoint — deletes every user that was created by
+    the seed_demo_users() helper (flagged via `demo_seed: True` in the
+    user doc). Use this to scrub demo accounts out of the LIVE deployment
+    that were created back when SEED_DEMO_USERS defaulted to True.
+
+    Safe even if there are no demo users: returns count=0.
+    """
+    demo_users = await db.users.find({"demo_seed": True}, {"_id": 0, "id": 1, "email": 1}).to_list(100)
+    if not demo_users:
+        return {"ok": True, "removed": 0, "message": "No demo users found."}
+    demo_ids = [u["id"] for u in demo_users]
+    demo_emails = [u.get("email") for u in demo_users]
+    # Cascade-delete user-owned rows so wallet/ledger stays clean
+    await db.users.delete_many({"id": {"$in": demo_ids}})
+    await db.wallet_transactions.delete_many({"user_id": {"$in": demo_ids}})
+    await db.ledger_entries.delete_many({"user_id": {"$in": demo_ids}})
+    await db.notifications.delete_many({"user_id": {"$in": demo_ids}})
+    await _audit_log(admin, "demo_users.purge", "users", "bulk", {
+        "count": len(demo_ids), "emails": demo_emails,
+    })
+    logger.info(f"Purged {len(demo_ids)} demo users: {demo_emails}")
+    return {"ok": True, "removed": len(demo_ids), "emails": demo_emails}
 
 
 
@@ -7333,6 +7360,15 @@ async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Dep
         cat_doc = await db.service_categories.find_one({"id": payload.category_id, "active": True})
         if cat_doc:
             category_name = cat_doc.get("name") or category_name
+    # Resolve sub-category (June 2026): must belong to the picked parent
+    sub_doc = None
+    if payload.service_subcategory_id:
+        sub_doc = await db.service_subcategories.find_one({
+            "id": payload.service_subcategory_id, "active": True,
+        })
+        if sub_doc and cat_doc and sub_doc.get("parent_id") != cat_doc.get("id"):
+            # Subcategory mismatch with selected category — reject silently
+            sub_doc = None
     # Validate languages (subset of allowed codes)
     allowed_langs = {"en", "te", "hi", "ta"}
     langs = [l for l in (payload.languages or []) if l in allowed_langs]
@@ -7346,6 +7382,9 @@ async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Dep
         "service_name": payload.service_name.strip(),
         "service_category": category_name,
         "category_id": cat_doc["id"] if cat_doc else None,
+        # June 2026 — sub-category support
+        "service_subcategory_id": sub_doc["id"] if sub_doc else None,
+        "service_subcategory_name": sub_doc.get("name") if sub_doc else None,
         "languages": langs,
         "pincode": payload.pincode,
         "charge": float(payload.charge),
@@ -7432,6 +7471,9 @@ async def admin_approve_service(aid: str, admin: Dict[str, Any] = Depends(requir
             "service_name": app["service_name"],
             "service_category": app["service_category"],
             "category_id": app.get("category_id"),
+            # June 2026 — sub-category support
+            "service_subcategory_id": app.get("service_subcategory_id"),
+            "service_subcategory_name": app.get("service_subcategory_name"),
             "service_languages": app.get("languages") or [],
             "service_pincode": app["pincode"],
             "service_charge": app["charge"],

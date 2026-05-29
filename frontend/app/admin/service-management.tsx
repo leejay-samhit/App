@@ -239,6 +239,12 @@ function CategoryEditor({
   const [sortOrder, setSortOrder] = useState(String(category?.sort_order ?? 999));
   const [saving, setSaving] = useState(false);
 
+  // June 2026 — persistent image fields (lives on the category doc)
+  // Hydrated from the existing category on open; set when admin taps
+  // "Apply as icon" / "Apply as banner" on a freshly-generated AI image.
+  const [imageB64, setImageB64]   = useState<string | null>(category?.image_b64 || null);
+  const [bannerB64, setBannerB64] = useState<string | null>(category?.banner_b64 || null);
+
   // ── AI helpers (inline; June 2026 — replaces the standalone /admin/ai-tools page) ──
   const [aiOpen, setAiOpen] = useState(false);
   const [aiTab, setAiTab] = useState<"text" | "image">("text");
@@ -287,12 +293,15 @@ function CategoryEditor({
     if (!name.trim() || name.trim().length < 2) return Alert.alert("Name required", "At least 2 characters.");
     setSaving(true);
     try {
-      const body = {
+      const body: any = {
         name: name.trim(),
         icon: icon || "briefcase",
         color: color || "#2563EB",
         sort_order: Number(sortOrder) || 0,
       };
+      // Include AI-generated images when set (admin tapped "Apply as icon/banner")
+      if (imageB64 !== null)  body.image_b64  = imageB64  || "";   // empty string = clear
+      if (bannerB64 !== null) body.banner_b64 = bannerB64 || "";
       if (isEdit && category) {
         await api.patch(`/admin/service-categories/${category.id}`, body);
       } else {
@@ -318,6 +327,8 @@ function CategoryEditor({
         setIcon(category?.icon || "briefcase");
         setColor(category?.color || "#2563EB");
         setSortOrder(String(category?.sort_order ?? 999));
+        setImageB64(category?.image_b64 || null);
+        setBannerB64(category?.banner_b64 || null);
         // reset AI panel between openings
         setAiOpen(false);
         setAiPrompt("");
@@ -334,11 +345,50 @@ function CategoryEditor({
             <ScrollView contentContainerStyle={{ paddingBottom: 20 }} showsVerticalScrollIndicator={false}>
               {/* Live preview */}
               <View style={styles.preview}>
-                <View style={[styles.previewIconWrap, { backgroundColor: color + "20" }]}>
-                  <Feather name={icon as any} size={28} color={color} />
+                <View style={[styles.previewIconWrap, { backgroundColor: color + "20", overflow: "hidden" }]}>
+                  {imageB64 ? (
+                    <Image
+                      source={{ uri: imageB64.startsWith("data:") ? imageB64 : `data:image/png;base64,${imageB64}` }}
+                      style={{ width: "100%", height: "100%" }}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <Feather name={icon as any} size={28} color={color} />
+                  )}
                 </View>
                 <Text style={styles.previewName}>{name || "Category name"}</Text>
               </View>
+
+              {/* Currently-applied AI images — quick visual + clear */}
+              {(imageB64 || bannerB64) ? (
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 4, marginBottom: 8 }}>
+                  {imageB64 ? (
+                    <View style={{ flex: 1, padding: 8, borderRadius: 10, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, alignItems: "center" }}>
+                      <Text style={{ fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 1 }}>ICON</Text>
+                      <Image
+                        source={{ uri: imageB64.startsWith("data:") ? imageB64 : `data:image/png;base64,${imageB64}` }}
+                        style={{ width: 48, height: 48, borderRadius: 8, marginTop: 4 }}
+                      />
+                      <TouchableOpacity onPress={() => setImageB64("")} style={{ marginTop: 6 }} testID="cat-clear-icon">
+                        <Text style={{ fontSize: 10, color: colors.error, fontWeight: "700" }}>Remove</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
+                  {bannerB64 ? (
+                    <View style={{ flex: 1, padding: 8, borderRadius: 10, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, alignItems: "center" }}>
+                      <Text style={{ fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 1 }}>BANNER</Text>
+                      <Image
+                        source={{ uri: bannerB64.startsWith("data:") ? bannerB64 : `data:image/png;base64,${bannerB64}` }}
+                        style={{ width: 84, height: 30, borderRadius: 6, marginTop: 4 }}
+                        resizeMode="cover"
+                      />
+                      <TouchableOpacity onPress={() => setBannerB64("")} style={{ marginTop: 6 }} testID="cat-clear-banner">
+                        <Text style={{ fontSize: 10, color: colors.error, fontWeight: "700" }}>Remove</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
 
               <Text style={styles.label}>Name</Text>
               <TextInput
@@ -478,12 +528,41 @@ function CategoryEditor({
                       </TouchableOpacity>
                       {aiImgB64 ? (
                         <View style={{ marginTop: 12, padding: 10, backgroundColor: colors.bg, borderRadius: 10, borderWidth: 1, borderColor: colors.border, alignItems: "center" }}>
-                          {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
                           <View style={{ width: "100%", aspectRatio: 1.4, backgroundColor: colors.surfaceMuted, borderRadius: 8, overflow: "hidden" }}>
                             <Image source={{ uri: aiImgB64 }} style={{ width: "100%", height: "100%" }} resizeMode="contain" />
                           </View>
-                          <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 8, textAlign: "center" }}>
-                            Long-press the image to save / copy. Paste into the category banner field via Branding screen.
+                          {/* June 2026 — one-tap "Apply" buttons. Sets the
+                              base64 string into form state; Save persists
+                              it to the category doc. Strip the data URL
+                              prefix so backend stores pure base64. */}
+                          <View style={{ flexDirection: "row", gap: 8, marginTop: 10, width: "100%" }}>
+                            <TouchableOpacity
+                              onPress={() => {
+                                const raw = aiImgB64.includes(",") ? aiImgB64.split(",")[1] : aiImgB64;
+                                setImageB64(raw);
+                                Alert.alert("Applied", "Image set as the category icon. Tap 'Save' to persist.");
+                              }}
+                              style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: "#10B981", flexDirection: "row", alignItems: "center", justifyContent: "center" }}
+                              testID="cat-ai-apply-icon"
+                            >
+                              <Feather name="image" size={14} color="#fff" />
+                              <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>{"  "}Apply as icon</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => {
+                                const raw = aiImgB64.includes(",") ? aiImgB64.split(",")[1] : aiImgB64;
+                                setBannerB64(raw);
+                                Alert.alert("Applied", "Image set as the category banner. Tap 'Save' to persist.");
+                              }}
+                              style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: "#8B5CF6", flexDirection: "row", alignItems: "center", justifyContent: "center" }}
+                              testID="cat-ai-apply-banner"
+                            >
+                              <Feather name="image" size={14} color="#fff" />
+                              <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>{"  "}Apply as banner</Text>
+                            </TouchableOpacity>
+                          </View>
+                          <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 6, textAlign: "center" }}>
+                            Pick one — "Apply as icon" sets the small image, "Apply as banner" sets the wide hero image.
                           </Text>
                         </View>
                       ) : null}
