@@ -7714,6 +7714,66 @@ backend:
           discovers threshold from the pending-levels response and
           adapts loop count accordingly. No issue.
 
+backend:
+  - task: "Finance & Accounting layer — 7-group net-worth, expenses, bank ledger, TXN ids, reverse/adjust, CSV exports (routes/finance.py)"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/finance.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            FULL PASS — 23/23 tests green via backend_test.py (2026-05-30).
+            Endpoints verified:
+              • GET /admin/finance/net-worth — 401 unauth, 200 with all 7 groups
+                (group_1_revenue {registration, service, platform_fee, shop, gross},
+                group_2_liability {total_reward_credits, total_withdrawals_settled,
+                available_user_balance}, group_3_gst {collected, paid, payable},
+                group_4_platform_fee {collected}, group_5_expenses {total},
+                group_6_pending_withdrawals {pending_amount},
+                group_7_bank {credits, debits, balance}) and master
+                {pending_collections, net_worth, formula}.
+              • GET/POST/DELETE /admin/expenses — create returns
+                expense.id + display_id matching TXN-NNNNNN (saw TXN-100001,
+                TXN-100006). Soft-delete flips status to "void". Void rows
+                are NOT counted in group_5_expenses.total.
+              • GET/POST /admin/bank-ledger — credit ₹50000 then debit ₹2000
+                produced display_ids TXN-100002/3 and TXN-100007/8.
+                List shows items+credits+debits+balance. Balance math is
+                correct (delta = +48000 each cycle).
+              • POST /admin/transactions/adjust — returns adjustment with
+                display_id (TXN-100004 / TXN-100009).
+              • POST /admin/transactions/{id}/reverse — picks an eligible
+                successful txn, writes the reversal (returns rev_id),
+                sets original.reversed_by=<rev_id> AND new
+                reversal.reverses=<original_id>. Second call → 400
+                with detail "Transaction already reversed (or is itself
+                a reversal)".
+              • GET /admin/finance/export/transactions — 200, content-type
+                text/csv, header row contains "display_id". /export/expenses
+                and /export/bank also return 200 text/csv.
+              • Regression: POST /auth/login (admin) 200; GET
+                /admin/system-wallet 200 with exactly 8 buckets
+                including the new platform_fee_collected
+                ['referral_commission','direct_signup','fee_residual',
+                'direct_added','service_margin','shopping_margin',
+                'gst_collected','platform_fee_collected'];
+                GET /admin/service-categories 200 returning categories list.
+
+            Re: the earlier 401 on /admin/service-categories — IT IS NOT
+            A REAL BUG. The route exists (routes/service_admin.py L35)
+            and the previous testing-agent note was wrong. The recurring
+            401s in backend.out.log are caused by the single-session
+            policy: when a user re-logs-in, the previously issued
+            access_token is marked session_revoked. Stale frontend tabs
+            then hit /admin/service-categories with the dead token →
+            401. Confirmed by running the test twice; with a fresh
+            token the endpoint returns 200. Same root-cause holds for
+            occasional 401 on /admin/system-wallet from stale sessions.
+
 metadata:
   last_backend_test: "2026-05-30"
   last_tested_by: "testing_agent"
@@ -7725,6 +7785,35 @@ test_plan:
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: |
+        ── BACKEND TEST RUN — Finance & Accounting (2026-05-30) ──
+        23 PASS / 0 FAIL on the new /api/admin/finance/* and supporting
+        endpoints exposed via routes/finance.py.
+
+          • Net-worth endpoint returns all 7 groups + master with the
+            exact shape requested.
+          • Expense CRUD works; soft-delete (void) excluded from totals.
+          • Bank ledger credit/debit math + display IDs verified
+            (TXN-100002 / 100003 / 100007 / 100008).
+          • Transactions reverse + adjust both write display_ids
+            (TXN-NNNNNN), link original↔reversal bidirectionally, and
+            block double-reverse with 400.
+          • CSV exports for transactions/expenses/bank all return
+            text/csv 200; transactions header includes display_id.
+          • Regression: admin login + /admin/system-wallet (now 8
+            buckets incl. platform_fee_collected) + /admin/service-
+            categories all 200 OK.
+
+        FINDING ON 401 /admin/service-categories: This is NOT a real
+        bug — it's stale-session behavior. The single-session policy
+        revokes the previous access_token whenever the admin logs in
+        again, so tabs holding the old token will see 401
+        "session_revoked". Endpoint itself works fine with a fresh
+        token. No action required.
+
+        Ship it. main agent can summarize & finish.
+
     - agent: "testing"
       message: |
         ── BACKEND TEST RUN — Commission engine (2026-05-29) ──

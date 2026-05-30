@@ -180,6 +180,7 @@ from routes import admin_ai as admin_ai_router  # noqa: E402
 from routes import service_subcategories as service_subcategories_router  # noqa: E402
 from routes import service_admin as service_admin_router  # noqa: E402
 from routes import service_provider as service_provider_router  # noqa: E402
+from routes import finance as finance_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -809,8 +810,13 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
         await _create_notification(sponsor_user["id"], "payout", f"₹{int(gross)} credited!", f"Level {level} referral payout")
         return
 
-    # Non-admin sponsor — apply GST-exclusive split: 18% OF gross → admin
-    gst = round(gross * (REFERRAL_GST_PCT / 100.0), 2)
+    # Non-admin sponsor — apply Platform-Fee-exclusive split.
+    # NEW (2026-05-30): the 18% on internal L1..L10 payouts is now
+    # categorised as PLATFORM FEE (company revenue), not GST. GST stays
+    # exclusively on customer-facing registrations / service fees.
+    # The math is unchanged — only the accounting bucket and txn `type`
+    # differ so finance reports can separate tax-payable from revenue.
+    gst = round(gross * (REFERRAL_GST_PCT / 100.0), 2)  # 18% withheld
     net = round(gross - gst, 2)
 
     # 1. Credit user wallet with NET
@@ -820,7 +826,7 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
     await db.users.update_one({"id": sponsor_user["id"]}, {"$inc": inc})
     user_desc = (
         f"Level {level} payout from {src_short}" if src_short else f"Level {level} referral payout"
-    ) + f" · ₹{int(gross)} − ₹{gst} GST"
+    ) + f" · ₹{int(gross)} − ₹{gst} platform fee"
     await db.transactions.insert_one({
         "id": str(uuid.uuid4()),
         "user_id": sponsor_user["id"],
@@ -828,8 +834,10 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
         "level": level,
         "amount": net,                 # only the net is credited to the user
         "gross_amount": gross,         # informational — original gross
-        "gst_amount": gst,             # informational — GST that was withheld
-        "gst_pct": REFERRAL_GST_PCT,
+        "platform_fee_amount": gst,    # 18% retained as platform fee
+        "platform_fee_pct": REFERRAL_GST_PCT,
+        "gst_amount": 0,               # legacy field kept for read-side compat
+        "gst_pct": 0,
         "status": "success",
         "description": user_desc,
         "source_user_name": src_short or None,
@@ -842,30 +850,31 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
         sponsor_user["id"],
         "payout",
         f"₹{int(net)} credited!",
-        f"Level {level} referral payout received (₹{int(gross)} gross − ₹{gst} GST = ₹{net} net)",
+        f"Level {level} referral payout received (₹{int(gross)} gross − ₹{gst} platform fee = ₹{net} net)",
     )
 
-    # 2. Credit admin's gst_collected bucket with the GST share
-    await credit_admin_bucket("gst_collected", gst, also_total_earned=False)
+    # 2. Credit admin's platform_fee_collected bucket with the 18% share
+    await credit_admin_bucket("platform_fee_collected", gst, also_total_earned=False)
     admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if admin_user and gst > 0:
         await db.transactions.insert_one({
             "id": str(uuid.uuid4()),
             "user_id": admin_user["id"],
-            "type": "gst_collected",
+            "type": "platform_fee_collected",
             "level": level,
             "amount": gst,
+            "platform_fee_amount": gst,
+            "platform_fee_pct": REFERRAL_GST_PCT,
             "status": "success",
             "description": (
-                f"GST {int(REFERRAL_GST_PCT)}% on L{level} payout to {sponsor_user.get('name')} "
+                f"Platform fee {int(REFERRAL_GST_PCT)}% on L{level} payout to {sponsor_user.get('name')} "
                 f"(gross ₹{int(gross)}) · triggered by {src_short or 'a downline activation'}"
             ),
             "source_user_name": src_short or sponsor_user.get("name"),
-            "sponsor_name": sponsor_user.get("name"),  # who received the payout
+            "sponsor_name": sponsor_user.get("name"),
             "sponsor_email": sponsor_user.get("email"),
             "gross_amount": gross,
-            "gst_pct": REFERRAL_GST_PCT,
-            "reference_number": base_ref + "-GST",
+            "reference_number": base_ref + "-PF",
             "linked_payout_to_user_id": sponsor_user["id"],
             "created_at": ts,
         })
@@ -5813,7 +5822,7 @@ async def seed_admin():
 # ============================================================
 # SYSTEM WALLET — admin's wallet broken down into 4 categorised buckets
 # ============================================================
-SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_signup", "fee_residual", "direct_added", "service_margin", "shopping_margin", "gst_collected")
+SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_signup", "fee_residual", "direct_added", "service_margin", "shopping_margin", "gst_collected", "platform_fee_collected")
 
 
 async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: bool = True):
@@ -8728,6 +8737,7 @@ app.include_router(admin_ai_router.router, prefix="/api")
 app.include_router(service_subcategories_router.router, prefix="/api")
 app.include_router(service_admin_router.router, prefix="/api")
 app.include_router(service_provider_router.router, prefix="/api")
+app.include_router(finance_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)
