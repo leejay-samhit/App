@@ -142,6 +142,38 @@ export default function AdminSystemWallet() {
   const [expOpen, setExpOpen] = useState(false);    // Group 5 expense modal
   const [adjOpen, setAdjOpen] = useState(false);    // Manual adjustment modal
 
+  // ─── Group drilldown drawer (taps on any of the 7 Group cards) ───
+  type GroupTxn = {
+    id: string; display_id?: string; type: string; amount: number;
+    status?: string; level?: number; description?: string; source?: string;
+    user_id?: string; reversed_by?: string; reverses?: string; created_at?: string;
+    bank?: string; utr?: string; vendor?: string; category?: string;
+  };
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [groupTitle, setGroupTitle] = useState<string>("");
+  const [groupTxns, setGroupTxns] = useState<GroupTxn[] | null>(null);
+  const [groupSubtotal, setGroupSubtotal] = useState<number>(0);
+  const [groupLoading, setGroupLoading] = useState(false);
+
+  const openGroup = useCallback(async (gid: string) => {
+    setActiveGroup(gid);
+    setGroupTxns(null);
+    setGroupSubtotal(0);
+    setGroupLoading(true);
+    setGroupTitle("");
+    try {
+      const { data } = await api.get(`/admin/finance/groups/${gid}/transactions`, { params: { limit: 200 } });
+      setGroupTxns(data?.items || []);
+      setGroupSubtotal(Number(data?.subtotal || 0));
+      setGroupTitle(String(data?.title || gid));
+    } catch (e) {
+      Alert.alert("Could not load group transactions", formatApiError(e));
+      setGroupTxns([]);
+    } finally {
+      setGroupLoading(false);
+    }
+  }, []);
+
   // Export CSV files via authenticated URL — opens in a new tab/window.
   const exportFile = useCallback((kind: "transactions" | "expenses" | "bank") => {
     const base = (process.env.EXPO_PUBLIC_BACKEND_URL || "").replace(/\/$/, "");
@@ -425,7 +457,7 @@ export default function AdminSystemWallet() {
               <Text style={styles.nwHeroFormula}>{netWorth.master.formula}</Text>
             </View>
 
-            <NwGroup icon="trending-up" title="Group 1 · Revenue Ledger" color="#10B981">
+            <NwGroup icon="trending-up" title="Group 1 · Revenue Ledger" color="#10B981" onPress={() => openGroup("group_1_revenue")}>
               <NwRow label="Registration revenue"   value={netWorth.group_1_revenue.registration} />
               {/* Joining inflow by source — counts Razorpay, UPI Manual & Offline. */}
               {netWorth.group_1_revenue.by_source ? (
@@ -457,36 +489,38 @@ export default function AdminSystemWallet() {
               <NwRow label="Gross revenue"          value={netWorth.group_1_revenue.gross} bold />
             </NwGroup>
 
-            <NwGroup icon="users" title="Group 2 · User Liability Wallet" color="#F59E0B">
+            <NwGroup icon="users" title="Group 2 · User Liability Wallet" color="#F59E0B" onPress={() => openGroup("group_2_liability")}>
               <NwRow label="Total reward credits issued"   value={netWorth.group_2_liability.total_reward_credits} />
               <NwRow label="Total withdrawals settled"     value={netWorth.group_2_liability.total_withdrawals_settled} />
               <NwRow label="Available user balance (LIABILITY)" value={netWorth.group_2_liability.available_user_balance} bold />
             </NwGroup>
 
-            <NwGroup icon="percent" title="Group 3 · GST Ledger" color="#EF4444">
+            <NwGroup icon="percent" title="Group 3 · GST Ledger" color="#EF4444" onPress={() => openGroup("group_3_gst")}>
               <NwRow label="GST collected"          value={netWorth.group_3_gst.collected} />
               <NwRow label="GST paid (expenses)"    value={netWorth.group_3_gst.paid} />
               <NwRow label="GST payable to govt"    value={netWorth.group_3_gst.payable} bold />
             </NwGroup>
 
-            <NwGroup icon="briefcase" title="Group 4 · Platform Fee Ledger" color="#8B5CF6">
+            <NwGroup icon="briefcase" title="Group 4 · Platform Fee Ledger" color="#8B5CF6" onPress={() => openGroup("group_4_platform_fee")}>
               <NwRow label="18% on L1–L10 payouts (company revenue)" value={netWorth.group_4_platform_fee.collected} bold />
             </NwGroup>
 
             <NwGroup
               icon="dollar-sign" title="Group 5 · Expense Ledger" color="#6366F1"
               rightChip={{ label: "+ Add", onPress: () => setExpOpen(true) }}
+              onPress={() => openGroup("group_5_expenses")}
             >
               <NwRow label="Total expenses (approved)" value={netWorth.group_5_expenses.total} bold />
             </NwGroup>
 
-            <NwGroup icon="clock" title="Group 6 · Pending Withdrawals" color="#0EA5E9">
+            <NwGroup icon="clock" title="Group 6 · Pending Withdrawals" color="#0EA5E9" onPress={() => openGroup("group_6_pending_withdrawals")}>
               <NwRow label="Awaiting approval" value={netWorth.group_6_pending_withdrawals.pending_amount} bold />
             </NwGroup>
 
             <NwGroup
               icon="credit-card" title="Group 7 · Bank Ledger" color="#14B8A6"
               rightChip={{ label: "+ Entry", onPress: () => setBankOpen(true) }}
+              onPress={() => openGroup("group_7_bank")}
             >
               <NwRow label="Total credits"          value={netWorth.group_7_bank.credits} />
               <NwRow label="Total debits"           value={netWorth.group_7_bank.debits} />
@@ -809,6 +843,72 @@ export default function AdminSystemWallet() {
       <NwExpenseModal open={expOpen} onClose={() => setExpOpen(false)} onSaved={load} />
       {/* ───────── Manual Adjustment modal ───────── */}
       <NwAdjustModal open={adjOpen} onClose={() => setAdjOpen(false)} onSaved={load} />
+
+      {/* ───────── Group transactions drawer ───────── */}
+      <Modal visible={!!activeGroup} animationType="slide" transparent onRequestClose={() => setActiveGroup(null)}>
+        <View style={styles.drawerBg}>
+          <View style={styles.drawerSheet}>
+            <View style={styles.modalHandle} />
+            <View style={styles.drawerHeader}>
+              <View style={[styles.bucketIcon, { backgroundColor: colors.primary + "22" }]}>
+                <Feather name="list" size={18} color={colors.primary} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.drawerTitle}>{groupTitle || "Group transactions"}</Text>
+                <Text style={styles.drawerSub}>
+                  Subtotal · {formatINR(groupSubtotal)}
+                  {groupTxns ? `   ·   showing ${groupTxns.length}` : ""}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setActiveGroup(null)} style={styles.closeBtn}>
+                <Feather name="x" size={20} color={colors.textMain} />
+              </TouchableOpacity>
+            </View>
+
+            {groupLoading ? (
+              <View style={[styles.center, { paddingVertical: 40 }]}><ActivityIndicator color={colors.primary} /></View>
+            ) : (groupTxns || []).length === 0 ? (
+              <View style={styles.empty}><Feather name="inbox" size={22} color={colors.textMuted} /><Text style={styles.emptyText}>No transactions yet</Text></View>
+            ) : (
+              <ScrollView style={{ flexGrow: 1 }} contentContainerStyle={{ paddingBottom: 28 }}>
+                {(groupTxns || []).map((t) => (
+                  <View key={t.id} style={styles.groupTxnRow}>
+                    <View style={[styles.txnDot, { backgroundColor: t.amount < 0 ? "#B3261E" : colors.primary }]} />
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        {t.display_id ? (
+                          <View style={styles.idChip}><Text style={styles.idChipText}>{t.display_id}</Text></View>
+                        ) : null}
+                        <Text style={styles.gTxnType}>{t.type}</Text>
+                        {t.level != null ? (
+                          <View style={[styles.idChip, { backgroundColor: "#7C3AED" + "22" }]}><Text style={[styles.idChipText, { color: "#7C3AED" }]}>L{t.level}</Text></View>
+                        ) : null}
+                        {t.reversed_by ? (
+                          <View style={[styles.idChip, { backgroundColor: "#FECACA" }]}><Text style={[styles.idChipText, { color: "#B3261E" }]}>reversed</Text></View>
+                        ) : null}
+                      </View>
+                      {t.description ? <Text style={styles.gTxnDesc} numberOfLines={3}>{t.description}</Text> : null}
+                      {(t.bank || t.utr || t.vendor || t.category) ? (
+                        <Text style={styles.gTxnMeta}>
+                          {t.bank ? `${t.bank}` : ""}{t.bank && t.utr ? " · " : ""}{t.utr ? `UTR ${t.utr}` : ""}
+                          {t.vendor ? `vendor: ${t.vendor}` : ""}{t.vendor && t.category ? " · " : ""}{t.category ? `cat: ${t.category}` : ""}
+                        </Text>
+                      ) : null}
+                      <Text style={styles.gTxnMeta}>{t.created_at ? new Date(t.created_at).toLocaleString() : "—"}</Text>
+                    </View>
+                    <Text style={[styles.txnAmount, { color: t.amount < 0 ? "#B3261E" : colors.primary }]}>
+                      {t.amount < 0 ? "" : "+"}{formatINR(t.amount)}
+                    </Text>
+                  </View>
+                ))}
+                <View style={{ height: 12 }} />
+                <Text style={styles.subtotalText}>Subtotal · {formatINR(groupSubtotal)}</Text>
+                <Text style={styles.subtotalHint}>(latest 200 entries; pull the wallet screen to refresh totals)</Text>
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -921,9 +1021,10 @@ function TxnRow({ txn, onPreviewInvoice }: { txn: Txn; onPreviewInvoice?: (t: Tx
 
 /* ────────────────────── Net-Worth helpers (merged from Finance Dashboard) ────────────────────── */
 
-function NwGroup({ icon, title, color, children, rightChip }: any) {
+function NwGroup({ icon, title, color, children, rightChip, onPress }: any) {
+  const Wrapper: any = onPress ? TouchableOpacity : View;
   return (
-    <View style={nwStyles.card}>
+    <Wrapper style={nwStyles.card} onPress={onPress} activeOpacity={0.7}>
       <View style={nwStyles.cardHead}>
         <View style={[nwStyles.iconWrap, { backgroundColor: color + "22" }]}>
           <Feather name={icon} size={14} color={color} />
@@ -934,9 +1035,16 @@ function NwGroup({ icon, title, color, children, rightChip }: any) {
             <Text style={nwStyles.chipBtnText}>{rightChip.label}</Text>
           </TouchableOpacity>
         ) : null}
+        {onPress ? <Feather name="chevron-right" size={16} color={colors.textMuted} style={{ marginLeft: 6 }} /> : null}
       </View>
       <View style={{ marginTop: 8 }}>{children}</View>
-    </View>
+      {onPress ? (
+        <View style={nwStyles.viewAll}>
+          <Feather name="list" size={11} color={colors.primary} />
+          <Text style={nwStyles.viewAllText}>Tap to view transactions</Text>
+        </View>
+      ) : null}
+    </Wrapper>
   );
 }
 
@@ -1294,4 +1402,28 @@ const styles = StyleSheet.create({
   // Joinings-by-source mini block inside Group 1
   sourceMini: { marginTop: 6, marginBottom: 4, paddingLeft: 8, borderLeftWidth: 2, borderLeftColor: colors.primary + "55" },
   sourceMiniHead: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 4 },
+
+  // Group drilldown drawer
+  drawerBg:    { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
+  drawerSheet: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, maxHeight: "88%" },
+  drawerHeader:{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 12, paddingBottom: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  drawerTitle: { fontSize: 16, fontWeight: "800", color: colors.textMain },
+  drawerSub:   { fontSize: 11, fontWeight: "700", color: colors.textMuted, marginTop: 2 },
+  closeBtn:    { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted },
+
+  // ID chips (txn display_id, level, reversed badge)
+  idChip:      { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, backgroundColor: colors.primary + "18" },
+  idChipText:  { fontSize: 10, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
+
+  // Transaction row inside the drawer
+  groupTxnRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  gTxnType:    { fontSize: 12, fontWeight: "800", color: colors.textMain, textTransform: "capitalize" },
+  gTxnDesc:    { fontSize: 11.5, color: colors.textMuted, marginTop: 3, lineHeight: 16 },
+  gTxnMeta:    { fontSize: 10, color: colors.textMuted, marginTop: 2 },
+  subtotalText:{ textAlign: "center", marginTop: 12, fontSize: 14, fontWeight: "800", color: colors.primary },
+  subtotalHint:{ textAlign: "center", marginTop: 2, fontSize: 10, color: colors.textMuted },
+
+  // "Tap to view transactions" affordance inside each Group card
+  viewAll:     { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, justifyContent: "center" },
+  viewAllText: { fontSize: 10.5, fontWeight: "700", color: colors.primary, letterSpacing: 0.4 },
 });

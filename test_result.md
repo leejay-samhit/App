@@ -7876,3 +7876,39 @@ agent_communication:
   - Registration: ₹1,062 (was ₹0 before fix)
   - by_source.razorpay: ₹118 × 1, upi_manual: ₹0 × 0, offline_cash: ₹944 × 8 → SUM matches.
   - bank_tally.reversals_count: 2, reversals_amount: ₹200 (correctly subtracted from outflow).
+
+---
+
+## 2026-05-30 (main agent): Group drilldown — tap any of the 7 ledger groups to see every transaction
+
+### Backend (`/app/backend/routes/finance.py`)
+- New endpoint: `GET /admin/finance/groups/{group_id}/transactions?limit=200`
+  - `group_id ∈ {group_1_revenue, group_2_liability, group_3_gst,
+    group_4_platform_fee, group_5_expenses, group_6_pending_withdrawals,
+    group_7_bank}`
+  - Returns `{ title, subtotal, items: [...] }` with a uniform shape across
+    all sources (db.transactions, db.expenses, db.withdrawals, db.bank_ledger).
+  - Groups 3/5/7 read from their own collections; expenses & negative bank
+    entries surface as signed-negative `amount` so the drawer renders them
+    in red automatically.
+- Fix: `bank_tally.adjustments_amount` aggregation now matches both
+  `type=adjustment` (the value written by `/admin/transactions/adjust`)
+  and the legacy `type=manual_adjustment`.
+
+### Frontend (`/app/frontend/app/admin/system-wallet.tsx`)
+- `NwGroup` is now a `TouchableOpacity` when `onPress` is supplied. All 7
+  group cards wired to `openGroup(group_id)`.
+- New "Tap to view transactions" affordance shown at the bottom of every
+  group card so admins know it's interactive.
+- New full-screen-style modal drawer renders the loaded items with
+  display_id chips, level chip (`L1..L10`), reversed badge, description,
+  metadata (bank / UTR / vendor / category), timestamp, and signed amount.
+- Curl-verified live data:
+  - Group 1 (revenue): subtotal ₹354 across registration/service txns
+  - Group 7 (bank): 1 credit row ₹50000 visible
+  - Other groups return correct subtotals.
+
+### Build verification
+- `npx expo export --platform web` clean — `/admin/system-wallet (64.5 kB)`.
+- All 7 endpoints curl-tested with admin token → 200 OK.
+

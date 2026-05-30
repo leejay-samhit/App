@@ -234,7 +234,7 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     reversals_amount = float((rev_agg or [{}])[0].get("sum") or 0)  # negative net
 
     adj_agg = await db.transactions.aggregate([
-        {"$match": {"type": "manual_adjustment", "status": "success"}},
+        {"$match": {"type": {"$in": ["adjustment", "manual_adjustment"]}, "status": "success"}},
         {"$group": {"_id": None, "sum": {"$sum": "$amount"}, "count": {"$sum": 1}}},
     ]).to_list(1)
     adjustments_count  = int((adj_agg or [{}])[0].get("count") or 0)
@@ -333,6 +333,170 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
 
 
 # ────────────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────────────
+# Group-level transaction drilldown
+#
+# Powers the "tap a group → see every txn that built that number" flow
+# inside System Wallet. Returns a uniform shape across all 7 groups:
+#
+#   { title, subtotal, items: [{ id, display_id, type, amount, status,
+#       description, created_at, ... }] }
+#
+# Groups 5 (expenses), 6 (pending withdrawals) and 7 (bank ledger) read
+# from their respective collections; 1-4 read from db.transactions.
+# ────────────────────────────────────────────────────────────────────
+@router.get("/admin/finance/groups/{group_id}/transactions")
+async def admin_finance_group_transactions(
+    group_id: str,
+    limit: int = 200,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    limit = max(1, min(int(limit or 200), 500))
+    PAID = ["paid", "success", "approved"]
+
+    def _shape_txn(t: Dict[str, Any]) -> Dict[str, Any]:
+        t.pop("_id", None)
+        return {
+            "id":           t.get("id"),
+            "display_id":   t.get("display_id"),
+            "type":         t.get("type"),
+            "amount":       float(t.get("amount") or 0),
+            "gross_amount": float(t.get("gross_amount")) if t.get("gross_amount") is not None else None,
+            "gst_amount":   float(t.get("gst_amount")) if t.get("gst_amount") is not None else None,
+            "status":       t.get("status"),
+            "level":        t.get("level"),
+            "description":  t.get("description") or "",
+            "source":       t.get("source"),
+            "user_id":      t.get("user_id"),
+            "reversed_by":  t.get("reversed_by"),
+            "reverses":     t.get("reverses"),
+            "created_at":   t.get("created_at"),
+        }
+
+    # ── Group 1 — Revenue Ledger ─────────────────────────────────────
+    if group_id == "group_1_revenue":
+        match = {
+            "type": {"$in": [
+                "registration_fee", "service_margin", "service_commission",
+                "phone_reveal_invoice", "service_request_fee",
+                "platform_fee_collected",
+                "shop_purchase", "shop_revenue", "shopping_margin", "shop_commission",
+            ]},
+            "status": {"$in": PAID},
+        }
+        rows = await db.transactions.find(match).sort("created_at", -1).limit(limit).to_list(limit)
+        subtotal = sum(float(r.get("amount") or 0) for r in rows)
+        return {"title": "Group 1 · Revenue Ledger", "subtotal": round(subtotal, 2), "items": [_shape_txn(r) for r in rows]}
+
+    # ── Group 2 — User Liability Wallet (referral payouts + withdrawals) ──
+    if group_id == "group_2_liability":
+        rows = await db.transactions.find({
+            "type": {"$in": ["referral_payout", "withdrawal", "direct_signup_credit"]},
+            "status": {"$in": PAID},
+        }).sort("created_at", -1).limit(limit).to_list(limit)
+        subtotal = sum(float(r.get("amount") or 0) for r in rows)
+        return {"title": "Group 2 · User Liability Wallet", "subtotal": round(subtotal, 2), "items": [_shape_txn(r) for r in rows]}
+
+    # ── Group 3 — GST Ledger ─────────────────────────────────────────
+    if group_id == "group_3_gst":
+        rows = await db.transactions.find({
+            "type": "gst_collected",
+            "status": {"$in": PAID},
+        }).sort("created_at", -1).limit(limit).to_list(limit)
+        gst_paid_exps = await db.expenses.find({
+            "category": "gst_paid", "status": "approved",
+        }).sort("created_at", -1).limit(limit).to_list(limit)
+        items = [_shape_txn(r) for r in rows]
+        for e in gst_paid_exps:
+            e.pop("_id", None)
+            items.append({
+                "id":         e.get("id"),
+                "display_id": e.get("display_id") or f"EXP-{(e.get('id') or '')[:6]}",
+                "type":       "gst_paid",
+                "amount":     -float(e.get("amount") or 0),
+                "status":     "approved",
+                "description": e.get("description") or "GST paid (expense)",
+                "created_at": e.get("created_at"),
+            })
+        items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        subtotal = sum(float(r.get("amount") or 0) for r in items)
+        return {"title": "Group 3 · GST Ledger", "subtotal": round(subtotal, 2), "items": items[:limit]}
+
+    # ── Group 4 — Platform Fee Ledger ────────────────────────────────
+    if group_id == "group_4_platform_fee":
+        rows = await db.transactions.find({
+            "type": "platform_fee_collected",
+            "status": {"$in": PAID},
+        }).sort("created_at", -1).limit(limit).to_list(limit)
+        subtotal = sum(float(r.get("amount") or 0) for r in rows)
+        return {"title": "Group 4 · Platform Fee Ledger", "subtotal": round(subtotal, 2), "items": [_shape_txn(r) for r in rows]}
+
+    # ── Group 5 — Expense Ledger (db.expenses) ───────────────────────
+    if group_id == "group_5_expenses":
+        rows = await db.expenses.find({"status": "approved"}).sort("created_at", -1).limit(limit).to_list(limit)
+        items = []
+        for e in rows:
+            e.pop("_id", None)
+            items.append({
+                "id":         e.get("id"),
+                "display_id": e.get("display_id") or f"EXP-{(e.get('id') or '')[:6]}",
+                "type":       f"expense · {e.get('category') or 'other'}",
+                "amount":     -float(e.get("amount") or 0),
+                "status":     e.get("status") or "approved",
+                "description": e.get("description") or "",
+                "vendor":     e.get("vendor"),
+                "category":   e.get("category"),
+                "created_at": e.get("created_at"),
+            })
+        subtotal = sum(float(r.get("amount") or 0) for r in items)
+        return {"title": "Group 5 · Expense Ledger", "subtotal": round(subtotal, 2), "items": items}
+
+    # ── Group 6 — Pending Withdrawals (db.withdrawals) ───────────────
+    if group_id == "group_6_pending_withdrawals":
+        rows = await db.withdrawals.find({"status": "pending"}).sort("created_at", -1).limit(limit).to_list(limit)
+        items = []
+        for w in rows:
+            w.pop("_id", None)
+            items.append({
+                "id":         w.get("id"),
+                "display_id": w.get("display_id") or f"WD-{(w.get('id') or '')[:6]}",
+                "type":       "withdrawal · pending",
+                "amount":     -float(w.get("amount") or 0),
+                "status":     w.get("status"),
+                "description": f"Pending withdrawal · UPI {w.get('upi_id') or '—'} · user {w.get('user_email') or w.get('user_id')}",
+                "user_id":    w.get("user_id"),
+                "created_at": w.get("created_at"),
+            })
+        subtotal = sum(float(r.get("amount") or 0) for r in items)
+        return {"title": "Group 6 · Pending Withdrawals", "subtotal": round(subtotal, 2), "items": items}
+
+    # ── Group 7 — Bank Ledger (db.bank_ledger) ───────────────────────
+    if group_id == "group_7_bank":
+        rows = await db.bank_ledger.find({}).sort("created_at", -1).limit(limit).to_list(limit)
+        items = []
+        for b in rows:
+            b.pop("_id", None)
+            amt = float(b.get("amount") or 0)
+            signed = amt if b.get("kind") == "credit" else -amt
+            items.append({
+                "id":         b.get("id"),
+                "display_id": b.get("display_id") or f"BANK-{(b.get('id') or '')[:6]}",
+                "type":       f"bank · {b.get('kind') or 'entry'}",
+                "amount":     signed,
+                "status":     b.get("status") or "success",
+                "description": b.get("description") or "Bank ledger entry",
+                "bank":       b.get("bank"),
+                "utr":        b.get("utr"),
+                "created_at": b.get("created_at"),
+            })
+        subtotal = sum(float(r.get("amount") or 0) for r in items)
+        return {"title": "Group 7 · Bank Ledger", "subtotal": round(subtotal, 2), "items": items}
+
+    raise HTTPException(status_code=400, detail=f"Unknown group_id: {group_id}")
+
+
+
 # Reverse / Adjust transactions (never delete)
 # ────────────────────────────────────────────────────────────────────
 @router.post("/admin/transactions/{txn_id}/reverse")
