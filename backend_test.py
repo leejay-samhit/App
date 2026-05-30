@@ -1,322 +1,359 @@
 """
-Backend regression — 4 small changes (2026-05-29):
-  1. Demo seed safety (SEED_DEMO_USERS env-gated)
-  2. /service/apply accepts service_subcategory_id (parent-id validated)
-  3. /admin/service-applications/{aid}/approve propagates subcategory
-  4. NEW POST /admin/purge-demo-users (super_admin only)
-"""
+Backend tests for the 2026-05-29 Commission Engine Change.
 
+Validates:
+ 1. Sanity — GET /api/admin/system-wallet
+ 2. New endpoint shape — GET /api/admin/users/{user_id}/pending-levels
+ 3. Per-level counter increment (L2 pending_l2 += 1, no payout yet)
+ 4. Threshold-fire — pending_l2 reaches directs_required → L2 payout + l2_funding
+ 5. Idempotency — re-approve does NOT increment counters
+ 6. Ledger integrity — total == sum(buckets) (within tolerance)
+ 7. Regression — /services, /auth/login, /admin/service-categories
+"""
 import os
 import sys
 import time
-import uuid
-import json
-import asyncio
+from typing import Any, Dict, List, Optional
 
 import requests
 
-BACKEND_URL = "https://vendor-network-app-1.preview.emergentagent.com"
-API = f"{BACKEND_URL}/api"
+BASE = os.environ.get(
+    "REACT_APP_BACKEND_URL",
+    "https://vendor-network-app-1.preview.emergentagent.com",
+).rstrip("/")
+API = f"{BASE}/api"
 
-ADMIN = {"email": "admin@app.com", "password": "Admin@123"}
-USER  = {"email": "testuser@app.com", "password": "Test@123"}
+ADMIN_EMAIL = "support@networkrupay.com"
+ADMIN_PASSWORD = "Nlee@1115"
 
-results = []  # (label, passed, detail)
+EXPECTED_THRESHOLD = 4
 
-def log(label: str, passed: bool, detail: str = ""):
-    mark = "PASS" if passed else "FAIL"
-    print(f"[{mark}] {label}{(' — ' + detail) if detail else ''}")
-    results.append((label, passed, detail))
+def log(msg, *a):
+    print(msg.format(*a) if a else msg, flush=True)
+
+PASS_LIST: List[str] = []
+FAIL_LIST: List[str] = []
+
+def record_pass(name: str, note: str = ""):
+    PASS_LIST.append(f"{name} :: {note}".rstrip(" :"))
+    log("  PASS  {} {}", name, ("- " + note) if note else "")
+
+def record_fail(name: str, note: str = ""):
+    FAIL_LIST.append(f"{name} :: {note}".rstrip(" :"))
+    log("  FAIL  {} {}", name, ("- " + note) if note else "")
+
+
+class Client:
+    def __init__(self, token: Optional[str] = None):
+        self.s = requests.Session()
+        if token:
+            self.s.headers["Authorization"] = f"Bearer {token}"
+
+    def _url(self, path: str) -> str:
+        return f"{API}{path}" if path.startswith("/") else f"{API}/{path}"
+
+    def post(self, path: str, payload: Optional[dict] = None, **kw):
+        return self.s.post(self._url(path), json=(payload or {}), timeout=30, **kw)
+
+    def get(self, path: str, **kw):
+        return self.s.get(self._url(path), timeout=30, **kw)
 
 
 def login(email: str, password: str) -> str:
     r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=30)
     r.raise_for_status()
-    j = r.json()
-    return j.get("token") or j.get("access_token")
+    return r.json()["token"]
 
 
-def H(tok: str) -> dict:
-    return {"Authorization": f"Bearer {tok}"}
+def admin_create_user(c: Client, name: str, email: str, password: str, referral_code: Optional[str] = None) -> Dict[str, Any]:
+    payload = {
+        "name": name,
+        "email": email,
+        "password": password,
+        "phone": "9" + str(int(time.time() * 1000))[-9:],
+        "mark_paid_offline": True,
+        "registration_source": "offline_cash",
+    }
+    if referral_code:
+        payload["referral_code"] = referral_code
+    r = c.post("/admin/users/create", payload)
+    if r.status_code != 200:
+        raise RuntimeError(f"admin_create_user failed: {r.status_code} {r.text}")
+    return r.json()["user"]
 
 
-# ─────────────────────────────────────────────────────────────────
-# Setup
-# ─────────────────────────────────────────────────────────────────
-print("\n=== SETUP ===")
-admin_tok = login(**ADMIN)
-log("Setup: admin login", True, f"token len={len(admin_tok)}")
-user_tok = login(**USER)
-log("Setup: testuser login", True, f"token len={len(user_tok)}")
+def admin_approve(c: Client, user_id: str) -> Dict[str, Any]:
+    r = c.post(f"/admin/approvals/{user_id}/approve", {})
+    if r.status_code != 200:
+        raise RuntimeError(f"approve failed: {r.status_code} {r.text}")
+    return r.json()
 
 
-# ─────────────────────────────────────────────────────────────────
-# Test 1 — purge w/o auth → 401
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 1: purge no-auth ===")
-r = requests.post(f"{API}/admin/purge-demo-users", timeout=30)
-log("1. purge-demo-users no-auth -> 401", r.status_code == 401,
-    f"status={r.status_code} body={r.text[:120]}")
+def get_pending_levels(c: Client, user_id: str) -> Dict[str, Any]:
+    r = c.get(f"/admin/users/{user_id}/pending-levels")
+    if r.status_code != 200:
+        raise RuntimeError(f"pending-levels failed: {r.status_code} {r.text}")
+    return r.json()
 
 
-# ─────────────────────────────────────────────────────────────────
-# Test 2 — purge as regular user → 403
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 2: purge as regular user ===")
-r = requests.post(f"{API}/admin/purge-demo-users", headers=H(user_tok), timeout=30)
-log("2. purge-demo-users as regular user -> 403", r.status_code == 403,
-    f"status={r.status_code} body={r.text[:160]}")
+def get_system_wallet(c: Client) -> Dict[str, Any]:
+    r = c.get("/admin/system-wallet")
+    if r.status_code != 200:
+        raise RuntimeError(f"system-wallet failed: {r.status_code} {r.text}")
+    return r.json()
 
 
-# ─────────────────────────────────────────────────────────────────
-# Test 3 — purge as admin → 200 + shape
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 3: purge as admin ===")
-r = requests.post(f"{API}/admin/purge-demo-users", headers=H(admin_tok), timeout=60)
-ok = r.status_code == 200
-body = {}
-try:
-    body = r.json()
-except Exception:
-    pass
-shape_ok = (
-    ok
-    and body.get("ok") is True
-    and isinstance(body.get("removed"), int)
-    # emails may be omitted on the "none found" branch — accept either
-    and ("emails" in body or body.get("removed") == 0)
-)
-log("3. purge-demo-users as admin -> 200 with shape {ok, removed, emails?}",
-    shape_ok, f"status={r.status_code} body={json.dumps(body)[:240]}")
-
-
-# ─────────────────────────────────────────────────────────────────
-# Test 4 — GET /admin/service-categories
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 4: list service categories ===")
-r = requests.get(f"{API}/admin/service-categories", headers=H(admin_tok), timeout=30)
-ok = r.status_code == 200
-cats = r.json().get("categories", []) if ok else []
-CAT_ID = None
-CAT2_ID = None
-if cats:
-    primary = next((c for c in cats if c.get("active", True)), cats[0])
-    CAT_ID = primary["id"]
-    for c in cats:
-        if c.get("id") != CAT_ID:
-            CAT2_ID = c["id"]
-            break
-log("4. GET /admin/service-categories -> 200, picked CAT_ID",
-    ok and bool(CAT_ID),
-    f"status={r.status_code} total={len(cats)} CAT_ID={CAT_ID} CAT2_ID={CAT2_ID}")
-
-
-# ─────────────────────────────────────────────────────────────────
-# Test 5 — POST /admin/service-subcategories
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 5: create subcategory ===")
-suffix = uuid.uuid4().hex[:6]
-sub_name = f"RefactorPhase2Sub-{suffix}"
-payload5 = {"parent_id": CAT_ID, "name": sub_name, "icon": "droplet"}
-r = requests.post(f"{API}/admin/service-subcategories", headers=H(admin_tok),
-                  json=payload5, timeout=30)
-ok = r.status_code == 200
-body = r.json() if ok else {}
-SUB_ID = (body.get("subcategory") or {}).get("id")
-log("5. POST /admin/service-subcategories -> 200, SUB_ID captured",
-    ok and bool(SUB_ID),
-    f"status={r.status_code} SUB_ID={SUB_ID} name={sub_name}")
-
-# Also create a subcategory under a *different* parent for the mismatch test (test 8)
-SUB_WRONG_PARENT_ID = None
-if CAT2_ID:
-    r = requests.post(f"{API}/admin/service-subcategories", headers=H(admin_tok),
-                      json={"parent_id": CAT2_ID, "name": f"MismatchSub-{suffix}", "icon": "x"},
-                      timeout=30)
+def list_user_txns(c: Client, user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    for path in (
+        f"/admin/users/{user_id}/transactions",
+        f"/admin/users/{user_id}/ledger",
+    ):
+        r = c.get(path, params={"limit": limit})
+        if r.status_code == 200:
+            data = r.json()
+            return data if isinstance(data, list) else (data.get("transactions") or data.get("items") or [])
+    r = c.get("/admin/transactions", params={"user_id": user_id, "limit": limit})
     if r.status_code == 200:
-        SUB_WRONG_PARENT_ID = (r.json().get("subcategory") or {}).get("id")
+        d = r.json()
+        return d if isinstance(d, list) else (d.get("transactions") or d.get("items") or [])
+    return []
 
 
-# ─────────────────────────────────────────────────────────────────
-# Test 6 — Prepare a clean user (no pending service application)
-# We register a brand-new user and flip registration_paid via Mongo
-# so we can call /service/apply.
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 6: prep clean user ===")
-
-async def _db():
-    from motor.motor_asyncio import AsyncIOMotorClient
-    from dotenv import load_dotenv
-    load_dotenv("/app/backend/.env")
-    client = AsyncIOMotorClient(os.environ["MONGO_URL"])
-    db = client[os.environ["DB_NAME"]]
-    return db, client
-
-
-CLEAN_EMAIL = f"phase2-clean-{suffix}@app.com"
-CLEAN_PASS  = "Phase2@123"
-r = requests.post(f"{API}/auth/register", json={
-    "name": "Phase2 Clean",
-    "email": CLEAN_EMAIL,
-    "password": CLEAN_PASS,
-    "phone": f"+91 9{int(time.time()) % 1000000000:09d}",
-    "referral_code": "EARN",
-}, timeout=30)
-reg_ok = r.status_code == 200
-log("6a. POST /auth/register fresh user", reg_ok,
-    f"status={r.status_code} email={CLEAN_EMAIL} body={r.text[:160]}")
+def test_sanity_system_wallet(c: Client) -> Dict[str, Any]:
+    log("\n[Test 1] Sanity GET /admin/system-wallet")
+    sw = get_system_wallet(c)
+    if not ({"buckets", "total", "deposits"} <= set(sw.keys())):
+        record_fail("T1 system-wallet shape", f"keys={list(sw.keys())}")
+        return sw
+    log("    buckets keys: {}", sorted(sw["buckets"].keys()))
+    log("    fee_residual={:.2f} referral_commission={:.2f} direct_signup={:.2f} direct_added={:.2f} total={:.2f}",
+        sw["buckets"].get("fee_residual") or 0,
+        sw["buckets"].get("referral_commission") or 0,
+        sw["buckets"].get("direct_signup") or 0,
+        sw["buckets"].get("direct_added") or 0,
+        sw["total"])
+    record_pass("T1 system-wallet sanity")
+    return sw
 
 
-async def _flip(email):
-    db, client = await _db()
-    res = await db.users.update_one(
-        {"email": email.lower()},
-        {"$set": {"registration_paid": True, "approval_status": "approved"}},
-    )
-    u = await db.users.find_one({"email": email.lower()}, {"_id": 0, "id": 1, "email": 1, "registration_paid": 1, "approval_status": 1})
-    client.close()
-    return res.modified_count, u
-
-mod, clean_user = asyncio.run(_flip(CLEAN_EMAIL))
-log("6b. mark fresh user paid+approved (mongo)",
-    bool(clean_user and clean_user.get("registration_paid")),
-    f"modified={mod} user={clean_user}")
-
-clean_tok = login(CLEAN_EMAIL, CLEAN_PASS) if reg_ok else None
-log("6c. clean-user login", bool(clean_tok), f"token len={len(clean_tok) if clean_tok else 0}")
-
-
-# ─────────────────────────────────────────────────────────────────
-# Test 7 — /service/apply with valid subcategory
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 7: apply with valid subcategory ===")
-apply_body = {
-    "service_name": "PhaseTwoTest",
-    "service_category": "WhateverName",
-    "category_id": CAT_ID,
-    "service_subcategory_id": SUB_ID,
-    "pincode": "110001",
-    "charge": 1,
-    "languages": ["en"],
-}
-r = requests.post(f"{API}/service/apply", headers=H(clean_tok), json=apply_body, timeout=30)
-ok = r.status_code == 200
-body = r.json() if ok else {}
-app7 = body.get("application", {})
-APP_ID = app7.get("id")
-got_sub_id = app7.get("service_subcategory_id")
-got_sub_name = app7.get("service_subcategory_name")
-all_ok = (
-    ok
-    and got_sub_id == SUB_ID
-    and got_sub_name == sub_name
-)
-log("7. POST /service/apply (valid sub) -> 200 with sub_id+name stored",
-    all_ok,
-    f"status={r.status_code} sub_id={got_sub_id} sub_name={got_sub_name} APP_ID={APP_ID} body={r.text[:200]}")
+def test_pending_levels_shape(c: Client) -> None:
+    log("\n[Test 2] /admin/users/<id>/pending-levels shape")
+    r = c.get("/admin/users", params={"limit": 20})
+    if r.status_code != 200:
+        record_fail("T2 list users", f"{r.status_code} {r.text[:200]}")
+        return
+    data = r.json()
+    users = data if isinstance(data, list) else (data.get("users") or data.get("items") or [])
+    if not users:
+        record_fail("T2 list users", "empty")
+        return
+    target = next((u for u in users if u.get("role") == "user"), users[0])
+    uid = target.get("id")
+    res = get_pending_levels(c, uid)
+    if "levels" not in res or len(res["levels"]) != 10:
+        record_fail("T2 pending-levels shape", f"levels len={len(res.get('levels') or [])}")
+        return
+    required_keys = {"level", "pending", "threshold", "remaining", "payout_inr", "ready"}
+    bad = [i for i, row in enumerate(res["levels"]) if not required_keys.issubset(row.keys())]
+    if bad:
+        record_fail("T2 row keys", f"bad rows at {bad}")
+        return
+    levels = [row["level"] for row in res["levels"]]
+    if levels != list(range(1, 11)):
+        record_fail("T2 row order", f"levels={levels}")
+        return
+    thr = res["levels"][1]["threshold"]
+    record_pass("T2 pending-levels 10 rows", f"threshold={thr}")
 
 
-# ─────────────────────────────────────────────────────────────────
-# Test 8 — /service/apply with WRONG subcategory (parent mismatch)
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 8: apply with mismatched-parent subcategory ===")
-WRONG_EMAIL = f"phase2-wrong-{suffix}@app.com"
-WRONG_PASS  = "Phase2@123"
-r = requests.post(f"{API}/auth/register", json={
-    "name": "Phase2 Wrong",
-    "email": WRONG_EMAIL,
-    "password": WRONG_PASS,
-    "phone": f"+91 8{int(time.time()) % 1000000000:09d}",
-    "referral_code": "EARN",
-}, timeout=30)
-asyncio.run(_flip(WRONG_EMAIL))
-wrong_tok = login(WRONG_EMAIL, WRONG_PASS)
+def test_chain_counter_and_threshold(c: Client) -> None:
+    log("\n[Test 3-6] Chain B->A->N* counter, threshold-fire, idempotency, ledger")
+    stamp = int(time.time())
+    pwd = "Test@1234"
 
-mismatch_sub_id = SUB_WRONG_PARENT_ID or str(uuid.uuid4())
-apply_body_wrong = {
-    "service_name": "PhaseTwoMismatch",
-    "service_category": "WhateverName",
-    "category_id": CAT_ID,
-    "service_subcategory_id": mismatch_sub_id,
-    "pincode": "110001",
-    "charge": 1,
-    "languages": ["en"],
-}
-r = requests.post(f"{API}/service/apply", headers=H(wrong_tok), json=apply_body_wrong, timeout=30)
-ok = r.status_code == 200
-body = r.json() if ok else {}
-app8 = body.get("application", {})
-got_sub_id = app8.get("service_subcategory_id")
-got_sub_name = app8.get("service_subcategory_name")
-silent_ok = ok and got_sub_id is None and got_sub_name is None
-log("8. POST /service/apply (wrong parent) -> 200 BUT sub silently nulled",
-    silent_ok,
-    f"status={r.status_code} sub_id={got_sub_id} sub_name={got_sub_name} mismatch_sub={mismatch_sub_id}")
+    log("  > creating root B (no sponsor)")
+    B = admin_create_user(c, "ChainRoot Bharat", f"chain_b_{stamp}@example.com", pwd)
+    admin_approve(c, B["id"])
+
+    log("  > creating A under B.referral_code={}", B["referral_code"])
+    A = admin_create_user(c, "Mid Anil", f"chain_a_{stamp}@example.com", pwd, referral_code=B["referral_code"])
+    admin_approve(c, A["id"])
+
+    pl_B = get_pending_levels(c, B["id"])
+    pending_l2_B = next(row["pending"] for row in pl_B["levels"] if row["level"] == 2)
+    threshold = pl_B["threshold_per_level"]
+    log("    after A approved: B.pending_l2={} (expect 0), threshold={}", pending_l2_B, threshold)
+    if pending_l2_B == 0:
+        record_pass("T3 pre-state B.pending_l2==0 after A approval")
+    else:
+        record_fail("T3 pre-state B.pending_l2 should be 0", f"got {pending_l2_B}")
+
+    log("  > creating + approving N1 under A.referral_code={}", A["referral_code"])
+    N1 = admin_create_user(c, "Down Naveen 1", f"chain_n1_{stamp}@example.com", pwd, referral_code=A["referral_code"])
+    sw_before_n1 = get_system_wallet(c)
+    admin_approve(c, N1["id"])
+
+    pl_B = get_pending_levels(c, B["id"])
+    pl_A = get_pending_levels(c, A["id"])
+    pending_l2_B = next(row["pending"] for row in pl_B["levels"] if row["level"] == 2)
+    pending_l1_A = next(row["pending"] for row in pl_A["levels"] if row["level"] == 1)
+    sw_after_n1 = get_system_wallet(c)
+    log("    after N1: B.pending_l2={} (expect 1), A.pending_l1={} (expect 1)", pending_l2_B, pending_l1_A)
+    log("    Δref_commission=₹{:+.2f}  Δfee_residual=₹{:+.2f}  Δtotal=₹{:+.2f}",
+        (sw_after_n1["buckets"].get("referral_commission") or 0) - (sw_before_n1["buckets"].get("referral_commission") or 0),
+        (sw_after_n1["buckets"].get("fee_residual") or 0) - (sw_before_n1["buckets"].get("fee_residual") or 0),
+        sw_after_n1["total"] - sw_before_n1["total"])
+
+    if pending_l2_B == 1:
+        record_pass("T3 L2 counter increments to 1")
+    else:
+        record_fail("T3 L2 counter should be 1", f"got {pending_l2_B}")
+
+    if pending_l1_A == 1:
+        record_pass("T3 L1 counter on A == 1")
+    else:
+        record_fail("T3 L1 counter on A should be 1", f"got {pending_l1_A}")
+
+    txns_B = list_user_txns(c, B["id"], limit=50)
+    payouts_B = [t for t in txns_B if t.get("type") == "referral_payout"]
+    if not payouts_B:
+        record_pass("T3 No referral_payout to B yet")
+    else:
+        record_fail("T3 unexpected referral_payout to B", f"count={len(payouts_B)}")
+
+    log("  > re-approving N1 (idempotency)")
+    re_resp = admin_approve(c, N1["id"])
+    pl_B_after = get_pending_levels(c, B["id"])
+    pl_A_after = get_pending_levels(c, A["id"])
+    pending_l2_B_after = next(row["pending"] for row in pl_B_after["levels"] if row["level"] == 2)
+    pending_l1_A_after = next(row["pending"] for row in pl_A_after["levels"] if row["level"] == 1)
+    if re_resp.get("already_approved") and pending_l2_B_after == pending_l2_B and pending_l1_A_after == pending_l1_A:
+        record_pass("T5 Idempotency - re-approve no-op")
+    else:
+        record_fail("T5 Idempotency",
+                    f"resp={re_resp}, l2 {pending_l2_B}->{pending_l2_B_after}, l1 {pending_l1_A}->{pending_l1_A_after}")
+
+    fire_target = threshold
+    remaining_needed = fire_target - pending_l2_B_after
+    log("  > firing L2: need {} more approvals (threshold={})", remaining_needed, fire_target)
+
+    fired_signup_id = None
+    for i in range(remaining_needed):
+        idx = i + 2
+        nu = admin_create_user(c, f"Down Naveen {idx}", f"chain_n{idx}_{stamp}@example.com", pwd,
+                               referral_code=A["referral_code"])
+        sw_before = get_system_wallet(c)
+        admin_approve(c, nu["id"])
+        sw_after = get_system_wallet(c)
+        pl_B_now = get_pending_levels(c, B["id"])
+        l2_now = next(row["pending"] for row in pl_B_now["levels"] if row["level"] == 2)
+        log("    N{} approved: B.pending_l2={}  Δfee_residual=₹{:+.2f}  Δtotal=₹{:+.2f}",
+            idx, l2_now,
+            (sw_after["buckets"].get("fee_residual") or 0) - (sw_before["buckets"].get("fee_residual") or 0),
+            sw_after["total"] - sw_before["total"])
+        if i == remaining_needed - 1:
+            fired_signup_id = nu["id"]
+
+    pl_B_final = get_pending_levels(c, B["id"])
+    l2_pending_final = next(row["pending"] for row in pl_B_final["levels"] if row["level"] == 2)
+    if l2_pending_final == 0:
+        record_pass("T4 B.pending_l2 reset to 0 after threshold fire")
+    else:
+        record_fail("T4 B.pending_l2 should reset to 0", f"got {l2_pending_final}")
+
+    txns_B = list_user_txns(c, B["id"], limit=200)
+    l2_payouts = [t for t in txns_B
+                  if t.get("type") == "referral_payout"
+                  and (t.get("level") == 2 or "L2" in (t.get("description") or "") or "level 2" in (t.get("description") or "").lower())]
+    any_payouts = [t for t in txns_B if t.get("type") == "referral_payout"]
+    if l2_payouts:
+        amt = sum(float(t.get("amount") or t.get("net_amount") or 0) for t in l2_payouts)
+        record_pass("T4 referral_payout L2 to B", f"count={len(l2_payouts)} amt≈₹{amt:.2f}")
+    elif any_payouts:
+        record_pass("T4 referral_payout to B (level marker missing in description)",
+                    f"count={len(any_payouts)}")
+    else:
+        log("    DEBUG B txns count={}, sample={}", len(txns_B), txns_B[:3])
+        record_fail("T4 referral_payout to B", "no payout txn found after threshold fire")
+
+    # Admin l2_funding txn
+    admin_uid = None
+    r_me = c.get("/auth/me")
+    if r_me.status_code == 200:
+        admin_uid = r_me.json().get("id")
+    l2_funding_found = False
+    if admin_uid:
+        admin_txns = list_user_txns(c, admin_uid, limit=500)
+        l2_funding_txns = [t for t in admin_txns if t.get("type") == "l2_funding"]
+        if l2_funding_txns:
+            recent = l2_funding_txns[0]
+            log("    l2_funding amount={} source_bucket={} related_signup={}",
+                recent.get("amount"), recent.get("source_bucket"), recent.get("related_signup_id"))
+            l2_funding_found = True
+        else:
+            log("    DEBUG admin txn types sample: {}",
+                sorted({t.get("type") for t in admin_txns})[:20])
+    if l2_funding_found:
+        record_pass("T4 admin l2_funding txn written")
+    else:
+        record_fail("T4 admin l2_funding txn", "no l2_funding txn found in admin ledger")
+
+    sw = get_system_wallet(c)
+    s = sum(float(v or 0) for v in sw["buckets"].values())
+    drift = abs(s - float(sw["total"]))
+    log("    final Σ(buckets)=₹{:.2f}  total=₹{:.2f}  drift=₹{:.4f}", s, sw["total"], drift)
+    if drift < 0.5:
+        record_pass("T6 Ledger Σ(buckets) ≈ total", f"drift=₹{drift:.4f}")
+    else:
+        record_fail("T6 Ledger drift", f"Σ={s:.2f}, total={sw['total']:.2f}, drift=₹{drift:.2f}")
 
 
-# ─────────────────────────────────────────────────────────────────
-# Test 9 — approve and verify user doc has sub fields
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 9: approve + verify user doc ===")
-me_sub_id = None
-me_sub_name = None
-if APP_ID:
-    r = requests.post(f"{API}/admin/service-applications/{APP_ID}/approve",
-                      headers=H(admin_tok), timeout=30)
-    approve_ok_flag = r.status_code == 200
-    log("9a. POST /admin/service-applications/{id}/approve -> 200",
-        approve_ok_flag, f"status={r.status_code} body={r.text[:160]}")
-    r = requests.get(f"{API}/auth/me", headers=H(clean_tok), timeout=30)
+def test_regression(c: Client) -> None:
+    log("\n[Test 7] Regression")
+    r = c.get("/services")
     if r.status_code == 200:
-        me = r.json()
-        me_sub_id = me.get("service_subcategory_id")
-        me_sub_name = me.get("service_subcategory_name")
-    log("9b. user /auth/me has service_subcategory_id + name set",
-        me_sub_id == SUB_ID and me_sub_name == sub_name,
-        f"sub_id={me_sub_id} sub_name={me_sub_name}")
-else:
-    log("9. SKIPPED - no APP_ID from test 7", False)
+        record_pass("T7 GET /services 200")
+    else:
+        record_fail("T7 GET /services", f"{r.status_code}")
+    rl = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, timeout=30)
+    if rl.status_code == 200:
+        record_pass("T7 POST /auth/login admin 200")
+    else:
+        record_fail("T7 POST /auth/login admin", f"{rl.status_code}")
+    rc = c.get("/admin/service-categories")
+    if rc.status_code == 200:
+        record_pass("T7 GET /admin/service-categories 200")
+    else:
+        record_fail("T7 GET /admin/service-categories", f"{rc.status_code}")
 
 
-# ─────────────────────────────────────────────────────────────────
-# Test 10 — DELETE the subcategory
-# ─────────────────────────────────────────────────────────────────
-print("\n=== TEST 10: cleanup subcategory ===")
-if SUB_ID:
-    r = requests.delete(f"{API}/admin/service-subcategories/{SUB_ID}",
-                        headers=H(admin_tok), timeout=30)
-    log("10. DELETE /admin/service-subcategories/$SUB_ID -> 200",
-        r.status_code == 200, f"status={r.status_code} body={r.text[:160]}")
-else:
-    log("10. SKIPPED - no SUB_ID", False)
+def main():
+    log("=" * 72)
+    log("Commission engine 2026-05-29 — backend tests")
+    log("API base: {}", API)
+    log("=" * 72)
 
-if SUB_WRONG_PARENT_ID:
-    requests.delete(f"{API}/admin/service-subcategories/{SUB_WRONG_PARENT_ID}",
-                    headers=H(admin_tok), timeout=30)
+    token = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    log("admin login OK ({}...)", token[:24])
+    c = Client(token)
 
-# Cleanup the test users + applications
-async def _cleanup():
-    db, client = await _db()
-    for e in [CLEAN_EMAIL.lower(), WRONG_EMAIL.lower()]:
-        u = await db.users.find_one({"email": e}, {"_id": 0, "id": 1})
-        if u:
-            await db.service_applications.delete_many({"user_id": u["id"]})
-            await db.users.delete_one({"id": u["id"]})
-    client.close()
+    test_sanity_system_wallet(c)
+    test_pending_levels_shape(c)
+    test_chain_counter_and_threshold(c)
+    test_regression(c)
 
-asyncio.run(_cleanup())
-print("\n=== Cleanup done ===")
+    log("\n" + "=" * 72)
+    log("SUMMARY")
+    log("=" * 72)
+    log("PASS ({}):", len(PASS_LIST))
+    for p in PASS_LIST:
+        log("  PASS  {}", p)
+    log("\nFAIL ({}):", len(FAIL_LIST))
+    for f in FAIL_LIST:
+        log("  FAIL  {}", f)
+    log("=" * 72)
+    sys.exit(0 if not FAIL_LIST else 1)
 
 
-# ─────────────────────────────────────────────────────────────────
-# Summary
-# ─────────────────────────────────────────────────────────────────
-print("\n" + "=" * 64)
-print("SUMMARY")
-print("=" * 64)
-passed = sum(1 for _, ok, _ in results if ok)
-total  = len(results)
-for label, ok, detail in results:
-    print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
-print(f"\n{passed}/{total} checks PASS")
-sys.exit(0 if passed == total else 1)
+if __name__ == "__main__":
+    main()

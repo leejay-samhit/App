@@ -881,6 +881,14 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
       direct_referrals_count). When admin changes the payout structure
       mid-flight, past payouts and progress are preserved — only the *next*
       threshold uses the new rule. Counter resets on payout.
+
+    L2..L10 trigger model (FIX 2026-05-29):
+      Same completion-based model as L1, extended to ALL levels per business
+      decision. Each upline gets `pending_l2 .. pending_l10` counters. Each
+      qualifying signup at that depth bumps the counter; payout fires only
+      when the counter reaches `directs_required` (same threshold as L1).
+      This eliminates the instant-credit firehose that was bloating the
+      system wallet with tiny transactions on every signup.
     """
     if user.get("commission_triggered"):
         return
@@ -1078,9 +1086,18 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     # parent (sponsor_id) already received the L1 cycle credit above, so we
     # start the cascade at the placement parent's sponsor (grandparent of
     # the new joiner) — preventing double payment to the placement parent.
+    #
+    # NEW BEHAVIOUR (2026-05-29 — at user request):
+    # L2..L10 now use the SAME completion-based model as L1. Each upline
+    # gets a `pending_lN` counter that we increment on every qualifying
+    # signup. The payout only fires when the counter reaches the configured
+    # `directs_required` threshold. This stops the per-signup credit
+    # firehose that was bloating the system wallet with hundreds of tiny
+    # transactions per registration.
     tree_parent = await db.users.find_one({"id": tree_parent_id})
     current_id = (tree_parent or {}).get("sponsor_id")
     paid_levels: List[int] = []
+    pending_chain: List[Dict[str, Any]] = []  # for diagnostics in tx log
     for level in range(2, 11):
         if not current_id:
             break
@@ -1093,8 +1110,81 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
             continue
         amt = level_payouts[level - 1]
         if amt > 0:
-            await _credit_payout(upline, amt, level, user["name"], signup_id=user["id"])
-            paid_levels.append(level)
+            pending_field = f"pending_l{level}"
+            # Bump this upline's per-level counter. Atomic $inc so concurrent
+            # approvals at the same level for the same upline can't race.
+            await db.users.update_one(
+                {"id": current_id},
+                {"$inc": {pending_field: 1}},
+            )
+            fresh_upline = await db.users.find_one({"id": current_id})
+            pending_n = int(fresh_upline.get(pending_field, 0))
+            pending_chain.append({
+                "level": level, "upline_id": current_id,
+                "pending": pending_n, "needed": directs_required,
+            })
+            if pending_n >= directs_required:
+                # Reset the counter (atomic) and pay this level.
+                await db.users.update_one(
+                    {"id": current_id},
+                    {"$inc": {pending_field: -directs_required}},
+                )
+                fresh_upline = await db.users.find_one({"id": current_id})
+                await _credit_payout(fresh_upline, amt, level, user["name"], signup_id=user["id"])
+                paid_levels.append(level)
+                # Fund this LN payout from admin's `fee_residual` (same
+                # source pattern as L1). When fee_residual is empty fall
+                # back to direct_signup → referral_commission.
+                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+                if admin_doc:
+                    remaining_to_fund = float(amt)
+                    for source_bucket in ("fee_residual", "direct_signup", "referral_commission"):
+                        if remaining_to_fund <= 0.01:
+                            break
+                        admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+                        available = float((admin_doc.get("wallet_buckets") or {}).get(source_bucket) or 0)
+                        if available <= 0:
+                            continue
+                        debit = round(min(available, remaining_to_fund), 2)
+                        await credit_admin_bucket(source_bucket, -debit, also_total_earned=False)
+                        await db.transactions.insert_one({
+                            "id": str(uuid.uuid4()),
+                            "user_id": admin_doc["id"],
+                            "type": f"l{level}_funding",
+                            "amount": -debit,
+                            "status": "success",
+                            "description": (
+                                f"L{level} payout funded from {source_bucket} "
+                                f"(₹{debit} for cycle of {directs_required} L{level} events)"
+                            ),
+                            "source_bucket": source_bucket,
+                            "related_signup_id": user["id"],
+                            "related_payout_recipient": current_id,
+                            "level": level,
+                            "created_at": now_utc().isoformat(),
+                        })
+                        remaining_to_fund -= debit
+                    if remaining_to_fund > 0.01:
+                        logger.warning(
+                            f"L{level} funding shortfall: ₹{remaining_to_fund} unfunded for "
+                            f"cycle to {current_id} — admin should top-up direct_added."
+                        )
+                # Notify the upline that their L<N> cycle just paid out.
+                await _create_notification(
+                    current_id, "referral",
+                    f"L{level} payout ₹{int(amt)} credited!",
+                    f"You hit {directs_required} L{level} activations. ₹{int(amt)} added to your wallet.",
+                )
+            else:
+                # Counter not full yet — send a progress notification once,
+                # only when the upline is exactly 1 short to keep the inbox
+                # quiet (otherwise we'd ping them 5× per cycle).
+                if pending_n == directs_required - 1:
+                    await _create_notification(
+                        current_id, "referral",
+                        f"1 more for your L{level} payout!",
+                        f"Just one more L{level} activation and you'll earn ₹{int(amt)}.",
+                    )
         current_id = upline.get("sponsor_id")
 
     # Cascade-overflow: any L2..L10 amounts that COULDN'T be paid because the
@@ -1128,15 +1218,15 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
             ]}, "status": "success", "created_at": {"$gte": user.get("created_at", "")}},
         ],
     }, {"_id": 0, "type": 1, "amount": 1, "gross_amount": 1, "level": 1}):
-        # SKIP L1 — it's funded from the existing fee_residual pool, not
-        # from THIS signup's fee. Including it would zero out the residual
-        # for L1-cycle signups and silently lose ₹95.95 per cycle.
-        if int(txn.get("level") or 0) == 1:
-            continue
+        # SKIP all referral_payout txns — they're now ALL funded from the
+        # existing fee_residual pool (not from THIS signup's fee), so
+        # including them here would zero out the residual for cycle
+        # signups and silently lose money. Update 2026-05-29: extended
+        # the L1-only skip to L1..L10 now that the completion-based
+        # payout model funds every level from fee_residual identically.
         if txn.get("type") == "referral_payout":
-            # gross = net credited to user + GST routed to admin
-            total_credited_for_signup += float(txn.get("gross_amount") or txn.get("amount") or 0)
-        elif txn.get("type") in ("cascade_overflow",):
+            continue
+        if txn.get("type") in ("cascade_overflow",):
             total_credited_for_signup += float(txn.get("amount") or 0)
     residual = round(fee_paid - total_credited_for_signup, 2)
     if residual > 0.01:
@@ -1168,6 +1258,45 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         {"id": user["id"]},
         {"$set": {"fee_residual_backfilled": True}},
     )
+
+
+@api_router.get("/admin/users/{user_id}/pending-levels")
+async def admin_get_pending_levels(
+    user_id: str,
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Per-user, per-level progress towards the next payout (2026-05-29).
+
+    With the new completion-based payout rule, each upline has 10 separate
+    counters (`pending_directs` for L1 plus `pending_l2` .. `pending_l10`).
+    This endpoint surfaces all 10 in one shot so admins can see exactly
+    how close every user is to their next commission cycle.
+    """
+    u = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    settings = await get_settings()
+    threshold = int(settings.get("directs_required") or 5)
+    rows = []
+    for lvl in range(1, 11):
+        field = "pending_directs" if lvl == 1 else f"pending_l{lvl}"
+        pending = int(u.get(field, 0) or 0)
+        payout = float(settings.get(f"payout_l{lvl}") or 0)
+        rows.append({
+            "level":     lvl,
+            "pending":   pending,
+            "threshold": threshold,
+            "remaining": max(0, threshold - pending),
+            "payout_inr": payout,
+            "ready":     pending >= threshold and payout > 0,
+        })
+    return {
+        "user_id": user_id,
+        "user_name": u.get("name"),
+        "levels": rows,
+        "threshold_per_level": threshold,
+        "generated_at": now_utc().isoformat(),
+    }
 
 
 @api_router.post("/payment/register-fee")
