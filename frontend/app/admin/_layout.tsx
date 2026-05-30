@@ -4,6 +4,22 @@ import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 
+/**
+ * ╔════════════════════════════════════════════════════════════════════╗
+ * ║ ⚠ BOTTOM NAV LOCK — DO NOT add new tabs here.                     ║
+ * ║                                                                    ║
+ * ║ The admin bottom navigation is permanently locked to exactly 6     ║
+ * ║ tabs (Home · Users · Shop · Payouts · Wallet · More).              ║
+ * ║                                                                    ║
+ * ║ When you add a NEW screen under /app/admin/, you MUST register     ║
+ * ║ it below with `options={{ href: null }}` — otherwise Expo Router   ║
+ * ║ will auto-add it as a 7th tab and break the locked layout.         ║
+ * ║                                                                    ║
+ * ║ Surface new screens through /admin/more.tsx instead (or via the    ║
+ * ║ relevant tab screen). NEVER add another <Tabs.Screen> without      ║
+ * ║ href:null unless you are intentionally replacing one of the 6.    ║
+ * ╚════════════════════════════════════════════════════════════════════╝
+ */
 export default function AdminLayout() {
   const insets = useSafeAreaInsets();
   // Lift the tab bar above the device's navigation buttons (Android 3-button
@@ -73,6 +89,10 @@ export default function AdminLayout() {
       <Tabs.Screen name="ai-tools" options={{ href: null }} />
       <Tabs.Screen name="service-analytics" options={{ href: null }} />
       <Tabs.Screen name="subcategories/[parentId]" options={{ href: null }} />
+      {/* Finance Dashboard was merged into System Wallet (2026-05-30). The
+         file still exists as a redirect for old bookmarks — keep it hidden
+         from the locked 6-tab bottom nav. */}
+      <Tabs.Screen name="finance-dashboard" options={{ href: null }} />
     </Tabs>
   );
 }

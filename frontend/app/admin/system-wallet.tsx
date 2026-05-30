@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
-  RefreshControl, Alert, Modal, TextInput, KeyboardAvoidingView, Platform,
+  RefreshControl, Alert, Modal, TextInput, KeyboardAvoidingView, Platform, Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -92,6 +92,19 @@ type Breakdown = {
   settings: { registration_fee: number; directs_required: number; level_payouts: number[] };
 };
 
+/** 7-Group Net Worth (from /admin/finance/net-worth) — merged from the old
+ *  standalone Finance Dashboard so the Wallet screen surfaces every rupee. */
+type NetWorth = {
+  group_1_revenue: { registration: number; service: number; platform_fee: number; shop: number; gross: number };
+  group_2_liability: { total_reward_credits: number; total_withdrawals_settled: number; available_user_balance: number };
+  group_3_gst: { collected: number; paid: number; payable: number };
+  group_4_platform_fee: { collected: number };
+  group_5_expenses: { total: number };
+  group_6_pending_withdrawals: { pending_amount: number };
+  group_7_bank: { credits: number; debits: number; balance: number };
+  master: { pending_collections: number; net_worth: number; formula: string };
+};
+
 export default function AdminSystemWallet() {
   const router = useRouter();
   const [data, setData] = useState<{ buckets: Record<string, number>; total: number; deposits: Deposit[] } | null>(null);
@@ -106,6 +119,20 @@ export default function AdminSystemWallet() {
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  // ─── 7-Group Net-Worth (merged from old Finance Dashboard) ───
+  // Lives at the top of this screen so admins see "every rupee" in one place.
+  const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
+  const [bankOpen, setBankOpen] = useState(false);  // Group 7 bank entry modal
+  const [expOpen, setExpOpen] = useState(false);    // Group 5 expense modal
+  const [adjOpen, setAdjOpen] = useState(false);    // Manual adjustment modal
+
+  // Export CSV files via authenticated URL — opens in a new tab/window.
+  const exportFile = useCallback((kind: "transactions" | "expenses" | "bank") => {
+    const base = (process.env.EXPO_PUBLIC_BACKEND_URL || "").replace(/\/$/, "");
+    const url = `${base}/api/admin/finance/export/${kind}`;
+    Linking.openURL(url).catch(() => Alert.alert("Could not open", url));
+  }, []);
 
   // Bucket-detail drawer state
   const [activeBucket, setActiveBucket] = useState<BucketKey | null>(null);
@@ -191,14 +218,16 @@ export default function AdminSystemWallet() {
 
   const load = useCallback(async () => {
     try {
-      const [{ data }, bd, sb] = await Promise.all([
+      const [{ data }, bd, sb, nw] = await Promise.all([
         api.get("/admin/system-wallet"),
         api.get<Breakdown>("/admin/system-wallet/breakdown").catch(() => ({ data: null as any })),
         api.get("/admin/system-wallet/source-breakdown").catch(() => ({ data: null as any })),
+        api.get<NetWorth>("/admin/finance/net-worth").catch(() => ({ data: null as any })),
       ]);
       setData(data);
       setBreakdown(bd.data || null);
       setSourceBreakdown(sb.data || null);
+      setNetWorth(nw.data || null);
     } catch (e) {
       console.warn(e);
     } finally {
@@ -342,6 +371,70 @@ export default function AdminSystemWallet() {
             </GradientCard>
           );
         })()}
+
+        {/* ────────────────────────────────────────────────────────────────
+            🏛 7-GROUP NET-WORTH (formerly the standalone Finance Dashboard).
+            Merged in here so the System Wallet is the single source of truth
+            for every rupee on the platform. Driven by /admin/finance/net-worth.
+            ──────────────────────────────────────────────────────────────── */}
+        {netWorth ? (
+          <View style={{ marginBottom: 8 }}>
+            <Text style={styles.sectionLabel}>Company Net Worth · 7-Group Ledger</Text>
+            <View style={styles.nwHero}>
+              <Text style={styles.nwHeroLabel}>COMPANY NET WORTH</Text>
+              <Text style={styles.nwHeroValue}>{formatINR(netWorth.master.net_worth)}</Text>
+              <Text style={styles.nwHeroFormula}>{netWorth.master.formula}</Text>
+            </View>
+
+            <NwGroup icon="trending-up" title="Group 1 · Revenue Ledger" color="#10B981">
+              <NwRow label="Registration revenue"   value={netWorth.group_1_revenue.registration} />
+              <NwRow label="Service revenue"        value={netWorth.group_1_revenue.service} />
+              <NwRow label="Platform fee revenue"   value={netWorth.group_1_revenue.platform_fee} />
+              <NwRow label="Shop revenue"           value={netWorth.group_1_revenue.shop} />
+              <NwRow label="Gross revenue"          value={netWorth.group_1_revenue.gross} bold />
+            </NwGroup>
+
+            <NwGroup icon="users" title="Group 2 · User Liability Wallet" color="#F59E0B">
+              <NwRow label="Total reward credits issued"   value={netWorth.group_2_liability.total_reward_credits} />
+              <NwRow label="Total withdrawals settled"     value={netWorth.group_2_liability.total_withdrawals_settled} />
+              <NwRow label="Available user balance (LIABILITY)" value={netWorth.group_2_liability.available_user_balance} bold />
+            </NwGroup>
+
+            <NwGroup icon="percent" title="Group 3 · GST Ledger" color="#EF4444">
+              <NwRow label="GST collected"          value={netWorth.group_3_gst.collected} />
+              <NwRow label="GST paid (expenses)"    value={netWorth.group_3_gst.paid} />
+              <NwRow label="GST payable to govt"    value={netWorth.group_3_gst.payable} bold />
+            </NwGroup>
+
+            <NwGroup icon="briefcase" title="Group 4 · Platform Fee Ledger" color="#8B5CF6">
+              <NwRow label="18% on L1–L10 payouts (company revenue)" value={netWorth.group_4_platform_fee.collected} bold />
+            </NwGroup>
+
+            <NwGroup
+              icon="dollar-sign" title="Group 5 · Expense Ledger" color="#6366F1"
+              rightChip={{ label: "+ Add", onPress: () => setExpOpen(true) }}
+            >
+              <NwRow label="Total expenses (approved)" value={netWorth.group_5_expenses.total} bold />
+            </NwGroup>
+
+            <NwGroup icon="clock" title="Group 6 · Pending Withdrawals" color="#0EA5E9">
+              <NwRow label="Awaiting approval" value={netWorth.group_6_pending_withdrawals.pending_amount} bold />
+            </NwGroup>
+
+            <NwGroup
+              icon="credit-card" title="Group 7 · Bank Ledger" color="#14B8A6"
+              rightChip={{ label: "+ Entry", onPress: () => setBankOpen(true) }}
+            >
+              <NwRow label="Total credits"          value={netWorth.group_7_bank.credits} />
+              <NwRow label="Total debits"           value={netWorth.group_7_bank.debits} />
+              <NwRow label="Current bank balance"   value={netWorth.group_7_bank.balance} bold />
+            </NwGroup>
+
+            <Text style={styles.helpText}>
+              Every entry is permanent — reverse or adjust instead of deleting.
+            </Text>
+          </View>
+        ) : null}
 
         {/* ─── Treasury · 3 SUMMED rows + 5 informational rows ─── */}
         {(() => {
@@ -615,6 +708,33 @@ export default function AdminSystemWallet() {
           Recomputes each bucket from the transaction ledger and fixes any drift. Run any time to verify books tally.
         </Text>
 
+        {/* ─── CSV Exports + Manual Adjustment (merged from old Finance Dashboard) ─── */}
+        <Text style={[styles.sectionLabel, { marginTop: 18 }]}>Treasury Tools · Exports & Adjustments</Text>
+        <NwActionRow
+          icon="rotate-ccw" color="#EAB308"
+          label="Manual Adjustment Entry"
+          description="Add a debit/credit correction to any user wallet — audit-logged."
+          onPress={() => setAdjOpen(true)}
+        />
+        <NwActionRow
+          icon="download" color="#0EA5E9"
+          label="Export Transactions (CSV)"
+          description="Last 90 days of every txn with full audit fields."
+          onPress={() => exportFile("transactions")}
+        />
+        <NwActionRow
+          icon="download" color="#6366F1"
+          label="Export Expenses (CSV)"
+          description="Group 5 entries — full lifetime export."
+          onPress={() => exportFile("expenses")}
+        />
+        <NwActionRow
+          icon="download" color="#14B8A6"
+          label="Export Bank Ledger (CSV)"
+          description="Group 7 entries — full lifetime export."
+          onPress={() => exportFile("bank")}
+        />
+
         {/* Phase: User-source unification — 3-way accountability breakdown.
             Shows registration revenue and downstream payout fan-out grouped
             by HOW the user joined (Razorpay / UPI manual / Offline cash).
@@ -854,6 +974,13 @@ export default function AdminSystemWallet() {
           ) : null}
         </SafeAreaView>
       </Modal>
+
+      {/* ───────── Bank Entry modal (Group 7) ───────── */}
+      <NwBankModal open={bankOpen} onClose={() => setBankOpen(false)} onSaved={load} />
+      {/* ───────── Expense modal (Group 5) ───────── */}
+      <NwExpenseModal open={expOpen} onClose={() => setExpOpen(false)} onSaved={load} />
+      {/* ───────── Manual Adjustment modal ───────── */}
+      <NwAdjustModal open={adjOpen} onClose={() => setAdjOpen(false)} onSaved={load} />
     </SafeAreaView>
   );
 }
@@ -963,6 +1090,231 @@ function TxnRow({ txn, onPreviewInvoice }: { txn: Txn; onPreviewInvoice?: (t: Tx
     </View>
   );
 }
+
+/* ────────────────────── Net-Worth helpers (merged from Finance Dashboard) ────────────────────── */
+
+function NwGroup({ icon, title, color, children, rightChip }: any) {
+  return (
+    <View style={nwStyles.card}>
+      <View style={nwStyles.cardHead}>
+        <View style={[nwStyles.iconWrap, { backgroundColor: color + "22" }]}>
+          <Feather name={icon} size={14} color={color} />
+        </View>
+        <Text style={nwStyles.cardTitle}>{title}</Text>
+        {rightChip ? (
+          <TouchableOpacity onPress={rightChip.onPress} style={[nwStyles.chipBtn, { backgroundColor: color }]}>
+            <Text style={nwStyles.chipBtnText}>{rightChip.label}</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+      <View style={{ marginTop: 8 }}>{children}</View>
+    </View>
+  );
+}
+
+function NwRow({ label, value, bold }: { label: string; value: number; bold?: boolean }) {
+  return (
+    <View style={nwStyles.row}>
+      <Text style={[nwStyles.rowLabel, bold && { fontWeight: "800", color: colors.textMain }]}>{label}</Text>
+      <Text style={[nwStyles.rowValue, bold && { fontSize: 16, color: colors.primary }]}>{formatINR(value)}</Text>
+    </View>
+  );
+}
+
+function NwActionRow({ icon, label, description, onPress, color }: any) {
+  return (
+    <TouchableOpacity onPress={onPress} style={[nwStyles.card, { flexDirection: "row", alignItems: "center", paddingVertical: 12 }]}>
+      <View style={[nwStyles.iconWrap, { backgroundColor: color + "22", marginRight: 10 }]}>
+        <Feather name={icon} size={14} color={color} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={{ fontWeight: "800", color: colors.textMain }}>{label}</Text>
+        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>{description}</Text>
+      </View>
+      <Feather name="chevron-right" size={18} color={colors.textMuted} />
+    </TouchableOpacity>
+  );
+}
+
+function NwField(props: any) {
+  return (
+    <TextInput
+      placeholderTextColor={colors.textMuted}
+      style={[nwStyles.field, props.multiline && { minHeight: 70, textAlignVertical: "top" }]}
+      {...props}
+    />
+  );
+}
+
+function NwBankModal({ open, onClose, onSaved }: any) {
+  const [kind, setKind] = useState<"credit" | "debit">("credit");
+  const [amount, setAmount] = useState("");
+  const [bank, setBank] = useState("");
+  const [utr, setUtr] = useState("");
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!amount || !description) return Alert.alert("Required", "Amount and description required");
+    setBusy(true);
+    try {
+      await api.post("/admin/bank-ledger", { kind, amount: Number(amount), bank, utr, description });
+      setAmount(""); setBank(""); setUtr(""); setDescription("");
+      onSaved(); onClose();
+    } catch (e) {
+      Alert.alert("Could not save", formatApiError(e));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal visible={open} animationType="slide" onRequestClose={onClose} transparent>
+      <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={nwStyles.sheetBackdrop} />
+        <View style={nwStyles.sheet}>
+          <Text style={nwStyles.sheetTitle}>Add Bank Entry · Group 7</Text>
+          <View style={{ flexDirection: "row", gap: 8, marginVertical: 10 }}>
+            {(["credit", "debit"] as const).map((k) => (
+              <TouchableOpacity key={k} onPress={() => setKind(k)} style={[nwStyles.toggle, kind === k && { backgroundColor: k === "credit" ? "#10B981" : "#EF4444" }]}>
+                <Text style={[nwStyles.toggleText, kind === k && { color: "#fff" }]}>{k.toUpperCase()}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <NwField placeholder="Amount (₹)" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
+          <NwField placeholder="Bank name (optional)" value={bank} onChangeText={setBank} />
+          <NwField placeholder="UTR / Reference (optional)" value={utr} onChangeText={setUtr} />
+          <NwField placeholder="Description" value={description} onChangeText={setDescription} multiline />
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+            <TouchableOpacity onPress={onClose} style={[nwStyles.btn, { backgroundColor: colors.surfaceMuted, flex: 1 }]}>
+              <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={submit} disabled={busy} style={[nwStyles.btn, { backgroundColor: colors.primary, flex: 1 }]}>
+              {busy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Save</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+function NwExpenseModal({ open, onClose, onSaved }: any) {
+  const [category, setCategory] = useState("server_hosting");
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [vendor, setVendor] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const cats = ["server_hosting", "sms_charges", "whatsapp_api", "staff_salary", "marketing", "legal_fees", "office_expenses", "payment_gateway", "refunds", "gst_paid", "other"];
+
+  const submit = async () => {
+    if (!amount || !description) return Alert.alert("Required", "Amount and description required");
+    setBusy(true);
+    try {
+      await api.post("/admin/expenses", { category, amount: Number(amount), description, vendor });
+      setAmount(""); setDescription(""); setVendor("");
+      onSaved(); onClose();
+    } catch (e) {
+      Alert.alert("Could not save", formatApiError(e));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal visible={open} animationType="slide" onRequestClose={onClose} transparent>
+      <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={nwStyles.sheetBackdrop} />
+        <View style={nwStyles.sheet}>
+          <Text style={nwStyles.sheetTitle}>Add Expense · Group 5</Text>
+          <Text style={nwStyles.fieldLabel}>Category</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 4 }}>
+            {cats.map((c) => (
+              <TouchableOpacity key={c} onPress={() => setCategory(c)} style={[nwStyles.chipChoice, category === c && { backgroundColor: colors.primary }]}>
+                <Text style={[nwStyles.chipChoiceText, category === c && { color: "#fff" }]}>{c.replace(/_/g, " ")}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+          <NwField placeholder="Amount (₹)" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
+          <NwField placeholder="Vendor (optional)" value={vendor} onChangeText={setVendor} />
+          <NwField placeholder="Description" value={description} onChangeText={setDescription} multiline />
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+            <TouchableOpacity onPress={onClose} style={[nwStyles.btn, { backgroundColor: colors.surfaceMuted, flex: 1 }]}>
+              <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={submit} disabled={busy} style={[nwStyles.btn, { backgroundColor: colors.primary, flex: 1 }]}>
+              {busy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Save</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+function NwAdjustModal({ open, onClose, onSaved }: any) {
+  const [userId, setUserId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("correction");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!userId || !amount || !description) return Alert.alert("Required", "User ID, amount and description required");
+    setBusy(true);
+    try {
+      await api.post("/admin/transactions/adjust", { user_id: userId, amount: Number(amount), description, category });
+      setUserId(""); setAmount(""); setDescription("");
+      onSaved(); onClose();
+    } catch (e) {
+      Alert.alert("Could not save", formatApiError(e));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal visible={open} animationType="slide" onRequestClose={onClose} transparent>
+      <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={nwStyles.sheetBackdrop} />
+        <View style={nwStyles.sheet}>
+          <Text style={nwStyles.sheetTitle}>Manual Adjustment</Text>
+          <NwField placeholder="User ID (target wallet)" value={userId} onChangeText={setUserId} />
+          <NwField placeholder="Amount (+ credit / − debit)" value={amount} onChangeText={setAmount} />
+          <NwField placeholder="Category (correction / writeoff / topup)" value={category} onChangeText={setCategory} />
+          <NwField placeholder="Reason / description" value={description} onChangeText={setDescription} multiline />
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+            <TouchableOpacity onPress={onClose} style={[nwStyles.btn, { backgroundColor: colors.surfaceMuted, flex: 1 }]}>
+              <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={submit} disabled={busy} style={[nwStyles.btn, { backgroundColor: "#EAB308", flex: 1 }]}>
+              {busy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Save</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+const nwStyles = StyleSheet.create({
+  card: { backgroundColor: colors.surface, borderRadius: 14, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: colors.border },
+  cardHead: { flexDirection: "row", alignItems: "center" },
+  iconWrap: { width: 28, height: 28, borderRadius: 8, alignItems: "center", justifyContent: "center" },
+  cardTitle: { fontSize: 13, fontWeight: "800", color: colors.textMain, marginLeft: 8, flex: 1, letterSpacing: 0.3 },
+  chipBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
+  chipBtnText: { color: "#fff", fontSize: 11, fontWeight: "800" },
+  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 5 },
+  rowLabel: { fontSize: 12, color: colors.textMuted, flex: 1 },
+  rowValue: { fontSize: 13, fontWeight: "700", color: colors.textMain },
+  sheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.45)" },
+  sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 18, paddingBottom: 30 },
+  sheetTitle: { fontSize: 17, fontWeight: "800", color: colors.textMain, marginBottom: 4 },
+  fieldLabel: { fontSize: 11, fontWeight: "800", color: colors.textMuted, marginTop: 8, letterSpacing: 0.6 },
+  field: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, marginTop: 8, color: colors.textMain },
+  toggle: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: colors.border, flex: 1, alignItems: "center" },
+  toggleText: { fontWeight: "800", color: colors.textMain },
+  chipChoice: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceMuted },
+  chipChoiceText: { fontSize: 11, fontWeight: "700", color: colors.textMain, textTransform: "capitalize" },
+  btn: { paddingVertical: 12, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+});
+
+
 
 // Phase: User-source unification — styles for the 3-way breakdown card.
 const localStyles = StyleSheet.create({
@@ -1078,4 +1430,15 @@ const styles = StyleSheet.create({
   label: { fontSize: 11, fontWeight: "700", color: colors.textMuted, marginTop: 12, marginBottom: 4, letterSpacing: 0.5, textTransform: "uppercase" },
   input: { backgroundColor: colors.surfaceMuted, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: colors.textMain, borderWidth: 1, borderColor: colors.border },
   modalBtn: { flex: 1, paddingVertical: 13, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+
+  // 7-Group net-worth hero (merged from old Finance Dashboard)
+  nwHero: {
+    backgroundColor: colors.primary,
+    borderRadius: 18,
+    padding: 22,
+    marginBottom: 12,
+  },
+  nwHeroLabel: { fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "800" },
+  nwHeroValue: { fontSize: 32, fontWeight: "800", color: colors.primaryFg, marginTop: 6, letterSpacing: -0.5 },
+  nwHeroFormula: { fontSize: 11, color: "rgba(255,255,255,0.78)", marginTop: 6, lineHeight: 16 },
 });
