@@ -7,9 +7,8 @@ import {
 import { Stack, useFocusEffect } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { api } from "@/api";
-import { colors } from "@/theme";
-import { formatApiError } from "@/utils/format";
+import { api, formatApiError } from "../../src/api";
+import { colors } from "../../src/theme";
 
 type NetWorth = {
   group_1_revenue: { registration: number; service: number; platform_fee: number; shop: number; gross: number };
