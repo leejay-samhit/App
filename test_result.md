@@ -7837,3 +7837,42 @@ agent_communication:
         related to this change.
 
         No action needed from main agent on the commission engine — ship it.
+
+
+---
+
+## 2026-05-30 (main agent): Finance unification + UPI Manual / Offline joining tracking + reconciliation-aware Bank Tally
+
+### Frontend (`/app/frontend/app/admin/system-wallet.tsx`)
+- Removed the redundant "Treasury · Held + Withdrawn = Inflow" 3-row section + 5 informational sub-bucket rows (≈ 95 lines).
+- Removed the "Money flow breakdown" toggle + entire `breakdownPanel` block (≈ 140 lines).
+- Replaced the Bank Balance Tally hero card with one driven by the new
+  `bank_tally` block from `/admin/finance/net-worth`. It now displays
+  Inflow / Outflow / Net plus a reversals chip and an adjustments chip
+  (shown only when count > 0).
+- Group 1 (Revenue Ledger) now shows a "Joinings by source" mini-list
+  with rows for Razorpay, UPI Manual, and Offline / Cash (count + amount).
+- Bottom-nav lock contract reinforced at the top of `_layout.tsx`.
+
+### Backend (`/app/backend/routes/finance.py`)
+- **Bug fix:** `/admin/finance/net-worth` was filtering registration revenue on
+  the non-existent `type=registration_inflow` (returning ₹0). Switched to
+  the canonical `type=registration_fee` with `status ∈ {paid, success, approved}`,
+  matching the breakdown endpoint. This single fix made ALL three sources
+  (Razorpay / UPI manual / Offline cash) count correctly.
+- Added per-source breakdown: response now includes
+  `group_1_revenue.by_source.{razorpay,upi_manual,offline_cash} = {amount,count}`.
+- Reversal-aware: each group sum now subtracts `type=reversal` txns
+  attributed via `original_type`.
+- Added new top-level `bank_tally` block:
+  - `inflow  = revenue + UTR deposits + bank credits + positive adjustments`
+  - `outflow = settled withdrawals + bank debits + |reversals| + |negative adjustments|`
+  - `net = inflow − outflow`
+  - Plus counts/amounts of reversals + adjustments for display.
+
+### Verification
+- `npx expo export --platform web` clean (`/admin/system-wallet (64.5 kB)`).
+- Live curl on `/admin/finance/net-worth` with real DB data:
+  - Registration: ₹1,062 (was ₹0 before fix)
+  - by_source.razorpay: ₹118 × 1, upi_manual: ₹0 × 0, offline_cash: ₹944 × 8 → SUM matches.
+  - bank_tally.reversals_count: 2, reversals_amount: ₹200 (correctly subtracted from outflow).

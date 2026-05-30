@@ -93,29 +93,66 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     migration is required.
     """
     # ── Group 1 — Revenue Ledger ──────────────────────────────────────
-    reg_inflow_agg = await db.transactions.aggregate([
-        {"$match": {"type": {"$in": ["registration_inflow", "direct_signup_credit"]}, "status": "success"}},
-        {"$group": {"_id": None, "sum": {"$sum": "$gross_amount"}}},
-    ]).to_list(1)
-    registration_revenue = float((reg_inflow_agg or [{}])[0].get("sum") or 0)
+    # FIX (2026-05-30): Use the canonical `registration_fee` type — same
+    # logic as `/admin/system-wallet/breakdown`. This counts ALL 3 sources
+    # (razorpay / upi_manual / offline_cash) in one shot.
+    PAID = ["paid", "success", "approved"]
 
-    service_rev_agg = await db.transactions.aggregate([
-        {"$match": {"type": {"$in": ["phone_reveal_invoice", "service_request_fee"]}, "status": "success"}},
-        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
-    ]).to_list(1)
-    service_revenue = float((service_rev_agg or [{}])[0].get("sum") or 0)
+    async def _sum_amount(match: Dict[str, Any]) -> float:
+        agg = await db.transactions.aggregate([
+            {"$match": match},
+            {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        return float((agg or [{}])[0].get("sum") or 0)
 
-    pf_agg = await db.transactions.aggregate([
-        {"$match": {"type": "platform_fee_collected", "status": "success"}},
-        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
-    ]).to_list(1)
-    platform_fee_revenue = float((pf_agg or [{}])[0].get("sum") or 0)
+    reg_fee_total = await _sum_amount({"type": "registration_fee", "status": {"$in": PAID}})
 
-    shop_rev_agg = await db.transactions.aggregate([
-        {"$match": {"type": {"$in": ["shop_purchase", "shop_revenue"]}, "status": "success"}},
-        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
-    ]).to_list(1)
-    shop_revenue = float((shop_rev_agg or [{}])[0].get("sum") or 0)
+    # Per-source breakdown so admin sees where the joinings came from.
+    reg_by_source_agg = await db.transactions.aggregate([
+        {"$match": {"type": "registration_fee", "status": {"$in": PAID}}},
+        {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "_u"}},
+        {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+        {"$group": {
+            "_id": {"$ifNull": ["$_u.registration_source", "razorpay"]},
+            "sum": {"$sum": "$amount"},
+            "count": {"$sum": 1},
+        }},
+    ]).to_list(10)
+    reg_by_source = {row["_id"] or "razorpay": {"amount": float(row["sum"] or 0), "count": int(row["count"] or 0)} for row in reg_by_source_agg}
+    # Always surface the 3 expected sources even when count==0 so the UI
+    # can render a stable 3-row breakdown.
+    for s in ("razorpay", "upi_manual", "offline_cash"):
+        reg_by_source.setdefault(s, {"amount": 0.0, "count": 0})
+
+    # Reversals subtract from revenue. Reversal txns carry `original_type`
+    # so we can attribute the credit-back to the correct group.
+    async def _reversals_for(original_types: list) -> float:
+        agg = await db.transactions.aggregate([
+            {"$match": {"type": "reversal", "original_type": {"$in": original_types}, "status": "success"}},
+            {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        # Reversal amounts are stored negative; flip to positive for subtraction.
+        return abs(float((agg or [{}])[0].get("sum") or 0))
+
+    reg_reversed = await _reversals_for(["registration_fee"])
+    registration_revenue = reg_fee_total - reg_reversed
+
+    service_rev_agg = await _sum_amount({
+        "type": {"$in": ["service_margin", "service_commission", "phone_reveal_invoice", "service_request_fee"]},
+        "status": {"$in": PAID},
+    })
+    service_reversed = await _sum_amount({"type": "service_commission_reversal", "status": "success"})
+    service_revenue = service_rev_agg - abs(service_reversed)
+
+    platform_fee_revenue = await _sum_amount({"type": "platform_fee_collected", "status": {"$in": PAID}})
+    platform_fee_revenue -= await _reversals_for(["platform_fee_collected"])
+
+    shop_rev_agg = await _sum_amount({
+        "type": {"$in": ["shop_purchase", "shop_revenue", "shopping_margin", "shop_commission"]},
+        "status": {"$in": PAID},
+    })
+    shop_reversed = await _sum_amount({"type": "shop_commission_reversal", "status": "success"})
+    shop_revenue = shop_rev_agg - abs(shop_reversed)
 
     gross_revenue = round(
         registration_revenue + service_revenue + platform_fee_revenue + shop_revenue,
@@ -185,12 +222,48 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
 
     bank_balance = round(bank_credits - bank_debits, 2)
 
+    # ── Reversals & Adjustments aggregate (for the Bank-Tally reconciliation
+    # at the top of the System Wallet). Reversals are stored with amount as
+    # negative (they undo a credit). Manual adjustments may be ± and live
+    # under type "manual_adjustment".
+    rev_agg = await db.transactions.aggregate([
+        {"$match": {"type": "reversal", "status": "success"}},
+        {"$group": {"_id": None, "sum": {"$sum": "$amount"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    reversals_count  = int((rev_agg or [{}])[0].get("count") or 0)
+    reversals_amount = float((rev_agg or [{}])[0].get("sum") or 0)  # negative net
+
+    adj_agg = await db.transactions.aggregate([
+        {"$match": {"type": "manual_adjustment", "status": "success"}},
+        {"$group": {"_id": None, "sum": {"$sum": "$amount"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    adjustments_count  = int((adj_agg or [{}])[0].get("count") or 0)
+    adjustments_amount = float((adj_agg or [{}])[0].get("sum") or 0)  # signed
+
     # Pending collections = Razorpay-initiated payments not yet captured
     pending_collections_agg = await db.transactions.aggregate([
         {"$match": {"type": "registration_inflow", "status": "pending"}},
         {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
     ]).to_list(1)
     pending_collections = float((pending_collections_agg or [{}])[0].get("sum") or 0)
+
+    # Compute a Bank Balance Tally that's reconciliation-aware. This is what
+    # the System Wallet hero card displays. Includes reversals & adjustments.
+    #   tally_in  = gross_revenue + utr_deposits + bank_credits + positive_adjustments
+    #   tally_out = settled_withdrawals + bank_debits + abs(reversals) + abs(negative_adjustments)
+    utr_dep_agg = await db.transactions.aggregate([
+        {"$match": {"type": "system_deposit", "status": {"$in": PAID}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    utr_deposits_total = float((utr_dep_agg or [{}])[0].get("sum") or 0)
+
+    pos_adj = max(0.0, adjustments_amount)         # signed sum already
+    neg_adj = max(0.0, -adjustments_amount)
+    abs_reversals = abs(reversals_amount)
+
+    bank_tally_in  = round(gross_revenue + utr_deposits_total + bank_credits + pos_adj, 2)
+    bank_tally_out = round(total_withdrawals_settled + bank_debits + abs_reversals + neg_adj, 2)
+    bank_tally_net = round(bank_tally_in - bank_tally_out, 2)
 
     net_worth = round(
         bank_balance + pending_collections - user_wallet_balance - pending_withdrawals - gst_payable,
@@ -204,6 +277,14 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "platform_fee": round(platform_fee_revenue, 2),
             "shop":         round(shop_revenue, 2),
             "gross":        gross_revenue,
+            # NEW: per-source breakdown of joinings so admins can see how
+            # much came via Razorpay vs UPI manual vs Offline cash.
+            "by_source": {
+                "razorpay":     reg_by_source.get("razorpay",     {"amount": 0.0, "count": 0}),
+                "upi_manual":   reg_by_source.get("upi_manual",   {"amount": 0.0, "count": 0}),
+                "offline_cash": reg_by_source.get("offline_cash", {"amount": 0.0, "count": 0}),
+            },
+            "reversed": round(reg_reversed, 2),
         },
         "group_2_liability": {
             "total_reward_credits":       round(total_reward_credits, 2),
@@ -228,6 +309,19 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "credits": round(bank_credits, 2),
             "debits":  round(bank_debits, 2),
             "balance": bank_balance,
+        },
+        # NEW: Top-of-screen Bank Balance Tally that respects reversals &
+        # adjustments. Frontend hero card uses this directly.
+        "bank_tally": {
+            "inflow":           bank_tally_in,
+            "outflow":          bank_tally_out,
+            "net":              bank_tally_net,
+            "utr_deposits":     round(utr_deposits_total, 2),
+            "reversals_count":  reversals_count,
+            "reversals_amount": round(abs_reversals, 2),
+            "adjustments_count":  adjustments_count,
+            "adjustments_amount": round(adjustments_amount, 2),
+            "formula": "Inflow (revenue + UTR + bank credits + +adjust) − Outflow (withdrawals + bank debits + reversals + −adjust)",
         },
         "master": {
             "pending_collections": round(pending_collections, 2),

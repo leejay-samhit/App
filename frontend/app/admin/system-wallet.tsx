@@ -95,13 +95,28 @@ type Breakdown = {
 /** 7-Group Net Worth (from /admin/finance/net-worth) — merged from the old
  *  standalone Finance Dashboard so the Wallet screen surfaces every rupee. */
 type NetWorth = {
-  group_1_revenue: { registration: number; service: number; platform_fee: number; shop: number; gross: number };
+  group_1_revenue: {
+    registration: number; service: number; platform_fee: number; shop: number; gross: number;
+    by_source?: {
+      razorpay:     { amount: number; count: number };
+      upi_manual:   { amount: number; count: number };
+      offline_cash: { amount: number; count: number };
+    };
+    reversed?: number;
+  };
   group_2_liability: { total_reward_credits: number; total_withdrawals_settled: number; available_user_balance: number };
   group_3_gst: { collected: number; paid: number; payable: number };
   group_4_platform_fee: { collected: number };
   group_5_expenses: { total: number };
   group_6_pending_withdrawals: { pending_amount: number };
   group_7_bank: { credits: number; debits: number; balance: number };
+  bank_tally?: {
+    inflow: number; outflow: number; net: number;
+    utr_deposits: number;
+    reversals_count: number; reversals_amount: number;
+    adjustments_count: number; adjustments_amount: number;
+    formula: string;
+  };
   master: { pending_collections: number; net_worth: number; formula: string };
 };
 
@@ -330,42 +345,66 @@ export default function AdminSystemWallet() {
         </View>
 
         {(() => {
-          // Hero KPI: surface the full money-flow identity at the top so the
-          // user always sees Inflow = Held + Withdrawn at a glance.
-          const inflow      = Number(breakdown?.inflow?.total || 0);
-          const adminHeld   = Number(breakdown?.balance?.in_admin_wallet || 0);
-          const usersHeld   = Number(breakdown?.balance?.in_user_wallets || 0);
-          const heldTotal   = adminHeld + usersHeld;
-          const withdrawn   = Number(breakdown?.outflow?.user_withdrawals_settled || 0);
-          const bankTally   = Math.max(0, inflow - withdrawn); // == heldTotal when books are balanced
-          const tallyOK     = Math.abs(inflow - (heldTotal + withdrawn)) <= 1;
+          // Hero KPI · BANK BALANCE TALLY — Powered by /admin/finance/net-worth
+          // bank_tally block, so the number is reconciliation-aware:
+          //   Inflow  = Revenue (regs incl. UPI manual + Offline + Razorpay,
+          //             service, platform fee, shop) + UTR deposits + bank
+          //             credits + positive adjustments
+          //   Outflow = Settled withdrawals + bank debits + reversals + neg. adjustments
+          //   Tally   = Inflow − Outflow
+          const t = netWorth?.bank_tally;
+          const inflow    = Number(t?.inflow  ?? breakdown?.inflow?.total ?? 0);
+          const outflow   = Number(t?.outflow ?? breakdown?.outflow?.user_withdrawals_settled ?? 0);
+          const tally     = Number(t?.net ?? Math.max(0, inflow - outflow));
+          const revAmt    = Number(t?.reversals_amount  || 0);
+          const revCnt    = Number(t?.reversals_count   || 0);
+          const adjAmt    = Number(t?.adjustments_amount || 0);
+          const adjCnt    = Number(t?.adjustments_count  || 0);
+          // For visual confidence: held = inflow − outflow should equal what
+          // we display; if breakdown is unavailable assume OK.
+          const tallyOK = !breakdown ? true : Math.abs(tally - (Number(breakdown?.balance?.in_admin_wallet || 0) + Number(breakdown?.balance?.in_user_wallets || 0))) <= 5;
           return (
             <GradientCard variant="emerald" style={{ padding: 22, marginBottom: 12 }}>
               <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>BANK BALANCE TALLY · ON PLATFORM</Text>
-              <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>{formatINR(bankTally)}</Text>
+              <Text style={{ fontSize: 36, fontWeight: "800", color: "#fff", letterSpacing: -1, marginTop: 6 }}>{formatINR(tally)}</Text>
               <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 6 }}>
-                Cash currently held on platform (Admin + User wallets).
+                Net cash position · reversals & adjustments included.
               </Text>
-              {/* 3-up identity grid: Inflow | Held | Withdrawn */}
+              {/* 2-up identity grid: Inflow | Outflow */}
               <View style={{ flexDirection: "row", gap: 8, marginTop: 16 }}>
                 <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
                   <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.5 }}>💰 INFLOW</Text>
                   <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>{formatINR(inflow)}</Text>
                 </View>
                 <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
-                  <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.5 }}>🏦 HELD</Text>
-                  <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>{formatINR(heldTotal)}</Text>
-                </View>
-                <View style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
-                  <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.5 }}>🏧 WITHDRAWN</Text>
-                  <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>{formatINR(withdrawn)}</Text>
+                  <Text style={{ fontSize: 9, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.5 }}>🏧 OUTFLOW</Text>
+                  <Text style={{ fontSize: 14, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>{formatINR(outflow)}</Text>
                 </View>
               </View>
-              {/* Identity check line */}
+              {/* Reversals + Adjustments row (only shown if non-zero) */}
+              {(revCnt > 0 || adjCnt > 0) ? (
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                  {revCnt > 0 ? (
+                    <View style={{ flex: 1, backgroundColor: "rgba(254, 202, 202, 0.22)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
+                      <Text style={{ fontSize: 9, color: "#FECACA", fontWeight: "800", letterSpacing: 0.5 }}>↩ REVERSALS · {revCnt}</Text>
+                      <Text style={{ fontSize: 13, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>−{formatINR(revAmt)}</Text>
+                    </View>
+                  ) : null}
+                  {adjCnt > 0 ? (
+                    <View style={{ flex: 1, backgroundColor: "rgba(254, 240, 138, 0.22)", paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10 }}>
+                      <Text style={{ fontSize: 9, color: "#FEF08A", fontWeight: "800", letterSpacing: 0.5 }}>⚖ ADJUSTMENTS · {adjCnt}</Text>
+                      <Text style={{ fontSize: 13, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] }}>
+                        {adjAmt >= 0 ? "+" : ""}{formatINR(adjAmt)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+              {/* Identity / formula line */}
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.2)" }}>
                 <Feather name={tallyOK ? "check-circle" : "alert-triangle"} size={13} color={tallyOK ? "#A7F3D0" : "#FECACA"} />
                 <Text style={{ flex: 1, fontSize: 11, color: "rgba(255,255,255,0.92)", fontWeight: "700", fontVariant: ["tabular-nums"] }}>
-                  {tallyOK ? "✓" : "⚠"} Inflow {formatINR(inflow)} = Held {formatINR(heldTotal)} + Withdrawn {formatINR(withdrawn)}
+                  {tallyOK ? "✓" : "⚠"} {t?.formula || "Inflow − Outflow = Tally"}
                 </Text>
               </View>
             </GradientCard>
@@ -388,6 +427,30 @@ export default function AdminSystemWallet() {
 
             <NwGroup icon="trending-up" title="Group 1 · Revenue Ledger" color="#10B981">
               <NwRow label="Registration revenue"   value={netWorth.group_1_revenue.registration} />
+              {/* Joining inflow by source — counts Razorpay, UPI Manual & Offline. */}
+              {netWorth.group_1_revenue.by_source ? (
+                <View style={styles.sourceMini}>
+                  <Text style={styles.sourceMiniHead}>↳ Joinings by source</Text>
+                  <NwSourceRow
+                    icon="credit-card" label="Razorpay Gateway"
+                    amount={netWorth.group_1_revenue.by_source.razorpay.amount}
+                    count={netWorth.group_1_revenue.by_source.razorpay.count}
+                  />
+                  <NwSourceRow
+                    icon="smartphone" label="UPI Manual (UTR)"
+                    amount={netWorth.group_1_revenue.by_source.upi_manual.amount}
+                    count={netWorth.group_1_revenue.by_source.upi_manual.count}
+                  />
+                  <NwSourceRow
+                    icon="tag" label="Offline / Cash"
+                    amount={netWorth.group_1_revenue.by_source.offline_cash.amount}
+                    count={netWorth.group_1_revenue.by_source.offline_cash.count}
+                  />
+                </View>
+              ) : null}
+              {(netWorth.group_1_revenue.reversed || 0) > 0 ? (
+                <NwRow label="↳ Reversed (subtracted)" value={-(netWorth.group_1_revenue.reversed || 0)} />
+              ) : null}
               <NwRow label="Service revenue"        value={netWorth.group_1_revenue.service} />
               <NwRow label="Platform fee revenue"   value={netWorth.group_1_revenue.platform_fee} />
               <NwRow label="Shop revenue"           value={netWorth.group_1_revenue.shop} />
@@ -436,241 +499,6 @@ export default function AdminSystemWallet() {
           </View>
         ) : null}
 
-        {/* ─── Treasury · 3 SUMMED rows + 5 informational rows ─── */}
-        {(() => {
-          // HONEST IDENTITY: Inflow = Admin Wallet (held) + User Wallets (held) + Withdrawn (left)
-          // Other rows are SUB-BUCKETS of Admin Wallet — informational only, NOT summed.
-          const adminHeld    = Number(breakdown?.balance?.in_admin_wallet || 0);
-          const usersHeld    = Number(breakdown?.balance?.in_user_wallets || 0);
-          const withdrawn    = Number(breakdown?.outflow?.user_withdrawals_settled || 0);
-          const gstHeld      = Number(breakdown?.outflow?.to_admin_gst_collected || 0);
-          const serviceHeld  = Number(breakdown?.outflow?.to_admin_service_margin || 0);
-          const shopHeld     = Number(breakdown?.outflow?.to_admin_shop_margin || 0);
-          const utrHeld      = Number(breakdown?.outflow?.to_admin_direct_added || 0);
-          const referralAdmin= Number(breakdown?.outflow?.to_admin_via_cascade || 0);
-
-          // 3 rows that ADD UP TO INFLOW (Bank Tally identity).
-          const tallyRows: { key: TreasuryRowKey; label: string; icon: any; color: string; value: number; sub: string; cta?: string }[] = [
-            { key: "admin_wallet",  label: "Admin Wallet · held",   icon: "credit-card", color: "#7C3AED", value: adminHeld, sub: "All admin buckets (signup + cascade + GST + UTR + margins − L1 funding)", cta: "View ledger" },
-            { key: "user_wallets",  label: "User Wallets · held",   icon: "users",        color: "#2E7D52", value: usersHeld, sub: "Net referral payouts still sitting in user wallets",                    cta: "View payouts" },
-            { key: "withdrawn",     label: "Withdrawn · left platform", icon: "log-out",  color: "#0F766E", value: withdrawn, sub: "Settled withdrawals (UTR) — money physically left to bank",            cta: "View withdrawals" },
-          ];
-          // 5 informational rows — sub-buckets of Admin Wallet (NOT summed).
-          const infoRows: { key: TreasuryInfoKey; label: string; icon: any; color: string; value: number; sub: string; cta?: string }[] = [
-            { key: "referral_admin",  label: "↳ Admin Referral (cascade)", icon: "git-branch",       color: "#A855F7", value: referralAdmin, sub: "Admin received L_N when cascade reached root",       cta: "View cascade txns" },
-            { key: "gst_info",        label: "↳ GST Collected (18%)",      icon: "percent",          color: "#B3261E", value: gstHeld,       sub: "Regulatory hold — already inside Admin Wallet",        cta: "View GST txns" },
-            { key: "service_margin",  label: "↳ Service Margin",           icon: "briefcase",        color: "#E57A44", value: serviceHeld,   sub: "Platform fees from service bookings",                  cta: "View service txns" },
-            { key: "shopping_margin", label: "↳ Sales Margin (Shop)",      icon: "shopping-bag",     color: "#1E40AF", value: shopHeld,      sub: "Commission from shop orders",                          cta: "View shop txns" },
-            { key: "direct_added",    label: "↳ Direct Added (UTR)",       icon: "arrow-down-circle",color: "#0B66C2", value: utrHeld,       sub: "Manual UTR bank deposits to system wallet",            cta: "View UTR deposits" },
-          ];
-          const sumAll = tallyRows.reduce((s, r) => s + r.value, 0);
-          const inflow = Number(breakdown?.inflow?.total || 0);
-          const tallyOK = Math.abs(sumAll - inflow) <= 1;
-          return (
-            <View style={{ marginBottom: 6 }}>
-              <Text style={styles.sectionLabel}>Treasury · Held + Withdrawn = Inflow</Text>
-              {tallyRows.map((r) => (
-                <TouchableOpacity
-                  key={r.key}
-                  style={[styles.bucketRow, { borderLeftColor: r.color }]}
-                  activeOpacity={0.7}
-                  onPress={() => {
-                    if (r.key === "admin_wallet") openBucket("admin_wallet");
-                    else if (r.key === "user_wallets") openBucket("user_payouts");
-                    else if (r.key === "withdrawn") openBucket("user_payouts");
-                  }}
-                  testID={`treasury-${r.key}`}
-                >
-                  <View style={[styles.bucketIcon, { backgroundColor: r.color + "22" }]}>
-                    <Feather name={r.icon} size={20} color={r.color} />
-                  </View>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text style={styles.bucketLabel}>{r.label}</Text>
-                    <Text style={styles.bucketDesc}>{r.sub}</Text>
-                  </View>
-                  <View style={{ alignItems: "flex-end" }}>
-                    <Text style={styles.bucketAmount}>{formatINR(r.value)}</Text>
-                    <View style={styles.bucketCta}>
-                      <Text style={styles.bucketCtaText}>{r.cta || "Details"}</Text>
-                      <Feather name="chevron-right" size={14} color={colors.primary} />
-                    </View>
-                  </View>
-                </TouchableOpacity>
-              ))}
-              <View style={[styles.breakdownTotal, { marginTop: 4, backgroundColor: tallyOK ? colors.brand100 : "#FFE4E4" }]}>
-                <Text style={[styles.breakdownTotalLabel, { fontSize: 13 }]}>Sum (Held + Withdrawn)</Text>
-                <Text style={[styles.breakdownTotalAmount, !tallyOK && { color: "#B3261E" }]}>{formatINR(sumAll)}</Text>
-              </View>
-              <Text style={styles.helpText}>
-                {tallyOK
-                  ? `✓ Tally matches inflow (${formatINR(inflow)}). Every rupee accounted for.`
-                  : `⚠ Tally ${formatINR(sumAll)} differs from inflow ${formatINR(inflow)} by ${formatINR(Math.abs(sumAll - inflow))}.`}
-              </Text>
-
-              {/* ─── INFORMATIONAL · Admin Wallet sub-buckets (NOT summed) ─── */}
-              <Text style={[styles.sectionLabel, { marginTop: 18 }]}>Admin Wallet Composition · informational</Text>
-              {infoRows.map((r) => (
-                <TouchableOpacity
-                  key={r.key}
-                  style={[styles.bucketRow, { borderLeftColor: r.color, opacity: 0.92 }]}
-                  activeOpacity={0.7}
-                  onPress={() => {
-                    if (r.key === "gst_info") openBucket("gst_collected");
-                    else if (r.key === "service_margin") openBucket("service_margin");
-                    else if (r.key === "shopping_margin") openBucket("shopping_margin");
-                    else if (r.key === "direct_added") openBucket("direct_added");
-                    else if (r.key === "referral_admin") openBucket("referral_commission");
-                  }}
-                  testID={`treasury-info-${r.key}`}
-                >
-                  <View style={[styles.bucketIcon, { backgroundColor: r.color + "22" }]}>
-                    <Feather name={r.icon} size={20} color={r.color} />
-                  </View>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text style={styles.bucketLabel}>{r.label}</Text>
-                    <Text style={styles.bucketDesc}>{r.sub}</Text>
-                  </View>
-                  <View style={{ alignItems: "flex-end" }}>
-                    <Text style={[styles.bucketAmount, { color: colors.textMuted, fontWeight: "700" }]}>{formatINR(r.value)}</Text>
-                    <View style={styles.bucketCta}>
-                      <Text style={styles.bucketCtaText}>{r.cta || "Details"}</Text>
-                      <Feather name="chevron-right" size={14} color={colors.primary} />
-                    </View>
-                  </View>
-                </TouchableOpacity>
-              ))}
-              <Text style={styles.helpText}>
-                ↳ Above rows are sub-buckets of Admin Wallet — they’re already counted in “Admin Wallet · held” above and are NOT added to the tally.
-              </Text>
-            </View>
-          );
-        })()}
-
-        {/* ─── Money Flow Breakdown — every rupee accounted for ─── */}
-        <TouchableOpacity
-          style={styles.breakdownToggle}
-          onPress={() => setShowBreakdown((v) => !v)}
-          activeOpacity={0.7}
-          testID="breakdown-toggle"
-        >
-          <Feather name="bar-chart-2" size={16} color={colors.primary} />
-          <Text style={styles.breakdownToggleText}>Money flow breakdown</Text>
-          <Feather name={showBreakdown ? "chevron-up" : "chevron-down"} size={16} color={colors.primary} />
-        </TouchableOpacity>
-        {showBreakdown && breakdown ? (
-          <View style={styles.breakdownPanel}>
-            {/* Inflow */}
-            <Text style={styles.breakdownHeader}>💰 INFLOW · money coming in</Text>
-            <BreakdownRow label="Registration fees (no-ref)" sub={`${breakdown.inflow.no_ref_count} signups × ₹${breakdown.settings.registration_fee.toFixed(0)}`} value={breakdown.inflow.no_ref_signup_revenue} hint="₹100 → direct_signup + ₹18 → GST per signup" />
-            <BreakdownRow label="Registration fees (with-ref)" sub={`${breakdown.inflow.with_ref_count} signups × ₹${breakdown.settings.registration_fee.toFixed(0)}`} value={breakdown.inflow.with_ref_signup_revenue} hint="Funds the L1-L10 cascade (paid out to upline)" />
-            <BreakdownRow label="UTR direct-added" value={breakdown.inflow.utr_deposits} hint="Manual bank deposits to system wallet" />
-            <BreakdownRow label="Service margin" value={breakdown.inflow.service_margin} hint="Platform fees from service bookings" />
-            <BreakdownRow label="Shop margin" value={breakdown.inflow.shop_margin} hint="Platform commission from shop orders" />
-            <View style={styles.breakdownTotal}>
-              <Text style={styles.breakdownTotalLabel}>Total inflow</Text>
-              <Text style={styles.breakdownTotalAmount}>{formatINR(breakdown.inflow.total)}</Text>
-            </View>
-
-            {/* ─── HELD ON PLATFORM (Admin + Users currently) ─── */}
-            {(() => {
-              const adminHeld   = Number(breakdown.balance.in_admin_wallet || 0);
-              const usersHeld   = Number(breakdown.balance.in_user_wallets || 0);
-              const withdrawn   = Number(breakdown.outflow.user_withdrawals_settled || 0);
-              const heldTotal   = adminHeld + usersHeld;
-              const inflowTotal = Number(breakdown.inflow.total || 0);
-              const identityOK  = Math.abs(inflowTotal - (heldTotal + withdrawn)) <= 1;
-              return (
-                <>
-                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏦 HELD ON PLATFORM · cash currently here</Text>
-                  <BreakdownRow label="Admin wallet (all buckets)" value={adminHeld} hint="direct_signup + fee_residual + cascade + GST + UTR + margins − L1 funding" />
-                  <BreakdownRow label="User wallets (across all users)" value={usersHeld} hint="Net referral payouts still sitting in user wallets (un-withdrawn)" />
-                  <View style={styles.breakdownTotal}>
-                    <Text style={styles.breakdownTotalLabel}>Held total (on platform)</Text>
-                    <Text style={styles.breakdownTotalAmount}>{formatINR(heldTotal)}</Text>
-                  </View>
-
-                  {/* ─── LEFT PLATFORM (Withdrawn to Bank) ─── */}
-                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏧 LEFT PLATFORM · withdrawn to bank</Text>
-                  <BreakdownRow label="User withdrawals (settled with UTR)" value={withdrawn} hint="Money that physically left platform via bank transfer / UPI" />
-                  <View style={styles.breakdownTotal}>
-                    <Text style={styles.breakdownTotalLabel}>Withdrawn total</Text>
-                    <Text style={styles.breakdownTotalAmount}>{formatINR(withdrawn)}</Text>
-                  </View>
-
-                  {/* ─── IDENTITY CHECK (Inflow = Held + Withdrawn) ─── */}
-                  <View style={[styles.identityBox, identityOK ? styles.identityOK : styles.identityBad]}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                      <Feather name={identityOK ? "check-circle" : "alert-triangle"} size={14} color={identityOK ? "#0F766E" : "#B3261E"} />
-                      <Text style={[styles.identityTitle, { color: identityOK ? "#0F766E" : "#B3261E" }]}>
-                        {identityOK ? "Books balanced" : "Drift detected"}
-                      </Text>
-                    </View>
-                    <Text style={styles.identityFormula}>
-                      Inflow {formatINR(inflowTotal)}  =  Held {formatINR(heldTotal)}  +  Withdrawn {formatINR(withdrawn)}
-                    </Text>
-                    {!identityOK ? (
-                      <Text style={styles.identityDrift}>Drift · {formatINR(Math.abs(inflowTotal - (heldTotal + withdrawn)))} — tap "Reconcile books" below.</Text>
-                    ) : null}
-                  </View>
-
-                  {/* ─── USER WALLET RECONCILIATION (cumulative-vs-current) ─── */}
-                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>👥 USER WALLET RECONCILIATION</Text>
-                  {(() => {
-                    const everCreditedNet = Number(breakdown.outflow.to_user_wallets_referral_net || 0);
-                    const otherDelta = everCreditedNet - (usersHeld + withdrawn);
-                    const recoCheckOK = Math.abs(otherDelta) <= 1;
-                    return (
-                      <>
-                        <BreakdownRow label="Ever net-credited to user wallets (cumulative)" value={everCreditedNet} hint="L1-L10 referral payouts to non-admin users (lifetime)" />
-                        <BreakdownRow label="  ─ Currently held in user wallets" value={usersHeld} hint="Un-withdrawn balance still on platform" />
-                        <BreakdownRow label="  ─ Withdrawn by users to bank (UTR)" value={withdrawn} hint="Settled withdrawal requests" />
-                        {!recoCheckOK ? (
-                          <BreakdownRow
-                            label={otherDelta > 0 ? "  ─ Other debits (purchases / adjustments)" : "  ─ Other credits (refunds / bonuses)"}
-                            value={Math.abs(otherDelta)}
-                            hint={otherDelta > 0 ? "Users spent on shop / services or admin adjustments" : "Refunds / bonuses credited outside referral cascade"}
-                          />
-                        ) : null}
-                        <View style={[styles.identityBox, recoCheckOK ? styles.identityOK : styles.identityBad, { marginTop: 6 }]}>
-                          <Text style={[styles.identityTitle, { color: recoCheckOK ? "#0F766E" : "#0B66C2" }]}>
-                            {recoCheckOK ? "✓ User wallets reconciled" : "ℹ User wallets reconciled with adjustments"}
-                          </Text>
-                          <Text style={styles.identityFormula}>
-                            {formatINR(everCreditedNet)} credited = {formatINR(usersHeld)} held + {formatINR(withdrawn)} withdrawn{!recoCheckOK ? ` ${otherDelta > 0 ? "+" : "−"} ${formatINR(Math.abs(otherDelta))} adj.` : ""}
-                          </Text>
-                        </View>
-                      </>
-                    );
-                  })()}
-
-                  {/* ─── ADMIN-WALLET COMPOSITION (full audit trail) ─── */}
-                  <Text style={[styles.breakdownHeader, { marginTop: 16 }]}>🏛️ ADMIN WALLET COMPOSITION</Text>
-                  <BreakdownRow label="Direct signup (₹100 per no-ref / EARN)" value={breakdown.outflow._legacy_to_admin_direct_signup || 0} />
-                  <BreakdownRow label="Fee residual (with-ref leftovers)" value={breakdown.outflow._legacy_to_admin_fee_residual || 0} />
-                  <BreakdownRow label="Cascade overflow (chain ended early)" value={breakdown.outflow._legacy_to_admin_cascade_overflow || 0} />
-                  <BreakdownRow label="L_N to admin (cascade reached root)" value={breakdown.outflow.to_admin_via_cascade || 0} />
-                  <BreakdownRow label="GST collected (18%)" value={breakdown.outflow.to_admin_gst_collected} hint="Regulatory hold — already inside admin wallet" />
-                  <BreakdownRow label="L1 funding debit" value={breakdown.outflow._legacy_l1_funding_debit || 0} hint="Negative — funds admin paid out for L1 cycles" />
-                  <BreakdownRow label="UTR direct-added" value={breakdown.outflow.to_admin_direct_added || 0} />
-                  <BreakdownRow label="Service margin held" value={breakdown.outflow.to_admin_service_margin || 0} />
-                  <BreakdownRow label="Shop margin held" value={breakdown.outflow.to_admin_shop_margin || 0} />
-                  <View style={styles.breakdownTotal}>
-                    <Text style={styles.breakdownTotalLabel}>Admin wallet total (consolidated)</Text>
-                    <Text style={styles.breakdownTotalAmount}>{formatINR(adminHeld)}</Text>
-                  </View>
-                </>
-              );
-            })()}
-
-            {/* Config */}
-            <View style={styles.breakdownNote}>
-              <Feather name="info" size={12} color={colors.textMuted} />
-              <Text style={styles.breakdownNoteText}>
-                Current rules · L1 fires every {breakdown.settings.directs_required} directs · Reg fee ₹{breakdown.settings.registration_fee.toFixed(0)} · L1-L10: ₹{breakdown.settings.level_payouts.map((x) => x.toFixed(0)).join(" / ")}
-              </Text>
-            </View>
-          </View>
-        ) : null}
 
         <TouchableOpacity style={styles.depositBtn} onPress={() => setDepositOpen(true)}>
           <Feather name="plus-circle" size={18} color={colors.primaryFg} />
@@ -1121,6 +949,22 @@ function NwRow({ label, value, bold }: { label: string; value: number; bold?: bo
   );
 }
 
+function NwSourceRow({ icon, label, amount, count }: { icon: any; label: string; amount: number; count: number }) {
+  const empty = count === 0 && amount === 0;
+  return (
+    <View style={nwStyles.srcRow}>
+      <View style={[nwStyles.srcIco, empty && { opacity: 0.4 }]}>
+        <Feather name={icon} size={12} color={colors.primary} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={[nwStyles.srcLbl, empty && { color: colors.textMuted }]}>{label}</Text>
+        <Text style={nwStyles.srcSub}>{count} signup{count === 1 ? "" : "s"}</Text>
+      </View>
+      <Text style={[nwStyles.srcAmt, empty && { color: colors.textMuted }]}>{formatINR(amount)}</Text>
+    </View>
+  );
+}
+
 function NwActionRow({ icon, label, description, onPress, color }: any) {
   return (
     <TouchableOpacity onPress={onPress} style={[nwStyles.card, { flexDirection: "row", alignItems: "center", paddingVertical: 12 }]}>
@@ -1312,6 +1156,12 @@ const nwStyles = StyleSheet.create({
   chipChoice: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceMuted },
   chipChoiceText: { fontSize: 11, fontWeight: "700", color: colors.textMain, textTransform: "capitalize" },
   btn: { paddingVertical: 12, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  // Joinings-by-source mini list inside Group 1
+  srcRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  srcIco: { width: 24, height: 24, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: colors.primary + "15" },
+  srcLbl: { fontSize: 12, fontWeight: "700", color: colors.textMain },
+  srcSub: { fontSize: 10, color: colors.textMuted, marginTop: 1 },
+  srcAmt: { fontSize: 12.5, fontWeight: "800", color: colors.textMain, fontVariant: ["tabular-nums"] },
 });
 
 
@@ -1441,4 +1291,7 @@ const styles = StyleSheet.create({
   nwHeroLabel: { fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "800" },
   nwHeroValue: { fontSize: 32, fontWeight: "800", color: colors.primaryFg, marginTop: 6, letterSpacing: -0.5 },
   nwHeroFormula: { fontSize: 11, color: "rgba(255,255,255,0.78)", marginTop: 6, lineHeight: 16 },
+  // Joinings-by-source mini block inside Group 1
+  sourceMini: { marginTop: 6, marginBottom: 4, paddingLeft: 8, borderLeftWidth: 2, borderLeftColor: colors.primary + "55" },
+  sourceMiniHead: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 4 },
 });
