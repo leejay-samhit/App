@@ -1013,42 +1013,61 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
         # cleanly so we never double-pay.
         return
 
-    # ─── L1 commission OWNERSHIP (PLACEMENT-BASED, Option B) ───────────
-    # Business rule: L1 commission goes to the user under whose tree the
-    # new joiner was PLACED (sponsor_id). When BFS spillover applies,
-    # sponsor_id is the deeper downline who actually got the new direct
-    # in their leg — they earn the L1 cycle credit.
-    # `referral_owner_id` is preserved separately as an audit/genealogy
-    # field ("who originally invited this user") but does NOT receive L1.
-    # L2..L10 cascade walks the TREE from sponsor_id upward as usual.
+    # ─── L1 commission OWNERSHIP (TRUE-INVITER-BASED, 2026-05-31) ──────
+    # CHANGED (user request): L1 cycle now anchors on the ORIGINAL INVITER
+    # (`referral_owner_id`), NOT the spillover placement (`sponsor_id`).
+    #
+    # Old behavior (broken): if User X invites Y but Y was spilled under Z
+    # (because X already completed L1), then Z's L1 counter ticked from
+    # Y's signup — even though Z didn't refer anyone. Spillovers were
+    # silently earning L1 for users who never invited.
+    #
+    # New rule:
+    #   • `direct_referrals_count` (placement sponsor) — bumped for tree view.
+    #   • `true_direct_count` + `pending_true_directs` (original inviter) —
+    #     these drive L1 release AND the withdrawal gate.
+    #   • A user MUST bring in `directs_required` TRUE directs (signups
+    #     using their own code) to release L1 + unlock withdrawals.
+    #
+    # L2-L10 cascade still walks the placement tree (sponsor_id chain) so
+    # spillover users keep earning per-signup L2-L10 commissions — exactly
+    # as the admin spec calls for.
     sponsor = await db.users.find_one({"id": sponsor_id})
     if not sponsor:
         return
     tree_parent_id = sponsor_id  # for L2..L10 cascade walk
-    # Atomically bump both counters; pending_directs starts at 0 if missing.
+
+    # 1) Placement counter — for tree view only, NOT L1 progress.
     await db.users.update_one(
         {"id": sponsor_id},
-        {"$inc": {"direct_referrals_count": 1, "pending_directs": 1}},
+        {"$inc": {"direct_referrals_count": 1}},
     )
-    fresh_sponsor = await db.users.find_one({"id": sponsor_id})
-    new_count = int(fresh_sponsor.get("direct_referrals_count", 0))
-    pending = int(fresh_sponsor.get("pending_directs", 0))
+
+    # 2) TRUE inviter counter — drives L1 release + withdrawal gate.
+    #    `referral_owner_id` was captured BEFORE any spillover at signup,
+    #    so it correctly points to whoever's code the new user typed.
+    inviter_id = user.get("referral_owner_id") or sponsor_id
+    await db.users.update_one(
+        {"id": inviter_id},
+        {"$inc": {"true_direct_count": 1, "pending_true_directs": 1}},
+    )
+    fresh_inviter = await db.users.find_one({"id": inviter_id})
+    true_pending = int(fresh_inviter.get("pending_true_directs", 0))
     payout_l1 = level_payouts[0]
-    remaining = max(0, directs_required - pending)
+    remaining = max(0, directs_required - true_pending)
     await _create_notification(
-        sponsor_id, "referral",
+        inviter_id, "referral",
         f"New referral: {user['name']}",
-        f"{user['name']} just joined your network. {remaining} more to next ₹{int(payout_l1)} payout.",
+        f"{user['name']} just joined using your code. {remaining} more to ₹{int(payout_l1)} L1 payout.",
     )
-    # Fire L1 payout when pending counter hits the configured threshold.
-    # Use $inc -directs_required to handle the case where admin lowered the
-    # threshold mid-flight (preserves overflow for next payout).
-    if pending >= directs_required and payout_l1 > 0:
+    # Fire L1 payout when TRUE-direct cycle hits threshold. Pays to the
+    # original inviter (not the spillover recipient).
+    if true_pending >= directs_required and payout_l1 > 0:
         await db.users.update_one(
-            {"id": sponsor_id},
-            {"$inc": {"pending_directs": -directs_required}},
+            {"id": inviter_id},
+            {"$inc": {"pending_true_directs": -directs_required}},
         )
-        fresh = await db.users.find_one({"id": sponsor_id})
+        fresh = await db.users.find_one({"id": inviter_id})
         await _credit_payout(fresh, payout_l1, 1, user["name"], signup_id=user["id"])
 
         # ─── L1 FUNDING SOURCE (ledger integrity) ───────────────────────
@@ -1894,6 +1913,28 @@ async def request_withdrawal(request: Request, payload: WithdrawalRequest, user:
         raise HTTPException(status_code=403, detail="Account is awaiting admin approval. Withdrawals are disabled until approved.")
     if user.get("wallet_frozen"):
         raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
+    # ── L1 completion gate (2026-05-31) ─────────────────────────────────
+    # Users who only have spillover / auto-aligned downline (i.e. NO real
+    # direct referrals using their own code) CANNOT withdraw. They must
+    # bring in `directs_required` true directs first to unlock L1, which
+    # also unlocks withdrawals. Cascade L2-L10 earnings still accumulate
+    # in their wallet — they just can't cash out until L1 is completed.
+    settings = await get_settings()
+    dr_required = int(settings.get("directs_required") or 5)
+    # Skip the gate for admin / system accounts.
+    if user.get("email", "").lower() != ADMIN_EMAIL.lower() and user.get("role") != "admin":
+        true_directs = int(user.get("true_direct_count") or 0)
+        if true_directs < dr_required:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unable to withdraw due to direct {dr_required} referral "
+                    f"not joined. Please complete Level 1 then raise withdrawal "
+                    f"request. (You have {true_directs}/{dr_required} direct "
+                    f"referrals — bring in {dr_required - true_directs} more "
+                    f"using your own referral code.)"
+                ),
+            )
     if user.get("wallet_balance", 0) < payload.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
     if not (user.get("upi_id") or user.get("bank_account")):
