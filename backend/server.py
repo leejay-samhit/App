@@ -657,6 +657,13 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
     # GST-inclusive: GST is a portion of the gross
     gst = round(gross * (REFERRAL_GST_PCT / (100.0 + REFERRAL_GST_PCT)), 2)
     net = round(gross - gst, 2)
+    # Bug-fix · 2026-05-31: If admin already collected GST at the moment of
+    # offline-creation, skip the entry-level GST here (would double-count).
+    # Net still goes into direct_signup. Payout-level GST on L2-L10 platform
+    # fees is untouched.
+    if joiner.get("registration_gst_collected_at_create"):
+        gst = 0.0
+        net = round(gross, 2)
 
     ts = now_utc().isoformat()
     ref = f"DIRSU-{str(uuid.uuid4())[:8].upper()}"
@@ -4156,6 +4163,18 @@ async def admin_create_user(
     if payload.mark_paid_offline:
         chosen_source = payload.registration_source or "offline_cash"
         fee_amount = settings["registration_fee"]
+        # Optional UTR / bank ref number — when admin actually received the
+        # money via UPI/Razorpay/bank transfer. Sanitized to upper-case
+        # alphanumeric; falls back to synthetic placeholder when blank.
+        clean_utr: Optional[str] = None
+        if getattr(payload, "utr", None):
+            _u = str(payload.utr).strip().upper()
+            if 6 <= len(_u) <= 32 and _u.replace("-", "").replace("_", "").isalnum():
+                clean_utr = _u
+        # Stamp the UTR on the user doc so invoices render correctly.
+        if clean_utr:
+            await db.users.update_one({"id": user_id}, {"$set": {"razorpay_utr": clean_utr}})
+
         await db.transactions.insert_one({
             "id": str(uuid.uuid4()),
             "user_id": user_id,
@@ -4166,9 +4185,45 @@ async def admin_create_user(
             # downstream payout txns inherit this so the entire fan-out is
             # filterable by where the money originally came from.
             "source": chosen_source,
-            "description": f"Registration fee — {chosen_source.replace('_',' ')} (admin {admin.get('email')})",
+            "description": f"Registration fee — {chosen_source.replace('_',' ')} (admin {admin.get('email')})"
+                            + (f" · UTR {clean_utr}" if clean_utr else ""),
+            "reference_number": clean_utr,
             "created_at": now,
         })
+
+        # ── GST collection at offline-create time (Bug-fix · 2026-05-31) ──
+        # When admin marks a user paid offline, the ₹118 (inclusive of 18%
+        # GST) MUST register the ₹18 GST liability immediately. Without
+        # this, the GST ledger missed every offline joining with a referrer
+        # (the cascade only collected payout-level GST, not entry GST).
+        #
+        # Inclusive formula: gst = fee × 18 / 118 (₹18 on the standard ₹118 fee).
+        try:
+            from server import REFERRAL_GST_PCT  # 18 — local re-import safe (we ARE server.py)
+        except Exception:
+            REFERRAL_GST_PCT = 18
+        registration_gst = round(float(fee_amount) * (REFERRAL_GST_PCT / (100.0 + REFERRAL_GST_PCT)), 2)
+        if registration_gst > 0:
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": admin["id"],  # GST entry belongs on the admin/system wallet ledger
+                "type": "gst_collected",
+                "amount": registration_gst,
+                "status": "success",
+                "description": f"GST {int(REFERRAL_GST_PCT)}% on registration fee · offline · {payload.name}",
+                "source_user_id": user_id,
+                "source_user_name": payload.name,
+                "linked_payout_to_user_id": user_id,
+                "reference_number": (clean_utr or "") + "-GST",
+                "created_at": now,
+            })
+            # Marker for the commission engine so it does NOT collect
+            # registration-level GST again at approval-time (it will still
+            # collect payout-level GST on L2-L10 platform fees).
+            await db.users.update_one(
+                {"id": user_id},
+                {"$set": {"registration_gst_collected_at_create": True}},
+            )
         # ── Accountability sync (2026-05-27) ─────────────────────────────
         # The admin has physically/digitally collected ₹118 (cash, Razorpay
         # link, or direct UPI). That money MUST land in the system-wallet
@@ -4185,11 +4240,13 @@ async def admin_create_user(
             await db.system_wallet_deposits.insert_one({
                 "id": str(uuid.uuid4()),
                 "amount": float(fee_amount),
-                # Synthetic UTR — keeps the unique-index happy and tags this
-                # row so admin can distinguish it from real bank deposits.
-                "utr": f"OFFLINE-{user_id[:8].upper()}",
-                "bank_ref": None,
-                "remarks": f"Offline registration fee · {chosen_source} · {payload.name}",
+                # Real UTR when admin provided it; synthetic fallback keeps
+                # the unique-index happy and tags rows admin can distinguish
+                # from real bank deposits.
+                "utr": clean_utr or f"OFFLINE-{user_id[:8].upper()}",
+                "bank_ref": clean_utr,
+                "remarks": f"Offline registration fee · {chosen_source} · {payload.name}"
+                           + (f" · UTR {clean_utr}" if clean_utr else ""),
                 "deposited_by": admin["id"],
                 "deposited_by_email": admin.get("email"),
                 "source": chosen_source,

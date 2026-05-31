@@ -301,6 +301,11 @@ class AdminCreateUserRequest(BaseModel):
     #   "razorpay"     — fee already collected via Razorpay outside the app
     #   "upi_manual"   — fee collected via direct UPI transfer (UTR on file)
     registration_source: Optional[str] = "offline_cash"
+    # Optional UTR / bank reference number — captured when admin actually
+    # received money via UPI/Razorpay/bank transfer. When provided, this
+    # replaces the synthetic OFFLINE-XXXX UTR in the system-wallet deposit
+    # row and on the user's invoice (razorpay_utr field).
+    utr: Optional[str] = None
 
 
 class ExtraDocsSubmit(BaseModel):

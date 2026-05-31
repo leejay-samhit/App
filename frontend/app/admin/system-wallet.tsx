@@ -151,6 +151,34 @@ export default function AdminSystemWallet() {
   const [expOpen, setExpOpen] = useState(false);    // Group 5 expense modal
   const [adjOpen, setAdjOpen] = useState(false);    // Manual adjustment modal
 
+  // Reset confirmation drawer — type-to-confirm gate for the destructive
+  // Reset Bank Ledger / Reset Expenses Ledger actions.
+  const [resetTarget, setResetTarget] = useState<"bank" | "expenses" | null>(null);
+  const [resetConfirmText, setResetConfirmText] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const closeReset = () => { setResetTarget(null); setResetConfirmText(""); setResetBusy(false); };
+  const doReset = useCallback(async () => {
+    if (!resetTarget) return;
+    if (resetConfirmText.trim().toUpperCase() !== "RESET") {
+      Alert.alert("Type RESET", "Please type RESET in capital letters to confirm.");
+      return;
+    }
+    setResetBusy(true);
+    try {
+      const path = resetTarget === "bank" ? "/admin/bank-ledger/reset" : "/admin/expenses/reset";
+      const { data } = await api.post(path);
+      Alert.alert(
+        "Ledger reset",
+        `Archived ${data?.archived ?? 0} entries · Removed ${data?.deleted ?? 0} from live ledger.\n\nArchived rows live in ${resetTarget === "bank" ? "bank_ledger_archived" : "expenses_archived"} and can be restored by support.`,
+      );
+      closeReset();
+      await load();
+    } catch (e) {
+      Alert.alert("Reset failed", formatApiError(e));
+      setResetBusy(false);
+    }
+  }, [resetTarget, resetConfirmText, load]);
+
   // ─── Group drilldown drawer (taps on any of the 7 Group cards) ───
   type GroupTxn = {
     id: string; display_id?: string; type: string; amount: number;
@@ -630,6 +658,22 @@ export default function AdminSystemWallet() {
           onPress={() => exportFile("bank")}
         />
 
+        {/* Destructive reset buttons — type-to-confirm gated.
+           Bank Ledger reset and Expense Ledger reset live here so they're
+           one tap away from the exports (admins typically export → reset). */}
+        <NwActionRow
+          icon="rotate-ccw" color="#B3261E"
+          label="Reset Bank Ledger"
+          description="Clear all Group 7 entries · archived for recovery."
+          onPress={() => setResetTarget("bank")}
+        />
+        <NwActionRow
+          icon="rotate-ccw" color="#B3261E"
+          label="Reset Expenses Ledger"
+          description="Clear all Group 5 expenses · archived for recovery."
+          onPress={() => setResetTarget("expenses")}
+        />
+
         {/* Phase: User-source unification — 3-way accountability breakdown.
             Shows registration revenue and downstream payout fan-out grouped
             by HOW the user joined (Razorpay / UPI manual / Offline cash).
@@ -876,6 +920,48 @@ export default function AdminSystemWallet() {
       <NwExpenseModal open={expOpen} onClose={() => setExpOpen(false)} onSaved={load} />
       {/* ───────── Manual Adjustment modal ───────── */}
       <NwAdjustModal open={adjOpen} onClose={() => setAdjOpen(false)} onSaved={load} />
+
+      {/* ───────── Reset confirmation modal (Bank / Expenses) ───────── */}
+      <Modal visible={!!resetTarget} animationType="fade" transparent onRequestClose={closeReset}>
+        <KeyboardAvoidingView style={{ flex: 1, justifyContent: "center", padding: 24, backgroundColor: "rgba(0,0,0,0.55)" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={{ backgroundColor: colors.surface, borderRadius: 18, padding: 22 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <View style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: "#FECACA", alignItems: "center", justifyContent: "center" }}>
+                <Feather name="alert-triangle" size={18} color="#B3261E" />
+              </View>
+              <Text style={{ flex: 1, fontSize: 17, fontWeight: "800", color: colors.textMain }}>
+                Reset {resetTarget === "bank" ? "Bank Ledger" : "Expenses Ledger"}?
+              </Text>
+            </View>
+            <Text style={{ marginTop: 12, fontSize: 13, color: colors.textMuted, lineHeight: 19 }}>
+              This will move ALL entries in the {resetTarget === "bank" ? "Group 7 Bank Ledger" : "Group 5 Expense Ledger"} to an archive collection and remove them from your live books. Net Worth and Bank Tally numbers will recompute immediately.
+            </Text>
+            <Text style={{ marginTop: 10, fontSize: 12, color: "#B3261E", fontWeight: "700" }}>
+              Type RESET below to confirm.
+            </Text>
+            <TextInput
+              value={resetConfirmText}
+              onChangeText={setResetConfirmText}
+              placeholder="RESET"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="characters"
+              style={{ borderWidth: 1.5, borderColor: "#B3261E", backgroundColor: colors.background, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, marginTop: 10, color: colors.textMain, letterSpacing: 4, fontWeight: "800", textAlign: "center", fontSize: 16 }}
+            />
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 16 }}>
+              <TouchableOpacity onPress={closeReset} style={{ flex: 1, paddingVertical: 13, borderRadius: 12, alignItems: "center", backgroundColor: colors.surfaceMuted }}>
+                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={doReset}
+                disabled={resetBusy || resetConfirmText.trim().toUpperCase() !== "RESET"}
+                style={{ flex: 1, paddingVertical: 13, borderRadius: 12, alignItems: "center", backgroundColor: "#B3261E", opacity: resetBusy || resetConfirmText.trim().toUpperCase() !== "RESET" ? 0.5 : 1 }}
+              >
+                {resetBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Reset Ledger</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       {/* ───────── Group transactions drawer ───────── */}
       <Modal visible={!!activeGroup} animationType="slide" transparent onRequestClose={() => setActiveGroup(null)}>

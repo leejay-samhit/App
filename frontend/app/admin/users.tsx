@@ -36,6 +36,10 @@ const SOURCE_LABELS: Record<string, string> = {
   unknown:      "Unknown source",
 };
 
+// Standard registration fee — used purely to render the GST hint inside the
+// admin "Add new user" modal. The actual fee comes from settings on save.
+const REG_FEE_HINT = 118;
+
 type AdminUser = {
   id: string;
   name: string;
@@ -318,11 +322,14 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
   // those channels OUTSIDE the app (e.g. customer paid via Razorpay link
   // and admin is creating the account based on that proof).
   const [source, setSource] = useState<"offline_cash" | "razorpay" | "upi_manual">("offline_cash");
+  // Optional UTR/Reference number — required visibility for accounting when
+  // admin actually received money via UPI / Razorpay / bank transfer.
+  const [utr, setUtr] = useState("");
   const [saving, setSaving] = useState(false);
 
   const reset = () => {
     setName(""); setEmail(""); setPhone(""); setPassword(""); setSponsor("");
-    setMarkPaid(true); setSource("offline_cash");
+    setMarkPaid(true); setSource("offline_cash"); setUtr("");
   };
 
   const onSubmit = async () => {
@@ -340,6 +347,7 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
         referral_code: sponsor.trim().toUpperCase() || undefined,
         mark_paid_offline: markPaid,
         registration_source: markPaid ? source : undefined,
+        utr: markPaid && utr.trim() ? utr.trim().toUpperCase() : undefined,
       });
       Alert.alert("User created", markPaid
         ? `Account created and marked as paid via ${SOURCE_LABELS[source]}. It now awaits finance approval.`
@@ -400,6 +408,26 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
                     );
                   })}
                 </View>
+                {/* UTR / Reference number — optional. When given, this is
+                   stamped on the user, the registration txn, AND the bank
+                   ledger row, so accounting traces back to a real bank
+                   reference. For pure cash with no bank receipt, leave blank. */}
+                <Text style={[nuStyles.fieldLabel, { marginTop: 12 }]}>
+                  UTR / Reference number {source === "offline_cash" ? "(optional)" : "(recommended)"}
+                </Text>
+                <TextInput
+                  value={utr}
+                  onChangeText={(v) => setUtr(v.replace(/\s+/g, "").toUpperCase())}
+                  autoCapitalize="characters"
+                  placeholder={source === "razorpay" ? "Razorpay payment / order ref" : source === "upi_manual" ? "12-22 char UPI UTR" : "Optional bank receipt number"}
+                  placeholderTextColor={colors.textMuted}
+                  style={[nuStyles.input, { letterSpacing: 1 }]}
+                  testID="new-user-utr"
+                  maxLength={32}
+                />
+                <Text style={nuStyles.switchSub}>
+                  ₹{REG_FEE_HINT}. GST 18% (₹{Math.round(REG_FEE_HINT * 18 / 118)}) is collected automatically at the moment of save.
+                </Text>
               </View>
             ) : null}
           </ScrollView>

@@ -519,6 +519,58 @@ async def admin_finance_group_transactions(
     raise HTTPException(status_code=400, detail=f"Unknown group_id: {group_id}")
 
 
+# ────────────────────────────────────────────────────────────────────
+# Reset endpoints — wipe Bank Ledger / Expense Ledger.
+#
+# DESTRUCTIVE. Super-admin only. Audit-logged. The frontend uses a
+# type-to-confirm modal ("RESET") to gate this action.
+#
+# We intentionally archive into a `<col>_archived` collection rather
+# than hard-delete, so the data is recoverable if you call support.
+# ────────────────────────────────────────────────────────────────────
+@router.post("/admin/bank-ledger/reset")
+async def admin_reset_bank_ledger(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    rows = await db.bank_ledger.find({}).to_list(10000)
+    archived = 0
+    if rows:
+        for r in rows:
+            r["_archived_at"] = now_utc().isoformat()
+            r["_archived_by"] = admin.get("email") or admin.get("id")
+        await db.bank_ledger_archived.insert_many(rows)
+        archived = len(rows)
+    res = await db.bank_ledger.delete_many({})
+    # Audit
+    try:
+        from server import _audit_log
+        await _audit_log(admin, "finance.bank_ledger.reset", "bank_ledger", "all",
+                          {"archived": archived, "deleted": res.deleted_count})
+    except Exception:
+        pass
+    return {"ok": True, "archived": archived, "deleted": res.deleted_count}
+
+
+@router.post("/admin/expenses/reset")
+async def admin_reset_expenses(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    rows = await db.expenses.find({}).to_list(10000)
+    archived = 0
+    if rows:
+        for r in rows:
+            r["_archived_at"] = now_utc().isoformat()
+            r["_archived_by"] = admin.get("email") or admin.get("id")
+        await db.expenses_archived.insert_many(rows)
+        archived = len(rows)
+    res = await db.expenses.delete_many({})
+    try:
+        from server import _audit_log
+        await _audit_log(admin, "finance.expenses.reset", "expenses", "all",
+                          {"archived": archived, "deleted": res.deleted_count})
+    except Exception:
+        pass
+    return {"ok": True, "archived": archived, "deleted": res.deleted_count}
+
+
+
+
 
 # Reverse / Adjust transactions (never delete)
 # ────────────────────────────────────────────────────────────────────

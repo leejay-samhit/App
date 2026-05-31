@@ -7969,3 +7969,48 @@ The response now includes a `master.components` block showing each piece.
 - Net worth math `97063 + 0 − 337.84 − 0 − 92.34 = 96632.82` ✓
 - `npx expo export --platform web` clean → `/admin/system-wallet (64.6 kB)`.
 
+
+---
+
+## 2026-05-31 (main agent): Reset buttons, UTR field on offline create, GST collection fix
+
+### 1. Reset endpoints (`routes/finance.py`)
+- `POST /api/admin/bank-ledger/reset` — archives rows into `bank_ledger_archived`, deletes from live.
+- `POST /api/admin/expenses/reset` — archives rows into `expenses_archived`, deletes from live.
+- Both require `super_admin` role + audit log entry.
+- Live-tested: reset 4 bank entries + 2 expenses, both returned `archived/deleted` counts.
+
+### 2. UTR field for offline user creation
+- `models.AdminCreateUserPayload` now accepts `utr: Optional[str]`.
+- `server.py` offline-create flow:
+  - Sanitizes UTR (6-32 chars, alphanumeric).
+  - Stamps `razorpay_utr` on the user.
+  - Sets `reference_number` on the registration_fee txn.
+  - Uses real UTR on `system_wallet_deposits.utr` (falls back to synthetic `OFFLINE-XXXXX` when blank).
+- Frontend `app/admin/users.tsx`: New UTR text input below the Source chips
+  with placeholder hints (UPI vs Razorpay vs offline) and a live GST line
+  "GST 18% (₹18) is collected automatically at the moment of save."
+
+### 3. GST collected at offline-create time (was missing for users with referrers)
+- **Root cause**: previously, GST was only collected at approval-time inside
+  the commission cascade. For offline users **with** referrers, the cascade
+  only collected payout-level GST on L1 (~₹72), not the entry-level ₹18 GST
+  on the ₹118 fee itself. So the GST ledger was systematically under-counting.
+- **Fix** (`server.py` mark_paid_offline branch):
+  - Inserts a `gst_collected` txn for ₹18 (= ₹118 × 18/118) immediately
+    when admin marks an offline user as paid.
+  - Stamps `registration_gst_collected_at_create=True` on the user.
+- `_credit_no_referral_signup` now checks this flag and zeros entry-level
+  GST to prevent double-collection at approval-time.
+- **Live test**: creating an offline user moved GST from ₹92.34 → ₹110.34
+  (delta = ₹18.00 exact).
+
+### Frontend: Reset buttons + type-to-confirm modal
+- Two red **Reset** buttons in Treasury Tools section (Bank / Expenses).
+- Tap → modal with "Type RESET" gate → POST to backend → refresh load().
+- Archived rows surface a hint: "Archived rows live in <archive_collection>
+  and can be restored by support."
+
+### Build
+- `npx expo export --platform web` clean. `/admin/users 66 kB`, `/admin/system-wallet 63.9 kB`.
+
