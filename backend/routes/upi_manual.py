@@ -169,6 +169,32 @@ async def submit_upi_manual_payment(
             }},
         )
         payment_id = existing["id"]
+        # Bug-2 fix · 2026-05-30: Ensure the mirror txn always exists for the
+        # admin to approve. Earlier resubmissions could leave the manual
+        # payment row without a paired pending txn, causing approval to find
+        # nothing to promote → revenue silently lost from net-worth.
+        mirror = await db.transactions.find_one({"manual_payment_id": payment_id, "type": "registration_fee"})
+        if not mirror:
+            await db.transactions.insert_one({
+                "id":              str(uuid.uuid4()),
+                "user_id":         user["id"],
+                "type":            "registration_fee",
+                "amount":          fee,
+                "status":          "pending",
+                "description":     f"Registration fee via UPI · UTR {utr} (awaiting approval)",
+                "reference_number": utr,
+                "payment_method":  "upi_manual",
+                "manual_payment_id": payment_id,
+                "created_at":      now_utc().isoformat(),
+            })
+        else:
+            await db.transactions.update_one(
+                {"id": mirror["id"]},
+                {"$set": {
+                    "reference_number": utr,
+                    "description":     f"Registration fee via UPI · UTR {utr} (awaiting approval)",
+                }},
+            )
     else:
         payment_id = str(uuid.uuid4())
         await db.manual_payments.insert_one({
@@ -295,16 +321,59 @@ async def approve_manual_payment(
         # Race: someone else paid in the meantime — fall through to record approval anyway.
         pass
 
-    # 2) Promote the pending transaction row to paid.
-    await db.transactions.update_one(
+    # 2) Promote the pending transaction row to paid. If the pending row is
+    #    missing (e.g. legacy data before the mirror was added, or a manual
+    #    payment row was created out-of-band), INSERT a fresh `paid` row so
+    #    the registration revenue is always counted in net-worth — Bug-2 fix.
+    upd_txn = await db.transactions.update_one(
         {"user_id": user["id"], "manual_payment_id": payment_id, "status": "pending"},
         {"$set": {
             "status":           "paid",
             "source":           "upi_manual",
+            "payment_method":   "upi_manual",
             "description":      f"Registration fee via UPI · UTR {row['utr']} (approved by {admin.get('email')})",
             "paid_at":          now_iso,
         }},
     )
+    if upd_txn.modified_count == 0:
+        # No pending mirror found — guard against a duplicate by also
+        # checking for any existing paid row for this manual_payment_id.
+        existing_paid = await db.transactions.find_one({
+            "user_id": user["id"],
+            "manual_payment_id": payment_id,
+            "type": "registration_fee",
+            "status": {"$in": ["paid", "success", "approved"]},
+        })
+        if not existing_paid:
+            await db.transactions.insert_one({
+                "id":               str(uuid.uuid4()),
+                "user_id":          user["id"],
+                "type":             "registration_fee",
+                "amount":           fee,
+                "status":           "paid",
+                "source":           "upi_manual",
+                "payment_method":   "upi_manual",
+                "description":      f"Registration fee via UPI · UTR {row['utr']} (approved by {admin.get('email')})",
+                "reference_number": row["utr"],
+                "manual_payment_id": payment_id,
+                "created_at":       now_iso,
+                "paid_at":          now_iso,
+            })
+
+    # Bug-2 fix companion: if the user was previously marked paid via another
+    # path (e.g. offline_cash) BEFORE the UPI approval came in, the earlier
+    # users.update_one (with `registration_paid:{$ne:True}` filter) did not
+    # rewrite `registration_source`. Force-overwrite source + utr so the
+    # 7-Group ledger correctly attributes the joining to UPI manual.
+    if upd.modified_count == 0:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {
+                "registration_source": "upi_manual",
+                "payment_method":      "upi_manual",
+                "razorpay_utr":        row["utr"],
+            }},
+        )
 
     # 3) Fire the same downstream side-effects as Razorpay verify.
     fresh = await db.users.find_one({"id": user["id"]})

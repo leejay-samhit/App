@@ -117,7 +117,16 @@ type NetWorth = {
     adjustments_count: number; adjustments_amount: number;
     formula: string;
   };
-  master: { pending_collections: number; net_worth: number; formula: string };
+  master: {
+    pending_collections: number; net_worth: number; formula: string;
+    components?: {
+      bank_tally_net: number;
+      pending_collections: number;
+      user_wallet_balance: number;
+      pending_withdrawals: number;
+      gst_payable: number;
+    };
+  };
 };
 
 export default function AdminSystemWallet() {
@@ -454,6 +463,30 @@ export default function AdminSystemWallet() {
             <View style={styles.nwHero}>
               <Text style={styles.nwHeroLabel}>COMPANY NET WORTH</Text>
               <Text style={styles.nwHeroValue}>{formatINR(netWorth.master.net_worth)}</Text>
+              {netWorth.master.components ? (
+                <View style={styles.nwComponentsGrid}>
+                  <View style={styles.nwCompCol}>
+                    <Text style={styles.nwCompLabel}>＋ Cash on hand</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.bank_tally_net)}</Text>
+                  </View>
+                  <View style={styles.nwCompCol}>
+                    <Text style={styles.nwCompLabel}>＋ Receivables</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.pending_collections)}</Text>
+                  </View>
+                  <View style={styles.nwCompCol}>
+                    <Text style={[styles.nwCompLabel, { color: "#FECACA" }]}>− User wallets</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.user_wallet_balance)}</Text>
+                  </View>
+                  <View style={styles.nwCompCol}>
+                    <Text style={[styles.nwCompLabel, { color: "#FECACA" }]}>− Pending withdrawals</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.pending_withdrawals)}</Text>
+                  </View>
+                  <View style={styles.nwCompCol}>
+                    <Text style={[styles.nwCompLabel, { color: "#FECACA" }]}>− GST payable</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.gst_payable)}</Text>
+                  </View>
+                </View>
+              ) : null}
               <Text style={styles.nwHeroFormula}>{netWorth.master.formula}</Text>
             </View>
 
@@ -1399,6 +1432,11 @@ const styles = StyleSheet.create({
   nwHeroLabel: { fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "800" },
   nwHeroValue: { fontSize: 32, fontWeight: "800", color: colors.primaryFg, marginTop: 6, letterSpacing: -0.5 },
   nwHeroFormula: { fontSize: 11, color: "rgba(255,255,255,0.78)", marginTop: 6, lineHeight: 16 },
+  // Components grid showing how Net Worth is computed
+  nwComponentsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 14 },
+  nwCompCol:    { flexBasis: "31%", flexGrow: 1, backgroundColor: "rgba(255,255,255,0.13)", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6 },
+  nwCompLabel:  { fontSize: 9.5, color: "rgba(255,255,255,0.85)", fontWeight: "800", letterSpacing: 0.4 },
+  nwCompValue:  { fontSize: 13, color: "#fff", fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] },
   // Joinings-by-source mini block inside Group 1
   sourceMini: { marginTop: 6, marginBottom: 4, paddingLeft: 8, borderLeftWidth: 2, borderLeftColor: colors.primary + "55" },
   sourceMiniHead: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 4 },

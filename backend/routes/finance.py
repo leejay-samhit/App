@@ -248,9 +248,11 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     pending_collections = float((pending_collections_agg or [{}])[0].get("sum") or 0)
 
     # Compute a Bank Balance Tally that's reconciliation-aware. This is what
-    # the System Wallet hero card displays. Includes reversals & adjustments.
+    # the System Wallet hero card displays. Includes reversals, adjustments
+    # AND expenses (Bug-1 fix · 2026-05-30) — expenses MUST debit the bank.
     #   tally_in  = gross_revenue + utr_deposits + bank_credits + positive_adjustments
-    #   tally_out = settled_withdrawals + bank_debits + abs(reversals) + abs(negative_adjustments)
+    #   tally_out = settled_withdrawals + bank_debits + abs(reversals)
+    #               + abs(negative_adjustments) + total_expenses
     utr_dep_agg = await db.transactions.aggregate([
         {"$match": {"type": "system_deposit", "status": {"$in": PAID}}},
         {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
@@ -262,11 +264,25 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     abs_reversals = abs(reversals_amount)
 
     bank_tally_in  = round(gross_revenue + utr_deposits_total + bank_credits + pos_adj, 2)
-    bank_tally_out = round(total_withdrawals_settled + bank_debits + abs_reversals + neg_adj, 2)
+    bank_tally_out = round(
+        total_withdrawals_settled + bank_debits + abs_reversals + neg_adj + total_expenses,
+        2,
+    )
     bank_tally_net = round(bank_tally_in - bank_tally_out, 2)
 
+    # Bug-3 fix · 2026-05-30: Use the reconciliation-aware Bank Tally Net
+    # (true cash on hand) as the asset component instead of just Group-7's
+    # manual bank_ledger balance. Otherwise the net-worth ignored every
+    # rupee of registration / service / shop revenue.
+    #
+    #   Net Worth = Cash on hand (bank_tally_net)
+    #             + Pending collections (receivables — money users owe us)
+    #             − User wallet balance (liability — we owe users)
+    #             − Pending withdrawals (liability — approved payouts queued)
+    #             − GST payable (liability — owed to govt)
     net_worth = round(
-        bank_balance + pending_collections - user_wallet_balance - pending_withdrawals - gst_payable,
+        bank_tally_net + pending_collections
+        - user_wallet_balance - pending_withdrawals - gst_payable,
         2,
     )
 
@@ -326,7 +342,14 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
         "master": {
             "pending_collections": round(pending_collections, 2),
             "net_worth":           net_worth,
-            "formula":             "bank + pending - liability - pending_withdrawals - gst_payable",
+            "formula":             "bank_tally_net + pending − user_wallet − pending_withdrawals − gst_payable",
+            "components": {
+                "bank_tally_net":      bank_tally_net,
+                "pending_collections": round(pending_collections, 2),
+                "user_wallet_balance": round(user_wallet_balance, 2),
+                "pending_withdrawals": round(pending_withdrawals, 2),
+                "gst_payable":         gst_payable,
+            },
         },
         "generated_at": now_utc().isoformat(),
     }

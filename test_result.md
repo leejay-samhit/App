@@ -7912,3 +7912,60 @@ agent_communication:
 - `npx expo export --platform web` clean — `/admin/system-wallet (64.5 kB)`.
 - All 7 endpoints curl-tested with admin token → 200 OK.
 
+
+---
+
+## 2026-05-31 (main agent): 3 Accounting bugs — Expenses, UPI inflow, Net Worth
+
+### Bug 1 — Expenses NOT deducting from Bank Balance Tally
+**Fix** (`routes/finance.py`): Added `total_expenses` to the `bank_tally_out`
+component. Verified live: adding a ₹500 expense increases outflow by ₹500
+and decreases net cash by ₹500.
+
+### Bug 2 — UPI manual approval not counted in inflow
+**Root cause** (`routes/upi_manual.py`): When a user re-submitted a UTR via
+the "existing pending" branch, the mirror `db.transactions` row was never
+created. The subsequent approve handler updated `status: pending → paid`,
+but there was no row to update → revenue silently disappeared.
+
+Additionally, when a user was already marked `registration_paid=True` from
+some other path (e.g. offline_cash), the approval's `users.update_one` with
+`registration_paid:{"$ne":True}` filter never overwrote `registration_source`,
+so the UPI approval was attributed to the prior source.
+
+**Fixes** (`routes/upi_manual.py`):
+1. SUBMIT (existing branch) now ensures the mirror txn exists (insert or
+   update with the latest UTR).
+2. APPROVE now:
+   - Updates the pending mirror to `status="paid"`, OR
+   - Inserts a fresh paid txn if no pending mirror exists (idempotent), AND
+   - Force-overwrites `registration_source="upi_manual"` on the user even
+     when they were previously marked paid.
+3. One-time backfill script ran in this session healed 2 orphan PENDING
+   manual_payments (no txn mirror) by inserting their pending txns.
+
+### Bug 3 — Company Net Worth wrong
+**Root cause** (`routes/finance.py`): The formula used `bank_balance` which
+is ONLY Group-7's manual `bank_ledger` entries (~the manual UTR/CSV inflows).
+This ignored ALL registration/service/shop revenue, withdrawals, expenses,
+reversals, and adjustments — the actual cash position.
+
+**Fix**: Net Worth now uses `bank_tally_net` (the reconciliation-aware
+cash on hand) as the asset component:
+
+```
+Net Worth = bank_tally_net (cash) + pending_collections (receivables)
+          − user_wallet_balance − pending_withdrawals − gst_payable
+```
+
+The response now includes a `master.components` block showing each piece.
+
+### Frontend (`app/admin/system-wallet.tsx`)
+- Hero Net-Worth card now shows a 5-cell breakdown grid: + Cash on hand,
+  + Receivables, − User wallets, − Pending withdrawals, − GST payable.
+
+### Verification
+- ₹500 expense → outflow +₹500, net −₹500, net worth −₹500. EXACT.
+- Net worth math `97063 + 0 − 337.84 − 0 − 92.34 = 96632.82` ✓
+- `npx expo export --platform web` clean → `/admin/system-wallet (64.6 kB)`.
+
