@@ -8007,6 +8007,51 @@ The response now includes a `master.components` block showing each piece.
 
 ### Frontend: Reset buttons + type-to-confirm modal
 - Two red **Reset** buttons in Treasury Tools section (Bank / Expenses).
+
+---
+
+## 2026-05-31 (main agent): UPI Manual approval — full System Wallet sync
+
+### Bug
+When admin approved a UPI manual payment, the registration fee correctly
+appeared in Group 1 Revenue (since the txn was status="paid"), BUT the
+System Wallet side-effects were missing:
+- `system_wallet_deposits` row never inserted (UTR Deposits panel stale)
+- Admin's `direct_added` bucket never credited (legacy bucket view stale)
+- Entry-level ₹18 GST never collected (parity gap with offline-create)
+
+The offline-create flow (`mark_paid_offline=True`) already does all of
+the above. UPI manual approve was missing this parity logic.
+
+### Fix (`routes/upi_manual.py` — `admin_approve_manual_payment`)
+Inside the post-approval side-effects block, BEFORE
+`_trigger_referral_commissions`:
+1. `credit_admin_bucket("direct_added", fee, also_total_earned=False)`
+2. `db.system_wallet_deposits.insert_one({...})` with the **real UTR**,
+   source="upi_manual", `linked_user_id`, and `manual_payment_id`.
+3. Set `offline_pre_credit_amount=fee` on the user so the commission
+   cascade debits direct_added by the same ₹118 (no double-count).
+4. Insert `gst_collected` ₹18 txn (= fee × 18/118) and stamp
+   `registration_gst_collected_at_create=True` so `_credit_no_referral_signup`
+   skips the entry-level GST (parity with offline flow).
+5. Re-read `fresh` so commissions read the new flags.
+
+Idempotency: all of the above is gated on `if not already_credited` (checked
+via `offline_pre_credit_amount`). Re-approving is safe.
+
+### Live verification (real DB, real approval)
+| Metric | Before | After | Delta | Expected |
+|---|---|---|---|---|
+| G1 registration revenue | ₹1062 | ₹1180 | +₹118 | ✓ |
+| G1 by_source.upi_manual | ₹0 (0) | ₹118 (1) | +₹118 | ✓ |
+| G3 GST collected | ₹92.34 | ₹110.34 | +₹18 | ✓ |
+| Bank Tally inflow | ₹1263 | ₹1381 | +₹118 | ✓ |
+| Bank Tally net | ₹1063 | ₹1181 | +₹118 | ✓ |
+| system_wallet_deposits row | — | ✓ with real UTR | — | ✓ |
+
+### Build
+- `npx expo export --platform web` clean — `/admin/system-wallet 63.9 kB`.
+
 - Tap → modal with "Type RESET" gate → POST to backend → refresh load().
 - Archived rows surface a hint: "Archived rows live in <archive_collection>
   and can be restored by support."

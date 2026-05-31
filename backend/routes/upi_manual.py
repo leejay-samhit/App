@@ -379,7 +379,71 @@ async def approve_manual_payment(
     fresh = await db.users.find_one({"id": user["id"]})
     if fresh:
         try:
-            from server import _trigger_referral_commissions, _archive_approved_user, _audit_log, _create_notification
+            from server import (
+                _trigger_referral_commissions, _archive_approved_user,
+                _audit_log, _create_notification,
+                credit_admin_bucket, REFERRAL_GST_PCT,
+            )
+
+            # ── System-wallet sync (Bug-fix · 2026-05-31) ───────────────
+            # The ₹118 has physically arrived in our UPI/Bank — we MUST
+            # mirror it into the admin's `direct_added` bucket and log a
+            # `system_wallet_deposits` row, otherwise the Bank Balance
+            # Tally / direct_added / UTR-Deposits panels stay stale even
+            # though revenue (Group 1) is correctly counted.
+            try:
+                already_credited = bool(fresh.get("offline_pre_credit_amount"))
+                if not already_credited:
+                    await credit_admin_bucket("direct_added", float(fee), also_total_earned=False)
+                    await db.system_wallet_deposits.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "amount": float(fee),
+                        "utr": row["utr"],
+                        "bank_ref": row["utr"],
+                        "remarks": f"UPI manual registration fee · {fresh.get('name') or fresh.get('email')} · approved by {admin.get('email')}",
+                        "deposited_by": admin["id"],
+                        "deposited_by_email": admin.get("email"),
+                        "source": "upi_manual",
+                        "linked_user_id": fresh["id"],
+                        "manual_payment_id": payment_id,
+                        "created_at": now_iso,
+                    })
+                    # Tell the commission cascade NOT to double-credit
+                    # `direct_added` — _trigger_referral_commissions reads
+                    # this and debits the pre-credit before redistributing.
+                    await db.users.update_one(
+                        {"id": fresh["id"]},
+                        {"$set": {"offline_pre_credit_amount": float(fee)}},
+                    )
+                    # ── Entry-level GST (Bug-fix · parity with offline create) ──
+                    # ₹18 = ₹118 × 18/118. Without this, UPI manual joinings
+                    # with a referrer underreport GST by the entry portion.
+                    registration_gst = round(float(fee) * (REFERRAL_GST_PCT / (100.0 + REFERRAL_GST_PCT)), 2)
+                    if registration_gst > 0 and not fresh.get("registration_gst_collected_at_create"):
+                        await db.transactions.insert_one({
+                            "id": str(uuid.uuid4()),
+                            "user_id": admin["id"],
+                            "type": "gst_collected",
+                            "amount": registration_gst,
+                            "status": "success",
+                            "description": f"GST {int(REFERRAL_GST_PCT)}% on registration fee · UPI manual · {fresh.get('name') or fresh.get('email')}",
+                            "source_user_id": fresh["id"],
+                            "source_user_name": fresh.get("name"),
+                            "linked_payout_to_user_id": fresh["id"],
+                            "reference_number": f"{row['utr']}-GST",
+                            "created_at": now_iso,
+                        })
+                        await db.users.update_one(
+                            {"id": fresh["id"]},
+                            {"$set": {"registration_gst_collected_at_create": True}},
+                        )
+                    # Re-read fresh to pick up the new flags before commissions
+                    fresh = await db.users.find_one({"id": fresh["id"]}) or fresh
+            except Exception:
+                # Wallet sync failures are non-fatal — the ledger reconciler
+                # will surface any drift on its next pass.
+                pass
+
             try:
                 await _trigger_referral_commissions(fresh)
             except Exception:
