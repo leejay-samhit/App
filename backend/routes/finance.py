@@ -154,8 +154,18 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     shop_reversed = await _sum_amount({"type": "shop_commission_reversal", "status": "success"})
     shop_revenue = shop_rev_agg - abs(shop_reversed)
 
+    # Bug-fix · 2026-05-31: platform_fee_revenue is NOT external revenue —
+    # it's the 18% withheld INTERNALLY when L1-L10 payouts fire. Adding it
+    # to gross_revenue double-counted the same rupee in both Group 1
+    # (revenue) AND Group 4 (platform fee), inflating the Bank Tally
+    # inflow and the Company Net Worth.
+    #
+    # New gross_revenue = registration + service + shop (NO platform fee).
+    # Group 4 still surfaces platform_fee_revenue as an informational
+    # sub-bucket so admins can see what portion of payouts the platform
+    # retained, but it no longer flows into the Bank Tally inflow.
     gross_revenue = round(
-        registration_revenue + service_revenue + platform_fee_revenue + shop_revenue,
+        registration_revenue + service_revenue + shop_revenue,
         2,
     )
 
@@ -567,6 +577,44 @@ async def admin_reset_expenses(admin: Dict[str, Any] = Depends(require_admin_rol
     except Exception:
         pass
     return {"ok": True, "archived": archived, "deleted": res.deleted_count}
+
+
+@router.post("/admin/payment-history/reset")
+async def admin_reset_payment_history(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
+    """Wipe UPI manual payments audit history + system wallet deposit log.
+
+    Bug-fix · 2026-05-31: The original 2-button reset (bank ledger / expenses)
+    left `manual_payments` (UPI approval audit) and `system_wallet_deposits`
+    (UTR receipt log) untouched, so the admin couldn't fully reset the books.
+    This endpoint archives + clears both collections in one shot.
+
+    Does NOT touch:
+      - `transactions`  (accounting ledger truth)
+      - `users`          (user wallets)
+      - `withdrawals`    (live withdrawal queue)
+    """
+    summary: Dict[str, int] = {}
+    for col_name, archive_name in [
+        ("manual_payments",         "manual_payments_archived"),
+        ("system_wallet_deposits",  "system_wallet_deposits_archived"),
+    ]:
+        col      = db[col_name]
+        archive  = db[archive_name]
+        rows     = await col.find({}).to_list(10000)
+        if rows:
+            stamp_iso = now_utc().isoformat()
+            for r in rows:
+                r["_archived_at"] = stamp_iso
+                r["_archived_by"] = admin.get("email") or admin.get("id")
+            await archive.insert_many(rows)
+        deleted = (await col.delete_many({})).deleted_count
+        summary[col_name] = {"archived": len(rows), "deleted": deleted}
+    try:
+        from server import _audit_log
+        await _audit_log(admin, "finance.payment_history.reset", "payment_history", "all", summary)
+    except Exception:
+        pass
+    return {"ok": True, **summary}
 
 
 

@@ -153,7 +153,7 @@ export default function AdminSystemWallet() {
 
   // Reset confirmation drawer — type-to-confirm gate for the destructive
   // Reset Bank Ledger / Reset Expenses Ledger actions.
-  const [resetTarget, setResetTarget] = useState<"bank" | "expenses" | null>(null);
+  const [resetTarget, setResetTarget] = useState<"bank" | "expenses" | "payments" | null>(null);
   const [resetConfirmText, setResetConfirmText] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
   const closeReset = () => { setResetTarget(null); setResetConfirmText(""); setResetBusy(false); };
@@ -165,12 +165,20 @@ export default function AdminSystemWallet() {
     }
     setResetBusy(true);
     try {
-      const path = resetTarget === "bank" ? "/admin/bank-ledger/reset" : "/admin/expenses/reset";
+      const path =
+        resetTarget === "bank"     ? "/admin/bank-ledger/reset"
+      : resetTarget === "expenses" ? "/admin/expenses/reset"
+      :                              "/admin/payment-history/reset";
       const { data } = await api.post(path);
-      Alert.alert(
-        "Ledger reset",
-        `Archived ${data?.archived ?? 0} entries · Removed ${data?.deleted ?? 0} from live ledger.\n\nArchived rows live in ${resetTarget === "bank" ? "bank_ledger_archived" : "expenses_archived"} and can be restored by support.`,
-      );
+      let msg = "";
+      if (resetTarget === "payments") {
+        const mp = data?.manual_payments || {};
+        const sd = data?.system_wallet_deposits || {};
+        msg = `Payment History cleared.\n• Manual payments archived: ${mp.archived ?? 0}, removed: ${mp.deleted ?? 0}\n• UTR deposits archived: ${sd.archived ?? 0}, removed: ${sd.deleted ?? 0}\n\nArchived in *_archived collections for recovery.`;
+      } else {
+        msg = `Archived ${data?.archived ?? 0} entries · Removed ${data?.deleted ?? 0} from live ledger.\n\nArchived rows live in ${resetTarget === "bank" ? "bank_ledger_archived" : "expenses_archived"} and can be restored by support.`;
+      }
+      Alert.alert("Ledger reset", msg);
       closeReset();
       await load();
     } catch (e) {
@@ -672,6 +680,12 @@ export default function AdminSystemWallet() {
           label="Reset Expenses Ledger"
           description="Clear all Group 5 expenses · archived for recovery."
           onPress={() => setResetTarget("expenses")}
+        />
+        <NwActionRow
+          icon="rotate-ccw" color="#B3261E"
+          label="Reset Payment History"
+          description="Clear UPI manual approval log + UTR deposit log · archived for recovery."
+          onPress={() => setResetTarget("payments")}
         />
 
         {/* Phase: User-source unification — 3-way accountability breakdown.

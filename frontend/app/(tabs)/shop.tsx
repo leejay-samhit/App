@@ -125,6 +125,12 @@ export default function ShopScreen() {
   const [myStatus, setMyStatus] = useState<string | null>(null);
   const [contactOf, setContactOf] = useState<ServiceProvider | null>(null);
   const [bookingId, setBookingId] = useState<string | null>(null);
+  // Admin-managed shop categories (with their uploaded icons / images). Used
+  // by the Departments tile row so the icons match what admin curates.
+  // Bug-fix · 2026-05-31 — was previously using a hard-coded `deptIcons`
+  // dict that ignored admin uploads, so departments showed stale icons.
+  type ShopCat = { id: string; name: string; icon?: string; image_b64?: string; image_url?: string };
+  const [shopCats, setShopCats] = useState<ShopCat[]>([]);
 
   const loadShop = useCallback(async () => {
     try {
@@ -132,6 +138,11 @@ export default function ShopScreen() {
       const { data } = await api.get<any>("/products");
       const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
       setItems(list);
+      // Admin-curated shop categories with icons/images (best-effort).
+      try {
+        const sc = await api.get<{ items: ShopCat[] }>("/shop-categories");
+        setShopCats(sc.data?.items || []);
+      } catch { /* anon may not have access; departments will fall back */ }
       try {
         const cart = await api.get<any>("/cart");
         const cItems = Array.isArray(cart.data) ? cart.data : (cart.data?.items || []);
@@ -558,6 +569,9 @@ export default function ShopScreen() {
                 >
                   {cats.map((c, i) => {
                     const active = shopCategory === c;
+                    // Match admin-curated category by case-insensitive name.
+                    const adminCat = shopCats.find((sc) => sc.name.toLowerCase().trim() === (c || "").toLowerCase().trim());
+                    const adminImg = adminCat?.image_b64 || adminCat?.image_url || null;
                     return (
                       <TouchableOpacity
                         key={c}
@@ -567,7 +581,16 @@ export default function ShopScreen() {
                         testID={`dept-${c}`}
                       >
                         <View style={[styles.deptIconCircle, { backgroundColor: deptColours[i % deptColours.length] }, active && { backgroundColor: colors.primary + "20" }]}>
-                          <Feather name={iconFor(c) as any} size={20} color={active ? colors.primary : colors.textMain} />
+                          {adminImg ? (
+                            // Admin uploaded an icon for this department → use it.
+                            <Image
+                              source={{ uri: adminImg }}
+                              style={{ width: 26, height: 26, borderRadius: 13 }}
+                              resizeMode="cover"
+                            />
+                          ) : (
+                            <Feather name={iconFor(c) as any} size={20} color={active ? colors.primary : colors.textMain} />
+                          )}
                         </View>
                         <Text style={[styles.deptLabel, active && { color: colors.primary }]} numberOfLines={1}>{c}</Text>
                         <Text style={styles.deptCount}>{countFor(c)} item{countFor(c) === 1 ? "" : "s"}</Text>

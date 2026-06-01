@@ -30,10 +30,23 @@ export default function ShopCategoryScreen() {
       setHasLayout(blocks.length > 0);
     } catch { setHasLayout(false); }
     try {
-      // Always preload products for the fallback grid
+      // Always preload products for the fallback grid.
+      // Bug-fix · 2026-05-31: Compare case-insensitively AND fall back to
+      // category_id match so products stored as ids ("uuid-xx") OR as
+      // name strings with differing capitalization ("Electronics" vs
+      // "electronics") still surface in the category view.
       const r = await api.get<any>("/products");
       const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
-      setProducts(list.filter((p) => (p.category || "") === category));
+      const norm = (s: any) => String(s || "").trim().toLowerCase();
+      const target = norm(category);
+      setProducts(
+        list.filter((p: any) => {
+          const cat = norm(p.category);
+          const cid = norm(p.category_id);
+          const cname = norm(p.category_name);
+          return cat === target || cid === target || cname === target;
+        }),
+      );
     } catch (e) { /* silent */ }
     finally { setLoadingProducts(false); setRefreshing(false); }
   }, [category]);
