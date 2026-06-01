@@ -176,8 +176,13 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     ]).to_list(1)
     total_reward_credits = float((rewards_agg or [{}])[0].get("sum") or 0)
 
+    # Settled withdrawals — `admin_complete_withdrawal` &
+    # `admin_approve_and_complete_withdrawal` write status="success".
+    # We also accept legacy statuses ("approved", "paid", "completed") in case
+    # any historical row used those labels.
+    SETTLED_WITHDRAWAL_STATUSES = ["success", "approved", "paid", "completed"]
     withdrawn_agg = await db.withdrawals.aggregate([
-        {"$match": {"status": {"$in": ["approved", "paid", "completed"]}}},
+        {"$match": {"status": {"$in": SETTLED_WITHDRAWAL_STATUSES}}},
         {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
     ]).to_list(1)
     total_withdrawals_settled = float((withdrawn_agg or [{}])[0].get("sum") or 0)
