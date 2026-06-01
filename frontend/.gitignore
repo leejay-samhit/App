@@ -18,6 +18,10 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# EAS Build local credentials (contains plaintext keystore password)
+credentials.json
+android/keystores/
+
 # Metro
 .metro-health-check*
 
