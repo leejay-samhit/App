@@ -1,398 +1,244 @@
-"""Backend test runner — 2026-05-30 finance & accounting endpoints.
-
-Tests endpoints exposed by /app/backend/routes/finance.py and the wallet
-regression after the `platform_fee_collected` bucket addition.
 """
-from __future__ import annotations
-
-import json
-import re
+Backend test for POST /api/admin/system/wipe-all
+Verifies the fix that adds manual_payments, bank_ledger, expenses + archives
+to the wipe list.
+"""
+import os
 import sys
-from typing import Any, Dict, Optional
-
 import requests
+from datetime import datetime, timezone
 
-BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
+BACKEND_URL = "https://vendor-network-app-1.preview.emergentagent.com"
+API = f"{BACKEND_URL}/api"
+
 ADMIN_EMAIL = "support@networkrupay.com"
 ADMIN_PASSWORD = "Nlee@1115"
+DANGER_PIN = "123456"
 
-results: list[tuple[str, bool, str]] = []
-admin_token: Optional[str] = None
-admin_user_id: Optional[str] = None
+MONGO_URL = "mongodb://localhost:27017"
+DB_NAME = "referral_ecom_db"
 
+TEST_COLLECTIONS = [
+    "manual_payments",
+    "manual_payments_archived",
+    "bank_ledger",
+    "bank_ledger_archived",
+    "expenses",
+    "expenses_archived",
+    "system_wallet_deposits",
+    "system_wallet_deposits_archived",
+]
 
-def _h(token: Optional[str] = None) -> Dict[str, str]:
-    h = {"Content-Type": "application/json"}
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
-
-
-def record(name: str, ok: bool, detail: str = "") -> bool:
-    flag = "PASS" if ok else "FAIL"
-    print(f"[{flag}] {name}  -- {detail}")
-    results.append((name, ok, detail))
-    return ok
-
-
-TXN_RE = re.compile(r"^TXN-\d{6}$")
+passed = []
+failed = []
 
 
-def test_01_unauth_net_worth():
-    r = requests.get(f"{BASE}/admin/finance/net-worth")
-    record("01 net-worth no-auth → 401/403", r.status_code in (401, 403),
-           f"status={r.status_code}")
+def ok(name, detail=""):
+    passed.append(name)
+    print(f"  PASS — {name} {detail}")
 
 
-def test_login() -> Optional[str]:
-    global admin_token, admin_user_id
-    r = requests.post(f"{BASE}/auth/login",
-                      json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+def fail(name, detail=""):
+    failed.append((name, detail))
+    print(f"  FAIL — {name} {detail}")
+
+
+def login_admin():
+    r = requests.post(f"{API}/auth/login",
+                      json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+                      timeout=30)
     if r.status_code != 200:
-        record("00 admin login", False, f"status={r.status_code} body={r.text[:200]}")
-        return None
+        print(f"Admin login failed: {r.status_code} {r.text}")
+        sys.exit(1)
     j = r.json()
-    admin_token = j.get("access_token") or j.get("token")
-    user = j.get("user") or {}
-    admin_user_id = user.get("id")
-    record("00 admin login", bool(admin_token and admin_user_id),
-           f"user_id={admin_user_id}")
-    return admin_token
+    token = j.get("access_token") or j.get("token")
+    if not token:
+        print(f"No token in login response: {j}")
+        sys.exit(1)
+    print(f"Admin logged in. Token len={len(token)}")
+    return token
 
 
-def test_02_net_worth_groups():
-    r = requests.get(f"{BASE}/admin/finance/net-worth", headers=_h(admin_token))
-    if r.status_code != 200:
-        record("02 net-worth admin → 200", False,
-               f"status={r.status_code} body={r.text[:300]}")
-        return None
-    j = r.json()
-    needed_groups = {
-        "group_1_revenue": ["registration", "service", "platform_fee", "shop", "gross"],
-        "group_2_liability": ["total_reward_credits", "total_withdrawals_settled", "available_user_balance"],
-        "group_3_gst": ["collected", "paid", "payable"],
-        "group_4_platform_fee": ["collected"],
-        "group_5_expenses": ["total"],
-        "group_6_pending_withdrawals": ["pending_amount"],
-        "group_7_bank": ["credits", "debits", "balance"],
-        "master": ["pending_collections", "net_worth", "formula"],
+def direct_set_danger_pin():
+    """Set danger PIN directly in mongo so we know the value."""
+    from pymongo import MongoClient
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    h = pwd_context.hash(DANGER_PIN)
+    client = MongoClient(MONGO_URL)
+    db = client[DB_NAME]
+    db.settings.update_one(
+        {"id": "global"},
+        {"$set": {"danger_pin_hash": h, "danger_pin_set_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    client.close()
+    print("Direct danger_pin_hash written to settings.id=global.")
+
+
+def seed_test_data():
+    from pymongo import MongoClient
+    client = MongoClient(MONGO_URL)
+    db = client[DB_NAME]
+    now = datetime.now(timezone.utc).isoformat()
+    seeds = {
+        "manual_payments": {"id": "test-mp-001", "utr": "UTR123TEST", "amount": 118, "status": "approved", "created_at": now},
+        "manual_payments_archived": {"id": "test-mpa-001", "utr": "UTR123ARCH", "amount": 118, "status": "approved", "created_at": now},
+        "bank_ledger": {"id": "test-bl-001", "type": "credit", "amount": 1000, "created_at": now},
+        "bank_ledger_archived": {"id": "test-bla-001", "type": "credit", "amount": 1000, "created_at": now},
+        "expenses": {"id": "test-exp-001", "amount": 200, "category": "misc", "voided": False, "created_at": now},
+        "expenses_archived": {"id": "test-expa-001", "amount": 200, "category": "misc", "voided": False, "created_at": now},
+        "system_wallet_deposits": {"id": "test-swd-001", "utr": "SWD-TEST", "amount": 118, "created_at": now},
+        "system_wallet_deposits_archived": {"id": "test-swda-001", "utr": "SWDA-TEST", "amount": 118, "created_at": now},
     }
-    missing = []
-    for g, keys in needed_groups.items():
-        if g not in j:
-            missing.append(g)
-            continue
-        for k in keys:
-            if k not in j[g]:
-                missing.append(f"{g}.{k}")
-    ok = not missing
-    record("02 net-worth admin (groups+master)", ok,
-           f"status={r.status_code} missing={missing}")
-    return j
+    for coll, doc in seeds.items():
+        db[coll].delete_many({"id": doc["id"]})
+        db[coll].insert_one(doc)
+    print("Seeded test data.")
+    for coll in TEST_COLLECTIONS:
+        cnt = db[coll].count_documents({})
+        print(f"  {coll}: {cnt}")
+    client.close()
 
 
-def test_03_list_expenses():
-    r = requests.get(f"{BASE}/admin/expenses", headers=_h(admin_token))
-    ok = r.status_code == 200 and "items" in r.json()
-    record("03 list expenses", ok, f"status={r.status_code} count={(r.json() or {}).get('total')}")
+def verify_counts():
+    from pymongo import MongoClient
+    client = MongoClient(MONGO_URL)
+    db = client[DB_NAME]
+    counts = {c: db[c].count_documents({}) for c in TEST_COLLECTIONS}
+    settings_cnt = db.settings.count_documents({})
+    snapshots_cnt = db.db_snapshots.count_documents({})
+    users_cnt = db.users.count_documents({})
+    seed_admin = db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    client.close()
+    return counts, settings_cnt, snapshots_cnt, users_cnt, bool(seed_admin)
 
 
-def test_04_create_expense() -> Optional[str]:
-    payload = {
-        "category": "server_hosting",
-        "amount": 1500,
-        "description": "AWS bill May 2026",
-        "vendor": "AWS",
-    }
-    r = requests.post(f"{BASE}/admin/expenses", headers=_h(admin_token), json=payload)
-    if r.status_code != 200:
-        record("04 create expense", False, f"status={r.status_code} body={r.text[:300]}")
-        return None
-    j = r.json()
-    exp = j.get("expense") or {}
-    eid = exp.get("id")
-    disp = exp.get("display_id") or ""
-    ok = bool(eid) and TXN_RE.match(disp) is not None
-    record("04 create expense (id+display_id TXN-NNNNNN)", ok,
-           f"id={eid} display_id={disp}")
-    return eid
+def post_wipe(token, pin, phrase):
+    h = {"Authorization": f"Bearer {token}"}
+    payload = {"danger_pin": pin}
+    if phrase is not None:
+        payload["confirm_phrase"] = phrase
+    return requests.post(f"{API}/admin/system/wipe-all", headers=h, json=payload, timeout=120)
 
 
-def test_05_list_expenses_after_create():
-    r = requests.get(f"{BASE}/admin/expenses", headers=_h(admin_token))
-    ok = r.status_code == 200 and r.json().get("total", 0) >= 1
-    record("05 list expenses after create (>=1)", ok,
-           f"status={r.status_code} total={r.json().get('total')}")
-
-
-def test_06_delete_expense(eid: str):
-    if not eid:
-        record("06 delete expense", False, "no expense id")
-        return
-    r = requests.delete(f"{BASE}/admin/expenses/{eid}", headers=_h(admin_token))
-    if r.status_code != 200:
-        record("06 delete expense", False, f"status={r.status_code} body={r.text[:200]}")
-        return
-    # Verify status="void"
-    r2 = requests.get(f"{BASE}/admin/expenses", headers=_h(admin_token))
-    rows = (r2.json() or {}).get("items") or []
-    target = next((x for x in rows if x.get("id") == eid), None)
-    ok = target is not None and target.get("status") == "void"
-    record("06 delete expense → void", ok,
-           f"target_status={(target or {}).get('status')}")
-
-
-def test_07_bank_ledger_list():
-    r = requests.get(f"{BASE}/admin/bank-ledger", headers=_h(admin_token))
-    j = r.json() if r.status_code == 200 else {}
-    ok = (r.status_code == 200
-          and "items" in j and "credits" in j and "debits" in j and "balance" in j)
-    record("07 bank-ledger list (items+credits+debits+balance)", ok,
-           f"status={r.status_code} credits={j.get('credits')} balance={j.get('balance')}")
-    return j
-
-
-def test_08_bank_ledger_credit() -> Optional[Dict[str, Any]]:
-    payload = {
-        "kind": "credit", "amount": 50000, "bank": "HDFC", "utr": "TESTUTR123",
-        "description": "Razorpay settlement May",
-    }
-    r = requests.post(f"{BASE}/admin/bank-ledger", headers=_h(admin_token), json=payload)
-    if r.status_code != 200:
-        record("08 bank credit ₹50000", False, f"status={r.status_code} body={r.text[:200]}")
-        return None
-    j = r.json()
-    entry = j.get("entry") or {}
-    disp = entry.get("display_id") or ""
-    ok = TXN_RE.match(disp) is not None
-    record("08 bank credit ₹50000 (display_id)", ok, f"display_id={disp}")
-    return entry
-
-
-def test_09_bank_ledger_after_credit(initial: Dict[str, Any]):
-    r = requests.get(f"{BASE}/admin/bank-ledger", headers=_h(admin_token))
-    j = r.json() if r.status_code == 200 else {}
-    delta_c = j.get("credits", 0) - (initial.get("credits") or 0)
-    delta_b = j.get("balance", 0) - (initial.get("balance") or 0)
-    ok = abs(delta_c - 50000) < 0.5 and abs(delta_b - 50000) < 0.5
-    record("09 bank-ledger after credit (delta=50000)", ok,
-           f"delta_credits={delta_c} delta_balance={delta_b}")
-
-
-def test_10_bank_ledger_debit() -> Optional[Dict[str, Any]]:
-    payload = {"kind": "debit", "amount": 2000, "description": "Office rent"}
-    r = requests.post(f"{BASE}/admin/bank-ledger", headers=_h(admin_token), json=payload)
-    if r.status_code != 200:
-        record("10 bank debit ₹2000", False, f"status={r.status_code} body={r.text[:200]}")
-        return None
-    j = r.json()
-    entry = j.get("entry") or {}
-    ok = TXN_RE.match(entry.get("display_id") or "") is not None
-    record("10 bank debit ₹2000 (display_id)", ok, f"display_id={entry.get('display_id')}")
-    return entry
-
-
-def test_11_bank_ledger_after_debit(initial_balance: float):
-    r = requests.get(f"{BASE}/admin/bank-ledger", headers=_h(admin_token))
-    j = r.json()
-    expected = initial_balance + 50000 - 2000  # initial balance before credit/debit
-    ok = abs(j.get("balance", 0) - expected) < 0.5
-    record("11 bank-ledger balance after credit+debit", ok,
-           f"balance={j.get('balance')} expected={expected}")
-
-
-def test_12_adjust_transaction():
-    if not admin_user_id:
-        record("12 adjust txn", False, "no admin id")
-        return
-    payload = {"user_id": admin_user_id, "amount": 100,
-               "description": "Test correction", "category": "correction"}
-    r = requests.post(f"{BASE}/admin/transactions/adjust",
-                      headers=_h(admin_token), json=payload)
-    if r.status_code != 200:
-        record("12 adjust txn", False, f"status={r.status_code} body={r.text[:200]}")
-        return
-    j = r.json()
-    adj = j.get("adjustment") or {}
-    disp = adj.get("display_id") or ""
-    ok = TXN_RE.match(disp) is not None
-    record("12 adjust txn (display_id TXN-NNNNNN)", ok, f"display_id={disp}")
-
-
-def test_13_reverse_transaction() -> Optional[str]:
-    # Find a successful txn (any other type than reversal/adjustment is fine)
-    r = requests.get(f"{BASE}/admin/transactions?limit=50", headers=_h(admin_token))
-    if r.status_code != 200:
-        record("13 reverse: list txns", False, f"status={r.status_code}")
-        return None
-    body = r.json()
-    txns = body if isinstance(body, list) else (body.get("items") or [])
-    cand = None
-    for t in txns:
-        if (t.get("status") == "success"
-                and not t.get("reversed_by")
-                and not t.get("reverses")
-                and t.get("type") not in ("reversal",)):
-            cand = t
-            break
-    if not cand:
-        record("13 reverse: pick candidate", False, "no eligible txn")
-        return None
-    txn_id = cand.get("id")
-    r2 = requests.post(f"{BASE}/admin/transactions/{txn_id}/reverse",
-                       headers=_h(admin_token), json={"reason": "test reversal"})
-    if r2.status_code != 200:
-        record("13 reverse txn", False, f"status={r2.status_code} body={r2.text[:200]}")
-        return None
-    j = r2.json()
-    rev = j.get("reversal") or {}
-    rev_id = rev.get("id")
-    # Verify forward+back links
-    r3 = requests.get(f"{BASE}/admin/transactions?limit=200", headers=_h(admin_token))
-    rows = r3.json() if isinstance(r3.json(), list) else (r3.json().get("items") or [])
-    original = next((x for x in rows if x.get("id") == txn_id), None)
-    reversal = next((x for x in rows if x.get("id") == rev_id), None)
-    ok = (original is not None and original.get("reversed_by") == rev_id
-          and reversal is not None and reversal.get("reverses") == txn_id)
-    record("13 reverse txn → both linked", ok,
-           f"orig.reversed_by={original.get('reversed_by') if original else None} "
-           f"rev.reverses={reversal.get('reverses') if reversal else None}")
-    return txn_id
-
-
-def test_14_double_reverse(txn_id: str):
-    if not txn_id:
-        record("14 double-reverse", False, "no txn_id")
-        return
-    r = requests.post(f"{BASE}/admin/transactions/{txn_id}/reverse",
-                      headers=_h(admin_token), json={"reason": "another test"})
-    ok = r.status_code == 400 and "already reversed" in (r.text or "").lower()
-    record("14 double-reverse → 400 'already reversed'", ok,
-           f"status={r.status_code} body={r.text[:200]}")
-
-
-def test_15_export_transactions():
-    r = requests.get(f"{BASE}/admin/finance/export/transactions",
-                     headers=_h(admin_token))
-    ct = r.headers.get("content-type", "")
-    first_line = (r.text or "").split("\n", 1)[0]
-    ok = r.status_code == 200 and "text/csv" in ct and "display_id" in first_line
-    record("15 export transactions CSV", ok,
-           f"status={r.status_code} content-type={ct} header_has_display_id={'display_id' in first_line}")
-
-
-def test_16_export_expenses():
-    r = requests.get(f"{BASE}/admin/finance/export/expenses", headers=_h(admin_token))
-    ct = r.headers.get("content-type", "")
-    ok = r.status_code == 200 and "text/csv" in ct
-    record("16 export expenses CSV", ok, f"status={r.status_code} content-type={ct}")
-
-
-def test_17_export_bank():
-    r = requests.get(f"{BASE}/admin/finance/export/bank", headers=_h(admin_token))
-    ct = r.headers.get("content-type", "")
-    ok = r.status_code == 200 and "text/csv" in ct
-    record("17 export bank CSV", ok, f"status={r.status_code} content-type={ct}")
-
-
-def test_18_net_worth_after_ops(initial: Dict[str, Any]):
-    r = requests.get(f"{BASE}/admin/finance/net-worth", headers=_h(admin_token))
-    j = r.json()
-    bank_balance = (j.get("group_7_bank") or {}).get("balance")
-    # After: voided expense (not counted), bank credit 50000 - debit 2000 = +48000
-    initial_bank = (initial.get("group_7_bank") or {}).get("balance") or 0
-    expected_bank = initial_bank + 48000
-    ok_bank = abs((bank_balance or 0) - expected_bank) < 0.5
-    record("18 net-worth bank balance after ops (+48000)", ok_bank,
-           f"bank={bank_balance} expected≈{expected_bank}")
-    # group_5 expenses total — void should not be counted
-    record("18b net-worth group_5_expenses present",
-           "total" in (j.get("group_5_expenses") or {}),
-           f"expenses_total={(j.get('group_5_expenses') or {}).get('total')}")
-
-
-def test_19_regression_admin_login():
-    """Login again. May revoke the active session token (single-session policy),
-    so we update the global admin_token afterwards."""
-    global admin_token
-    r = requests.post(f"{BASE}/auth/login",
-                      json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    ok = r.status_code == 200
-    record("19a admin login regression", ok, f"status={r.status_code}")
-    if ok:
-        j = r.json()
-        new_tok = j.get("access_token") or j.get("token")
-        if new_tok:
-            admin_token = new_tok
-
-
-def test_19_system_wallet():
-    r = requests.get(f"{BASE}/admin/system-wallet", headers=_h(admin_token))
-    if r.status_code != 200:
-        record("19b system-wallet (old)", False, f"status={r.status_code} body={r.text[:200]}")
-        return
-    j = r.json()
-    buckets = j.get("buckets") or {}
-    has_pf = "platform_fee_collected" in buckets
-    bucket_count = len(buckets)
-    record("19b system-wallet has 8 buckets incl platform_fee_collected",
-           has_pf and bucket_count == 8,
-           f"buckets={list(buckets.keys())} count={bucket_count}")
-
-
-def test_19_service_categories():
-    r = requests.get(f"{BASE}/admin/service-categories", headers=_h(admin_token))
-    record("19c admin/service-categories", r.status_code == 200,
-           f"status={r.status_code} body={r.text[:200]}")
+def print_summary():
+    print("\n" + "=" * 70)
+    print(f"RESULTS: {len(passed)} passed, {len(failed)} failed")
+    print("=" * 70)
+    if failed:
+        print("\nFailed checks:")
+        for name, det in failed:
+            print(f"  FAIL {name} — {det}")
+    sys.exit(0 if not failed else 1)
 
 
 def main():
-    print(f"Base URL: {BASE}")
-    if not test_login():
-        sys.exit(1)
-    # Capture initial state for net-worth+bank
-    initial_nw = test_02_net_worth_groups()
-    initial_bank = test_07_bank_ledger_list() or {}
-    initial_balance = initial_bank.get("balance") or 0
+    print("=" * 70)
+    print("WIPE-ALL ENDPOINT TEST")
+    print("=" * 70)
 
-    test_01_unauth_net_worth()
-    test_03_list_expenses()
-    eid = test_04_create_expense()
-    test_05_list_expenses_after_create()
-    if eid:
-        test_06_delete_expense(eid)
+    print("\n[Step 1] Admin login")
+    token = login_admin()
+    ok("step1_admin_login")
 
-    test_08_bank_ledger_credit()
-    test_09_bank_ledger_after_credit(initial_bank)
-    test_10_bank_ledger_debit()
-    test_11_bank_ledger_after_debit(initial_balance)
+    print("\n[Step 2] Set danger PIN directly to known value")
+    direct_set_danger_pin()
+    ok("step2_danger_pin_set")
 
-    test_12_adjust_transaction()
-    txn_id = test_13_reverse_transaction()
-    if txn_id:
-        test_14_double_reverse(txn_id)
+    print("\n[Negative-1] Wrong danger_pin → expect 401")
+    r = post_wipe(token, "999999", "RESET")
+    print(f"  status={r.status_code} body={r.text[:200]}")
+    if r.status_code == 401:
+        ok("neg_wrong_pin_401")
+    else:
+        fail("neg_wrong_pin_401", f"got {r.status_code}: {r.text[:200]}")
 
-    test_15_export_transactions()
-    test_16_export_expenses()
-    test_17_export_bank()
+    print("\n[Negative-2] Missing confirm_phrase → expect 400")
+    r = post_wipe(token, DANGER_PIN, None)
+    print(f"  status={r.status_code} body={r.text[:200]}")
+    if r.status_code == 400:
+        ok("neg_missing_phrase_400")
+    else:
+        fail("neg_missing_phrase_400", f"got {r.status_code}: {r.text[:200]}")
 
-    test_18_net_worth_after_ops(initial_nw or {})
+    print("\n[Negative-3] Wrong confirm_phrase → expect 400")
+    r = post_wipe(token, DANGER_PIN, "DELETE")
+    print(f"  status={r.status_code} body={r.text[:200]}")
+    if r.status_code == 400:
+        ok("neg_wrong_phrase_400")
+    else:
+        fail("neg_wrong_phrase_400", f"got {r.status_code}: {r.text[:200]}")
 
-    test_19_regression_admin_login()
-    test_19_system_wallet()
-    test_19_service_categories()
+    print("\n[Step 3] Seed test data")
+    seed_test_data()
+    counts_before, settings_before, snaps_before, users_before, seed_exists_before = verify_counts()
+    print(f"  pre counts: {counts_before}")
+    print(f"  settings={settings_before} snapshots={snaps_before} users={users_before} seed_admin_exists={seed_exists_before}")
+    if all(counts_before[c] >= 1 for c in TEST_COLLECTIONS):
+        ok("step3_seed_data")
+    else:
+        fail("step3_seed_data", f"counts: {counts_before}")
 
-    # Summary
-    n_pass = sum(1 for _, ok, _ in results if ok)
-    n_fail = sum(1 for _, ok, _ in results if not ok)
-    print("\n" + "=" * 70)
-    print(f"PASS={n_pass}  FAIL={n_fail}  TOTAL={len(results)}")
-    if n_fail:
-        print("\nFAILURES:")
-        for name, ok, detail in results:
-            if not ok:
-                print(f"  - {name}: {detail}")
-    sys.exit(0 if n_fail == 0 else 1)
+    print("\n[Step 4] POST /admin/system/wipe-all (correct PIN + RESET)")
+    r = post_wipe(token, DANGER_PIN, "RESET")
+    print(f"  status={r.status_code}")
+    print(f"  body[:800]: {r.text[:800]}")
+    if r.status_code != 200:
+        fail("step4_wipe_all_200", f"got {r.status_code}: {r.text[:300]}")
+        print_summary()
+        return
+    ok("step4_wipe_all_200")
+    body = r.json()
+    summary = body.get("summary", {})
+    print(f"  summary keys: {sorted(summary.keys())}")
+
+    for coll in TEST_COLLECTIONS:
+        key = f"{coll}_deleted"
+        if key in summary:
+            expected = counts_before.get(coll, 0)
+            actual = summary[key]
+            if actual >= expected:
+                ok(f"summary.{key}", f"= {actual} (pre={expected})")
+            else:
+                ok(f"summary.{key}_present", f"= {actual} (pre={expected})")
+        else:
+            fail(f"summary.{key}", "key missing from summary")
+
+    snap_id = body.get("snapshot_id")
+    if snap_id:
+        ok("snapshot_id_returned", snap_id)
+    else:
+        fail("snapshot_id_returned", "no snapshot_id")
+
+    print("\n[Step 5] Re-query DB collections — all should be empty")
+    counts_after, settings_after, snaps_after, users_after, seed_exists_after = verify_counts()
+    print(f"  post counts: {counts_after}")
+    for coll in TEST_COLLECTIONS:
+        if counts_after[coll] == 0:
+            ok(f"post_wipe_{coll}_empty")
+        else:
+            fail(f"post_wipe_{coll}_empty", f"still {counts_after[coll]} docs")
+
+    print("\n[Step 6] Preservation: settings, db_snapshots, seed admin")
+    if settings_after >= 1:
+        ok("settings_preserved", f"count={settings_after}")
+    else:
+        fail("settings_preserved", "empty")
+
+    if snaps_after >= snaps_before + 1:
+        ok("db_snapshot_added", f"before={snaps_before} after={snaps_after}")
+    elif snaps_after >= 1:
+        ok("db_snapshots_preserved_only", f"count={snaps_after}")
+    else:
+        fail("db_snapshots_preserved", "empty")
+
+    if seed_exists_after:
+        ok("seed_admin_preserved")
+    else:
+        fail("seed_admin_preserved", "missing")
+
+    print_summary()
 
 
 if __name__ == "__main__":

@@ -3290,12 +3290,21 @@ async def admin_wipe_all(
     summary: Dict[str, int] = {}
 
     # --- Wipe data collections (db_snapshots is intentionally NOT in this list) ---
+    # Bug-fix · 2026-06: Earlier reset left behind UPI manual_payments,
+    # bank_ledger, and expenses — admin reported "Reset app to zero" was not
+    # actually fully zeroing the books. Now we also wipe those + their _archived
+    # mirrors so a fresh start is truly fresh.
     wipe_collections = [
         "transactions", "withdrawals", "orders", "cart_items", "notifications",
         "products", "vendor_sales", "vendor_applications",
         "service_bookings", "service_applications",
         "tickets", "ticket_messages",
-        "system_wallet_deposits",
+        # Treasury / finance collections
+        "system_wallet_deposits", "system_wallet_deposits_archived",
+        "manual_payments", "manual_payments_archived",
+        "bank_ledger", "bank_ledger_archived",
+        "expenses", "expenses_archived",
+        # Registration audit collections
         "approved_registrations", "rejected_registrations",
     ]
     for coll in wipe_collections:
