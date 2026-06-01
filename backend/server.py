@@ -8790,6 +8790,30 @@ _AVAIL_STATUSES = {"available", "busy", "offline"}  # kept for any in-file refs
 # Include router
 app.include_router(api_router)
 
+# ───────────────────────────────────────────────────────────────────────────
+# TEMPORARY one-time keystore download endpoint
+# Created 2026-06-01 to let admin download networkrupay-release.jks from the
+# sandbox. REMOVE this entire block once the file is safely downloaded.
+# Path uses a long random token so it isn't guessable.
+# ───────────────────────────────────────────────────────────────────────────
+from fastapi.responses import FileResponse as _KS_FileResponse
+import os as _ks_os
+
+_KEYSTORE_DOWNLOAD_TOKEN = "nrp-7f3c2a91-keystore-2026"
+_KEYSTORE_PATH = "/app/frontend/android/keystores/networkrupay-release.jks"
+
+@app.get("/api/_internal/keystore-download/" + _KEYSTORE_DOWNLOAD_TOKEN)
+async def _temp_keystore_download():
+    if not _ks_os.path.exists(_KEYSTORE_PATH):
+        raise HTTPException(status_code=404, detail="Keystore not found")
+    return _KS_FileResponse(
+        _KEYSTORE_PATH,
+        media_type="application/octet-stream",
+        filename="networkrupay-release.jks",
+    )
+# ───────────────────────────────────────────────────────────────────────────
+
+
 # Phase 2B refactor: extracted routers, mounted at /api so URLs are unchanged
 # from the client's perspective.
 app.include_router(branding_router.router, prefix="/api")
