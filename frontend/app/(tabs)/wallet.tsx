@@ -130,6 +130,7 @@ export default function WalletScreen() {
     setError("");
     const amt = parseFloat(amount);
     if (!amt || amt <= 0) { setError("Enter valid amount"); return; }
+    if (amt < 100) { setError("Minimum withdrawal amount is ₹100"); return; }
     if (amt > (user?.wallet_balance || 0)) { setError("Insufficient balance"); return; }
     setSubmitting(true);
     try {
@@ -379,12 +380,12 @@ export default function WalletScreen() {
           <View style={styles.modalSheet}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Schedule withdrawal</Text>
-            <Text style={styles.modalSub}>Available: {formatINR(user?.wallet_balance || 0)}{"\n"}Funds reach your bank within 48 hours after admin approval.</Text>
+            <Text style={styles.modalSub}>Available: {formatINR(user?.wallet_balance || 0)}{"\n"}Minimum ₹100. Funds reach your bank within 48 hours after admin approval.</Text>
             <TextInput
               testID="withdraw-amount-input"
               value={amount}
               onChangeText={setAmount}
-              placeholder="Enter amount in ₹"
+              placeholder="Enter amount in ₹ (min ₹100)"
               placeholderTextColor={colors.textMuted}
               keyboardType="numeric"
               style={styles.modalInput}

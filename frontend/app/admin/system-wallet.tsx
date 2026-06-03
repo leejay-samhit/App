@@ -270,8 +270,10 @@ export default function AdminSystemWallet() {
     }
   };
 
-  // Reconcile state
-  const [reconciling, setReconciling] = useState(false);
+  // Reconcile state — REMOVED on 2026-06-01 per admin request (button cleared
+  // from Treasury Tools to reduce clutter). Keeping state stub commented out
+  // in case we want to bring it back behind an "advanced" toggle later.
+  // const [reconciling, setReconciling] = useState(false);
 
   // ─── Invoice preview modal state ─────────────────────────────────
   // When admin taps "View invoice/statement" on a txn row, we fetch the
@@ -347,39 +349,7 @@ export default function AdminSystemWallet() {
     }
   }, []);
 
-  const runReconcile = useCallback(() => {
-    Alert.alert(
-      "Reconcile books?",
-      "This recomputes each bucket from the transaction ledger (source of truth) and sets the headline total = sum of buckets. Safe to run any time — it never moves real money, just fixes display drift.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Reconcile",
-          style: "default",
-          onPress: async () => {
-            setReconciling(true);
-            try {
-              const { data } = await api.post("/admin/system-wallet/reconcile");
-              await load();
-              const diff = data?.diff || {};
-              const diffLines = Object.entries(diff)
-                .filter(([, v]: any) => Math.abs(Number(v) || 0) > 0.005)
-                .map(([k, v]: any) => `${k}: ${Number(v) > 0 ? "+" : ""}${formatINR(Number(v))}`)
-                .join("\n");
-              Alert.alert(
-                "Books reconciled",
-                diffLines || "No drift detected — books were already in sync.",
-              );
-            } catch (e) {
-              Alert.alert("Reconcile failed", formatApiError(e));
-            } finally {
-              setReconciling(false);
-            }
-          },
-        },
-      ],
-    );
-  }, [load]);
+  const runReconcile = useCallback(() => { /* deprecated 2026-06-01 */ }, []);
 
   const submitDeposit = async () => {    const amt = Number(amount);
     if (!amt || amt <= 0) return Alert.alert("Amount required");
@@ -622,23 +592,6 @@ export default function AdminSystemWallet() {
           for personal or business use). Properly audit-logged.
         </Text>
 
-        <TouchableOpacity
-          style={[styles.reconcileBtn, reconciling && { opacity: 0.6 }]}
-          onPress={runReconcile}
-          disabled={reconciling}
-          testID="reconcile-books"
-        >
-          {reconciling ? (
-            <ActivityIndicator size="small" color={colors.primary} />
-          ) : (
-            <Feather name="refresh-cw" size={15} color={colors.primary} />
-          )}
-          <Text style={styles.reconcileBtnText}>{reconciling ? "Reconciling…" : "Reconcile books"}</Text>
-        </TouchableOpacity>
-        <Text style={styles.helpText}>
-          Recomputes each bucket from the transaction ledger and fixes any drift. Run any time to verify books tally.
-        </Text>
-
         {/* ─── CSV Exports + Manual Adjustment (merged from old Finance Dashboard) ─── */}
         <Text style={[styles.sectionLabel, { marginTop: 18 }]}>Treasury Tools · Exports & Adjustments</Text>
         <NwActionRow
@@ -735,20 +688,9 @@ export default function AdminSystemWallet() {
           </View>
         ) : null}
 
-        <Text style={styles.sectionLabel}>Recent UTR Deposits</Text>
-        {(data?.deposits || []).length === 0 ? (
-          <View style={styles.empty}><Feather name="inbox" size={20} color={colors.textMuted} /><Text style={styles.emptyText}>No deposits yet</Text></View>
-        ) : (
-          (data?.deposits || []).map((d) => (
-            <View key={d.id} style={styles.depositRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.depAmount}>{formatINR(d.amount)} · UTR {d.utr}</Text>
-                {d.remarks ? <Text style={styles.depRemarks}>{d.remarks}</Text> : null}
-                <Text style={styles.depMeta}>{new Date(d.created_at).toLocaleString()} · {d.deposited_by_email || "system"}</Text>
-              </View>
-            </View>
-          ))
-        )}
+        {/* Recent UTR Deposits — removed 2026-06-01 per admin request:
+            the section was causing excessive scroll and is already
+            accessible via Group 7 Bank Ledger drill-down. */}
       </ScrollView>
 
       {/* ───────── Bucket detail drawer ───────── */}

@@ -1907,6 +1907,14 @@ async def update_bank(payload: BankUpdate, user: Dict[str, Any] = Depends(get_cu
 @api_router.post("/withdrawals")
 @_rl.limit("5/hour")
 async def request_withdrawal(request: Request, payload: WithdrawalRequest, user: Dict[str, Any] = Depends(require_clean_device)):
+    # Minimum withdrawal floor (2026-06-01): ₹100. Anything below is rejected
+    # at the API layer with a friendly message that includes the floor.
+    MIN_WITHDRAWAL_AMOUNT = 100.0
+    if float(payload.amount) < MIN_WITHDRAWAL_AMOUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Minimum withdrawal amount is ₹{int(MIN_WITHDRAWAL_AMOUNT)}. Please enter an amount of ₹{int(MIN_WITHDRAWAL_AMOUNT)} or more.",
+        )
     if not user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Complete registration payment first")
     if user.get("approval_status", "approved") != "approved":
@@ -2578,12 +2586,50 @@ async def admin_transactions(
             or t.get("razorpay_payment_id")
             or (f"TXN-{t['id'][:8].upper()}" if t.get("id") else None)
         )
+        # Invoice-like detail description (2026-06-01): if the txn doesn't
+        # have a rich description, synthesize one so the admin list shows
+        # WHO + WHAT + WHY + AMOUNT + REFERENCE on every single row.
+        TYPE_HUMAN = {
+            "registration_fee":      "Registration fee (Joining ₹118 = ₹100 + 18% GST)",
+            "referral_payout":       "Referral commission payout",
+            "withdrawal":            "User withdrawal to bank/UPI",
+            "gst_collected":         "GST 18% collected on registration",
+            "platform_fee_collected":"Platform fee collected on commission",
+            "direct_signup_credit":  "Direct signup credit to sponsor (Level 1)",
+            "order_payment":         "Shop order payment",
+            "service_booking":       "Service booking payment",
+            "system_deposit":        "Admin direct UTR deposit to system wallet",
+            "wallet_transfer":       "Peer-to-peer wallet transfer",
+            "transfer_in":           "Wallet credit received (transfer in)",
+            "transfer_out":          "Wallet debit sent (transfer out)",
+            "service_commission":    "Service commission credit",
+            "shopping_margin":       "Shopping margin earned",
+            "reversal":              "Transaction reversal (admin adjustment)",
+            "adjustment":            "Manual adjustment (admin)",
+            "manual_adjustment":     "Manual adjustment (admin)",
+        }
+        existing_desc = (t.get("description") or "").strip()
+        # Compose a self-describing line — invoice copy style
+        actor = u.get("name") or u.get("email") or t.get("user_id", "unknown user")
+        type_human = TYPE_HUMAN.get(t.get("type") or "", (t.get("type") or "").replace("_", " ").title())
+        level_str = ""
+        if t.get("level") is not None:
+            try:
+                level_str = f" · Level {int(t['level'])}"
+            except Exception:
+                pass
+        ref_str = f" · Ref {ref}" if ref else ""
+        # Status label
+        status_lbl = (t.get("status") or "").upper()
+        rich = f"{type_human}{level_str} · ₹{abs(float(t.get('amount') or 0)):.2f} · {actor}{ref_str} · {status_lbl}"
         enriched.append({
             **t,
             "user_name": u.get("name"),
             "user_email": u.get("email"),
             "user_referral_code": u.get("referral_code"),
             "reference_number": ref,
+            "description": existing_desc or rich,
+            "invoice_line": rich,  # Always populated, even when description exists
         })
     return enriched
 

@@ -208,7 +208,19 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
 
     gst_payable = round(gst_collected - gst_paid, 2)
 
-    # ── Group 5 — Expenses ────────────────────────────────────────────
+    # ── Group 5 — Operating Expenses ──────────────────────────────────
+    # NOTE (2026-06-01): `gst_paid` expenses are accounted under Group 3 (GST
+    # Ledger) as a payable settlement, NOT as an operating cost. We exclude
+    # them from Group 5 display so the admin doesn't see them counted twice
+    # (once as expense, once as GST paid). The bank_tally_out math below
+    # still uses `total_expenses` (inclusive of gst_paid) so the cash math
+    # remains exact — paying GST is a real cash outflow.
+    operating_exp_agg = await db.expenses.aggregate([
+        {"$match": {"status": "approved", "category": {"$ne": "gst_paid"}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    operating_expenses = float((operating_exp_agg or [{}])[0].get("sum") or 0)
+
     exp_agg = await db.expenses.aggregate([
         {"$match": {"status": "approved"}},
         {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
@@ -331,7 +343,10 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "collected": round(platform_fee_revenue, 2),
         },
         "group_5_expenses": {
-            "total": round(total_expenses, 2),
+            "total": round(operating_expenses, 2),
+            # Diagnostic: show what was hidden from this group because it
+            # belongs to Group 3 (GST Ledger) as a payable settlement.
+            "gst_paid_excluded": round(total_expenses - operating_expenses, 2),
         },
         "group_6_pending_withdrawals": {
             "pending_amount": round(pending_withdrawals, 2),
@@ -471,8 +486,12 @@ async def admin_finance_group_transactions(
         return {"title": "Group 4 · Platform Fee Ledger", "subtotal": round(subtotal, 2), "items": [_shape_txn(r) for r in rows]}
 
     # ── Group 5 — Expense Ledger (db.expenses) ───────────────────────
+    # Excludes category=gst_paid because those are shown under Group 3.
     if group_id == "group_5_expenses":
-        rows = await db.expenses.find({"status": "approved"}).sort("created_at", -1).limit(limit).to_list(limit)
+        rows = await db.expenses.find({
+            "status": "approved",
+            "category": {"$ne": "gst_paid"},
+        }).sort("created_at", -1).limit(limit).to_list(limit)
         items = []
         for e in rows:
             e.pop("_id", None)

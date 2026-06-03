@@ -44,6 +44,10 @@ export default function ChatThreadScreen() {
   const [picking, setPicking] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<Message | null>(null);
+  // Image preview / zoom modal (2026-06-01) — tap any image bubble to
+  // open it full-screen with a clean dark backdrop so subtle photos
+  // become clearly readable.
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const scrollRef = useRef<ScrollView | null>(null);
 
   const load = useCallback(async () => {
@@ -194,13 +198,22 @@ export default function ChatThreadScreen() {
                       <Text style={styles.avatarBubbleText}>{(thread?.other.name || "?").substring(0, 1).toUpperCase()}</Text>
                     </View>
                   ) : null}
-                  <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleTheirs, m.deleted && styles.bubbleDeleted]}>
+                  <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleTheirs, m.deleted && styles.bubbleDeleted, m.image_data_url && !m.deleted && styles.bubbleWithImage]}>
                     {m.deleted ? (
                       <Text style={styles.deletedText}>Message deleted</Text>
                     ) : (
                       <>
                         {m.image_data_url ? (
-                          <Image source={{ uri: m.image_data_url }} style={styles.bubbleImg} resizeMode="cover" />
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={() => setPreviewImage(m.image_data_url || null)}
+                            testID={`chat-image-${m.id}`}
+                          >
+                            <Image source={{ uri: m.image_data_url }} style={styles.bubbleImg} resizeMode="cover" />
+                            <View style={styles.imgZoomHint} pointerEvents="none">
+                              <Feather name="maximize-2" size={11} color="#FFFFFF" />
+                            </View>
+                          </TouchableOpacity>
                         ) : null}
                         {m.text ? <Text style={[styles.bubbleText, mine ? { color: colors.primaryFg } : { color: colors.textMain }]}>{m.text}</Text> : null}
                         <View style={styles.bubbleFooter}>
@@ -275,6 +288,22 @@ export default function ChatThreadScreen() {
           </View>
         </Pressable>
       </Modal>
+
+      {/* Full-screen image preview — opens when user taps any image bubble. */}
+      <Modal visible={!!previewImage} transparent animationType="fade" onRequestClose={() => setPreviewImage(null)} statusBarTranslucent>
+        <Pressable style={styles.previewBackdrop} onPress={() => setPreviewImage(null)} testID="chat-image-preview-backdrop">
+          {previewImage ? (
+            <Image source={{ uri: previewImage }} style={styles.previewImg} resizeMode="contain" />
+          ) : null}
+          <TouchableOpacity
+            onPress={() => setPreviewImage(null)}
+            style={styles.previewClose}
+            testID="chat-image-preview-close"
+          >
+            <Feather name="x" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -300,12 +329,17 @@ const styles = StyleSheet.create({
   emptyState: { alignItems: "center", paddingVertical: 40, gap: 6 },
   emptyStateText: { fontSize: 13, color: colors.textMuted },
   bubble: { maxWidth: "78%", paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, marginVertical: 2 },
+  // When a bubble contains ONLY/primarily an image, drop the inner padding +
+  // softer the bottom corner so the image edges aren't framed by a heavy
+  // colored border. Makes the photo itself the focus.
+  bubbleWithImage: { paddingHorizontal: 4, paddingVertical: 4, paddingBottom: 6 },
   bubbleMine: { backgroundColor: colors.primary, borderBottomRightRadius: 4 },
   bubbleTheirs: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderBottomLeftRadius: 4 },
   bubbleDeleted: { opacity: 0.7, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, borderStyle: "dashed" },
   bubbleText: { fontSize: 14, lineHeight: 19 },
   deletedText: { fontSize: 12, fontStyle: "italic", color: colors.textMuted },
-  bubbleImg: { width: 220, height: 220, borderRadius: 12, marginBottom: 4 },
+  bubbleImg: { width: 240, height: 240, borderRadius: 12, marginBottom: 4, backgroundColor: "#000" },
+  imgZoomHint: { position: "absolute", right: 8, bottom: 10, width: 22, height: 22, borderRadius: 11, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
   bubbleFooter: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", marginTop: 3, gap: 2 },
   bubbleMeta: { fontSize: 9, color: colors.textMuted, letterSpacing: 0.3 },
   avatarBubble: { width: 26, height: 26, borderRadius: 13, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center", marginBottom: 4 },
@@ -322,4 +356,8 @@ const styles = StyleSheet.create({
   sheetRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12 },
   sheetRowDisabled: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, opacity: 0.5 },
   sheetRowText: { fontSize: 14, fontWeight: "700", color: colors.textMain },
+  // Full-screen image preview overlay.
+  previewBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.94)", alignItems: "center", justifyContent: "center" },
+  previewImg: { width: "100%", height: "100%" },
+  previewClose: { position: "absolute", top: 50, right: 18, width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" },
 });
