@@ -21,12 +21,21 @@ import { GradientCard } from "../src/gradient-card";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
 export default function Login() {
-  const { login, sessionEndReason, clearSessionEnd } = useAuth();
+  const {
+    login,
+    sessionEndReason,
+    clearSessionEnd,
+    biometricAvailable,
+    biometricReady,
+    biometricEmailHint,
+    loginWithBiometric,
+  } = useAuth();
   const { app_name, tagline, login_subtitle } = useBranding();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [bioLoading, setBioLoading] = useState(false);
   const [error, setError] = useState("");
 
   // Friendly banner shown when the user landed here because their session
@@ -62,6 +71,19 @@ export default function Login() {
       setError(formatApiError(e));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const onBiometric = async () => {
+    setError("");
+    setBioLoading(true);
+    try {
+      const u = await loginWithBiometric();
+      navigateAfter(u);
+    } catch (e: any) {
+      setError(e?.message || "Fingerprint login failed");
+    } finally {
+      setBioLoading(false);
     }
   };
 
@@ -141,6 +163,44 @@ export default function Login() {
             )}
           </TouchableOpacity>
 
+          {/* Biometric login — only rendered on devices that support it AND
+              where the user previously opted in. Falls back gracefully on
+              web / unsupported devices. */}
+          {biometricReady ? (
+            <>
+              <View style={styles.bioDivider}>
+                <View style={styles.bioLine} />
+                <Text style={styles.bioDividerText}>or</Text>
+                <View style={styles.bioLine} />
+              </View>
+              <TouchableOpacity
+                testID="login-biometric-button"
+                style={[styles.bioBtn, bioLoading && { opacity: 0.6 }]}
+                onPress={onBiometric}
+                disabled={bioLoading || loading}
+              >
+                {bioLoading ? (
+                  <ActivityIndicator color={colors.primary} size="small" />
+                ) : (
+                  <>
+                    <Feather name="unlock" size={18} color={colors.primary} />
+                    <Text style={styles.bioBtnText}>
+                      Login with Fingerprint
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              {biometricEmailHint ? (
+                <Text style={styles.bioHint}>Welcome back, {biometricEmailHint}</Text>
+              ) : null}
+            </>
+          ) : biometricAvailable ? (
+            <Text style={styles.bioEnableHint}>
+              Tip: After login, enable Fingerprint from Profile for faster
+              access next time.
+            </Text>
+          ) : null}
+
           <View style={styles.footerRow}>
             <Text style={styles.muted}>New here?</Text>
             <Link href="/register" asChild>
@@ -207,6 +267,25 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   primaryBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 16 },
+  // Biometric ("Login with Fingerprint") UI
+  bioDivider: { flexDirection: "row", alignItems: "center", marginTop: 16, marginBottom: 6 },
+  bioLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  bioDividerText: { marginHorizontal: 12, fontSize: 12, color: colors.textMuted, fontWeight: "700", letterSpacing: 0.5 },
+  bioBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    borderRadius: radii.button,
+    paddingVertical: 14,
+    marginTop: 6,
+  },
+  bioBtnText: { color: colors.primary, fontWeight: "800", fontSize: 15, letterSpacing: 0.3 },
+  bioHint: { fontSize: 12, color: colors.textMuted, textAlign: "center", marginTop: 8 },
+  bioEnableHint: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 14, lineHeight: 16, fontStyle: "italic" },
   footerRow: { flexDirection: "row", justifyContent: "center", marginTop: 24 },
   muted: { color: colors.textMuted, fontSize: 14 },
   link: { color: colors.primary, fontWeight: "700", fontSize: 14 },

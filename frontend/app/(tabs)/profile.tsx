@@ -21,7 +21,15 @@ import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 
 export default function ProfileScreen() {
-  const { user, logout, refresh } = useAuth();
+  const {
+    user,
+    logout,
+    refresh,
+    biometricAvailable,
+    biometricReady,
+    enableBiometric,
+    disableBiometric,
+  } = useAuth();
   const router = useRouter();
   const [upi, setUpi] = useState("");
   const [bank, setBank] = useState("");
@@ -29,6 +37,27 @@ export default function ProfileScreen() {
   const [holder, setHolder] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
+  const [bioBusy, setBioBusy] = useState(false);
+
+  const onToggleBiometric = useCallback(async () => {
+    setBioBusy(true);
+    try {
+      if (biometricReady) {
+        await disableBiometric();
+        Alert.alert("Fingerprint login disabled", "You'll need to use your password to sign in next time.");
+      } else {
+        await enableBiometric();
+        Alert.alert(
+          "Fingerprint login enabled",
+          "Next time, just tap 'Login with Fingerprint' on the login screen.",
+        );
+      }
+    } catch (e: any) {
+      Alert.alert("Couldn't update fingerprint login", e?.message || "Unknown error");
+    } finally {
+      setBioBusy(false);
+    }
+  }, [biometricReady, enableBiometric, disableBiometric]);
 
   useEffect(() => {
     setUpi(user?.upi_id || "");
@@ -229,6 +258,41 @@ export default function ProfileScreen() {
             </TouchableOpacity>
           </View>
 
+          {/* Fingerprint / Biometric login card — only on supported devices */}
+          {biometricAvailable ? (
+            <View style={styles.bioCard}>
+              <View style={styles.bioCardHead}>
+                <View style={styles.bioIcon}>
+                  <Feather name={biometricReady ? "shield" : "unlock"} size={18} color={colors.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bioCardTitle}>
+                    {biometricReady ? "Fingerprint login enabled" : "Fingerprint login"}
+                  </Text>
+                  <Text style={styles.bioCardSub}>
+                    {biometricReady
+                      ? "Tap your fingerprint to sign in next time — no password needed."
+                      : "Skip typing your password — sign in with your phone's fingerprint or Face ID."}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity
+                onPress={onToggleBiometric}
+                disabled={bioBusy}
+                style={[styles.bioToggleBtn, biometricReady && styles.bioToggleBtnOff, bioBusy && { opacity: 0.6 }]}
+                testID="profile-toggle-biometric"
+              >
+                {bioBusy ? (
+                  <ActivityIndicator size="small" color={biometricReady ? "#B3261E" : colors.primaryFg} />
+                ) : (
+                  <Text style={[styles.bioToggleBtnText, biometricReady && { color: "#B3261E" }]}>
+                    {biometricReady ? "Disable Fingerprint Login" : "Enable Fingerprint Login"}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          ) : null}
+
           <TouchableOpacity onPress={onLogout} style={styles.logoutBtn} testID="profile-logout">
             <Feather name="log-out" size={16} color="#B3261E" />
             <Text style={styles.logoutText}>Logout</Text>
@@ -278,5 +342,31 @@ const styles = StyleSheet.create({
   // Logout: subtle outlined button instead of naked text — clearer affordance
   // and visually anchors the bottom of the screen.
   logoutBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: spacing.sectionGap, marginBottom: 8, paddingVertical: 14, borderRadius: radii.button, borderWidth: 1, borderColor: "#F2B8B5", backgroundColor: "#FFF6F5" },
+  // Fingerprint / Biometric card
+  bioCard: {
+    marginTop: spacing.sectionGap,
+    padding: 16,
+    borderRadius: radii.card,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  bioCardHead: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
+  bioIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: colors.brand100,
+    alignItems: "center", justifyContent: "center",
+  },
+  bioCardTitle: { fontSize: 15, fontWeight: "800", color: colors.textMain, marginBottom: 2 },
+  bioCardSub: { fontSize: 12, color: colors.textMuted, lineHeight: 17 },
+  bioToggleBtn: {
+    marginTop: 12,
+    paddingVertical: 12,
+    borderRadius: radii.button,
+    backgroundColor: colors.primary,
+    alignItems: "center",
+  },
+  bioToggleBtnOff: { backgroundColor: "#FFF6F5", borderWidth: 1, borderColor: "#F2B8B5" },
+  bioToggleBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14, letterSpacing: 0.3 },
   logoutText: { color: "#B3261E", fontSize: 14, fontWeight: "700" },
 });

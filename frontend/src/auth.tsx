@@ -3,6 +3,14 @@ import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { api, setAuthToken, setSessionTokens, onSessionInvalidated } from "./api";
 import { runAndCacheIntegrity, IntegrityVerdict } from "./tamper-detection";
+import {
+  authenticateAndGetTokens,
+  disableBiometricLogin,
+  enableBiometricLogin,
+  getBiometricCapability,
+  isBiometricLoginReady,
+  syncBiometricTokens,
+} from "./biometric";
 
 export type User = {
   id: string;
@@ -46,6 +54,23 @@ type AuthState = {
   /** Force a re-run of the integrity checks (e.g. after a fresh login or
    *  on a payment screen entrance). */
   recheckIntegrity: () => Promise<IntegrityVerdict | null>;
+
+  // ── Biometric (fingerprint / Face ID) login ──────────────────────────
+  /** Whether the device supports biometrics AND the user has enrolled one. */
+  biometricAvailable: boolean;
+  /** Whether the user has previously opted-in on this device, has a cached
+   *  token, and can therefore tap "Login with fingerprint". */
+  biometricReady: boolean;
+  /** Masked email associated with the cached biometric token. Shown on the
+   *  login screen so the user knows whose session will be unlocked. */
+  biometricEmailHint: string | null;
+  /** Run the OS biometric prompt and, on success, restore the cached
+   *  session. Returns the User on success or throws Error("…") on failure. */
+  loginWithBiometric: () => Promise<User>;
+  /** Opt in: stash the current token securely + flip the enabled flag. */
+  enableBiometric: () => Promise<void>;
+  /** Opt out: wipe stored tokens + disable. */
+  disableBiometric: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -55,6 +80,29 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(false);
   const [sessionEndReason, setSessionEndReason] = useState<AuthState["sessionEndReason"]>(null);
   const [integrity, setIntegrity] = useState<IntegrityVerdict | null>(null);
+  // ── Biometric state ────────────────────────────────────────────────
+  const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricReady, setBiometricReady] = useState(false);
+  const [biometricEmailHint, setBiometricEmailHint] = useState<string | null>(null);
+
+  // Re-evaluate biometric readiness — called on mount and after enable/disable.
+  const refreshBiometricStatus = async () => {
+    try {
+      const cap = await getBiometricCapability();
+      setBiometricAvailable(cap.available);
+      const r = await isBiometricLoginReady();
+      setBiometricReady(r.ready);
+      setBiometricEmailHint(r.emailHint);
+    } catch {
+      setBiometricAvailable(false);
+      setBiometricReady(false);
+      setBiometricEmailHint(null);
+    }
+  };
+
+  useEffect(() => {
+    refreshBiometricStatus();
+  }, []);
 
   // Phase 3 — run the integrity battery + POST verdict to the backend.
   // Always backgrounded (never blocks UI) and tolerant of failures —
@@ -112,6 +160,45 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     // backend stamp on this user is up-to-date before they touch any
     // financial action. Fire-and-forget; we don't block the UI.
     recheckIntegrity().catch(() => {});
+    // Refresh biometric cache so the cached token doesn't go stale.
+    syncBiometricTokens(data.token ?? null, data.refresh_token ?? null)
+      .then(refreshBiometricStatus)
+      .catch(() => {});
+  };
+
+  // ── Biometric methods ────────────────────────────────────────────
+  const loginWithBiometric = async (): Promise<User> => {
+    const r = await authenticateAndGetTokens();
+    if (!r.ok) throw new Error(r.reason);
+    await setSessionTokens(r.token, r.refreshToken);
+    try {
+      const { data } = await api.get<User>("/auth/me");
+      setUser(data);
+      setSessionEndReason(null);
+      recheckIntegrity().catch(() => {});
+      return data;
+    } catch (e: any) {
+      // Cached token is bad — wipe biometric so user can re-enroll on next
+      // password login. Surface a friendly error.
+      await disableBiometricLogin();
+      await refreshBiometricStatus();
+      await setSessionTokens(null, null);
+      throw new Error("Your saved session has expired. Please login with password once.");
+    }
+  };
+
+  const enableBiometric = async (): Promise<void> => {
+    const token = await AsyncStorage.getItem("auth_token");
+    const refresh = await AsyncStorage.getItem("refresh_token");
+    if (!token) throw new Error("Please login with password first.");
+    if (!user?.email) throw new Error("Could not read your email — please re-login.");
+    await enableBiometricLogin({ token, refreshToken: refresh, email: user.email });
+    await refreshBiometricStatus();
+  };
+
+  const disableBiometric = async (): Promise<void> => {
+    await disableBiometricLogin();
+    await refreshBiometricStatus();
   };
 
   const login = async (email: string, password: string) => {
@@ -148,6 +235,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     // (offline), the local wipe below will sign the user out on this device.
     try { await api.post("/auth/logout"); } catch { /* ignore */ }
     await setSessionTokens(null, null);
+    // Also wipe biometric cache so the next user on this phone doesn't get
+    // auto-logged into the previous user's account.
+    await disableBiometricLogin().catch(() => {});
+    await refreshBiometricStatus();
     setUser(null);
     setSessionEndReason(null);
   };
@@ -161,6 +252,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         login, register, logout, refresh, setSession,
         sessionEndReason, clearSessionEnd,
         integrity, recheckIntegrity,
+        biometricAvailable, biometricReady, biometricEmailHint,
+        loginWithBiometric, enableBiometric, disableBiometric,
       }}
     >
       {children}
