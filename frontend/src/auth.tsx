@@ -130,6 +130,23 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setUser(null);
         return;
       }
+      // 2026-06-10 — When biometric is enabled, every cold app launch must
+      // gate behind the fingerprint screen instead of silently restoring
+      // the previous session. We leave `user = null` so the navigator
+      // routes to /login, where the auto-prompt fires the fingerprint
+      // sheet. After a successful scan, `loginWithBiometric()` re-hydrates
+      // the user from the cached tokens (already in SecureStore).
+      //
+      // Without this, the user could close + reopen the app and land
+      // straight on the dashboard — bypassing the biometric gate the
+      // user explicitly asked us to add. We probe AsyncStorage directly
+      // here because the biometric state hook hasn't run yet at this
+      // point in the boot sequence.
+      const bioEnabled = (await AsyncStorage.getItem("biometric_enabled_v1")) === "1";
+      if (bioEnabled) {
+        setUser(null);
+        return;
+      }
       await refresh();
       // Phase 3 — restored session → re-run integrity check so the
       // server's stamp on this user reflects the CURRENT device, not the
@@ -261,29 +278,23 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const logout = async () => {
-    // 2026-06-07 fix: If biometric login is enabled, we must NOT call the
-    // server's /auth/logout endpoint, because that endpoint invalidates the
-    // `active_session_id` — and the biometric flow expects the cached token
-    // to still be accepted by the server on the next fingerprint login.
+    // 2026-06-10 — Explicit Logout is the ONLY way (other than the "Use a
+    // different account" link on the login screen) to break out of the
+    // biometric lock-in and sign in as a different user. So we always:
+    //   1. Call the server's /auth/logout to invalidate the access token
+    //      and active_session_id.
+    //   2. Clear both AsyncStorage tokens.
+    //   3. Wipe the encrypted biometric cache so the login screen falls
+    //      back to the email + password form.
+    //   4. Clear in-memory user.
     //
-    // Behaviour:
-    //  • biometricReady === true  → local logout only (token+refresh stay
-    //    encrypted in SecureStore, server session stays alive, fingerprint
-    //    can resume the same session).
-    //  • biometricReady === false → full server logout (active_session_id
-    //    wiped on the backend so the token can't be used elsewhere).
-    if (!biometricReady) {
-      try { await api.post("/auth/logout"); } catch { /* ignore */ }
-    }
+    // This is different from a cold app launch — closing the app preserves
+    // the biometric cache so the fingerprint screen can resume the session
+    // (see useEffect in AuthProvider for that flow).
+    try { await api.post("/auth/logout"); } catch { /* ignore offline */ }
     await setSessionTokens(null, null);
-    // NOTE: We intentionally do NOT wipe the biometric cache on logout. The
-    // biometric token is protected by the user's own fingerprint and only
-    // unlocks on THIS device. Wiping it on every logout would force the
-    // user to re-enroll on every single login cycle — exactly the friction
-    // we are trying to remove. The cache IS wiped when (a) the user
-    // explicitly disables from Profile, (b) the cached token is rejected
-    // by /auth/me inside `loginWithBiometric`, or (c) a different account
-    // logs in with password (handled inside `syncBiometricTokens`).
+    await disableBiometricLogin().catch(() => {});
+    await refreshBiometricStatus();
     setUser(null);
     setSessionEndReason(null);
   };

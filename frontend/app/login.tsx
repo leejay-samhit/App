@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   Platform,
   ScrollView,
   ActivityIndicator,
+  Alert,
 } from "react-native";
 import { useRouter, Link } from "expo-router";
 import { Feather } from "@expo/vector-icons";
@@ -29,6 +30,7 @@ export default function Login() {
     biometricReady,
     biometricEmailHint,
     loginWithBiometric,
+    disableBiometric,
   } = useAuth();
   const { app_name, tagline, login_subtitle } = useBranding();
   const router = useRouter();
@@ -37,6 +39,32 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [bioLoading, setBioLoading] = useState(false);
   const [error, setError] = useState("");
+  // When biometric is enabled the password form is hidden. User can tap
+  // "Use a different account" to force-disable biometric and unlock the
+  // password fields. Tracked separately from biometricReady so we don't
+  // accidentally flicker the UI mid-disable.
+  const [forcePassword, setForcePassword] = useState(false);
+
+  // Auto-prompt fingerprint when the login screen mounts AND the user has
+  // previously enabled biometric. We only do this once per mount so it
+  // doesn't re-trigger after a user cancels. Skipped on web (no support).
+  const autoPromptedRef = useRef(false);
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    if (!biometricReady) return;
+    if (autoPromptedRef.current) return;
+    autoPromptedRef.current = true;
+    // Fire and forget — onBiometric handles its own loading + errors.
+    // Adding a tiny delay so the splash overlay has time to unmount and
+    // the OS biometric sheet animates in cleanly without overlapping it.
+    const t = setTimeout(() => { onBiometric(); }, 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [biometricReady]);
+
+  // When biometric is enabled, the password form is hidden by default.
+  // Showing it requires explicit "Use a different account" confirmation.
+  const showPasswordForm = !biometricReady || forcePassword;
 
   // Friendly banner shown when the user landed here because their session
   // was ended remotely (signed in on another device, refresh token expired,
@@ -87,6 +115,37 @@ export default function Login() {
     }
   };
 
+  // "Use a different account" — requires explicit confirmation because it
+  // wipes the cached biometric session. After confirmation, the password
+  // form replaces the fingerprint UI so the user can sign in as someone
+  // else. This is the ONLY in-app path to unlock the password form when
+  // biometric is enabled.
+  const onUseDifferentAccount = () => {
+    Alert.alert(
+      "Switch account?",
+      "Fingerprint login will be disabled and the saved session for " +
+        (biometricEmailHint || "this account") +
+        " will be removed from this phone. Continue?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Yes, switch",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await disableBiometric();
+              autoPromptedRef.current = true; // don't re-prompt after disable
+              setForcePassword(true);
+              setError("");
+            } catch (e: any) {
+              Alert.alert("Could not switch account", e?.message || "Try again");
+            }
+          },
+        },
+      ],
+    );
+  };
+
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView
@@ -122,78 +181,90 @@ export default function Login() {
               </TouchableOpacity>
             </View>
           ) : null}
-          <View style={styles.formGroup}>
-            <Text style={styles.label}>Email</Text>
-            <TextInput
-              testID="login-email-input"
-              value={email}
-              onChangeText={setEmail}
-              autoCapitalize="none"
-              keyboardType="email-address"
-              placeholder="you@example.com"
-              placeholderTextColor={colors.textMuted}
-              style={styles.input}
-            />
-          </View>
-          <View style={styles.formGroup}>
-            <Text style={styles.label}>Password</Text>
-            <TextInput
-              testID="login-password-input"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              placeholder="Your password"
-              placeholderTextColor={colors.textMuted}
-              style={styles.input}
-            />
-          </View>
-
-          {error ? <Text style={styles.error} testID="login-error">{error}</Text> : null}
-
-          <TouchableOpacity
-            testID="login-submit-button"
-            style={[styles.primaryBtn, loading && { opacity: 0.7 }]}
-            onPress={onSubmit}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color={colors.primaryFg} />
-            ) : (
-              <Text style={styles.primaryBtnText}>Sign in</Text>
-            )}
-          </TouchableOpacity>
-
-          {/* Biometric login — only rendered on devices that support it AND
-              where the user previously opted in. Falls back gracefully on
-              web / unsupported devices. */}
-          {biometricReady ? (
+          {/* ── Email + Password — hidden when biometric is enabled ── */}
+          {showPasswordForm ? (
             <>
-              <View style={styles.bioDivider}>
-                <View style={styles.bioLine} />
-                <Text style={styles.bioDividerText}>or</Text>
-                <View style={styles.bioLine} />
+              <View style={styles.formGroup}>
+                <Text style={styles.label}>Email</Text>
+                <TextInput
+                  testID="login-email-input"
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  placeholder="you@example.com"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.input}
+                />
               </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.label}>Password</Text>
+                <TextInput
+                  testID="login-password-input"
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry
+                  placeholder="Your password"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.input}
+                />
+              </View>
+
+              {error ? <Text style={styles.error} testID="login-error">{error}</Text> : null}
+
+              <TouchableOpacity
+                testID="login-submit-button"
+                style={[styles.primaryBtn, loading && { opacity: 0.7 }]}
+                onPress={onSubmit}
+                disabled={loading}
+              >
+                {loading ? (
+                  <ActivityIndicator color={colors.primaryFg} />
+                ) : (
+                  <Text style={styles.primaryBtnText}>Sign in</Text>
+                )}
+              </TouchableOpacity>
+            </>
+          ) : null}
+
+          {/* Biometric login — when enabled, this is the PRIMARY login. The
+              password form is hidden above. User must explicitly tap "Use a
+              different account" below to switch accounts. */}
+          {biometricReady ? (
+            <View style={styles.bioPrimaryCard}>
+              <View style={styles.bioIconBig}>
+                <Feather name="unlock" size={32} color={colors.primary} />
+              </View>
+              <Text style={styles.bioPrimaryTitle}>Welcome back</Text>
+              {biometricEmailHint ? (
+                <Text style={styles.bioPrimarySub}>{biometricEmailHint}</Text>
+              ) : null}
+              {error ? (
+                <Text style={[styles.error, { marginTop: 4 }]} testID="login-error">{error}</Text>
+              ) : null}
               <TouchableOpacity
                 testID="login-biometric-button"
-                style={[styles.bioBtn, bioLoading && { opacity: 0.6 }]}
+                style={[styles.bioBtn, bioLoading && { opacity: 0.6 }, { marginTop: 12, alignSelf: "stretch" }]}
                 onPress={onBiometric}
-                disabled={bioLoading || loading}
+                disabled={bioLoading}
               >
                 {bioLoading ? (
                   <ActivityIndicator color={colors.primary} size="small" />
                 ) : (
                   <>
                     <Feather name="unlock" size={18} color={colors.primary} />
-                    <Text style={styles.bioBtnText}>
-                      Login with Fingerprint
-                    </Text>
+                    <Text style={styles.bioBtnText}>Login with Fingerprint</Text>
                   </>
                 )}
               </TouchableOpacity>
-              {biometricEmailHint ? (
-                <Text style={styles.bioHint}>Welcome back, {biometricEmailHint}</Text>
-              ) : null}
-            </>
+              <TouchableOpacity
+                onPress={onUseDifferentAccount}
+                style={styles.bioSwitchLink}
+                testID="login-switch-account"
+              >
+                <Text style={styles.bioSwitchText}>Use a different account</Text>
+              </TouchableOpacity>
+            </View>
           ) : biometricAvailable ? (
             <Text style={styles.bioEnableHint}>
               Tip: After login, enable Fingerprint from Profile for faster
@@ -286,6 +357,27 @@ const styles = StyleSheet.create({
   bioBtnText: { color: colors.primary, fontWeight: "800", fontSize: 15, letterSpacing: 0.3 },
   bioHint: { fontSize: 12, color: colors.textMuted, textAlign: "center", marginTop: 8 },
   bioEnableHint: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 14, lineHeight: 16, fontStyle: "italic" },
+  // Prominent fingerprint card shown as the PRIMARY login when biometric
+  // is enabled. Hides the password form entirely.
+  bioPrimaryCard: {
+    marginTop: 24,
+    padding: 24,
+    borderRadius: radii.card,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+  },
+  bioIconBig: {
+    width: 64, height: 64, borderRadius: 32,
+    backgroundColor: colors.brand100,
+    alignItems: "center", justifyContent: "center",
+    marginBottom: 12,
+  },
+  bioPrimaryTitle: { fontSize: 18, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
+  bioPrimarySub: { fontSize: 13, color: colors.textMuted, fontWeight: "700", marginTop: 4 },
+  bioSwitchLink: { marginTop: 14, paddingVertical: 8 },
+  bioSwitchText: { fontSize: 13, fontWeight: "700", color: colors.textMuted, textDecorationLine: "underline" },
   footerRow: { flexDirection: "row", justifyContent: "center", marginTop: 24 },
   muted: { color: colors.textMuted, fontSize: 14 },
   link: { color: colors.primary, fontWeight: "700", fontSize: 14 },

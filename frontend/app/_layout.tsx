@@ -1,8 +1,10 @@
 import { Stack } from "expo-router";
+import { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
 import { Text, TextInput, View, useWindowDimensions, StyleSheet, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import * as SplashScreen from "expo-splash-screen";
 import { AuthProvider, useAuth } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
 import { LocationGate } from "../src/location-gate";
@@ -10,6 +12,16 @@ import { SplashOverlay } from "../src/splash-overlay";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
 import { colors } from "../src/theme";
 import { TABLET_MIN_WIDTH, READABLE_MAX_WIDTH } from "../src/theme";
+
+// Keep the native (Expo) splash screen visible until React Native has had a
+// chance to mount our own JS splash overlay. Without this, there's a brief
+// FAF9F6 (off-white) flash between the moment the native splash auto-hides
+// and the moment our `<SplashOverlay/>` renders the dark-green brand splash.
+// Calling preventAutoHideAsync() at module-load (outside any component)
+// guarantees we win the race against the auto-hide.
+SplashScreen.preventAutoHideAsync().catch(() => {
+  /* Safe to ignore — fails on web / when called twice. */
+});
 
 // Apply the active font to every Text/TextInput by extending defaultProps.
 // Also caps font scaling at 1.2× so users with very large system fonts don't
@@ -63,8 +75,15 @@ function TamperGate({ children }: { children: React.ReactNode }) {
 }
 
 export default function RootLayout() {
+  // Once React has mounted and our SplashOverlay is in the tree, hide the
+  // native Expo splash. The handoff to the JS-rendered splash is now
+  // seamless — no off-white flash between them.
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
   return (
-    <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.background }}>
+    <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#143D2E" }}>
       <SafeAreaProvider>
         <BrandingProvider>
           <AuthProvider>
@@ -85,7 +104,11 @@ export default function RootLayout() {
                     <Stack
                       screenOptions={{
                         headerShown: false,
-                        contentStyle: { backgroundColor: colors.background },
+                        // Use the splash brand color as the screen background
+                        // so the brief frame between splash unmount and the
+                        // login screen mount blends into the splash colour
+                        // instead of flashing off-white (FAF9F6).
+                        contentStyle: { backgroundColor: "#143D2E" },
                         animation: "fade",
                       }}
                     />

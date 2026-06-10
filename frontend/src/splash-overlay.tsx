@@ -15,8 +15,11 @@ export function SplashOverlay() {
   const [visible, setVisible] = useState(true);
 
   useEffect(() => {
-    // Default duration 5s if branding doesn't specify
-    const dur = Math.max(1000, Math.min(10000, Number(b.splash_duration_ms || 5000)));
+    // Default duration 1.5s — short enough to feel snappy, long enough for
+    // the BrandingProvider to fetch /api/branding and for AuthProvider to
+    // hydrate the persisted session. The native splash now stays up until
+    // we mount (see _layout.tsx), so there's no white flash before us.
+    const dur = Math.max(800, Math.min(10000, Number(b.splash_duration_ms || 1500)));
     const t = setTimeout(() => setVisible(false), dur);
     return () => clearTimeout(t);
   }, [b.splash_duration_ms]);
