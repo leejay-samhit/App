@@ -223,19 +223,54 @@ export function ShopHome({
     } finally { setLoading(false); }
   }, []);
 
-  // Admin-managed categories — fetched in parallel with products. Falls
-  // back to FALLBACK_CATEGORIES on any error so the strip is never empty.
+  // Admin-managed categories — fetched in parallel with products.
+  //
+  // 2026-06-10 — Two bugs fixed here:
+  //   1. Initial render previously fell back to FALLBACK_CATEGORIES (a
+  //      hardcoded list including "Sarees", "Men", "Women" etc.) for the
+  //      ~200-300 ms window between mount and the first /shop-categories
+  //      response. Result: user saw OLD icons flash, then the screen
+  //      "corrected" itself once the API returned. The fix is to hydrate
+  //      from a persisted AsyncStorage cache (last good API response) on
+  //      mount, so the strip shows the REAL admin categories instantly
+  //      and only ever transitions to "fresher real" data — never to
+  //      "stale hardcoded" data.
+  //
+  //   2. If both cache + API fail (first install offline), we still
+  //      DON'T fall back to the hardcoded list. Instead we render an
+  //      empty strip so the user never sees obsolete category names.
+  const SHOP_CATS_CACHE = "@app/shopCategoriesV1";
   const loadCategories = useCallback(async () => {
     try {
       const r = await api.get<{ items: ApiCategory[] }>("/shop-categories");
       const items = (r.data?.items || []).filter((c) => c.active !== false);
       items.sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
       setApiCategories(items);
+      // Persist for next launch so the strip never flashes old icons.
+      try { await AsyncStorage.setItem(SHOP_CATS_CACHE, JSON.stringify(items)); } catch { /* quota / disabled storage */ }
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn("ShopHome /shop-categories failed:", formatApiError(e));
-      setApiCategories(null);
+      // Don't clobber existing state on transient errors — keep whatever
+      // we already had (likely the cache hydrated on mount).
     }
+  }, []);
+
+  // Hydrate from cache BEFORE the first network response so the very
+  // first frame already shows the admin's real categories, not the
+  // hardcoded fallback. The API call still runs immediately after and
+  // overrides this with the freshest data.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cached = await AsyncStorage.getItem(SHOP_CATS_CACHE);
+        if (!cached || cancelled) return;
+        const parsed: ApiCategory[] = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) setApiCategories(parsed);
+      } catch { /* ignore cache miss / corruption */ }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => { load(); loadCategories(); }, [load, loadCategories]);
@@ -533,20 +568,42 @@ export function ShopHome({
             <Text style={[styles.catLabel, activeCategory === "all" && { color: colors.primary, fontWeight: "800" }]}>All</Text>
           </TouchableOpacity>
 
-          {/* Admin categories (max 6 in the strip — rest live in the More modal) */}
-          {(apiCategories || FALLBACK_CATEGORIES.filter((c) => c.key !== "all")).slice(0, 6).map((c: any) => {
-            const key = c.id ? c.name : c.key;
-            const label = c.name || c.label || "";
-            const pack: CatIconPack = c.icon_pack || c.pack || "feather";
-            const iconName = c.icon_name || c.icon || "shopping-bag";
+          {/* Admin categories — strictly from /api/shop-categories (cache-hydrated).
+              NEVER falls back to FALLBACK_CATEGORIES here because that
+              caused old/stale category names (Sarees, Men, etc) to flash
+              before the API returned. Empty array → render nothing until
+              data arrives. Max 6 in the strip, rest live in the More
+              modal. */}
+          {(apiCategories || []).slice(0, 6).map((c: ApiCategory) => {
+            const key = c.id || c.name;
+            const label = c.name;
+            const pack: CatIconPack = c.icon_pack || "feather";
+            const iconName = c.icon_name || "shopping-bag";
             const color = c.color || "#E5F2EC";
             const imageUrl = c.image_url || null;
-            const active = activeCategory === key;
+            const active = activeCategory === c.name;
             return (
               <TouchableOpacity
-                key={c.id || key}
+                key={key}
                 style={styles.catItem}
-                onPress={() => setActiveCategory(key)}
+                onPress={() => {
+                  // 2026-06-10 — Tapping a category in the home strip
+                  // now NAVIGATES to /shop-category/<name> instead of
+                  // just locally filtering the list. The local-filter
+                  // path used `p.category === activeCategory` which
+                  // silently returned 0 products whenever the admin
+                  // category name didn't exactly match the field on
+                  // product docs (a common case after a rename or when
+                  // products are stored with category_id but the strip
+                  // uses category_name). The dedicated category screen
+                  // is case-insensitive and falls through category_id /
+                  // category_name / category, so it Just Works™ — same
+                  // as the "More → tap" path that the user already
+                  // confirmed shows products correctly.
+                  router.push(
+                    `${categoryRoutePrefix}/shop-category/${encodeURIComponent(c.name)}` as any,
+                  );
+                }}
                 activeOpacity={0.75}
                 testID={`home-cat-${key}`}
               >
