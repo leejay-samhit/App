@@ -113,6 +113,14 @@ type Ctx = {
   loading: boolean;
 };
 
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+// Persisted last-good branding response. Hydrated synchronously-ish on
+// BrandingProvider mount so the very first paint already shows the LIVE
+// app_name / tagline / colors / logo — instead of flashing the hardcoded
+// DEFAULT_BRANDING (e.g. "NetworkPay" → "NetworkRupay").
+const BRANDING_CACHE_KEY = "@app/brandingV1";
+
 const BrandingContext = createContext<Ctx | undefined>(undefined);
 
 export function BrandingProvider({ children }: { children: React.ReactNode }) {
@@ -158,16 +166,31 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
         tabs: Array.isArray(data?.tabs) && data.tabs.length ? data.tabs : DEFAULT_BRANDING.tabs,
       };
       setBranding(merged);
+      // Persist for next launch so first paint already shows LIVE branding.
+      try { await AsyncStorage.setItem(BRANDING_CACHE_KEY, JSON.stringify(merged)); } catch { /* quota */ }
     } catch {
-      // keep defaults
+      // keep defaults (or cached if we already hydrated)
     } finally {
       setLoading(false);
     }
   }, [setBranding]);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    // Hydrate from cache synchronously-ish so the very first paint already
+    // shows the LIVE app_name / tagline / colors. Then refresh from the API
+    // in parallel — by the time the request resolves, we silently swap to
+    // the freshest values (usually identical, so no visual change).
+    (async () => {
+      try {
+        const cached = await AsyncStorage.getItem(BRANDING_CACHE_KEY);
+        if (cached) {
+          const parsed = JSON.parse(cached) as Branding;
+          if (parsed && parsed.app_name) setBranding(parsed);
+        }
+      } catch { /* cache miss / parse error – fall back to DEFAULT_BRANDING */ }
+      refresh();
+    })();
+  }, [refresh, setBranding]);
 
   // Apply the chosen font globally. We override default styles for Text via
   // a one-time monkey-patch on StyleSheet (works for RN out of the box).
