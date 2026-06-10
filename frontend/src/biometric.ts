@@ -132,8 +132,18 @@ export async function disableBiometricLogin(): Promise<void> {
  * Whenever the user gets a fresh token via refresh / re-login, we update the
  * cached biometric token so it doesn't expire. Silently no-ops if biometric
  * isn't enabled. Called from the api token-refresh hook.
+ *
+ * If `email` is passed (e.g. on a successful login), we also refresh the
+ * cached email hint. This keeps the "Welcome back, ra***@gmail.com" label
+ * pointing at the user whose tokens are actually stored — important when a
+ * different user logs into the same phone with password after the first
+ * user enabled fingerprint.
  */
-export async function syncBiometricTokens(token: string | null, refreshToken: string | null): Promise<void> {
+export async function syncBiometricTokens(
+  token: string | null,
+  refreshToken: string | null,
+  email?: string | null,
+): Promise<void> {
   try {
     const enabled = (await AsyncStorage.getItem(AS_ENABLED_KEY)) === "1";
     if (!enabled) return;
@@ -146,6 +156,9 @@ export async function syncBiometricTokens(token: string | null, refreshToken: st
       await SecureStore.setItemAsync(SS_REFRESH_KEY, refreshToken, {
         keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       });
+    }
+    if (email) {
+      await AsyncStorage.setItem(AS_EMAIL_HINT, maskEmail(email));
     }
   } catch {
     // Sync failures are not fatal — worst case the user does one more

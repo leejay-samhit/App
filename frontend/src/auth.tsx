@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { api, setAuthToken, setSessionTokens, onSessionInvalidated } from "./api";
+import { api, setAuthToken, setSessionTokens, onSessionInvalidated, getAuthToken, getRefreshToken } from "./api";
 import { runAndCacheIntegrity, IntegrityVerdict } from "./tamper-detection";
 import {
   authenticateAndGetTokens,
@@ -161,7 +161,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     // financial action. Fire-and-forget; we don't block the UI.
     recheckIntegrity().catch(() => {});
     // Refresh biometric cache so the cached token doesn't go stale.
-    syncBiometricTokens(data.token ?? null, data.refresh_token ?? null)
+    // Also pass the user's email so the email hint shown on the login
+    // screen always reflects whose session is actually cached (important
+    // when a different user logs in on a phone where biometric was
+    // previously enabled — the hint must follow the cached session).
+    syncBiometricTokens(data.token ?? null, data.refresh_token ?? null, data.user?.email ?? null)
       .then(refreshBiometricStatus)
       .catch(() => {});
   };
@@ -188,10 +192,37 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const enableBiometric = async (): Promise<void> => {
-    const token = await AsyncStorage.getItem("auth_token");
-    const refresh = await AsyncStorage.getItem("refresh_token");
+    // Read CURRENT tokens via the canonical helpers (not by guessing keys).
+    // Previously this read `refresh_token` directly which is the wrong key
+    // (real key is `auth_refresh_token`), so refresh tokens never got cached
+    // and biometric sessions died on the first refresh. Fixed 2026-06-07.
+    const token = await getAuthToken();
+    const refresh = await getRefreshToken();
     if (!token) throw new Error("Please login with password first.");
     if (!user?.email) throw new Error("Could not read your email — please re-login.");
+    // Verify the user can actually pass their device biometric BEFORE we
+    // mark it as enabled. This avoids enabling the feature on a device
+    // where the user can't actually unlock it (e.g. enrolled fingerprints
+    // were removed in OS settings since the device was provisioned). The
+    // OS sheet shown here also serves as an explicit consent moment.
+    const cap = await getBiometricCapability();
+    if (!cap.available) {
+      throw new Error(
+        !cap.hasHardware
+          ? "Your device doesn't support biometrics."
+          : "Please enrol a fingerprint or face in your phone's settings first.",
+      );
+    }
+    const LocalAuth = await import("expo-local-authentication");
+    const proof = await LocalAuth.authenticateAsync({
+      promptMessage: "Confirm fingerprint to enable quick login",
+      cancelLabel: "Cancel",
+      fallbackLabel: "",
+      disableDeviceFallback: true,
+    });
+    if (!proof.success) {
+      throw new Error("Fingerprint not confirmed. Try again.");
+    }
     await enableBiometricLogin({ token, refreshToken: refresh, email: user.email });
     await refreshBiometricStatus();
   };
@@ -230,15 +261,29 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const logout = async () => {
-    // Best-effort: tell the server to wipe active_session_id so the access
-    // token dies immediately. Don't block the UI on it — even if this fails
-    // (offline), the local wipe below will sign the user out on this device.
-    try { await api.post("/auth/logout"); } catch { /* ignore */ }
+    // 2026-06-07 fix: If biometric login is enabled, we must NOT call the
+    // server's /auth/logout endpoint, because that endpoint invalidates the
+    // `active_session_id` — and the biometric flow expects the cached token
+    // to still be accepted by the server on the next fingerprint login.
+    //
+    // Behaviour:
+    //  • biometricReady === true  → local logout only (token+refresh stay
+    //    encrypted in SecureStore, server session stays alive, fingerprint
+    //    can resume the same session).
+    //  • biometricReady === false → full server logout (active_session_id
+    //    wiped on the backend so the token can't be used elsewhere).
+    if (!biometricReady) {
+      try { await api.post("/auth/logout"); } catch { /* ignore */ }
+    }
     await setSessionTokens(null, null);
-    // Also wipe biometric cache so the next user on this phone doesn't get
-    // auto-logged into the previous user's account.
-    await disableBiometricLogin().catch(() => {});
-    await refreshBiometricStatus();
+    // NOTE: We intentionally do NOT wipe the biometric cache on logout. The
+    // biometric token is protected by the user's own fingerprint and only
+    // unlocks on THIS device. Wiping it on every logout would force the
+    // user to re-enroll on every single login cycle — exactly the friction
+    // we are trying to remove. The cache IS wiped when (a) the user
+    // explicitly disables from Profile, (b) the cached token is rejected
+    // by /auth/me inside `loginWithBiometric`, or (c) a different account
+    // logs in with password (handled inside `syncBiometricTokens`).
     setUser(null);
     setSessionEndReason(null);
   };
