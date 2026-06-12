@@ -78,6 +78,28 @@ export default function DashboardScreen() {
     products_count: number; published_count: number;
   } | null>(null);
   const [pendingQA, setPendingQA] = useState<number>(0);
+  // ─── Service Provider availability quick-toggle (June 2026) ───
+  // When the logged-in user is an approved Service Provider we show a
+  // prominent Available / Busy / Offline strip on the Dashboard so they
+  // can flip status in one tap (vs. drilling into Profile → Availability).
+  const { refresh: refreshUser } = useAuth();
+  const [availSaving, setAvailSaving] = useState<"available" | "busy" | "offline" | null>(null);
+  const isProvider = !!(user as any)?.is_service_provider || (user as any)?.service_status === "approved";
+  const availStatus: "available" | "busy" | "offline" =
+    (((user as any)?.availability_status as "available" | "busy" | "offline") || "available");
+
+  const setAvailability = useCallback(async (s: "available" | "busy" | "offline") => {
+    if (s === availStatus) return;
+    setAvailSaving(s);
+    try {
+      await api.patch("/services/me/availability", { status: s });
+      try { await refreshUser(); } catch {}
+    } catch (e: any) {
+      // Soft-fail — keep the previous state visually
+    } finally {
+      setAvailSaving(null);
+    }
+  }, [availStatus, refreshUser]);
 
   const load = useCallback(async () => {
     try {
@@ -309,6 +331,75 @@ export default function DashboardScreen() {
                 </View>
               ) : null}
             </TouchableOpacity>
+          </Animated.View>
+        ) : null}
+
+        {/* === Service Provider availability quick-toggle === */}
+        {/* June 2026 — Approved providers see this prominent strip on the
+            Dashboard so they can flip Available / Busy / Offline in one tap.
+            Offline = hidden from customer search, Busy = badge + still bookable,
+            Available = normal listing.
+            We tolerate two slightly different "approved" shapes from auth/me:
+            `is_service_provider:true` (modern) and `service_status:"approved"`
+            (legacy). */}
+        {isProvider ? (
+          <Animated.View entering={FadeInDown.duration(380).delay(60)}>
+            <View style={styles.availCard}>
+              <View style={styles.availHead}>
+                <View style={[styles.availIcon, {
+                  backgroundColor: availStatus === "available" ? "#DCFCE7" : availStatus === "busy" ? "#FEF3C7" : "#E5E7EB",
+                }]}>
+                  <Feather
+                    name={availStatus === "available" ? "check-circle" : availStatus === "busy" ? "clock" : "power"}
+                    size={16}
+                    color={availStatus === "available" ? "#16A34A" : availStatus === "busy" ? "#B45309" : "#374151"}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.availEyebrow}>MY AVAILABILITY</Text>
+                  <Text style={styles.availTitle}>
+                    {availStatus === "available" ? "Available — customers can find you"
+                      : availStatus === "busy" ? "Busy — still bookable, may delay"
+                      : "Offline — hidden from search"}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.availPickerRow}>
+                {(["available", "busy", "offline"] as const).map((opt) => {
+                  const active = availStatus === opt;
+                  const saving = availSaving === opt;
+                  const meta = opt === "available"
+                    ? { c: "#16A34A", bg: "#DCFCE7", label: "Available" }
+                    : opt === "busy"
+                    ? { c: "#B45309", bg: "#FEF3C7", label: "Busy" }
+                    : { c: "#374151", bg: "#E5E7EB", label: "Offline" };
+                  return (
+                    <TouchableOpacity
+                      key={opt}
+                      onPress={() => setAvailability(opt)}
+                      disabled={!!availSaving}
+                      activeOpacity={0.85}
+                      style={[
+                        styles.availPickerBtn,
+                        active && { backgroundColor: meta.bg, borderColor: meta.c },
+                      ]}
+                      testID={`dashboard-avail-${opt}`}
+                    >
+                      {saving ? (
+                        <ActivityIndicator size="small" color={meta.c} />
+                      ) : (
+                        <>
+                          <View style={[styles.availDot, { backgroundColor: meta.c }]} />
+                          <Text style={[styles.availPickerText, active && { color: meta.c, fontWeight: "900" }]}>
+                            {meta.label}
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
           </Animated.View>
         ) : null}
 
@@ -643,4 +734,31 @@ const styles = StyleSheet.create({
     backgroundColor: "#FEF3C7", borderRadius: 10,
   },
   vendorPreviewAlertText: { fontSize: 11, fontWeight: "700", color: "#92400E", flex: 1 },
+  // ── Service Provider availability quick-toggle (June 2026) ──
+  availCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.card,
+    borderWidth: 1, borderColor: colors.border,
+    padding: 14,
+    marginTop: 14,
+  },
+  availHead: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 12 },
+  availIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: "center", justifyContent: "center",
+  },
+  availEyebrow: { fontSize: 10, letterSpacing: 1.5, color: colors.textMuted, fontWeight: "800" },
+  availTitle: { fontSize: 13, color: colors.textMain, fontWeight: "700", marginTop: 2 },
+  availPickerRow: { flexDirection: "row", gap: 8 },
+  availPickerBtn: {
+    flex: 1,
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10, paddingHorizontal: 8,
+    borderRadius: radii.button,
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  availDot: { width: 8, height: 8, borderRadius: 4 },
+  availPickerText: { fontSize: 12, color: colors.textMuted, fontWeight: "700" },
 });

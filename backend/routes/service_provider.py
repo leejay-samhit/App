@@ -38,7 +38,7 @@ async def update_my_availability(
     """Provider toggles their own visibility status. Independent of location
     sharing — this is the green/yellow/gray dot users see next to them.
     """
-    if not user.get("is_service_provider"):
+    if not (user.get("is_service_provider") or user.get("service_status") == "approved"):
         raise HTTPException(status_code=403, detail="Only service providers can set availability")
     status = (payload.status or "").lower().strip()
     if status not in _AVAIL_STATUSES:

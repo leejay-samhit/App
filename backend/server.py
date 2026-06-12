@@ -7200,6 +7200,34 @@ async def _background_init():
         except Exception as _e:
             logger.warning(f"registration_source backfill failed: {str(_e)[:200]}")
 
+        # ─── Backfill availability_status for legacy service providers (June-2026) ───
+        # Approved providers from before the availability feature was added won't
+        # have `availability_status` set, so the Service Analytics dashboard
+        # shows them as "unset". Default them to "available" so the live
+        # buckets (Available/Busy/Offline) tally correctly and providers
+        # show up in customer searches. Idempotent: only touches docs missing
+        # the field.
+        try:
+            now_iso2 = now_utc().isoformat()
+            avail_bf = await db.users.update_many(
+                {
+                    "is_service_provider": True,
+                    "$or": [
+                        {"availability_status": {"$exists": False}},
+                        {"availability_status": None},
+                        {"availability_status": ""},
+                    ],
+                },
+                {"$set": {
+                    "availability_status": "available",
+                    "availability_updated_at": now_iso2,
+                }},
+            )
+            if avail_bf.modified_count:
+                logger.info(f"backfill availability_status=available: stamped {avail_bf.modified_count} providers")
+        except Exception as _e:
+            logger.warning(f"availability_status backfill failed: {str(_e)[:200]}")
+
         logger.info("Background init complete")
     except Exception as _root_err:
         # Catch-all: never let the background init task die loudly.
@@ -7781,6 +7809,11 @@ async def admin_approve_service(aid: str, admin: Dict[str, Any] = Depends(requir
             "service_charge": app["charge"],
             "service_description": app.get("description"),
             "service_approved_at": ts,
+            # June 2026 — default availability so the provider shows up
+            # immediately in customer searches and admin analytics buckets.
+            # They can toggle Available/Busy/Offline themselves later.
+            "availability_status": "available",
+            "availability_updated_at": ts,
         }},
     )
     await _create_notification(

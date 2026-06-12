@@ -47,7 +47,7 @@ export default function ServiceAvailability() {
     }
   };
 
-  if (!user?.is_service_provider) {
+  if (!user?.is_service_provider && (user as any)?.service_status !== "approved") {
     return (
       <SafeAreaView style={st.safe} edges={["top"]}>
         <View style={st.center}>
