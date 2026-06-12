@@ -17,10 +17,12 @@ import * as Clipboard from "expo-clipboard";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { api } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { useBranding } from "../../src/branding";
 import { colors, formatINR, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
 import { Sparkline, DonutProgress, BarChart } from "../../src/charts";
+import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 
 type Tier = { name: string; min: number; color: string; icon: string };
 
@@ -54,6 +56,12 @@ type Notif = {
 
 export default function DashboardScreen() {
   const { user } = useAuth();
+  const branding = useBranding();
+  // Admin-configurable WhatsApp support number (falls back to the default
+  // we wired into the helper). Branding service can later expose
+  // `support_whatsapp` so admin can edit it via the admin panel.
+  const supportWhatsapp = (branding as any)?.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
+  const appName = branding?.app_name || "NetworkRupay";
   const router = useRouter();
   const [data, setData] = useState<Dashboard | null>(null);
   const [recentNotifs, setRecentNotifs] = useState<Notif[]>([]);
@@ -192,6 +200,36 @@ export default function DashboardScreen() {
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
         )}
+
+        {/* WhatsApp welcome card — added 2026-06-10.
+            Lets the user tap once to open WhatsApp with a pre-filled
+            "Hi NetworkRupay, I just registered as <name>" message going to
+            the admin support number. Free (uses wa.me URL scheme), works
+            on every device with WhatsApp installed. */}
+        <TouchableOpacity
+          onPress={() => openWhatsApp(
+            buildWelcomeMessage({
+              name: user?.name,
+              referral_code: user?.referral_code,
+              app_name: appName,
+            }),
+            supportWhatsapp,
+          )}
+          activeOpacity={0.85}
+          style={styles.waCard}
+          testID="dashboard-whatsapp-welcome"
+        >
+          <View style={styles.waIconWrap}>
+            <Feather name="message-circle" size={22} color="#FFFFFF" />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.waTitle}>Chat with us on WhatsApp</Text>
+            <Text style={styles.waSub} numberOfLines={2}>
+              Send your welcome message & get instant support from our team.
+            </Text>
+          </View>
+          <Feather name="chevron-right" size={20} color="#FFFFFF" />
+        </TouchableOpacity>
 
         {/* === Compact Total Earnings card === */}
         {/* The card body is tappable: it toggles the expanded sections.
@@ -468,6 +506,30 @@ const styles = StyleSheet.create({
   tierDivider: { width: 1, height: 12, backgroundColor: colors.primary, opacity: 0.2 },
   tierTeam: { fontSize: 11, color: colors.primary, fontWeight: "600" },
   approvalBanner: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, borderWidth: 1, marginBottom: 16 },
+  approvalBannerTitle: { fontSize: 14, fontWeight: "800" } as any,
+  approvalBannerSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  // WhatsApp welcome card — Bright green to look like WhatsApp's own brand.
+  waCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: "#25D366",
+    marginBottom: 16,
+    shadowColor: "#25D366",
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  waIconWrap: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    alignItems: "center", justifyContent: "center",
+  },
+  waTitle: { fontSize: 15, fontWeight: "900", color: "#FFFFFF", letterSpacing: 0.2 },
+  waSub: { fontSize: 12, color: "rgba(255,255,255,0.95)", marginTop: 2 },
   approvalBannerTitle: { fontSize: 13, fontWeight: "800" },
   approvalBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, lineHeight: 16 },
   heroCard: { marginBottom: 16, padding: 24 },

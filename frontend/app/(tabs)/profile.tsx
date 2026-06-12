@@ -17,6 +17,8 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { useBranding } from "../../src/branding";
+import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 
@@ -30,6 +32,9 @@ export default function ProfileScreen() {
     enableBiometric,
     disableBiometric,
   } = useAuth();
+  const branding = useBranding();
+  const supportWhatsapp = (branding as any)?.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
+  const appName = branding?.app_name || "NetworkRupay";
   const router = useRouter();
   const [upi, setUpi] = useState("");
   const [bank, setBank] = useState("");
@@ -293,6 +298,26 @@ export default function ProfileScreen() {
             </View>
           ) : null}
 
+          {/* WhatsApp chat button — always-on contact channel for the user.
+              Tapping opens WhatsApp with a pre-filled welcome message
+              going to the admin support number. */}
+          <TouchableOpacity
+            onPress={() => openWhatsApp(
+              buildWelcomeMessage({
+                name: user?.name,
+                referral_code: user?.referral_code,
+                app_name: appName,
+              }),
+              supportWhatsapp,
+            )}
+            style={styles.waButton}
+            testID="profile-whatsapp"
+            activeOpacity={0.85}
+          >
+            <Feather name="message-circle" size={16} color="#FFFFFF" />
+            <Text style={styles.waButtonText}>Chat with us on WhatsApp</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity onPress={onLogout} style={styles.logoutBtn} testID="profile-logout">
             <Feather name="log-out" size={16} color="#B3261E" />
             <Text style={styles.logoutText}>Logout</Text>
@@ -342,6 +367,16 @@ const styles = StyleSheet.create({
   // Logout: subtle outlined button instead of naked text — clearer affordance
   // and visually anchors the bottom of the screen.
   logoutBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: spacing.sectionGap, marginBottom: 8, paddingVertical: 14, borderRadius: radii.button, borderWidth: 1, borderColor: "#F2B8B5", backgroundColor: "#FFF6F5" },
+  // WhatsApp chat-with-us pill (above Logout).
+  waButton: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 10,
+    marginTop: spacing.sectionGap,
+    paddingVertical: 13,
+    borderRadius: radii.button,
+    backgroundColor: "#25D366",
+  },
+  waButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 14, letterSpacing: 0.3 },
   // Fingerprint / Biometric card
   bioCard: {
     marginTop: spacing.sectionGap,
