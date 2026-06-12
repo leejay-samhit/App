@@ -47,6 +47,8 @@ type Provider = {
   profile_image?: string | null;
   kyc_status?: string | null;
   is_active?: boolean;
+  // June 2026 — provider-controlled status (Available / Busy / Offline).
+  availability_status?: "available" | "busy" | "offline" | null;
   rating_avg?: number;
   rating_count?: number;
   bookings_count?: number;
@@ -225,12 +227,39 @@ export default function ProviderProfileScreen() {
                 <Text style={{ color: "#fff", fontWeight: "900", fontSize: 28 }}>{initials}</Text>
               </View>
             )}
-            <View style={[styles.statusDot, { backgroundColor: p.is_active ? "#16A34A" : colors.textMuted }]} />
+            {(() => {
+              const av = (p.availability_status || "available") as "available" | "busy" | "offline";
+              const c = av === "available" ? "#16A34A" : av === "busy" ? "#F59E0B" : "#6B7280";
+              return <View style={[styles.statusDot, { backgroundColor: c }]} />;
+            })()}
           </View>
           <View style={styles.heroBody}>
             <Text style={styles.heroName} numberOfLines={2}>{p.name}</Text>
             <Text style={styles.heroService} numberOfLines={2}>{p.service_name || "—"}</Text>
             {p.service_category ? <Text style={styles.heroCategory}>{p.service_category}</Text> : null}
+            {(() => {
+              const av = (p.availability_status || "available") as "available" | "busy" | "offline";
+              const meta = av === "available"
+                ? { c: "#16A34A", bg: "#DCFCE7", t: "AVAILABLE NOW" }
+                : av === "busy"
+                ? { c: "#B45309", bg: "#FEF3C7", t: "BUSY · MAY DELAY" }
+                : { c: "#374151", bg: "#E5E7EB", t: "OFFLINE" };
+              return (
+                <View style={{
+                  alignSelf: "flex-start",
+                  flexDirection: "row", alignItems: "center", gap: 4,
+                  backgroundColor: meta.bg,
+                  paddingHorizontal: 8, paddingVertical: 3,
+                  borderRadius: 10,
+                  marginTop: 6,
+                }}>
+                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: meta.c }} />
+                  <Text style={{ fontSize: 10, fontWeight: "900", letterSpacing: 0.5, color: meta.c }}>
+                    {meta.t}
+                  </Text>
+                </View>
+              );
+            })()}
             <View style={styles.ratingRow}>
               {[1,2,3,4,5].map((i) => (
                 <Feather

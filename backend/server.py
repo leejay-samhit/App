@@ -1901,6 +1901,47 @@ async def update_bank(payload: BankUpdate, user: Dict[str, Any] = Depends(get_cu
     return fresh
 
 
+# ── Profile picture upload (2026-06-12) ────────────────────────────────────
+# Uploads via base64 data-URI so we don't need multipart/form-data, S3, or
+# any blob storage — the image is stored inline on the user doc. Capped at
+# ~1.5 MB base64 (≈ 1 MB binary) to keep the user document under Mongo's
+# 16 MB hard limit even when other fields grow.
+class ProfileImageUpload(BaseModel):
+    image_data_url: str  # full data URI like "data:image/jpeg;base64,..."
+
+
+@api_router.post("/users/me/profile-image")
+async def update_profile_image(payload: ProfileImageUpload, user: Dict[str, Any] = Depends(get_current_user)):
+    img = (payload.image_data_url or "").strip()
+    if not img or not img.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail="Invalid image format. Use a base64 data URI.")
+    # Soft cap at 1.5 MB base64 — ~1.1 MB binary. Higher quality should be
+    # client-down-scaled before upload.
+    MAX_LEN = 1_500_000
+    if len(img) > MAX_LEN:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image too large. Please use a photo under ~1 MB (got {len(img)//1024} KB).",
+        )
+    ts = datetime.utcnow().isoformat()
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"profile_image": img, "profile_image_updated_at": ts}},
+    )
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    return fresh
+
+
+@api_router.delete("/users/me/profile-image")
+async def remove_profile_image(user: Dict[str, Any] = Depends(get_current_user)):
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$unset": {"profile_image": "", "profile_image_updated_at": ""}},
+    )
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    return fresh
+
+
 # ------------------ Withdrawals ------------------
 # 5 withdrawal requests per hour per user — generous for legitimate users
 # but tight enough to deter wallet-drain abuse scripts.
@@ -7806,7 +7847,13 @@ async def list_services(
     if subcategory_id:
         base_filt["service_subcategory_id"] = subcategory_id
     if availability and availability in {"available", "busy", "offline"}:
+        # Explicit filter — respect exactly what the caller asked for.
         base_filt["availability_status"] = availability
+    else:
+        # Default behaviour (June 2026): hide providers who explicitly marked
+        # themselves "offline" so customers don't see / try to book them.
+        # `available`, `busy`, missing, and any other legacy values stay visible.
+        base_filt["availability_status"] = {"$ne": "offline"}
     if language:
         base_filt["service_languages"] = language
     if q:
@@ -7826,6 +7873,10 @@ async def list_services(
         # services listing & detail screen.
         "availability_status": 1,
         "availability_updated_at": 1,
+        # Profile picture (June 2026) — uploaded by the provider from their
+        # Profile screen. Always projected so the listing card + detail
+        # hero avatar can render the real photo. Base64 data URI inline.
+        "profile_image": 1,
     }
 
     # ----- Geo path ----------------------------------------------------------

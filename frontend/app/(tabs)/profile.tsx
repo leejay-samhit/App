@@ -11,10 +11,15 @@ import {
   Platform,
   Alert,
   RefreshControl,
+  Image,
+  Modal,
+  Pressable,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
+import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
@@ -43,6 +48,71 @@ export default function ProfileScreen() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
   const [bioBusy, setBioBusy] = useState(false);
+  // Profile picture upload state — both for picking + viewing.
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [avatarPreviewOpen, setAvatarPreviewOpen] = useState(false);
+  const profileImage = (user as any)?.profile_image || null;
+
+  // Pick an image from the gallery → downscale & compress → POST as base64
+  // data URI. The compression step keeps payloads well under our 1 MB
+  // server cap and reduces upload time on slow connections.
+  const onPickAvatar = useCallback(async () => {
+    try {
+      // Ask for gallery permission (camera-roll). We don't request camera
+      // here — gallery is enough for a single profile picture.
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert(
+          "Photo access needed",
+          "Please allow photo access from settings so you can pick a profile picture.",
+        );
+        return;
+      }
+      const r = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.9,
+      });
+      if (r.canceled || !r.assets?.length) return;
+      setAvatarUploading(true);
+      // Downscale to 720x720 max + JPEG-recompress @ 0.7 quality so the
+      // base64 payload stays under our 1 MB cap.
+      const manipulated = await ImageManipulator.manipulateAsync(
+        r.assets[0].uri,
+        [{ resize: { width: 720, height: 720 } }],
+        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true },
+      );
+      const dataUrl = `data:image/jpeg;base64,${manipulated.base64}`;
+      await api.post("/users/me/profile-image", { image_data_url: dataUrl });
+      await refresh();
+    } catch (e: any) {
+      Alert.alert("Couldn't update photo", formatApiError(e));
+    } finally {
+      setAvatarUploading(false);
+    }
+  }, [refresh]);
+
+  const onRemoveAvatar = useCallback(() => {
+    Alert.alert("Remove profile photo?", "Your avatar will fall back to the first letter of your name.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Remove",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            setAvatarUploading(true);
+            await api.delete("/users/me/profile-image");
+            await refresh();
+          } catch (e: any) {
+            Alert.alert("Couldn't remove photo", formatApiError(e));
+          } finally {
+            setAvatarUploading(false);
+          }
+        },
+      },
+    ]);
+  }, [refresh]);
 
   const onToggleBiometric = useCallback(async () => {
     setBioBusy(true);
@@ -111,13 +181,42 @@ export default function ProfileScreen() {
         >
           <GradientCard variant="royal" style={{ marginBottom: spacing.cardPad, padding: 24 }}>
             <View style={{ flexDirection: "row", alignItems: "center" }}>
-              <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center", marginRight: 16, borderWidth: 2, borderColor: "rgba(255,255,255,0.4)" }}>
-                <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff" }}>{(user?.name || "U").charAt(0).toUpperCase()}</Text>
-              </View>
+              {/* Avatar: tap to view full size, long-press / camera icon to upload.
+                  When `profile_image` is set we render the actual photo; else
+                  we fall back to the first-letter circle so the layout never
+                  collapses. */}
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={() => {
+                  if (profileImage) setAvatarPreviewOpen(true);
+                  else onPickAvatar();
+                }}
+                onLongPress={profileImage ? onRemoveAvatar : undefined}
+                style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center", marginRight: 16, borderWidth: 2, borderColor: "rgba(255,255,255,0.4)", overflow: "hidden" }}
+                testID="profile-avatar"
+              >
+                {avatarUploading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : profileImage ? (
+                  <Image source={{ uri: profileImage }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+                ) : (
+                  <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff" }}>{(user?.name || "U").charAt(0).toUpperCase()}</Text>
+                )}
+              </TouchableOpacity>
               <View style={{ flex: 1 }}>
                 <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>PROFILE</Text>
                 <Text style={{ fontSize: 22, fontWeight: "800", color: "#fff", letterSpacing: -0.5, marginTop: 4 }} numberOfLines={1}>{user?.name}</Text>
                 <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginTop: 2 }} numberOfLines={1}>{user?.email}</Text>
+                <TouchableOpacity
+                  onPress={onPickAvatar}
+                  style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, alignSelf: "flex-start", backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 }}
+                  testID="profile-avatar-edit"
+                >
+                  <Feather name="camera" size={12} color="#fff" />
+                  <Text style={{ fontSize: 11, color: "#fff", fontWeight: "800", letterSpacing: 0.3 }}>
+                    {profileImage ? "CHANGE PHOTO" : "ADD PHOTO"}
+                  </Text>
+                </TouchableOpacity>
               </View>
             </View>
             <View style={{ flexDirection: "row", marginTop: 16, gap: 8 }}>
@@ -189,28 +288,38 @@ export default function ProfileScreen() {
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
             <View style={styles.rowDivider} />
-            {/* Service Provider entry — moved here from the Services tab banner. */}
+            {/* Service Provider entry — moved here from the Services tab banner.
+                Reads the canonical `service_status` + `is_service_provider` fields
+                set by the apply/approve/reject backend flows. */}
             <TouchableOpacity
               onPress={() => router.push("/services/apply" as any)}
               style={styles.rowItem}
               testID="profile-service-provider-link"
             >
-              <View style={[styles.kycDot, { backgroundColor: (user as any)?.service_provider_status === "approved" ? colors.success : (user as any)?.service_provider_status === "pending" ? colors.warning : (user as any)?.service_provider_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
+              {(() => {
+                const isProv = !!(user as any)?.is_service_provider;
+                const st = (user as any)?.service_status as string | null | undefined;
+                const dotColor = isProv ? colors.success
+                  : st === "pending"  ? colors.warning
+                  : st === "rejected" ? "#B3261E"
+                  : "#94A3B8";
+                return <View style={[styles.kycDot, { backgroundColor: dotColor }]} />;
+              })()}
               <View style={{ flex: 1 }}>
                 <Text style={styles.kycTitle}>
-                  {(user as any)?.service_provider_status === "approved" ? "You're a Service Provider" : "Become a Service Provider"}
+                  {(user as any)?.is_service_provider ? "You're a Service Provider" : "Become a Service Provider"}
                 </Text>
                 <Text style={styles.kycSub}>
-                  {(user as any)?.service_provider_status === "approved" ? "TAP TO UPDATE OR VIEW BOOKINGS"
-                    : (user as any)?.service_provider_status === "pending" ? "APPLICATION UNDER REVIEW"
-                    : (user as any)?.service_provider_status === "rejected" ? "APPLY AGAIN"
+                  {(user as any)?.is_service_provider ? "TAP TO UPDATE OR VIEW BOOKINGS"
+                    : (user as any)?.service_status === "pending" ? "APPLICATION UNDER REVIEW"
+                    : (user as any)?.service_status === "rejected" ? "APPLY AGAIN"
                     : "EARN — LIST YOUR SERVICE"}
                 </Text>
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
             {/* Provider availability — only relevant when already an approved service provider. */}
-            {(user as any)?.service_provider_status === "approved" ? (
+            {(user as any)?.is_service_provider ? (
               <>
                 <View style={styles.rowDivider} />
                 <TouchableOpacity
@@ -324,6 +433,33 @@ export default function ProfileScreen() {
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Full-screen avatar preview — opens when user taps their photo.
+          Same UX pattern used for chat images so it feels familiar. */}
+      <Modal
+        visible={avatarPreviewOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAvatarPreviewOpen(false)}
+        statusBarTranslucent
+      >
+        <Pressable
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.94)", alignItems: "center", justifyContent: "center" }}
+          onPress={() => setAvatarPreviewOpen(false)}
+          testID="profile-avatar-preview-backdrop"
+        >
+          {profileImage ? (
+            <Image source={{ uri: profileImage }} style={{ width: "100%", height: "100%" }} resizeMode="contain" />
+          ) : null}
+          <TouchableOpacity
+            onPress={() => setAvatarPreviewOpen(false)}
+            style={{ position: "absolute", top: 50, right: 18, width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" }}
+            testID="profile-avatar-preview-close"
+          >
+            <Feather name="x" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }

@@ -65,6 +65,8 @@ type ServiceProvider = {
   // June 2026 — provider-controlled availability dot.
   availability_status?: "available" | "busy" | "offline" | null;
   availability_updated_at?: string | null;
+  // June 2026 — provider profile picture (base64 data URI).
+  profile_image?: string | null;
 };
 type Mode = "shop" | "services";
 
@@ -835,7 +837,15 @@ export default function ShopScreen() {
                           testID={`service-card-${s.id}`}
                         >
                           <View style={styles.serviceAvatar}>
-                            <Text style={styles.serviceAvatarText}>{(s.name || "?")[0].toUpperCase()}</Text>
+                            {s.profile_image ? (
+                              <Image
+                                source={{ uri: s.profile_image }}
+                                style={{ width: "100%", height: "100%" }}
+                                resizeMode="cover"
+                              />
+                            ) : (
+                              <Text style={styles.serviceAvatarText}>{(s.name || "?")[0].toUpperCase()}</Text>
+                            )}
                           </View>
                           <View style={{ flex: 1 }}>
                             <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -1186,7 +1196,7 @@ const styles = StyleSheet.create({
   activeAgo: { fontSize: 10, color: colors.textMuted, marginTop: 2 },
 
   serviceCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 10 },
-  serviceAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
+  serviceAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center", overflow: "hidden" },
   serviceAvatarText: { fontSize: 16, fontWeight: "800", color: colors.primary },
   serviceName: { fontSize: 14, fontWeight: "700", color: colors.textMain },
   serviceTitle: { fontSize: 12, color: colors.textMuted, marginTop: 1 },

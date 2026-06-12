@@ -1,0 +1,61 @@
+{
+  "summary": "Iteration 6 — backend-only review of Service Provider Availability + Profile-Image features. All 18 new pytest cases PASS (18/18, 100%). Verified: (1) POST /api/users/me/profile-image accepts a valid base64 data URI and persists profile_image on the user doc; rejects empty / non-image payloads with 400; rejects >1.5 MB payload with 413. (2) DELETE clears the field. (3) GET /api/auth/me echoes profile_image. (4) PATCH /api/services/me/availability returns 403 for non-providers, 400 for invalid status, 200 + persists for available/busy/offline. (5) GET /api/services DEFAULT correctly hides offline providers while keeping available/busy/no-status visible; explicit availability=available|busy|offline filters return only the requested bucket. (6) GET /api/services/{id}/profile surfaces both availability_status and profile_image; 404 path verified. (7) GET /api/admin/service-analytics availability buckets (available+busy+offline+unset) SUM EXACTLY to total providers (is_service_provider=true) in Mongo. No critical or minor backend issues found in scope.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/auth/register",
+        "issue": "Rate-limited 5/min/IP via slowapi. Pre-existing test files (test_backend_api.py, test_iteration2/3/4.py) repeatedly hit 429 when run together — they also still reference the deleted admin@app.com / Admin@123 credentials (replaced 2026-05-29 by support@networkrupay.com). Not in scope of this iteration but noted: those legacy test files should be updated by the main agent in a follow-up. iteration6 fixtures already include 429-backoff."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration6_provider.py",
+    "/app/test_reports/pytest/iteration6.xml"
+  ],
+  "action_items": [
+    "[NONE-CRITICAL] All 7 scoped endpoints verified. No backend changes required.",
+    "[LOW] Legacy test suites (test_backend_api.py, test_iteration2/3.py) still use old admin@app.com credentials and have no 429 backoff — consider porting them to ADMIN_EMAIL from .env and adding the same retry pattern used in test_iteration6_provider.py to keep regressions green.",
+    "[LOW] /api/services list endpoint capped at 500 results in the geo path; the non-geo path has no explicit cap (regular find().to_list(...)). If provider count grows, add a default page/limit so the listing stays bounded — out of scope for this iteration."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1916 — POST /users/me/profile-image correctly validates `startswith('data:image/')` so `data:text/plain;...` is rejected. Good.",
+    "server.py:7849-7856 — list_services correctly defaults to {availability_status: {$ne: 'offline'}} when no explicit filter is provided. Critical correctness: providers with NO availability_status field also stay visible because `$ne: 'offline'` matches missing fields in Mongo. Verified empirically — the unset bucket in admin analytics is non-zero and those providers DO appear in the default listing.",
+    "service_provider.py:41-45 — PATCH /services/me/availability gates on `user.get('is_service_provider')` (truthy check) and normalises status to lower().strip(). Both 400 and 403 paths produce clean JSON errors. No issues.",
+    "service_admin.py:151-156 — admin_service_analytics avail bucket falls back unknown values into 'unset', so the sum-to-total invariant always holds. Verified.",
+    "core/utils.py:16 — serialize_user simply pops _id and password_hash, so profile_image and availability_status pass through to /auth/me unfiltered. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration6_provider.py (new — 18 cases across 5 test classes, with 429 backoff and Mongo teardown)",
+    "/app/test_reports/iteration_6.json (this file)",
+    "/app/test_reports/pytest/iteration6.xml (JUnit output)"
+  ],
+  "success_rate": {
+    "backend": "100% (18/18 in scope)",
+    "frontend": "not_tested (skipped per review request)"
+  },
+  "verified_features": {
+    "profile_image_upload": "Small base64 jpeg accepted; profile_image_updated_at stamped; doc persisted in users collection.",
+    "profile_image_validation": "Empty string → 400; data:text/plain → 400; >1.5MB base64 → 413 (verified at length 2_133_356 chars).",
+    "profile_image_delete": "DELETE unsets both profile_image and profile_image_updated_at; /auth/me no longer surfaces it.",
+    "auth_me_includes_profile_image": "Bearer-auth /auth/me returns profile_image field exactly as stored.",
+    "availability_patch_403": "Non-provider PATCH /services/me/availability → 403 'Only service providers can set availability'.",
+    "availability_patch_400": "Invalid status 'vacationing' → 400 'status must be one of: available, busy, offline'.",
+    "availability_patch_200": "All three valid statuses persist users.availability_status + users.availability_updated_at and return {ok:true, availability_status, availability_updated_at}.",
+    "services_default_hides_offline": "Seeded 3 providers (available/busy/offline). Default GET /api/services includes available + busy IDs, EXCLUDES offline. Verified.",
+    "services_explicit_filters": "availability=offline → only offline IDs; busy → only busy; available → only available. Every returned row has matching availability_status field. Verified.",
+    "provider_profile_detail": "GET /api/services/{id}/profile returns availability_status and profile_image fields. 404 returned for random UUID.",
+    "admin_availability_buckets_sum": "Sum of avail buckets (available+busy+offline+unset) == db.users.count_documents({is_service_provider:true}). Invariant holds."
+  },
+  "seed_data_creation": "Tests created 5 ephemeral docs in db.users (1 promoted provider, 1 plain user, 3 seeded providers for filter matrix) all prefixed with TEST_I6_<hex>. ALL cleaned up in module teardown via mongo_db.users.delete_one/delete_many. No residue.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "test_iteration6_provider.py is the canonical regression for Service Provider Availability + Profile-Image. When running the full pytest dir (tests/), legacy iteration2/3/4 files share a session-scoped admin_token fixture that depends on conftest's ADMIN_EMAIL/PASSWORD — make sure /app/backend/.env's ADMIN_EMAIL/ADMIN_PASSWORD is sourced (it is). The legacy test_backend_api.py still hardcodes admin@app.com/Admin@123 inline — separate concern. Run iteration6 alone with: EXPO_PUBLIC_BACKEND_URL=https://vendor-network-app-1.preview.emergentagent.com pytest tests/test_iteration6_provider.py",
+  "rca_of_issue": "n/a — no bugs surfaced in scope. The default 'hide offline' filter at server.py:7856 works correctly because Mongo's {$ne: 'offline'} matches both other-string values AND missing fields, which is the intended behaviour (legacy providers without availability_status stay visible). Confirmed by seeded fixtures + parallel admin analytics sum invariant."
+}
