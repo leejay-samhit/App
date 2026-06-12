@@ -8176,3 +8176,81 @@ via `offline_pre_credit_amount`). Re-approving is safe.
 ### Build
 - `npx expo export --platform web` clean. `/admin/users 66 kB`, `/admin/system-wallet 63.9 kB`.
 
+
+
+## 2026-06-12 — Service Provider Availability + Profile Picture (Iteration 6)
+
+backend:
+  - task: "Service Provider Availability (Available / Busy / Offline)"
+    implemented: true
+    working: true
+    file: "backend/routes/service_provider.py, backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            All 18 backend tests PASS (100%). PATCH /api/services/me/availability
+            correctly rejects non-providers (403), invalid statuses (400), and
+            persists `availability_status` + `availability_updated_at` for the 3
+            valid values. GET /api/services hides offline providers by default
+            ($ne:"offline") and respects explicit filters. GET /api/admin/service-analytics
+            aggregation buckets sum correctly to total provider count.
+
+  - task: "Profile Picture Upload (base64)"
+    implemented: true
+    working: true
+    file: "backend/server.py:1913-1942"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: |
+            POST /api/users/me/profile-image accepts base64 data URI, rejects
+            non-image strings (400) and oversized payloads (413). DELETE clears
+            the field. GET /api/auth/me returns `profile_image` when set, omits
+            when cleared.
+
+frontend:
+  - task: "Service Provider Availability picker UI + Profile avatar upload UI"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/service-availability.tsx, frontend/app/(tabs)/profile.tsx, frontend/app/(tabs)/shop.tsx, frontend/app/services/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            (1) Profile screen now has an avatar picker (expo-image-picker +
+                expo-image-manipulator → 720x720 JPEG @ 0.7) with tap-to-zoom
+                preview and long-press to remove.
+            (2) Fixed `service_provider_status` → `is_service_provider`/`service_status`
+                in profile.tsx to match the actual backend fields.
+            (3) Added "My Availability" row under EARN MORE — only visible when
+                `is_service_provider` is true. Routes to /service-availability.
+            (4) Service listing card (shop.tsx) now renders provider's photo
+                in the round avatar (falls back to initials).
+            (5) Service detail hero (services/[id].tsx) shows a colored
+                Available / Busy / Offline badge under the category.
+            Needs visual + interaction test on real device for the upload
+            flow (image picker permissions).
+
+metadata:
+  iteration: 6
+  test_sequence: 6
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Iteration 6 delivered Service Provider Availability + Profile Picture.
+        Backend tested (18/18 PASS). Frontend changes are minimal, focused on
+        wiring up the existing PATCH endpoint and rendering availability/photo
+        in the customer listing + detail screens. Splash and biometric flows
+        from previous iterations remain intact.
