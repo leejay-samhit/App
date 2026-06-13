@@ -55,6 +55,23 @@ export default function ServiceApply() {
   const [registrationPaid, setRegistrationPaid] = useState<boolean | null>(null);
   const [approvalStatus, setApprovalStatus] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  // ── June 2026 — Edit mode for approved providers ───────────────────────
+  // When an already-approved provider visits this screen they used to see a
+  // read-only locked form. We now allow them to flip into "edit mode" so
+  // they can update their listing (PATCH /service/me) without going through
+  // the apply / approval flow again.
+  const [editing, setEditing] = useState(false);
+
+  const hydrateFromListing = (listing: any) => {
+    setServiceName(listing.service_name || "");
+    setCategoryName(listing.service_category || "");
+    setCategoryId(listing.category_id || null);
+    setSubcategoryId(listing.service_subcategory_id || null);
+    setSubcategoryName(listing.service_subcategory_name || "");
+    setPincode(listing.service_pincode || "");
+    setDescription(listing.service_description || "");
+    setLanguages(listing.service_languages || []);
+  };
 
   useEffect(() => {
     (async () => {
@@ -71,16 +88,20 @@ export default function ServiceApply() {
         const me = await api.get<any>("/auth/me");
         setRegistrationPaid(!!me.data?.registration_paid);
         setApprovalStatus(me.data?.approval_status || null);
-        const { data } = await api.get("/service/me");
+        const { data } = await api.get<any>("/service/me");
         setExisting(data);
-        if (data?.application) {
+        // Approved providers — prefer the live `listing` from the user doc
+        // (kept fresh by PATCH /service/me edits). Falls back to the
+        // application payload for legacy users.
+        if (data?.listing) {
+          hydrateFromListing(data.listing);
+        } else if (data?.application) {
           setServiceName(data.application.service_name || "");
           setCategoryName(data.application.service_category || "");
           setCategoryId(data.application.category_id || null);
           setSubcategoryId(data.application.service_subcategory_id || null);
           setSubcategoryName(data.application.service_subcategory_name || "");
           setPincode(data.application.pincode || "");
-          setCharge(String(data.application.charge || ""));
           setDescription(data.application.description || "");
           setLanguages(data.application.languages || []);
         }
@@ -131,6 +152,41 @@ export default function ServiceApply() {
       return showError("Pincode must be 6 digits.");
     if (languages.length === 0)
       return showError("Pick at least one language you can speak with customers.");
+
+    const isApprovedNow = (existing?.service_status as string) === "approved";
+
+    // ── Approved-provider EDIT path: PATCH /service/me ──
+    // Approved providers can update their listing without re-applying or
+    // ticking the T&C checkbox again (they already accepted it on first
+    // approval). Charge stays at the platform default (phone-reveal model).
+    if (isApprovedNow && editing) {
+      setSubmitting(true);
+      try {
+        await api.patch("/service/me", {
+          service_name: serviceName.trim(),
+          service_category: categoryName,
+          category_id: categoryId,
+          service_subcategory_id: subcategoryId,
+          service_subcategory_name: subcategoryName,
+          pincode,
+          description: description.trim() || null,
+          languages,
+        });
+        Alert.alert("Saved", "Your service details have been updated.", [
+          { text: "OK", onPress: () => router.back() },
+        ]);
+        setEditing(false);
+      } catch (e) {
+        const msg = formatApiError(e);
+        setFormError(msg);
+        Alert.alert("Could not save", msg);
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
+    // ── First-time apply path: POST /service/apply ──
     if (!acceptTerms)
       return showError("Please tick the terms & conditions checkbox to continue.");
     setSubmitting(true);
@@ -171,7 +227,10 @@ export default function ServiceApply() {
   const isApproved = status === "approved";
   const isPending = status === "pending";
   const needsRegistration = registrationPaid === false;
-  const locked = isApproved || isPending || needsRegistration;
+  // June 2026 — approved providers can EDIT (locked=false while `editing`).
+  // Pending applications stay locked (admin is reviewing). Unpaid users
+  // stay locked (must pay registration first).
+  const locked = (isApproved && !editing) || isPending || needsRegistration;
   const banner = needsRegistration
     ? {
         color: colors.error,
@@ -196,6 +255,37 @@ export default function ServiceApply() {
             </TouchableOpacity>
             <Text style={styles.title}>List your service</Text>
           </View>
+
+          {/* Approved-provider Edit/Cancel toggle. Shows above the page so the
+              affordance is obvious — users were confused why their service
+              details were locked. */}
+          {isApproved ? (
+            <View style={styles.editToggleRow}>
+              <Text style={styles.editToggleHint}>
+                {editing ? "Editing your service details" : "Tap Edit to update your service details"}
+              </Text>
+              <TouchableOpacity
+                onPress={() => {
+                  if (editing) {
+                    // Cancel — re-hydrate from server values so unsaved
+                    // changes are discarded.
+                    if (existing?.listing) hydrateFromListing(existing.listing);
+                    setEditing(false);
+                    setFormError(null);
+                  } else {
+                    setEditing(true);
+                  }
+                }}
+                style={[styles.editToggleBtn, editing ? styles.editToggleBtnCancel : null]}
+                testID="service-edit-toggle"
+              >
+                <Feather name={editing ? "x" : "edit-3"} size={14} color={editing ? colors.error : colors.primary} />
+                <Text style={[styles.editToggleBtnText, editing ? { color: colors.error } : null]}>
+                  {editing ? "Cancel" : "Edit"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
 
           {banner && (
             <View style={[styles.banner, { backgroundColor: banner.color + "22", borderColor: banner.color }]}>
@@ -387,11 +477,14 @@ export default function ServiceApply() {
               style={[styles.submitBtn, submitting && { opacity: 0.6 }]}
               onPress={submit}
               disabled={submitting}
+              testID="service-apply-submit"
             >
               {submitting ? (
                 <ActivityIndicator color={colors.primaryFg} />
               ) : (
-                <Text style={styles.submitText}>Submit application</Text>
+                <Text style={styles.submitText}>
+                  {isApproved && editing ? "Save changes" : "Submit application"}
+                </Text>
               )}
             </TouchableOpacity>
           )}
@@ -511,4 +604,26 @@ const styles = StyleSheet.create({
   },
   tncCheckBoxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
   tncCheckText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 18 },
+  // June 2026 — Edit toggle for approved providers
+  editToggleRow: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: 14, paddingVertical: 12,
+    marginBottom: 14,
+  },
+  editToggleHint: { flex: 1, fontSize: 12, color: colors.textMuted, fontWeight: "600" },
+  editToggleBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: colors.primary + "12",
+    borderWidth: 1, borderColor: colors.primary,
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderRadius: 10,
+  },
+  editToggleBtnCancel: {
+    backgroundColor: colors.error + "12",
+    borderColor: colors.error,
+  },
+  editToggleBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
 });

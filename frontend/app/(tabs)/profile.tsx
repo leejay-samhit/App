@@ -185,24 +185,44 @@ export default function ProfileScreen() {
                   When `profile_image` is set we render the actual photo; else
                   we fall back to the first-letter circle so the layout never
                   collapses. */}
-              <TouchableOpacity
-                activeOpacity={0.8}
-                onPress={() => {
-                  if (profileImage) setAvatarPreviewOpen(true);
-                  else onPickAvatar();
-                }}
-                onLongPress={profileImage ? onRemoveAvatar : undefined}
-                style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center", marginRight: 16, borderWidth: 2, borderColor: "rgba(255,255,255,0.4)", overflow: "hidden" }}
-                testID="profile-avatar"
-              >
-                {avatarUploading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : profileImage ? (
-                  <Image source={{ uri: profileImage }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
-                ) : (
-                  <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff" }}>{(user?.name || "U").charAt(0).toUpperCase()}</Text>
-                )}
-              </TouchableOpacity>
+              {/* June 2026 — avatar UX: TAP always opens the picker (so users
+                  immediately understand they can change their photo). LONG-PRESS
+                  on an existing photo opens the full-screen preview (zoom).
+                  Previously tapping opened the preview, which made the upload
+                  affordance invisible. */}
+              <View style={{ position: "relative", marginRight: 16 }}>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={onPickAvatar}
+                  onLongPress={profileImage ? () => setAvatarPreviewOpen(true) : undefined}
+                  style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: "rgba(255,255,255,0.4)", overflow: "hidden" }}
+                  testID="profile-avatar"
+                >
+                  {avatarUploading ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : profileImage ? (
+                    <Image source={{ uri: profileImage }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+                  ) : (
+                    <Text style={{ fontSize: 28, fontWeight: "800", color: "#fff" }}>{(user?.name || "U").charAt(0).toUpperCase()}</Text>
+                  )}
+                </TouchableOpacity>
+                {/* Camera badge — pure visual cue that the avatar is editable. */}
+                {!avatarUploading ? (
+                  <View
+                    pointerEvents="none"
+                    style={{
+                      position: "absolute",
+                      right: -2, bottom: -2,
+                      width: 22, height: 22, borderRadius: 11,
+                      backgroundColor: "#FFFFFF",
+                      alignItems: "center", justifyContent: "center",
+                      borderWidth: 2, borderColor: colors.primary,
+                    }}
+                  >
+                    <Feather name="camera" size={11} color={colors.primary} />
+                  </View>
+                ) : null}
+              </View>
               <View style={{ flex: 1 }}>
                 <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700" }}>PROFILE</Text>
                 <Text style={{ fontSize: 22, fontWeight: "800", color: "#fff", letterSpacing: -0.5, marginTop: 4 }} numberOfLines={1}>{user?.name}</Text>

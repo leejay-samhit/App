@@ -7753,9 +7753,14 @@ async def service_me(user: Dict[str, Any] = Depends(get_current_user)):
             {
                 "service_name": fresh.get("service_name"),
                 "service_category": fresh.get("service_category"),
+                "category_id": fresh.get("category_id"),
+                "service_subcategory_id": fresh.get("service_subcategory_id"),
+                "service_subcategory_name": fresh.get("service_subcategory_name"),
                 "service_pincode": fresh.get("service_pincode"),
                 "service_charge": fresh.get("service_charge"),
                 "service_description": fresh.get("service_description"),
+                "service_languages": fresh.get("service_languages") or [],
+                "service_updated_at": fresh.get("service_updated_at"),
             }
             if fresh and fresh.get("is_service_provider")
             else None

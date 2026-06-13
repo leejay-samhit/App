@@ -5,15 +5,17 @@ endpoints that don't touch the commission engine.
 
 Endpoints:
   PATCH /services/me/availability       — provider toggles online/busy/offline
+  PATCH /service/me                     — provider edits their own service details
   POST  /users/me/location              — customer foreground GPS capture
   GET   /services/reveals/me            — list my phone-reveal invoices
   GET   /services/reveals/invoice/{id}  — single invoice
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from core.db import db
 from core.security import get_current_user
@@ -49,6 +51,99 @@ async def update_my_availability(
         {"$set": {"availability_status": status, "availability_updated_at": ts}},
     )
     return {"ok": True, "availability_status": status, "availability_updated_at": ts}
+
+
+# ============================================================
+# Edit own service details (June 2026)
+# ============================================================
+# Approved providers can update their listing without going through the
+# admin approval flow again. Only descriptive fields are mutable here —
+# pincode, sub-category, languages, description, etc. The parent category
+# can be changed too (categories are the public taxonomy and providers may
+# legitimately pivot e.g. "Plumbing" → "Electrical"). KYC, charge model,
+# and approval status are NOT editable from this endpoint.
+class ServiceEditRequest(BaseModel):
+    service_name: Optional[str] = None
+    category_id: Optional[str] = None
+    service_category: Optional[str] = None  # display name; we trust the client for the label
+    service_subcategory_id: Optional[str] = None
+    service_subcategory_name: Optional[str] = None
+    pincode: Optional[str] = Field(default=None, min_length=6, max_length=6)
+    description: Optional[str] = None
+    languages: Optional[List[str]] = None
+
+
+@router.patch("/service/me")
+async def update_my_service(
+    payload: ServiceEditRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Provider-only edit of their own listing.
+
+    Returns the refreshed `users` doc (minus password_hash) so the client
+    can hydrate the apply-screen form without an extra round-trip.
+    """
+    if not (user.get("is_service_provider") or user.get("service_status") == "approved"):
+        raise HTTPException(status_code=403, detail="Only approved service providers can edit their listing")
+
+    # Build $set incrementally so unsupplied fields stay untouched. None
+    # means "don't change"; explicit empty string means "clear it".
+    sets: Dict[str, Any] = {}
+    if payload.service_name is not None:
+        name = payload.service_name.strip()
+        if len(name) < 2:
+            raise HTTPException(status_code=400, detail="Service name must be at least 2 characters")
+        sets["service_name"] = name
+    if payload.service_category is not None:
+        sets["service_category"] = payload.service_category.strip()
+    if payload.category_id is not None:
+        sets["category_id"] = payload.category_id
+    if payload.service_subcategory_id is not None:
+        # Allow clearing by sending empty string
+        sets["service_subcategory_id"] = payload.service_subcategory_id or None
+    if payload.service_subcategory_name is not None:
+        sets["service_subcategory_name"] = payload.service_subcategory_name or None
+    if payload.pincode is not None:
+        pin = payload.pincode.strip()
+        if not (pin.isdigit() and len(pin) == 6):
+            raise HTTPException(status_code=400, detail="Pincode must be 6 digits")
+        sets["service_pincode"] = pin
+    if payload.description is not None:
+        sets["service_description"] = payload.description.strip() or None
+    if payload.languages is not None:
+        sets["service_languages"] = [x for x in payload.languages if isinstance(x, str)]
+
+    if not sets:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+
+    sets["service_updated_at"] = now_utc().isoformat()
+    await db.users.update_one({"id": user["id"]}, {"$set": sets})
+
+    # Mirror to the corresponding service_application doc so admin search /
+    # filters reflect the updated values. Best-effort — we don't fail the
+    # primary update if the mirror write hits an issue.
+    try:
+        mirror: Dict[str, Any] = {}
+        if "service_name" in sets:           mirror["service_name"] = sets["service_name"]
+        if "service_category" in sets:        mirror["service_category"] = sets["service_category"]
+        if "category_id" in sets:             mirror["category_id"] = sets["category_id"]
+        if "service_subcategory_id" in sets:  mirror["service_subcategory_id"] = sets["service_subcategory_id"]
+        if "service_subcategory_name" in sets:mirror["service_subcategory_name"] = sets["service_subcategory_name"]
+        if "service_pincode" in sets:         mirror["pincode"] = sets["service_pincode"]
+        if "service_description" in sets:     mirror["description"] = sets["service_description"]
+        if "service_languages" in sets:       mirror["languages"] = sets["service_languages"]
+        if mirror:
+            mirror["updated_at"] = sets["service_updated_at"]
+            await db.service_applications.update_many(
+                {"user_id": user["id"], "status": "approved"},
+                {"$set": mirror},
+            )
+    except Exception:
+        pass
+
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    return {"ok": True, "user": fresh}
+
 
 
 # ============================================================
