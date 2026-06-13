@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -23,6 +23,7 @@ import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
 import { Sparkline, DonutProgress, BarChart } from "../../src/charts";
 import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
+import { startBackgroundProviderLocation, stopBackgroundProviderLocation, pushLocationNow } from "../../src/bg-location";
 
 type Tier = { name: string; min: number; color: string; icon: string };
 
@@ -94,12 +95,40 @@ export default function DashboardScreen() {
     try {
       await api.patch("/services/me/availability", { status: s });
       try { await refreshUser(); } catch {}
+      // Tie the 30-min background location heartbeat to availability:
+      //   Available / Busy → start tracker + push a fresh fix right away so
+      //                      customers see the new distance immediately.
+      //   Offline          → stop the tracker (we won't be shown in search
+      //                      anyway, so save the user's battery).
+      if (s === "offline") {
+        stopBackgroundProviderLocation().catch(() => {});
+      } else {
+        startBackgroundProviderLocation().catch(() => {});
+        pushLocationNow().catch(() => {});
+      }
     } catch (e: any) {
       // Soft-fail — keep the previous state visually
     } finally {
       setAvailSaving(null);
     }
   }, [availStatus, refreshUser]);
+
+  // On mount (and whenever provider/availability flips) make sure the
+  // background tracker reflects the current state. Critical for cold app
+  // launches and post-install upgrades where the OS-level registration may
+  // have been cleared.
+  useEffect(() => {
+    if (!isProvider) {
+      stopBackgroundProviderLocation().catch(() => {});
+      return;
+    }
+    if (availStatus === "offline") {
+      stopBackgroundProviderLocation().catch(() => {});
+    } else {
+      // Idempotent — won't restart if already running.
+      startBackgroundProviderLocation().catch(() => {});
+    }
+  }, [isProvider, availStatus]);
 
   const load = useCallback(async () => {
     try {

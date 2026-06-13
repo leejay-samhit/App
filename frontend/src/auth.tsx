@@ -292,6 +292,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     // the biometric cache so the fingerprint screen can resume the session
     // (see useEffect in AuthProvider for that flow).
     try { await api.post("/auth/logout"); } catch { /* ignore offline */ }
+    // Stop background location heartbeat (no-op for customers / web).
+    try { const bg = await import("./bg-location"); await bg.stopBackgroundProviderLocation(); } catch {}
     await setSessionTokens(null, null);
     await disableBiometricLogin().catch(() => {});
     await refreshBiometricStatus();

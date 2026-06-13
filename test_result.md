@@ -8254,3 +8254,55 @@ agent_communication:
         wiring up the existing PATCH endpoint and rendering availability/photo
         in the customer listing + detail screens. Splash and biometric flows
         from previous iterations remain intact.
+
+## 2026-06-13 — Provider Background Location Heartbeat (Iteration 7)
+
+backend:
+  - task: "Provider location heartbeat endpoint"
+    implemented: true
+    working: true
+    file: "backend/server.py:8039 POST /api/service/me/location"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            Endpoint already in place; reused as-is. Stores GeoJSON Point +
+            `location_updated_at`. Customer `/api/services?lat&lng` query uses
+            $geoNear so distance is computed from the LAST KNOWN location even
+            if the provider's device is currently offline.
+
+frontend:
+  - task: "Background location task (30-min heartbeat)"
+    implemented: true
+    working: "needs_native_build"
+    file: "frontend/src/bg-location.ts, frontend/app/(tabs)/dashboard.tsx, frontend/app/_layout (auth logout), frontend/app.json"
+    needs_retesting: false
+    status_history:
+        - working: "needs_native_build"
+          agent: "main"
+          comment: |
+            New module `src/bg-location.ts` defines TaskManager task
+            `PROVIDER_LOCATION_TASK_V1` and starts a 30-min /
+            250-metre `Location.startLocationUpdatesAsync` heartbeat for
+            approved providers. Task POSTs to /service/me/location with the
+            cached auth token via fetch. Soft-coalesces to ≤1 push per 5 min.
+            Last fix cached to AsyncStorage so the UI can still show last-known
+            even when offline. Wired into Dashboard availability toggle —
+            Available/Busy starts the tracker + immediate fix push; Offline
+            stops it. Logout also stops it. Permissions and background modes
+            added to app.json (iOS UIBackgroundModes:location, Android
+            ACCESS_BACKGROUND_LOCATION + FOREGROUND_SERVICE_LOCATION,
+            expo-location plugin with iOS/Android background enabled).
+            REQUIRES a native dev/prod build — does NOT run in Expo Go.
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Iteration 7: background-location feature is code-complete. To validate
+        the heartbeat, the user must build the APK (Publish → Generate Android
+        build) and grant ACCESS_BACKGROUND_LOCATION ("Allow all the time") at
+        runtime. On iOS the user must also pick "Always" for location. Customer
+        search already serves the last-known location via $geoNear so the
+        "offline = show last updated location" UX works without any change.
+

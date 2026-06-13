@@ -24,6 +24,9 @@
         "NSCameraUsageDescription": "Capture KYC documents and selfie for verification",
         "NSPhotoLibraryUsageDescription": "Upload KYC documents from your photos",
         "NSLocationWhenInUseUsageDescription": "Show nearby providers and accurate delivery estimates.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Keep your map pin fresh so customers nearby can find you.",
+        "NSLocationAlwaysUsageDescription": "Keep your map pin fresh so customers nearby can find you.",
+        "UIBackgroundModes": ["location", "fetch"],
         "NSFaceIDUsageDescription": "Sign in instantly with Face ID instead of typing your password.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false,
@@ -54,6 +57,9 @@
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
         "android.permission.USE_BIOMETRIC",
         "android.permission.USE_FINGERPRINT"
       ]
@@ -104,7 +110,18 @@
         }
       ],
       "expo-font",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Keep your map pin fresh so customers nearby can find you.",
+          "locationAlwaysPermission": "Keep your map pin fresh so customers nearby can find you.",
+          "locationWhenInUsePermission": "Show nearby providers and accurate delivery estimates.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
