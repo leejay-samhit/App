@@ -46,6 +46,27 @@ from core.utils import now_utc
 router = APIRouter()
 
 
+async def _resolve_platform_admin() -> Optional[Dict[str, Any]]:
+    """Locate the canonical platform-admin user whose buckets hold
+    direct_signup / gst_collected / platform_fee_collected.
+
+    Order:
+      1) `ADMIN_EMAIL` env (seeded support@networkrupay.com by default)
+      2) the first user with role in {super_admin, admin}
+
+    The seeded admin is created with role:"admin" in production, so the
+    previous strict {"role":"super_admin"} filter silently missed every
+    reversal — leaving the books unbalanced. This helper centralises the
+    lookup so refund maths can never skip those writes again.
+    """
+    import os
+    admin_email = (os.environ.get("ADMIN_EMAIL") or "support@networkrupay.com").lower()
+    doc = await db.users.find_one({"email": admin_email})
+    if doc:
+        return doc
+    return await db.users.find_one({"role": {"$in": ["super_admin", "admin"]}})
+
+
 # ────────────────────────────────────────────────────────────────────
 # Search users to refund
 # ────────────────────────────────────────────────────────────────────
@@ -233,14 +254,18 @@ async def initiate_refund(
     user = await db.users.find_one({"id": payload.target_user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if not user.get("registration_paid"):
-        raise HTTPException(status_code=400, detail="User has no paid registration to refund")
     if (user.get("email") or "").lower().endswith("@networkrupay.com") and user.get("role") in {"admin", "super_admin"}:
         raise HTTPException(status_code=400, detail="Cannot refund admin users")
 
-    # Idempotency — single refund per user.
+    # Idempotency — single refund per user.  This MUST run before the
+    # registration-paid gate because `soft_delete` flips registration_paid
+    # back to false. If we ran it after, a re-POST after a soft_delete
+    # would return 400 ("no paid registration") instead of 409.
     if await db.refunds.find_one({"target_user_id": payload.target_user_id}):
         raise HTTPException(status_code=409, detail="User already refunded")
+
+    if not user.get("registration_paid"):
+        raise HTTPException(status_code=400, detail="User has no paid registration to refund")
 
     ts = now_utc().isoformat()
     refund_id = str(uuid.uuid4())
@@ -316,10 +341,12 @@ async def initiate_refund(
 
         # If the original payout incurred a platform fee credited to admin,
         # reverse that too so Group 4 stays consistent.
+        # We look up the platform admin by ADMIN_EMAIL env (matches the
+        # seeded support@networkrupay.com) and fall back to any user with
+        # role in {super_admin, admin}. The previous strict `role:super_admin`
+        # filter missed the actual seed admin who has role:admin.
         if platform_fee > 0:
-            admin_doc = await db.users.find_one({"email": (await db.users.find_one({"role": "super_admin"}) or {}).get("email", "")})
-            if not admin_doc:
-                admin_doc = await db.users.find_one({"role": "super_admin"})
+            admin_doc = await _resolve_platform_admin()
             if admin_doc:
                 cur_pf = float((admin_doc.get("wallet_buckets") or {}).get("platform_fee_collected") or 0)
                 await db.users.update_one(
@@ -395,7 +422,7 @@ async def initiate_refund(
     # ── 4. Reverse admin's direct_signup + (optional) gst_collected ──
     # The user's own registration credited admin direct_signup with `net`
     # and gst_collected with `gst`. Reverse those to zero the inflow.
-    admin_doc = await db.users.find_one({"role": "super_admin"})
+    admin_doc = await _resolve_platform_admin()
     if admin_doc:
         ds_bucket = float((admin_doc.get("wallet_buckets") or {}).get("direct_signup") or 0)
         await db.users.update_one(

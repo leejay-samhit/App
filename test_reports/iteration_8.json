@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 8 — re-ran Group 8 Refund flow backend suite after main agent applied FIX 1 (admin lookup via _resolve_platform_admin helper using ADMIN_EMAIL env with role:{$in:[super_admin, admin]} fallback) and FIX 2 (idempotency check now precedes registration_paid gate). Result: 27/27 PASS (100%). Both previously-failing flows now green: (a) admin-side reversals — refund_revenue_reversal, refund_gst_reversal, refund_admin_funding_reversal, and platform_fee_reversal txns are now created and admin.wallet_buckets.direct_signup / gst_collected / platform_fee_collected are correctly decremented (test_admin_revenue_reversal_created, test_admin_funding_reversal_created_if_funding_existed, test_platform_fee_reversal_created all PASS); (b) idempotent re-POST of a soft-deleted user now returns 409 'User already refunded' instead of 400 (test_idempotency_409 PASS). All other invariants from iteration 7 remain intact: search/preview/clawback math, payouts reversed, bank_ledger debit, registration_inflow refunded=true, soft_delete sets is_blocked + registration_paid=false + status='deleted_refund', remove_referral re-parents downline + decrements grandparent.direct_referrals_count, Group 8 net-worth shape, Group 8 drilldown row, expense-category list with refunds removed, refund_debt absorption order in _credit_payout. Code-side verification confirmed _resolve_platform_admin at /app/backend/routes/refunds.py:49 used at lines 349 (per-payout platform-fee reversal) and 425 (revenue+GST reversal); idempotency `db.refunds.find_one({target_user_id})` 409 check at line 264 now runs BEFORE the `registration_paid` 400 gate at line 267 — matches the spec.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8_refunds.py",
+    "/app/test_reports/pytest/iteration9.xml"
+  ],
+  "action_items": [
+    "Group 8 Refund flow backend is fully green — no further backend action required. Main agent can proceed to wire up the frontend (admin refund console) and/or move to next Iteration."
+  ],
+  "critical_code_review_comments": [
+    "refunds.py:49 — _resolve_platform_admin() correctly prefers ADMIN_EMAIL (defaults to support@networkrupay.com) and falls back to role:{$in:[super_admin, admin]}. Single source of truth for admin lookup across the refund pipeline — fixes the latent multi-tenant issue too.",
+    "refunds.py:264-267 — idempotency-first ordering is correct now; the docstring comment at line 261 documenting WHY it must precede the registration_paid gate is a nice touch for future maintainers.",
+    "Re-verified _credit_payout debt-absorption in server.py (debt 100 → absorbs ₹50 then ₹80 → wallet 0→0→30, refund_debt_collection txn negative) — math still holds.",
+    "Re-verified finance.py group_8_refunds object (6 keys) and drilldown shape — no regression."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (27/27)", "frontend": "skipped"},
+  "seed_data_creation": "Same Mongo-direct chain as iteration 7 (Admin → A → B → C → D, plus AA→BB→CC for re-parenting, solo, unpaid, debtor) — all prefixed TEST_I8_ and torn down by the mongo_db fixture.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 8 Group 8 Refund backend suite is fully green (27/27). No flaky tests observed; total runtime ~2.3s. Test file at /app/backend/tests/test_iteration8_refunds.py is self-cleaning. The two previously reported bugs (admin role lookup, idempotency ordering) are fixed and verified at refunds.py:49 (_resolve_platform_admin), :264 (early 409 check), :349 & :425 (helper used). No further work needed on this flow."
+}
