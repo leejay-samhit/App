@@ -234,6 +234,34 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     ]).to_list(1)
     pending_withdrawals = float((pw_agg or [{}])[0].get("sum") or 0)
 
+    # ── Group 8 — Refund ledger (NEW, June 2026) ─────────────────────
+    # Aggregates refund payouts. Bank-debit is recorded in db.bank_ledger
+    # so it already flows through `bank_debits` below — we do not subtract
+    # it again from net_worth.
+    refund_agg = await db.refunds.aggregate([
+        {"$group": {"_id": None,
+                    "sum_total":    {"$sum": "$refund_amount"},
+                    "sum_clawback": {"$sum": "$clawback_total"},
+                    "sum_pf_rev":   {"$sum": "$platform_fee_reversed"},
+                    "count":        {"$sum": 1}}},
+    ]).to_list(1)
+    r0 = (refund_agg or [{}])[0]
+    refund_total       = float(r0.get("sum_total")    or 0)
+    refund_clawback    = float(r0.get("sum_clawback") or 0)
+    refund_pf_reversed = float(r0.get("sum_pf_rev")   or 0)
+    refund_count       = int(r0.get("count")          or 0)
+
+    # Aggregate outstanding refund_debt across all users (so admin can see
+    # how much is still owed by uplines after clawbacks).
+    debt_agg = await db.users.aggregate([
+        {"$match": {"refund_debt": {"$gt": 0}}},
+        {"$group": {"_id": None,
+                    "sum":   {"$sum": "$refund_debt"},
+                    "count": {"$sum": 1}}},
+    ]).to_list(1)
+    debt_total = float((debt_agg or [{}])[0].get("sum")   or 0)
+    debt_count = int((debt_agg or [{}])[0].get("count") or 0)
+
     # ── Group 7 — Bank Ledger ─────────────────────────────────────────
     bank_in = await db.bank_ledger.aggregate([
         {"$match": {"kind": "credit"}},
@@ -355,6 +383,14 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "credits": round(bank_credits, 2),
             "debits":  round(bank_debits, 2),
             "balance": bank_balance,
+        },
+        "group_8_refunds": {
+            "total":                  round(refund_total, 2),
+            "count":                  refund_count,
+            "clawback_total":         round(refund_clawback, 2),
+            "platform_fee_reversed":  round(refund_pf_reversed, 2),
+            "outstanding_debt":       round(debt_total, 2),
+            "outstanding_debt_users": debt_count,
         },
         # NEW: Top-of-screen Bank Balance Tally that respects reversals &
         # adjustments. Frontend hero card uses this directly.
@@ -549,6 +585,31 @@ async def admin_finance_group_transactions(
             })
         subtotal = sum(float(r.get("amount") or 0) for r in items)
         return {"title": "Group 7 · Bank Ledger", "subtotal": round(subtotal, 2), "items": items}
+
+    # ── Group 8 — Refund Ledger (db.refunds) — June 2026 ─────────────
+    if group_id == "group_8_refunds":
+        rows = await db.refunds.find({}).sort("created_at", -1).limit(limit).to_list(limit)
+        items = []
+        for r in rows:
+            r.pop("_id", None)
+            items.append({
+                "id":         r.get("id"),
+                "display_id": r.get("display_id") or f"RFND-{(r.get('id') or '')[:6]}",
+                "type":       "refund · paid" + (" + GST" if r.get("gst_refund") else ""),
+                "amount":     -float(r.get("refund_amount") or 0),
+                "status":     r.get("status") or "success",
+                "description": (
+                    f"Refund to {r.get('target_name') or r.get('target_email') or r.get('target_referral_id') or '—'}"
+                    + (f" — {r.get('comments')}" if r.get("comments") else "")
+                ),
+                "target_user_id": r.get("target_user_id"),
+                "clawback_total": float(r.get("clawback_total") or 0),
+                "platform_fee_reversed": float(r.get("platform_fee_reversed") or 0),
+                "final_action": r.get("final_action"),
+                "created_at": r.get("created_at"),
+            })
+        subtotal = sum(float(rr.get("amount") or 0) for rr in items)
+        return {"title": "Group 8 · Refund Ledger", "subtotal": round(subtotal, 2), "items": items}
 
     raise HTTPException(status_code=400, detail=f"Unknown group_id: {group_id}")
 
@@ -752,7 +813,9 @@ async def adjust_transaction(
 DEFAULT_EXPENSE_CATEGORIES = [
     "server_hosting", "sms_charges", "whatsapp_api", "staff_salary",
     "marketing", "legal_fees", "office_expenses", "payment_gateway",
-    "refunds", "gst_paid", "other",
+    # June 2026 — "refunds" moved out of Group 5 into its own Group 8 ledger
+    # (db.refunds). Keep "gst_paid" + "other" here.
+    "gst_paid", "other",
 ]
 
 

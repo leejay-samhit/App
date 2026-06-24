@@ -5,8 +5,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+# Also load frontend .env so EXPO_PUBLIC_BACKEND_URL is populated for tests
+_frontend_env = Path(__file__).resolve().parents[2] / "frontend" / ".env"
+if _frontend_env.exists():
+    load_dotenv(_frontend_env, override=False)
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://network-pay-1.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@app.com")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 

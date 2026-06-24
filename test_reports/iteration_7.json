@@ -1,0 +1,64 @@
+{
+  "summary": "Iteration 7 — backend-only validation of the new Group 8 Refund flow (admin clawback + bank-ledger + Group 8 ledger + refund_debt absorption). Built a deterministic upline chain (Admin → A → B → C → D) via Mongo-direct seeding and exercised all 9 endpoints listed in the brief. 23/27 pytest cases PASS (85.2%). 4 FAILURES reveal TWO real backend bugs that break the books-balanced invariant: (1) CRITICAL — every admin-side reversal in /app/backend/routes/refunds.py uses `db.users.find_one({'role': 'super_admin'})` but the actual seed admin in the DB has `role: 'admin'`. This means NONE of `refund_revenue_reversal`, `refund_gst_reversal`, or `platform_fee_reversal` txns are EVER created and the admin's `wallet_buckets.direct_signup`, `wallet_buckets.gst_collected`, and `wallet_buckets.platform_fee_collected` are NEVER decremented on refund. After any refund, System Wallet (Group 1/2 admin buckets) will be HIGHER than Bank Balance by (net + 18% GST per refunded user + 18% platform-fee × every payout). (2) HIGH — Idempotency ordering bug: the `registration_paid` check runs BEFORE the `already_refunded` check, so a second POST for a user whose first refund used `final_action=soft_delete` (which sets `registration_paid=false`) returns 400 instead of the spec'd 409. Verified flows: search by name/email/referral_id excludes admins; preview gst_breakdown math (gross−gross/1.18=gst); clawback rows correct shape & wallet math; full cascade clawback debits each upline wallet & creates refund_clawback txns; original payouts marked status='reversed' with reversed_by; bank_ledger debit created with kind=debit/purpose=refund/related_refund_id; registration_inflow marked refunded=true; soft_delete sets status='deleted_refund'+is_blocked+registration_paid=false; remove_referral re-parents downline to grandparent AND decrements grandparent.direct_referrals_count; refund list returns total_count+total_amount; detail returns 404 on unknown id; Group 8 drilldown returns refund as -refund_amount; refund_debt absorption inside _credit_payout correctly absorbs the debt FIRST, then credits the remainder to wallet, and writes a refund_debt_collection txn (negative). Zero-downline refund still creates bank-debit + Group 8 entry.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/admin/refunds",
+        "issue": "Admin lookup uses role='super_admin' but seed admin (support@networkrupay.com) is role='admin'. As a result the THREE admin-side reversal txns (refund_revenue_reversal, refund_gst_reversal, platform_fee_reversal) are silently skipped AND admin.wallet_buckets.direct_signup / gst_collected / platform_fee_collected are NOT decremented. Refund books do NOT balance — System Wallet stays higher than Bank Balance. Reference: /app/backend/routes/refunds.py lines 320-322, 398, 416. Fix: change to `{'role': {'$in': ['super_admin', 'admin']}}` OR find by ADMIN_EMAIL.",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "POST /api/admin/refunds (idempotency)",
+        "issue": "Order-of-checks bug: registration_paid check (line 236) runs BEFORE the already_refunded check (line 242). After a soft_delete refund the user has registration_paid=false, so a second POST returns 400 'User has no paid registration to refund' instead of the spec'd 409 'User already refunded'. Move the idempotency check to BEFORE the registration_paid check. Reference: /app/backend/routes/refunds.py lines 236-244.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/admin/refunds (refund doc)",
+        "issue": "refund.platform_fee_reversed always reports 0.0 because of the same admin-role lookup bug (it only increments inside the if admin_doc: branch which is never entered). Will mis-report in Group 8 drilldown columns once dashboard ships."
+      },
+      {
+        "endpoint": "/app/backend/routes/refunds.py line 320",
+        "issue": "Dead/odd code path: `db.users.find_one({'email': (await db.users.find_one({'role': 'super_admin'}) or {}).get('email', '')})` — does TWO queries to look up the same admin. Simplify to one query by ADMIN_EMAIL (loaded from env)."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8_refunds.py",
+    "/app/test_reports/pytest/iteration8.xml"
+  ],
+  "action_items": [
+    "[CRITICAL] Fix admin role lookup in /app/backend/routes/refunds.py at lines 320-322 (platform-fee reversal), 398 (revenue + GST reversal). Replace `{'role': 'super_admin'}` with `{'role': {'$in': ['super_admin', 'admin']}}` OR look up by ADMIN_EMAIL env var. Without this fix the System Wallet vs Bank tally diverges on every refund — books not balanced.",
+    "[HIGH] Re-order checks in /app/backend/routes/refunds.py initiate_refund: move the `db.refunds.find_one({'target_user_id': ...})` 409 idempotency check BEFORE the registration_paid 400 check. Otherwise re-POSTing a refund for a soft-deleted user returns the wrong error.",
+    "[LOW] Refactor the duplicate admin lookup at refunds.py:320 into a single `find_one({'role': {'$in': ['super_admin','admin']}})` (or env-based ADMIN_EMAIL lookup).",
+    "[LOW] Once the two bugs above are fixed, retest_iteration8 should reach 27/27 PASS — no test code change required."
+  ],
+  "critical_code_review_comments": [
+    "refunds.py:320, 398 — admin role lookup is the single biggest defect: production admin is role='admin', not 'super_admin' (confirmed via Mongo: only one admin doc with role='admin' and email=support@networkrupay.com).",
+    "refunds.py:233-244 — idempotency-vs-validation ordering inverted. The docstring at the top of the file even says 'Re-running returns the existing refund row' but the implementation returns 400 instead.",
+    "refunds.py:265-271 — payouts query correctly scoped by related_signup_id + type='referral_payout' + status='success'. Idempotent because the cascade later marks them status='reversed', so a hypothetical re-run wouldn't double-claw (but the registration_paid guard short-circuits before we get there anyway).",
+    "refunds.py:286-297 — wallet debit + refund_debt set look correct. Going-negative math: cur_debt + abs(min(new_wallet,0)). Verified empirically (all 500→172 wallets, no debt added since none went negative in the L1/L2/L3 test).",
+    "refunds.py:472-485 — remove_referral re-parents downline AND decrements grandparent.direct_referrals_count. Verified.",
+    "server.py:830-864 — refund_debt absorption in _credit_payout: order is (a) compute debt_absorbed=min(cur_debt,net) BEFORE wallet inc, (b) decrement refund_debt, (c) write refund_debt_collection txn (negative amount), (d) credit (net - debt_absorbed) to wallet. Verified two-step ₹50/₹80 sequence: debt 100→50→0, wallet 0→0→30. Math correct.",
+    "finance.py:813-819 — DEFAULT_EXPENSE_CATEGORIES correctly drops 'refunds' between 'payment_gateway' and 'gst_paid'. Verified via GET /api/admin/expenses/categories.",
+    "finance.py:387-394 — group_8_refunds object exposes all 6 required keys (total / count / clawback_total / platform_fee_reversed / outstanding_debt / outstanding_debt_users). Verified.",
+    "finance.py:589-612 — Group 8 drilldown returns each refund as a -refund_amount row with target_user_id + clawback_total + final_action. Subtotal sums correctly. Verified."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration8_refunds.py (NEW)",
+    "/app/backend/tests/conftest.py (load frontend/.env so EXPO_PUBLIC_BACKEND_URL resolves; strict env var read)"
+  ],
+  "success_rate": {"backend": "85.2% (23/27)", "frontend": "skipped"},
+  "seed_data_creation": "Mongo-direct: chain Admin → A → B → C → D with wallet 500/500/500/0, plus referral_payout txns at L1/L2/L3 (NET ₹328, platform_fee ₹72) keyed by related_signup_id=D.id, plus a registration_inflow for D. Separate chains AA→BB→CC for the remove_referral re-parenting test, a 'solo' user for the zero-downline test, an 'unpaid' user for the 400-path test, and a 'debtor' user for the _credit_payout absorption test. All test users are prefixed TEST_I8_ and cleaned up in fixture teardown.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Re-run `pytest /app/backend/tests/test_iteration8_refunds.py -v` after main agent fixes the admin role lookup and the idempotency ordering. All 27 tests should then PASS. The test file is fully self-cleaning via the mongo_db fixture teardown and uses pytest-class-scoped fixtures so test order matters: TestRefundFlowSoftDelete runs the cascade on seed user D, then TestRefundListAndDetail / TestGroup8Drilldown / TestRefundFlowSoftDelete::test_idempotency_409 read that refund. Don't reorder.",
+  "rca_of_issue": "Bug 1 (admin-side reversals never created): /app/backend/routes/refunds.py at lines 320-322 and 398 calls `db.users.find_one({'role': 'super_admin'})` to locate the admin user, but the production / dev admin (support@networkrupay.com) is stored with role='admin' (verified via direct Mongo query). The find returns None and the code skips ALL admin-side reversal logic via an `if admin_doc:` short-circuit. Net effect: every refund debits the bank-ledger and uplines but FAILS to decrement admin's revenue/GST/platform-fee buckets — so the System Wallet → Bank invariant is violated by (net_reg + optional gst_reg + 18%*every_payout_per_signup). Reproduce: 1) seed any paid user with downline payouts, 2) POST /api/admin/refunds, 3) inspect admin user's wallet_buckets — values unchanged. Mitigation: change the query to `{'role': {'$in': ['super_admin','admin']}}` (preferred) OR look up by ADMIN_EMAIL env var. Bug 2 (idempotency ordering): in initiate_refund, the registration_paid check (line 236) precedes the already_refunded check (line 242). When final_action=soft_delete a successful first refund sets registration_paid=False, so the second POST trips the 400 path before reaching the 409 path. Reproduce: POST refund with final_action=soft_delete twice for the same user → second call returns 400 instead of 409. Mitigation: move the `if await db.refunds.find_one({...}): raise 409` block up to immediately after the user-exists check."
+}

@@ -110,6 +110,15 @@ type NetWorth = {
   group_5_expenses: { total: number };
   group_6_pending_withdrawals: { pending_amount: number };
   group_7_bank: { credits: number; debits: number; balance: number };
+  // June 2026 — Group 8 Refunds (db.refunds + bank-debit + clawbacks)
+  group_8_refunds?: {
+    total: number;
+    count: number;
+    clawback_total: number;
+    platform_fee_reversed: number;
+    outstanding_debt: number;
+    outstanding_debt_users: number;
+  };
   bank_tally?: {
     inflow: number; outflow: number; net: number;
     utr_deposits: number;
@@ -150,6 +159,61 @@ export default function AdminSystemWallet() {
   const [bankOpen, setBankOpen] = useState(false);  // Group 7 bank entry modal
   const [expOpen, setExpOpen] = useState(false);    // Group 5 expense modal
   const [adjOpen, setAdjOpen] = useState(false);    // Manual adjustment modal
+  // ── Refund flow (Group 8 — June 2026) ──
+  const [refundOpen, setRefundOpen] = useState(false);
+  const [refundQuery, setRefundQuery] = useState("");
+  const [refundResults, setRefundResults] = useState<Array<any> | null>(null);
+  const [refundTarget, setRefundTarget] = useState<any | null>(null);
+  const [refundPreview, setRefundPreview] = useState<any | null>(null);
+  const [refundGst, setRefundGst] = useState(false);
+  const [refundComments, setRefundComments] = useState("");
+  const [refundAction, setRefundAction] = useState<"soft_delete" | "remove_referral">("soft_delete");
+  const [refundSubmitting, setRefundSubmitting] = useState(false);
+  const closeRefund = () => {
+    setRefundOpen(false); setRefundQuery(""); setRefundResults(null);
+    setRefundTarget(null); setRefundPreview(null);
+    setRefundGst(false); setRefundComments(""); setRefundAction("soft_delete");
+    setRefundSubmitting(false);
+  };
+  const refundSearch = useCallback(async (q: string) => {
+    if (!q || q.trim().length < 2) { setRefundResults(null); return; }
+    try {
+      const r = await api.get(`/admin/refunds/search?q=${encodeURIComponent(q.trim())}`);
+      setRefundResults(r.data?.items || []);
+    } catch { setRefundResults([]); }
+  }, []);
+  const refundLoadPreview = useCallback(async (u: any, gst: boolean) => {
+    if (!u?.id) return;
+    setRefundPreview(null);
+    try {
+      const r = await api.get(`/admin/refunds/preview/${u.id}?gst_refund=${gst ? "true" : "false"}`);
+      setRefundPreview(r.data);
+    } catch (e: any) {
+      Alert.alert("Preview failed", formatApiError(e));
+      setRefundPreview(null);
+    }
+  }, []);
+  const submitRefund = useCallback(async () => {
+    if (!refundTarget?.id || !refundPreview) return;
+    setRefundSubmitting(true);
+    try {
+      await api.post("/admin/refunds", {
+        target_user_id: refundTarget.id,
+        gst_refund: refundGst,
+        comments: refundComments?.trim() || null,
+        final_action: refundAction,
+      });
+      Alert.alert(
+        "Refund processed",
+        `₹${refundPreview.refund_amount.toLocaleString("en-IN")} refunded · clawed back from ${refundPreview.clawback.count} upline${refundPreview.clawback.count === 1 ? "" : "s"}.`,
+      );
+      closeRefund();
+      await load();
+    } catch (e) {
+      Alert.alert("Refund failed", formatApiError(e));
+      setRefundSubmitting(false);
+    }
+  }, [refundTarget, refundPreview, refundGst, refundComments, refundAction, load]);
 
   // Reset confirmation drawer — type-to-confirm gate for the destructive
   // Reset Bank Ledger / Reset Expenses Ledger actions.
@@ -566,6 +630,27 @@ export default function AdminSystemWallet() {
               <NwRow label="Current bank balance"   value={netWorth.group_7_bank.balance} bold />
             </NwGroup>
 
+            {/* ── Group 8 — Refund Ledger (June 2026) ─────────────────
+                Surfaces every refund processed (Bank debited + uplines
+                clawed back). Tap to drill into the refund history; use
+                the "+ Refund" chip to open the initiate-refund modal. */}
+            <NwGroup
+              icon="rotate-ccw" title="Group 8 · Refund Ledger" color="#DC2626"
+              rightChip={{ label: "+ Refund", onPress: () => setRefundOpen(true) }}
+              onPress={() => openGroup("group_8_refunds")}
+            >
+              <NwRow label="Total refunded"        value={netWorth.group_8_refunds?.total ?? 0} bold />
+              <NwRow label="Refund count"          value={netWorth.group_8_refunds?.count ?? 0} />
+              <NwRow label="Clawed back from uplines" value={netWorth.group_8_refunds?.clawback_total ?? 0} />
+              <NwRow label="Platform fee reversed" value={netWorth.group_8_refunds?.platform_fee_reversed ?? 0} />
+              {(netWorth.group_8_refunds?.outstanding_debt ?? 0) > 0 ? (
+                <NwRow
+                  label={`Owed by uplines (${netWorth.group_8_refunds?.outstanding_debt_users ?? 0})`}
+                  value={netWorth.group_8_refunds?.outstanding_debt ?? 0}
+                />
+              ) : null}
+            </NwGroup>
+
             <Text style={styles.helpText}>
               Every entry is permanent — reverse or adjust instead of deleting.
             </Text>
@@ -876,6 +961,204 @@ export default function AdminSystemWallet() {
       <NwExpenseModal open={expOpen} onClose={() => setExpOpen(false)} onSaved={load} />
       {/* ───────── Manual Adjustment modal ───────── */}
       <NwAdjustModal open={adjOpen} onClose={() => setAdjOpen(false)} onSaved={load} />
+
+      {/* ───────── Refund modal (Group 8 — June 2026) ───────── */}
+      <Modal visible={refundOpen} animationType="slide" transparent onRequestClose={closeRefund}>
+        <KeyboardAvoidingView style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.55)" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={{ flex: 1 }} />
+          <View style={{ backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, maxHeight: "92%" }}>
+            <View style={{ flexDirection: "row", alignItems: "center", padding: 18, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+              <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: "#FEE2E2", alignItems: "center", justifyContent: "center" }}>
+                <Feather name="rotate-ccw" size={18} color="#DC2626" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={{ fontSize: 16, fontWeight: "800", color: colors.textMain }}>Initiate Refund</Text>
+                <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                  Refunds the joining-fee, claws back every L1–L10 payout this user triggered, and debits the bank.
+                </Text>
+              </View>
+              <TouchableOpacity onPress={closeRefund}><Feather name="x" size={22} color={colors.textMuted} /></TouchableOpacity>
+            </View>
+
+            <ScrollView style={{ padding: 18 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 28 }}>
+              {/* — Search — */}
+              {!refundTarget ? (
+                <>
+                  <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textMuted, marginBottom: 6 }}>FIND USER</Text>
+                  <TextInput
+                    value={refundQuery}
+                    onChangeText={(t) => { setRefundQuery(t); refundSearch(t); }}
+                    placeholder="Name, email, phone or referral ID"
+                    placeholderTextColor={colors.textMuted}
+                    style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: colors.textMain }}
+                    testID="refund-search-input"
+                  />
+                  {refundResults?.length === 0 ? (
+                    <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 10 }}>No matches.</Text>
+                  ) : null}
+                  {refundResults?.map((u) => (
+                    <TouchableOpacity
+                      key={u.id}
+                      disabled={!!u.already_refunded}
+                      onPress={() => {
+                        setRefundTarget(u);
+                        setRefundResults(null);
+                        refundLoadPreview(u, refundGst);
+                      }}
+                      style={{
+                        marginTop: 8, padding: 12,
+                        borderWidth: 1, borderColor: colors.border, borderRadius: 12,
+                        flexDirection: "row", alignItems: "center", gap: 10,
+                        opacity: u.already_refunded ? 0.5 : 1,
+                        backgroundColor: u.already_refunded ? "#FEE2E2" : colors.surface,
+                      }}
+                      testID={`refund-pick-${u.id}`}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontWeight: "700", color: colors.textMain }}>{u.name}</Text>
+                        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                          {u.referral_id || u.my_referral_code || "—"} · {u.email}
+                        </Text>
+                      </View>
+                      <Text style={{ fontSize: 11, fontWeight: "700", color: u.registration_paid ? "#16A34A" : "#B45309" }}>
+                        {u.already_refunded ? "ALREADY REFUNDED" : (u.registration_paid ? "PAID" : "UNPAID")}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </>
+              ) : (
+                <>
+                  {/* — Selected user — */}
+                  <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 12, marginBottom: 14, flexDirection: "row", alignItems: "center", gap: 10 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 14, fontWeight: "800", color: colors.textMain }}>{refundTarget.name}</Text>
+                      <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                        {refundTarget.referral_id || refundTarget.my_referral_code || "—"} · {refundTarget.email}
+                      </Text>
+                    </View>
+                    <TouchableOpacity onPress={() => { setRefundTarget(null); setRefundPreview(null); }}>
+                      <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700" }}>CHANGE</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* — GST switch — */}
+                  <TouchableOpacity
+                    onPress={() => { const v = !refundGst; setRefundGst(v); refundLoadPreview(refundTarget, v); }}
+                    style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderWidth: 1, borderColor: refundGst ? colors.primary : colors.border, borderRadius: 12, backgroundColor: refundGst ? colors.primary + "12" : colors.surface, marginBottom: 12 }}
+                    testID="refund-gst-toggle"
+                  >
+                    <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: refundGst ? colors.primary : colors.border, alignItems: "center", justifyContent: "center", backgroundColor: refundGst ? colors.primary : "transparent" }}>
+                      {refundGst ? <Feather name="check" size={14} color="#fff" /> : null}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }}>Refund GST too</Text>
+                      <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                        If on, the 18% GST collected on join is also reversed and refunded.
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  {/* — Preview card — */}
+                  {!refundPreview ? (
+                    <ActivityIndicator color={colors.primary} style={{ marginVertical: 18 }} />
+                  ) : (
+                    <View style={{ backgroundColor: "#FEF2F2", borderRadius: 12, padding: 14, marginBottom: 14, borderWidth: 1, borderColor: "#FEE2E2" }}>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 6 }}>
+                        <Text style={{ fontSize: 11, fontWeight: "700", color: "#7F1D1D" }}>REFUND AMOUNT</Text>
+                        <Text style={{ fontSize: 17, fontWeight: "900", color: "#B91C1C" }}>
+                          ₹{(refundPreview.refund_amount || 0).toLocaleString("en-IN")}
+                        </Text>
+                      </View>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 4 }}>
+                        <Text style={{ fontSize: 11, color: "#7F1D1D" }}>Gross joining fee</Text>
+                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#7F1D1D" }}>₹{(refundPreview.user?.gross_paid || 0).toLocaleString("en-IN")}</Text>
+                      </View>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 4 }}>
+                        <Text style={{ fontSize: 11, color: "#7F1D1D" }}>GST inside</Text>
+                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#7F1D1D" }}>₹{(refundPreview.gst_breakdown?.gst || 0).toLocaleString("en-IN")}</Text>
+                      </View>
+                      <View style={{ height: 1, backgroundColor: "#FECACA", marginVertical: 8 }} />
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 4 }}>
+                        <Text style={{ fontSize: 11, color: "#7F1D1D" }}>Clawback total ({refundPreview.clawback?.count || 0} uplines)</Text>
+                        <Text style={{ fontSize: 12, fontWeight: "700", color: "#7F1D1D" }}>₹{(refundPreview.clawback?.total || 0).toLocaleString("en-IN")}</Text>
+                      </View>
+                      {(refundPreview.clawback?.going_negative_total || 0) > 0 ? (
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 4 }}>
+                          <Text style={{ fontSize: 11, color: "#B45309" }}>Going negative</Text>
+                          <Text style={{ fontSize: 12, fontWeight: "800", color: "#B45309" }}>−₹{(refundPreview.clawback?.going_negative_total || 0).toLocaleString("en-IN")}</Text>
+                        </View>
+                      ) : null}
+                      {refundPreview.clawback?.rows?.length ? (
+                        <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: "#FECACA" }}>
+                          {refundPreview.clawback.rows.map((r: any, i: number) => (
+                            <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 2 }}>
+                              <Text style={{ fontSize: 10, color: "#7F1D1D" }}>L{r.level} · {r.recipient_name || r.recipient_id?.slice(0, 6)}</Text>
+                              <Text style={{ fontSize: 10, fontWeight: "700", color: r.wallet_after < 0 ? "#B45309" : "#7F1D1D" }}>
+                                ₹{r.amount} → {r.wallet_after < 0 ? `owes ₹${r.debt_after}` : `₹${r.wallet_after} left`}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      ) : null}
+                    </View>
+                  )}
+
+                  {/* — Comments — */}
+                  <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textMuted, marginBottom: 6 }}>COMMENTS (optional)</Text>
+                  <TextInput
+                    value={refundComments}
+                    onChangeText={setRefundComments}
+                    placeholder="Why is this refund being processed?"
+                    placeholderTextColor={colors.textMuted}
+                    multiline
+                    numberOfLines={3}
+                    style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 13, color: colors.textMain, minHeight: 64, textAlignVertical: "top", marginBottom: 14 }}
+                  />
+
+                  {/* — Final action — */}
+                  <Text style={{ fontSize: 12, fontWeight: "700", color: colors.textMuted, marginBottom: 6 }}>AFTER REFUND</Text>
+                  {(["soft_delete", "remove_referral"] as const).map((opt) => (
+                    <TouchableOpacity
+                      key={opt}
+                      onPress={() => setRefundAction(opt)}
+                      style={{ flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderWidth: 1, borderColor: refundAction === opt ? colors.primary : colors.border, borderRadius: 12, marginBottom: 8, backgroundColor: refundAction === opt ? colors.primary + "10" : colors.surface }}
+                      testID={`refund-action-${opt}`}
+                    >
+                      <View style={{ width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: refundAction === opt ? colors.primary : colors.border, alignItems: "center", justifyContent: "center" }}>
+                        {refundAction === opt ? <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary }} /> : null}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }}>
+                          {opt === "soft_delete" ? "Delete user (soft)" : "Remove from referral scheme"}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                          {opt === "soft_delete"
+                            ? "Account hidden from app; data kept for audit."
+                            : "Account stays usable for shop/services; downline re-parents to grandparent."}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+
+                  {/* — Submit — */}
+                  <TouchableOpacity
+                    onPress={submitRefund}
+                    disabled={!refundPreview || refundSubmitting}
+                    style={{ backgroundColor: "#DC2626", borderRadius: 12, paddingVertical: 14, alignItems: "center", marginTop: 14, opacity: refundSubmitting || !refundPreview ? 0.6 : 1 }}
+                    testID="refund-submit"
+                  >
+                    {refundSubmitting ? <ActivityIndicator color="#fff" /> : (
+                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: 15 }}>
+                        Process Refund ₹{(refundPreview?.refund_amount || 0).toLocaleString("en-IN")}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              )}
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
       {/* ───────── Reset confirmation modal (Bank / Expenses) ───────── */}
       <Modal visible={!!resetTarget} animationType="fade" transparent onRequestClose={closeReset}>

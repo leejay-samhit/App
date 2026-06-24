@@ -181,6 +181,7 @@ from routes import service_subcategories as service_subcategories_router  # noqa
 from routes import service_admin as service_admin_router  # noqa: E402
 from routes import service_provider as service_provider_router  # noqa: E402
 from routes import finance as finance_router  # noqa: E402
+from routes import refunds as refunds_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -826,8 +827,44 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
     gst = round(gross * (REFERRAL_GST_PCT / 100.0), 2)  # 18% withheld
     net = round(gross - gst, 2)
 
-    # 1. Credit user wallet with NET
-    inc: Dict[str, Any] = {"wallet_balance": net, "total_earned": net}
+    # ── June 2026 — Refund-debt absorption ──────────────────────────────
+    # If this recipient still owes money from a prior refund clawback
+    # (`refund_debt > 0`), divert the credit to pay down the debt first.
+    # We only credit the wallet with whatever NET remains after the
+    # debt is settled. Bank/admin platform-fee math stays unchanged so the
+    # books match the configured gross payout.
+    cur_debt = float(sponsor_user.get("refund_debt") or 0)
+    debt_absorbed = 0.0
+    net_credited = net
+    if cur_debt > 0.01 and net > 0:
+        debt_absorbed = round(min(cur_debt, net), 2)
+        net_credited = round(net - debt_absorbed, 2)
+        new_debt = round(cur_debt - debt_absorbed, 2)
+        # Drop refund_debt by the absorbed amount; wallet_balance gets the
+        # remainder only.
+        await db.users.update_one(
+            {"id": sponsor_user["id"]},
+            {"$set": {"refund_debt": new_debt}},
+        )
+        # Log the absorption as a separate txn so the user (and audit
+        # trail) understand why the deposit was reduced.
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": sponsor_user["id"],
+            "type": "refund_debt_collection",
+            "amount": -debt_absorbed,
+            "status": "success",
+            "description": (
+                f"Refund debt collected ₹{debt_absorbed:g} from L{level} payout "
+                f"(triggered by {src_short or 'a new signup'})"
+            ),
+            "related_signup_id": signup_id,
+            "level": level,
+            "created_at": ts,
+        })
+
+    # 1. Credit user wallet with the (debt-adjusted) NET
+    inc: Dict[str, Any] = {"wallet_balance": net_credited, "total_earned": net_credited}
     if level == 1:
         inc["payouts_received"] = 1
     await db.users.update_one({"id": sponsor_user["id"]}, {"$inc": inc})
@@ -856,8 +893,14 @@ async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int
     await _create_notification(
         sponsor_user["id"],
         "payout",
-        f"₹{int(net)} credited!",
-        f"Level {level} referral payout received (₹{int(gross)} gross − ₹{gst} platform fee = ₹{net} net)",
+        f"₹{int(net_credited)} credited!" if debt_absorbed <= 0
+        else f"₹{int(net_credited)} credited (₹{int(debt_absorbed)} went to refund debt)",
+        (
+            f"Level {level} referral payout received "
+            f"(₹{int(gross)} gross − ₹{gst} platform fee = ₹{net} net"
+            + (f"; ₹{debt_absorbed} collected against refund debt" if debt_absorbed > 0 else "")
+            + ")"
+        ),
     )
 
     # 2. Credit admin's platform_fee_collected bucket with the 18% share
@@ -8951,6 +8994,7 @@ app.include_router(service_subcategories_router.router, prefix="/api")
 app.include_router(service_admin_router.router, prefix="/api")
 app.include_router(service_provider_router.router, prefix="/api")
 app.include_router(finance_router.router, prefix="/api")
+app.include_router(refunds_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)
