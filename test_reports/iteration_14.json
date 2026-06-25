@@ -1,0 +1,31 @@
+{
+  "summary": "Iteration 14 — RETEST after fix. 16/16 tests pass in /app/backend/tests/test_iteration13_push_broadcast.py. The audience-filter bug in routes/broadcast.py (now using `approval_status` with legacy `status` fallback via $or) is resolved: POST /api/admin/broadcasts {audience:'all'} returns 201 with recipient_count >= 2 against two freshly-approved TEST_ users; segmented audiences (providers/vendors empty → 400 as documented; users → 201). The announcement thread is fan-out for each recipient and surfaces under GET /api/chat/threads with is_announcement=true. Non-super-admin POST to the announcement thread returns 403 with detail mentioning 'announcement'/'one-way'. GET /api/chat/{tid}/details exposes is_announcement=true. Duplicate Operation ID `search_messages` warning is no longer emitted after backend restart (only present in pre-fix log lines 4714/4770; latest startup at 12:18 is clean). Push relay 401s with placeholder EMERGENT_PUSH_KEY remain non-blocking as designed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration13_push_broadcast.py",
+    "/app/test_reports/pytest/iteration14.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "broadcast.py:_audience_user_ids now uses an $or over [approval_status, status] to cover both schemas — sane and minimally invasive. Recommend a follow-up data-migration sweep to backfill `approval_status` from any legacy `status` rows so the $or fallback becomes redundant.",
+    "chat.py — duplicate `search_messages` definition removed; only the original at line 532 remains. OpenAPI schema is clean on restart."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration13_push_broadcast.py (test-only fix: announcement-thread assertion now scans the thread's full message list for the original broadcast text instead of relying on last_message, because a later segmented audience='users' broadcast legitimately overwrites last_message)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "N/A — frontend out of scope"},
+  "seed_data_creation": "Two fresh TEST_alice_* and TEST_bob_* users are registered and approved on every run (per-test-module fixture). They persist in the DB after the run; admin may purge them via the existing demo-user purge mechanism.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Broadcast/announcement flow is fully green. Test file is idempotent. EMERGENT_PUSH_KEY 401s in backend logs are expected with the placeholder key and are swallowed by routes/push.py without breaking primary flows.",
+  "rca_of_issue": "Original RCA (iteration 13): audience filter queried `status` while users wrote `approval_status` → broadcasts always 400. Fix in iteration 14 (by main agent): broadcast.py now matches users via $or over both keys, so newly-approved users (approval_status) AND any legacy rows (status) both receive broadcasts. Test-side adjustment in iteration 14: the announcement-thread assertion was made robust to the second segmented broadcast that also targets plain users, by scanning the message list rather than only last_message."
+}

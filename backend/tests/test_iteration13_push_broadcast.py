@@ -219,10 +219,18 @@ class TestAnnouncementThread:
         threads = r.json().get("threads", [])
         ann = [t for t in threads if t.get("is_announcement")]
         assert ann, f"No announcement thread for {alice['email']}: {threads}"
-        # Last message should equal the broadcast text we just sent.
-        last = ann[0].get("last_message") or {}
-        assert last.get("text", "").startswith("This is an automated test"), last
-        pytest.alice_announcement_thread_id = ann[0]["id"]
+        tid = ann[0]["id"]
+        # The original broadcast may not be the LAST message in the thread (the
+        # later segmented audience='users' broadcast also lands here). Instead,
+        # verify the original broadcast message exists in the message list.
+        mr = s.get(f"{BASE_URL}/api/chat/{tid}/messages",
+                   headers=_h(alice["token"]))
+        assert mr.status_code == 200, mr.text
+        msgs = mr.json().get("messages", [])
+        texts = [m.get("text", "") for m in msgs]
+        assert any(t.startswith("This is an automated test") for t in texts), \
+            f"Original broadcast text not found in announcement thread: {texts}"
+        pytest.alice_announcement_thread_id = tid
 
     def test_user_cannot_post_in_announcement_thread(self, s, two_users):
         tid = getattr(pytest, "alice_announcement_thread_id", None)

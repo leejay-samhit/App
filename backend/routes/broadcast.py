@@ -69,8 +69,12 @@ async def _audience_user_ids(audience: str) -> List[str]:
     """
     base: Dict[str, Any] = {
         "role": {"$ne": "admin"},
-        # Both 'approved' and 'active' status values exist in legacy rows.
-        "status": {"$in": ["approved", "active"]},
+        # Field used by both legacy and new registrations. Some old rows
+        # may still set the bare `status` field, so accept either.
+        "$or": [
+            {"approval_status": {"$in": ["approved", "active"]}},
+            {"status":          {"$in": ["approved", "active"]}},
+        ],
         "deleted": {"$ne": True},
     }
     if audience == "providers":

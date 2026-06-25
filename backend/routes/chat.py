@@ -963,27 +963,10 @@ async def report_user(body: ReportIn, user: Dict[str, Any] = Depends(get_current
     return _serialize(dict(doc))
 
 
-# ── Search messages within a single thread (or globally across mine) ──
-@router.get("/chat/search/messages")
-async def search_messages(
-    q: str = Query(..., min_length=2, max_length=80),
-    thread_id: Optional[str] = None,
-    user: Dict[str, Any] = Depends(get_current_user),
-):
-    safe = re.escape(q.strip())
-    base: Dict[str, Any] = {
-        "text": {"$regex": safe, "$options": "i"},
-        "deleted_for_everyone": {"$ne": True},
-    }
-    if thread_id:
-        await _assert_thread_member(thread_id, user["id"])
-        base["thread_id"] = thread_id
-    else:
-        # All threads this user participates in.
-        my_threads = await db.chat_threads.find({"participants": user["id"]}, {"_id": 0, "id": 1}).to_list(2000)
-        base["thread_id"] = {"$in": [t["id"] for t in my_threads]}
-    rows = await db.chat_messages.find(base, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
-    return {"messages": [_serialize(dict(r)) for r in rows]}
+# ── Search messages — the canonical implementation lives earlier in this
+# file (above the `/chat/{thread_id}/...` dynamic routes). The duplicate
+# declaration that previously sat here triggered FastAPI's "Duplicate
+# Operation ID" warning at startup, so it has been removed.
 
 
 # ── "Delete for everyone" — only the sender, within 1 hour ──
