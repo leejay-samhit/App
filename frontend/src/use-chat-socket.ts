@@ -1,9 +1,17 @@
 // Real-time chat WebSocket hook. Connects to /api/ws/chat with the user's
-// JWT in the ?token= query. Auto-reconnects with exponential backoff.
+// JWT in the ?token= query. Auto-reconnects with exponential backoff PLUS
+// foreground/visibility-aware reconnect so a paused-then-resumed app
+// reconnects immediately instead of waiting out the backoff.
 import { useEffect, useRef, useState } from "react";
+import { AppState, AppStateStatus, Platform } from "react-native";
 import { getAuthToken } from "./api";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL || "";
+
+// Heartbeat: send a "ping" every 20s so corporate proxies / mobile carriers
+// don't silently kill the socket after a minute of inactivity. The server
+// echoes "pong" — see routes/chat.py:websocket_chat.
+const HEARTBEAT_MS = 20_000;
 
 function wsUrlFromHttp(token: string): string {
   const u = BASE_URL.replace(/^https?:\/\//, (m) => (m === "https://" ? "wss://" : "ws://"));
@@ -17,7 +25,10 @@ export type ChatSocketEvent =
   | { type: "request.rejected"; request_id: string }
   | { type: "message.new"; thread_id: string; message: any }
   | { type: "message.edited"; thread_id: string; message: any }
-  | { type: "message.deleted"; thread_id: string; message_id: string };
+  | { type: "message.deleted"; thread_id: string; message_id: string }
+  | { type: "message.reacted"; thread_id: string; message_id: string; reactions: Record<string, string[]> }
+  | { type: "message.delivered"; thread_id: string; by_user_id: string }
+  | { type: "typing"; thread_id: string; user_id: string; at: string };
 
 export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -29,6 +40,21 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
   useEffect(() => {
     let cancelled = false;
     let timer: any = null;
+    let heartbeat: any = null;
+
+    const stopHeartbeat = () => {
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+    };
+
+    const startHeartbeat = () => {
+      stopHeartbeat();
+      heartbeat = setInterval(() => {
+        try {
+          const ws = wsRef.current;
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
+        } catch { /* ignore */ }
+      }, HEARTBEAT_MS);
+    };
 
     const connect = async () => {
       if (cancelled) return;
@@ -43,20 +69,24 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
         ws.onopen = () => {
           reconnectRef.current = 0;
           setConnected(true);
+          startHeartbeat();
         };
         ws.onmessage = (e) => {
+          // Text "pong" is the heartbeat reply — ignore.
+          if (typeof e.data === "string" && e.data === "pong") return;
           try {
             const data = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
             if (data && data.type) onEventRef.current(data);
-          } catch { /* ignore */ }
+          } catch { /* ignore non-JSON frames */ }
         };
         ws.onerror = () => { /* close handler will retry */ };
         ws.onclose = () => {
           setConnected(false);
           wsRef.current = null;
+          stopHeartbeat();
           if (cancelled) return;
-          // Exponential backoff capped at 30s
-          const delay = Math.min(30000, 1000 * Math.pow(2, reconnectRef.current));
+          // Exponential backoff capped at 30s.
+          const delay = Math.min(30_000, 1000 * Math.pow(2, reconnectRef.current));
           reconnectRef.current += 1;
           timer = setTimeout(connect, delay);
         };
@@ -65,10 +95,39 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
       }
     };
 
+    // Reconnect aggressively when the app returns to the foreground —
+    // mobile OSes routinely tear down idle sockets to save battery.
+    const onAppState = (state: AppStateStatus) => {
+      if (cancelled) return;
+      if (state !== "active") return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        // Skip the backoff — user is looking at the app right now.
+        if (timer) { clearTimeout(timer); timer = null; }
+        reconnectRef.current = 0;
+        connect();
+      }
+    };
+    const appStateSub = AppState.addEventListener("change", onAppState);
+
+    // On web, also listen to visibility so reopening the tab reconnects fast.
+    let visListener: (() => void) | null = null;
+    if (Platform.OS === "web" && typeof document !== "undefined") {
+      visListener = () => {
+        if (document.visibilityState === "visible") onAppState("active");
+      };
+      document.addEventListener("visibilitychange", visListener);
+    }
+
     connect();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      stopHeartbeat();
+      try { appStateSub.remove(); } catch { /* ignore */ }
+      if (visListener && typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", visListener);
+      }
       try { wsRef.current?.close(); } catch { /* ignore */ }
     };
   }, []);

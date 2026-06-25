@@ -12,6 +12,8 @@ import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 import { useChatSocket } from "../../src/use-chat-socket";
+import { useChatSettings } from "../../src/chat-settings";
+import { ChatLockGate } from "../../src/chat-lock-gate";
 
 type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; is_vendor?: boolean; is_service_provider?: boolean };
 type Thread = { id: string; other: UserBrief; is_downline: boolean; unread_count: number; last_message: any; last_message_at?: string };
@@ -131,13 +133,18 @@ export default function ChatListScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.headerRow}>
-        <Text style={styles.title}>Slang-Connect</Text>
-        {requests.incoming.length > 0 ? (
-          <View style={styles.badge}><Text style={styles.badgeText}>{requests.incoming.length} new</Text></View>
-        ) : null}
-      </View>
+    <ChatTabGate>
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <View style={styles.headerRow}>
+          <Text style={styles.title}>Slang-Connect</Text>
+          {requests.incoming.length > 0 ? (
+            <View style={styles.badge}><Text style={styles.badgeText}>{requests.incoming.length} new</Text></View>
+          ) : null}
+          <View style={{ flex: 1 }} />
+          <TouchableOpacity onPress={() => router.push("/chat/settings" as any)} style={styles.gearBtn} testID="chat-settings-open">
+            <Feather name="settings" size={20} color={colors.text} />
+          </TouchableOpacity>
+        </View>
 
       {/* Search by referral code */}
       <View style={styles.searchWrap}>
@@ -337,12 +344,27 @@ export default function ChatListScreen() {
         </View>
       </Modal>
     </SafeAreaView>
+    </ChatTabGate>
+  );
+}
+
+// Gate wrapper — when chat lock is on and the tab hasn't been unlocked yet
+// this session, render the lock screen instead of the chat list.
+function ChatTabGate({ children }: { children: React.ReactNode }) {
+  const { isTabLocked, isUnlocked, markUnlocked } = useChatSettings();
+  const [unlocked, setUnlocked] = useState(false);
+  if (!isTabLocked() || isUnlocked("tab") || unlocked) return <>{children}</>;
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      <ChatLockGate unlockKey="tab" onUnlocked={() => { markUnlocked("tab"); setUnlocked(true); }} />
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
-  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.screen, paddingTop: 4, paddingBottom: 8 },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: spacing.screen, paddingTop: 4, paddingBottom: 8 },
+  gearBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center", borderRadius: 18 },
   title: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4 },
   badge: { backgroundColor: "#FEE2E2", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
   badgeText: { fontSize: 11, fontWeight: "800", color: "#B91C1C" },

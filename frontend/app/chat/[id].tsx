@@ -14,6 +14,8 @@ import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 import { useChatSocket } from "../../src/use-chat-socket";
+import { useChatSettings, wallpaperStyle } from "../../src/chat-settings";
+import { ChatLockGate } from "../../src/chat-lock-gate";
 
 type Message = {
   id: string;
@@ -87,6 +89,10 @@ export default function ChatThreadScreen() {
   // open it full-screen with a clean dark backdrop so subtle photos
   // become clearly readable.
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  // Per-thread chat-lock unlock state (kept locally so the gate disappears
+  // immediately after a successful PIN entry).
+  const [unlockedThisSession, setUnlockedThisSession] = useState(false);
+  const wpSettings = useChatSettings();
   const scrollRef = useRef<ScrollView | null>(null);
 
   const load = useCallback(async () => {
@@ -199,8 +205,24 @@ export default function ChatThreadScreen() {
 
   if (!threadId) return null;
 
+  const locked = wpSettings.isThreadLocked(threadId);
+  const alreadyUnlocked = wpSettings.isUnlocked(threadId) || unlockedThisSession;
+  if (locked && !alreadyUnlocked) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+        <ChatLockGate
+          unlockKey={threadId}
+          title="This chat is locked"
+          subtitle="Enter your chat PIN to view the conversation."
+          onUnlocked={() => { wpSettings.markUnlocked(threadId); setUnlockedThisSession(true); }}
+        />
+      </SafeAreaView>
+    );
+  }
+  const bgStyle = wallpaperStyle(wpSettings.wallpaperFor(threadId), wpSettings.settings?.presets || {});
+
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={[styles.safe, bgStyle]} edges={["top"]}>
       <View style={styles.headerRow}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
           <Feather name="arrow-left" size={20} color={colors.textMain} />

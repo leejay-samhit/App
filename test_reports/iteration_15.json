@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 15 — Chat Settings (wallpaper + chat lock) + Maintenance backfill. 27/27 pytest cases PASS in /app/backend/tests/test_iteration15_chat_settings_maintenance.py. GET /api/chat/settings returns the full documented shape (default_wallpaper, thread_wallpapers, has_pin, use_biometric, lock_chat_tab, locked_thread_ids, presets). PATCH /api/chat/settings/wallpaper correctly handles default-set/clear_default/per-thread-set/per-thread-clear and rejects unknown presets with 400. The chat-lock lifecycle is fully green: setup (200) → second setup (400) → verify wrong (403) → verify right (200) → change PIN (200) → old PIN now invalid (403) → new PIN works (200) → tab toggle PIN-gated → threads list PIN-gated → disable wipes pin/tab/threads → subsequent verify/change/disable all 400 (with `change` returning 403 because the old-PIN verify path fails first — both surface 'no PIN' state cleanly). Maintenance backfill: 403 for non-admin, 200 with {ok,copied_from_status,admin_defaulted} for super_admin; idempotent on second call (0/0). Regression: /api/chat/threads still 200 (returns {threads:[…]} envelope), /api/admin/broadcasts {audience:'all'} still 201 with recipient_count > 0. EMERGENT_PUSH_KEY 401s in backend logs remain expected with placeholder key.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration15_chat_settings_maintenance.py",
+    "/app/test_reports/pytest/iteration15.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routes/chat_settings.py — _verify_pin correctly rejects when pin_hash is None; combined with the explicit `if not pin_hash` 400 guards in verify/disable/threads/tab, the lock surface has no by-passable path. PIN regex ^\\d{4,6}$ matches PinBody min/max=4-6 so format validation is consistent across models and route bodies.",
+    "routes/chat_settings.py — lock_change uses 403 (old PIN incorrect) even when no PIN is configured. Tested and documented: behaviour is consistent because _verify_pin treats a null hash as 'wrong PIN'. If a 400 (no PIN configured) message would be friendlier, consider adding the same `if not current.get('pin_hash')` 400 guard that verify/disable already have. Non-blocking — current behaviour is safe.",
+    "routes/chat_settings.py — Wallpaper.value max_length=4_000_000 is generous (accepts embedded base64). Confirm the chat_settings doc stays within Mongo's 16 MB cap if both default_wallpaper and many thread_wallpapers carry base64 images. Consider rejecting kind='image' values larger than ~250 KB on the server side to keep doc bloat bounded.",
+    "routes/maintenance.py — backfill is correctly gated on super_admin via require_admin_role('super_admin') and is idempotent by construction ($exists:false guards). Cleanly logs copied/admin_defaulted counts.",
+    "server.py — both new routers are wired with the /api prefix (lines 9019-9020) so URLs match the spec exactly."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration15_chat_settings_maintenance.py (new — 27 cases covering all new endpoints + regression)"
+  ],
+  "success_rate": {"backend": "100% (27/27)", "frontend": "N/A — backend-only scope"},
+  "seed_data_creation": "Per-module fixtures create two fresh TEST_lock_* / TEST_nonadmin_* users via EARN referral and admin-approve them. They persist after the run; admin can purge via the existing demo-user purge if needed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All new chat-settings + maintenance endpoints are green. The test file is idempotent and can be re-run as a regression suite. The backfill test asserts the SECOND call returns 0/0; the FIRST call may also return 0/0 if a prior iteration ran the backfill — that's still a valid pass (idempotency means the DB is already migrated). EMERGENT_PUSH_KEY 401s during the broadcast regression test are expected and swallowed by routes/push.py.",
+  "rca_of_issue": "No production defect surfaced. Only test-author issue: initially asserted /api/chat/threads returns a bare list, but the current shape is {threads:[…]}. Test was updated to accept both shapes (forward-compat)."
+}

@@ -185,6 +185,8 @@ from routes import refunds as refunds_router  # noqa: E402
 from routes import privacy as privacy_router  # noqa: E402
 from routes import push as push_router  # noqa: E402
 from routes import broadcast as broadcast_router  # noqa: E402
+from routes import maintenance as maintenance_router  # noqa: E402
+from routes import chat_settings as chat_settings_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -9014,6 +9016,8 @@ app.include_router(refunds_router.router, prefix="/api")
 app.include_router(privacy_router.router, prefix="/api")
 app.include_router(push_router.router, prefix="/api")
 app.include_router(broadcast_router.router, prefix="/api")
+app.include_router(maintenance_router.router, prefix="/api")
+app.include_router(chat_settings_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

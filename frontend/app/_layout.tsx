@@ -9,6 +9,7 @@ import * as Notifications from "expo-notifications";
 import * as Linking from "expo-linking";
 import { AuthProvider, useAuth } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
+import { ChatSettingsProvider } from "../src/chat-settings";
 import { LocationGate } from "../src/location-gate";
 import { SplashOverlay } from "../src/splash-overlay";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
@@ -167,6 +168,7 @@ function RootLayoutInner() {
       <SafeAreaProvider>
         <BrandingProvider>
           <AuthProvider>
+            <ChatSettingsProvider>
             <PushReRegister />
             <GlobalFont>
               {/* Standard status bar — Android reserves space for it automatically
@@ -202,6 +204,7 @@ function RootLayoutInner() {
                 <SplashOverlay />
               </TabletContainer>
             </GlobalFont>
+            </ChatSettingsProvider>
           </AuthProvider>
         </BrandingProvider>
       </SafeAreaProvider>
