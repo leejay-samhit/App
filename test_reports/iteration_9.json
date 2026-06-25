@@ -1,0 +1,53 @@
+{
+  "summary": "Sprint 1 chat upgrade — backend-only validation. 26 pytest cases covering all 12 features (offensive filter, reply, dedupe, rate-limit, block, reactions, star, pin, delivered, typing, presence, block lifecycle, report, search, delete-for-everyone, SP Start-Chat shortcut). 22/26 PASS, 4 FAIL — surfacing 2 distinct backend bugs: (a) route-ordering: GET /api/chat/search/messages is shadowed by GET /api/chat/{thread_id}/messages because the dynamic route is declared first, so the search call resolves with thread_id='search' and returns 404 'Chat not found'; (b) timezone bug in DELETE /api/chat/messages/{msg_id}/for-everyone where _now() (aware UTC) is subtracted from m['created_at'] (naive UTC returned by Motor) → TypeError, returning 500. Same naive/aware subtraction pattern also exists in PATCH edit_message at chat.py:613 and would break edit checks once messages are retrieved from Mongo. All other features verified end-to-end including offensive-word 422, reply_to snapshot (≤160 chars), dedupe within 30s, 31st-message 429, symmetric block 403, reaction toggle+replace, star+listing, pin+non-participant denial, delivered count, typing 200, presence offline, block lifecycle, self-report 400, SP Start-Chat shortcut (self 400, non-provider w/o thread 403, provider w/o reveal 403, provider w/ reveal 200).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/chat/search/messages",
+        "issue": "Route ordering bug — this static path is shadowed by the dynamic '/api/chat/{thread_id}/messages' route declared earlier at chat.py:482. Requests to /chat/search/messages?q=... resolve as thread_id='search' and return 404 'Chat not found'. Fix: declare the search route (and any other static '/chat/<word>/...' routes) BEFORE the dynamic '/chat/{thread_id}/messages' handler, OR rename to a non-conflicting path such as '/chat/messages/search'.",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "DELETE /api/chat/messages/{msg_id}/for-everyone",
+        "issue": "TypeError: can't subtract offset-naive and offset-aware datetimes at chat.py:841. _now() returns timezone-aware UTC but Motor/PyMongo returns naive UTC for stored datetimes, so '_now() - created' raises and the endpoint returns 500. Fix: coerce 'created' to aware UTC, e.g. `if created.tzinfo is None: created = created.replace(tzinfo=timezone.utc)` before the subtraction. The same defect exists in PATCH /api/chat/messages/{msg_id} at chat.py:613 (edit_message age check) and will manifest once an edit is attempted on a message refetched from Mongo.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration9_chat_sprint1.py",
+    "/app/test_reports/pytest/iteration9_chat_sprint1.xml"
+  ],
+  "action_items": [
+    "Fix route ordering: move @router.get('/chat/search/messages') above @router.get('/chat/{thread_id}/messages') in /app/backend/routes/chat.py so FastAPI matches the static path first. Same caution applies to any other '/chat/<static>/...' route registered after the dynamic one.",
+    "Normalize datetimes before arithmetic in chat.py: in delete_for_everyone (line 841) and edit_message (line 613), do `created = created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created` before computing `_now() - created`. Optionally, add a small helper `_as_utc(dt)` and reuse.",
+    "Optional hardening: when /chat/threads is hit for a non-provider target who has NO existing thread, the current code returns 403 — good. But if a thread already exists between non-providers (e.g., via /chat/request/accept), this endpoint silently returns it. That matches the documented behaviour, but worth confirming this is intentional vs. requiring an explicit 'accepted request' check."
+  ],
+  "critical_code_review_comments": [
+    "chat.py:482 vs 807 — route-ordering bug as described above. FastAPI routes are matched in declaration order; the dynamic path captures anything in the {thread_id} slot.",
+    "chat.py:613 and chat.py:841 — naive/aware datetime subtraction is unsafe whenever a value is loaded from Mongo (Motor returns naive UTC). Centralize via a `_as_utc()` helper.",
+    "chat.py:813 — `re.escape(q.strip())` correctly sanitizes regex special chars; case-insensitive match works as specified.",
+    "chat.py:269 — `is_service_provider or service_status == 'approved'` — be aware this still requires the user record to be flipped; ensure the SP onboarding writes one of those flags consistently.",
+    "chat.py:530-548 — dedupe window 30s and rate-limit 30/60s are correctly implemented; behaviour confirmed by tests.",
+    "chat.py:660 — `_assert_thread_member` is invoked for react, so non-participants correctly get 404 (or 403 depending on which exception fires first). Adequate."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration9_chat_sprint1.py (new)"
+  ],
+  "success_rate": {
+    "backend": "85% (22/26 pytest cases passing; the 4 failures are caused by 2 distinct backend defects)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Created 3 disposable users (TEST_chatA_<RUN_TAG>@example.com, …chatB…, …chatC…) plus an on-demand 4th user (chatD…) via POST /api/auth/register, then flipped registration_paid=true / approval_status='approved' in Mongo. Seeded one chat_threads doc between A and B at module setup, another B↔C in the rate-limit test, and one phone_reveal_invoices row (status='paid', customer_id=A, provider_id=C, tagged TEST_TAG=<RUN_TAG>) for the SP Start-Chat shortcut test. All seeded users, threads, messages, blocks, reports and reveal invoices are deleted at module teardown — leaves no residue.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run pytest /app/backend/tests/test_iteration9_chat_sprint1.py after the main agent applies the route-ordering fix and the datetime tz-normalization fix. Expectation: all 26 cases should pass with no code change to the test file. If the main agent renames the search route path (instead of reordering), update test_search_thread_scoped / test_search_excludes_deleted_for_everyone to hit the new URL.",
+  "rca_of_issue": "Bug 1 (search 404) — FastAPI evaluates routes in declaration order; '/chat/{thread_id}/messages' (chat.py:482) is registered well before '/chat/search/messages' (chat.py:807). A GET to '/chat/search/messages' is therefore matched by the dynamic route with thread_id='search', the membership check in _assert_thread_member fails, and the client sees 404 'Chat not found'. Reproduction: any participant calling GET /api/chat/search/messages?q=hello. Mitigation: declare static-path GET handlers before the dynamic one, or namespace search under '/chat/messages/search'. Bug 2 (delete-for-everyone 500) — _now() returns datetime.now(timezone.utc) (aware); MongoDB stores datetimes as naive UTC and the default Motor codec returns them naive. Subtracting them raises TypeError. The same anti-pattern is on line 613 of edit_message and is a latent landmine. Reproduction: POST a message, then DELETE /api/chat/messages/<id>/for-everyone — server logs 'TypeError: can't subtract offset-naive and offset-aware datetimes' and returns 500. Mitigation: introduce `_as_utc(dt)` helper and call it before every arithmetic on Mongo-sourced datetimes."
+}

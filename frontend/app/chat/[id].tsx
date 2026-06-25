@@ -44,6 +44,8 @@ export default function ChatThreadScreen() {
   const [picking, setPicking] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<Message | null>(null);
+  // Sprint 1 chat upgrade — reply-to + send dedupe key.
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
   // Image preview / zoom modal (2026-06-01) — tap any image bubble to
   // open it full-screen with a clean dark backdrop so subtle photos
   // become clearly readable.
@@ -106,7 +108,12 @@ export default function ChatThreadScreen() {
         await api.patch(`/chat/messages/${editingId}`, { text });
         setEditingId(null);
       } else {
-        await api.post(`/chat/${threadId}/messages`, { text });
+        await api.post(`/chat/${threadId}/messages`, {
+          text,
+          reply_to_id: replyTo?.id,
+          client_dedupe_key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        });
+        setReplyTo(null);
       }
       setDraft("");
       // Optimistic local update will happen via WS event
@@ -191,8 +198,22 @@ export default function ChatThreadScreen() {
               const mine = isMine(m);
               const prev = messages[idx - 1];
               const showAvatar = !mine && (!prev || prev.sender_id !== m.sender_id);
+              const reactions = (m as any).reactions as Record<string, string[]> | undefined;
+              const reply = (m as any).reply_to as { id: string; sender_id: string; text: string; has_image?: boolean } | undefined;
+              // Delivery status (mine only). 3 states:
+              //   sent      → in delivered_to with only sender
+              //   delivered → other party in delivered_to but not read_by
+              //   read      → other party in read_by (blue)
+              const otherId = thread?.other?.id;
+              const delivered = !!otherId && Array.isArray((m as any).delivered_to) && (m as any).delivered_to.includes(otherId);
+              const readByOther = !!otherId && Array.isArray(m.read_by) && m.read_by.includes(otherId);
               return (
-                <Pressable key={m.id} onLongPress={() => { if (mine && !m.deleted) setActionMessage(m); }} style={{ flexDirection: "row", alignItems: "flex-end", justifyContent: mine ? "flex-end" : "flex-start", gap: 6 }}>
+                <Pressable
+                  key={m.id}
+                  onLongPress={() => { if (!m.deleted) setActionMessage(m); }}
+                  delayLongPress={250}
+                  style={{ flexDirection: "row", alignItems: "flex-end", justifyContent: mine ? "flex-end" : "flex-start", gap: 6 }}
+                >
                   {!mine ? (
                     <View style={[styles.avatarBubble, !showAvatar && { opacity: 0 }]}>
                       <Text style={styles.avatarBubbleText}>{(thread?.other.name || "?").substring(0, 1).toUpperCase()}</Text>
@@ -203,6 +224,16 @@ export default function ChatThreadScreen() {
                       <Text style={styles.deletedText}>Message deleted</Text>
                     ) : (
                       <>
+                        {reply ? (
+                          <View style={{ borderLeftWidth: 3, borderLeftColor: mine ? "rgba(255,255,255,0.7)" : colors.primary, paddingLeft: 8, marginBottom: 6, opacity: 0.9 }}>
+                            <Text style={{ fontSize: 10, fontWeight: "800", color: mine ? "rgba(255,255,255,0.85)" : colors.primary }} numberOfLines={1}>
+                              {reply.sender_id === user?.id ? "You" : thread?.other?.name || "Reply"}
+                            </Text>
+                            <Text style={{ fontSize: 12, color: mine ? "rgba(255,255,255,0.85)" : colors.textMuted }} numberOfLines={2}>
+                              {reply.has_image ? "📷 Image" : reply.text}
+                            </Text>
+                          </View>
+                        ) : null}
                         {m.image_data_url ? (
                           <TouchableOpacity
                             activeOpacity={0.85}
@@ -219,7 +250,22 @@ export default function ChatThreadScreen() {
                         <View style={styles.bubbleFooter}>
                           {m.edited ? <Text style={[styles.bubbleMeta, mine ? { color: "rgba(255,255,255,0.7)" } : null]}>edited · </Text> : null}
                           <Text style={[styles.bubbleMeta, mine ? { color: "rgba(255,255,255,0.7)" } : null]}>{formatTime(m.created_at)}</Text>
+                          {mine ? (
+                            <Text style={[styles.bubbleMeta, { marginLeft: 4, color: readByOther ? "#3FB6F8" : "rgba(255,255,255,0.7)" }]}>
+                              {readByOther ? "✓✓" : delivered ? "✓✓" : "✓"}
+                            </Text>
+                          ) : null}
                         </View>
+                        {reactions && Object.keys(reactions).length > 0 ? (
+                          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                            {Object.entries(reactions).map(([emo, list]) => (
+                              <View key={emo} style={{ backgroundColor: mine ? "rgba(255,255,255,0.18)" : "rgba(20,61,46,0.08)", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, flexDirection: "row", gap: 3 }}>
+                                <Text style={{ fontSize: 12 }}>{emo}</Text>
+                                <Text style={{ fontSize: 10, fontWeight: "800", color: mine ? "#fff" : colors.textMain }}>{list.length}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        ) : null}
                       </>
                     )}
                   </View>
@@ -235,6 +281,26 @@ export default function ChatThreadScreen() {
             <Feather name="edit-2" size={12} color={colors.primary} />
             <Text style={styles.editingText}>Editing message</Text>
             <TouchableOpacity onPress={() => { setEditingId(null); setDraft(""); }} style={{ marginLeft: "auto" }}>
+              <Feather name="x" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {/* Reply pill — shown above the composer when the user picked
+            "Reply" from a message's long-press menu. Sends `reply_to_id`
+            with the next message so the recipient sees a quote bubble. */}
+        {replyTo ? (
+          <View style={[styles.editingBanner, { backgroundColor: colors.brand100, borderColor: colors.primary, gap: 8 }]}>
+            <Feather name="corner-up-left" size={12} color={colors.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 10, fontWeight: "800", color: colors.primary, letterSpacing: 0.5 }}>
+                REPLY TO {isMine(replyTo) ? "YOURSELF" : (thread?.other?.name || "").toUpperCase()}
+              </Text>
+              <Text style={{ fontSize: 12, color: colors.textMain }} numberOfLines={1}>
+                {replyTo.image_data_url && !replyTo.text ? "📷 Image" : (replyTo.text || "")}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => setReplyTo(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Feather name="x" size={16} color={colors.textMuted} />
             </TouchableOpacity>
           </View>
@@ -261,13 +327,126 @@ export default function ChatThreadScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      {/* Action sheet for own messages (edit/delete) */}
+      {/* Action sheet — long-press a message to react / reply / copy / star / delete / report. */}
       <Modal visible={!!actionMessage} transparent animationType="fade" onRequestClose={() => setActionMessage(null)}>
         <Pressable style={styles.sheetOverlay} onPress={() => setActionMessage(null)}>
-          <View style={styles.sheet}>
+          <View style={styles.sheet} onStartShouldSetResponder={() => true}>
+            {/* Reaction picker — 6 common emojis. Tapping one toggles it on the server. */}
+            <View style={{ flexDirection: "row", justifyContent: "space-around", paddingVertical: 4, marginBottom: 6 }}>
+              {["👍", "❤️", "😂", "😮", "😢", "🙏"].map((emo) => (
+                <TouchableOpacity
+                  key={emo}
+                  onPress={async () => {
+                    if (!actionMessage) return;
+                    try { await api.post(`/chat/messages/${actionMessage.id}/react`, { emoji: emo }); } catch {}
+                    setActionMessage(null);
+                  }}
+                  style={{ width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted }}
+                  testID={`chat-react-${emo}`}
+                >
+                  <Text style={{ fontSize: 20 }}>{emo}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
             <Text style={styles.sheetTitle}>Message options</Text>
-            {actionMessage && canEdit(actionMessage) ? (
+
+            {/* Reply — set the composer's pending-reply state and close. */}
+            <TouchableOpacity
+              onPress={() => { if (actionMessage) setReplyTo(actionMessage); setActionMessage(null); }}
+              style={styles.sheetRow}
+            >
+              <Feather name="corner-up-left" size={18} color={colors.textMain} />
+              <Text style={styles.sheetRowText}>Reply</Text>
+            </TouchableOpacity>
+
+            {/* Copy text — uses expo-clipboard which is bundled by Expo SDK. */}
+            {actionMessage?.text ? (
+              <TouchableOpacity
+                onPress={async () => {
+                  try {
+                    const Clipboard = await import("expo-clipboard");
+                    await Clipboard.setStringAsync(actionMessage?.text || "");
+                  } catch {}
+                  setActionMessage(null);
+                }}
+                style={styles.sheetRow}
+              >
+                <Feather name="copy" size={18} color={colors.textMain} />
+                <Text style={styles.sheetRowText}>Copy</Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {/* Star — toggle per-user star flag on the server. */}
+            <TouchableOpacity
+              onPress={async () => {
+                if (!actionMessage) return;
+                try { await api.post(`/chat/messages/${actionMessage.id}/star`); } catch {}
+                setActionMessage(null);
+              }}
+              style={styles.sheetRow}
+            >
+              <Feather name="star" size={18} color={colors.textMain} />
+              <Text style={styles.sheetRowText}>Star</Text>
+            </TouchableOpacity>
+
+            {/* Edit — only own messages, within 15 min, no reply yet. */}
+            {actionMessage && isMine(actionMessage) && canEdit(actionMessage) ? (
               <TouchableOpacity onPress={() => onStartEdit(actionMessage)} style={styles.sheetRow}>
+                <Feather name="edit-2" size={18} color={colors.textMain} />
+                <Text style={styles.sheetRowText}>Edit</Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {/* Delete for me — soft-delete own messages anytime. */}
+            {actionMessage && isMine(actionMessage) ? (
+              <TouchableOpacity onPress={() => actionMessage && onDelete(actionMessage)} style={styles.sheetRow}>
+                <Feather name="trash-2" size={18} color="#B91C1C" />
+                <Text style={[styles.sheetRowText, { color: "#B91C1C" }]}>Delete for me</Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {/* Delete for everyone — own messages within 1 hour only. */}
+            {actionMessage && isMine(actionMessage) ? (
+              <TouchableOpacity
+                onPress={async () => {
+                  if (!actionMessage) return;
+                  try {
+                    await api.delete(`/chat/messages/${actionMessage.id}/for-everyone`);
+                  } catch (e) { Alert.alert("Couldn't delete", "The 1-hour window may have passed."); }
+                  setActionMessage(null);
+                }}
+                style={styles.sheetRow}
+              >
+                <Feather name="trash" size={18} color="#B91C1C" />
+                <Text style={[styles.sheetRowText, { color: "#B91C1C" }]}>Delete for everyone</Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {/* Report — only for messages NOT from me. */}
+            {actionMessage && !isMine(actionMessage) ? (
+              <TouchableOpacity
+                onPress={async () => {
+                  if (!actionMessage || !thread?.other?.id) return;
+                  try {
+                    await api.post("/chat/report", { target_user_id: thread.other.id, message_id: actionMessage.id, reason: "Reported from chat thread" });
+                    Alert.alert("Reported", "Thanks — our team will review this conversation.");
+                  } catch {}
+                  setActionMessage(null);
+                }}
+                style={styles.sheetRow}
+              >
+                <Feather name="flag" size={18} color="#B45309" />
+                <Text style={[styles.sheetRowText, { color: "#B45309" }]}>Report</Text>
+              </TouchableOpacity>
+            ) : null}
+
+            <TouchableOpacity onPress={() => setActionMessage(null)} style={[styles.sheetRow, { borderTopWidth: 1, borderTopColor: colors.border }]}>
+              <Feather name="x" size={18} color={colors.textMuted} />
+              <Text style={[styles.sheetRowText, { color: colors.textMuted }]}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Modal>
                 <Feather name="edit-2" size={18} color={colors.textMain} />
                 <Text style={styles.sheetRowText}>Edit</Text>
               </TouchableOpacity>

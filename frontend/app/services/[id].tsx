@@ -393,6 +393,27 @@ export default function ProviderProfileScreen() {
                 : "Get phone number"}
           </Text>
         </TouchableOpacity>
+        {/* June 2026 — once the user has revealed the provider's phone we
+            also surface an in-app "Start Chat" CTA so they don't have to
+            leave for a call. Opens a chat thread (created on first send)
+            against the provider's user_id. */}
+        {revealedPhone && p?.id ? (
+          <TouchableOpacity
+            onPress={async () => {
+              try {
+                const r = await api.post("/chat/threads", { other_user_id: p.id });
+                router.push(`/chat/${r.data.id}` as any);
+              } catch (e) {
+                Alert.alert("Couldn't open chat", "Please try again.");
+              }
+            }}
+            style={[styles.ctaBtn, { marginLeft: 8, backgroundColor: "#16A34A" }]}
+            testID="start-chat-btn"
+          >
+            <Feather name="message-circle" size={16} color="#fff" />
+            <Text style={styles.ctaBtnText}>Start Chat</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* Confirm reveal modal — shows breakdown + T&C checkbox + Pay button */}

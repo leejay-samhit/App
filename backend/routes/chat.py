@@ -55,6 +55,49 @@ class MessagePatch(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000)
 
 
+# ── Sprint 1 — WhatsApp-style chat upgrade (June 2026) ─────────────────────
+
+class MessageInExt(BaseModel):
+    """Extended message body with reply + client-side dedupe key."""
+    text: Optional[str] = Field(default="", max_length=4000)
+    image_data_url: Optional[str] = Field(default="", max_length=4_000_000)
+    reply_to_id: Optional[str] = None
+    client_dedupe_key: Optional[str] = Field(default=None, max_length=64)
+
+
+class ReactionIn(BaseModel):
+    emoji: str = Field(..., min_length=1, max_length=8)
+
+
+class ReportIn(BaseModel):
+    target_user_id: str = Field(..., min_length=1)
+    reason: Optional[str] = Field(default="", max_length=400)
+    message_id: Optional[str] = None
+
+
+# Minimal offensive-word filter — server-side gate so blocked words can
+# never enter chat_messages. Kept short on purpose; expand via admin
+# settings later if needed. Match is case-insensitive and word-boundary.
+OFFENSIVE_WORDS = {
+    "fuck", "shit", "bitch", "bastard", "asshole", "dick", "pussy",
+    "nigger", "faggot", "slut", "whore", "rape", "cunt",
+    # Hindi/Telugu transliterations frequently flagged in MLM spam reports
+    "madarchod", "behenchod", "chutiya", "lavda", "lund", "gandu",
+}
+
+import re  # noqa: E402  (kept module-local since the regex is only built once)
+_OFFENSIVE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in OFFENSIVE_WORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _contains_offensive(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_OFFENSIVE_RE.search(text))
+
+
 # ============== Helpers ==============
 
 def _now() -> datetime:
@@ -157,6 +200,10 @@ class _ConnectionManager:
                 except Exception:
                     self.disconnect(uid, ws)
 
+    def is_online(self, user_id: str) -> bool:
+        """Truthy if at least one live WS connection exists for this user."""
+        return bool(self._conns.get(user_id))
+
 
 manager = _ConnectionManager()
 
@@ -194,6 +241,55 @@ async def search_by_refcode(code: str = Query(..., min_length=2, max_length=20),
         "request_id": (pending or {}).get("id"),
         "is_downline": is_downline,
     }
+
+
+@router.post("/chat/threads")
+async def start_thread(body: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user)):
+    """June 2026 — Service-Provider Start-Chat shortcut.
+
+    The classic chat flow requires sending a `chat_request` and waiting for
+    acceptance. For Service Providers we skip that handshake: once the
+    customer has paid to reveal the provider's phone (any successful
+    `phone_reveal_invoices` row between the two), the chat thread is
+    created instantly so the customer can message the provider without
+    leaving the screen. Returns the thread doc.
+    """
+    other_user_id = (body or {}).get("other_user_id") or ""
+    if not other_user_id:
+        raise HTTPException(status_code=400, detail="other_user_id is required")
+    if other_user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Can't chat with yourself.")
+    other = await db.users.find_one({"id": other_user_id}, {"_id": 0})
+    if not other:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Allow if (a) the customer has revealed THIS provider's phone, OR
+    # (b) the OTHER user is an approved service provider and the caller
+    # has at least one successful reveal of them in `phone_reveal_invoices`.
+    if other.get("is_service_provider") or other.get("service_status") == "approved":
+        ok = await db.phone_reveal_invoices.find_one({
+            "customer_id":     user["id"],
+            "provider_id":     other_user_id,
+            "status":          {"$in": ["paid", "success", "approved"]},
+        })
+        if not ok:
+            raise HTTPException(
+                status_code=403,
+                detail="Reveal the provider's phone first to start a chat.",
+            )
+    else:
+        # For non-provider chats keep the existing safety net — must already
+        # have an accepted thread or an approved request.
+        parts = await _participants_canonical(user["id"], other_user_id)
+        existing = await db.chat_threads.find_one({"participants": parts})
+        if not existing:
+            raise HTTPException(
+                status_code=403,
+                detail="Send a chat request to this user first.",
+            )
+
+    thread = await _find_or_create_thread(user["id"], other_user_id)
+    return _serialize(dict(thread))
 
 
 @router.post("/chat/request")
@@ -405,12 +501,65 @@ async def list_messages(thread_id: str, before: Optional[str] = None, limit: int
 
 
 @router.post("/chat/{thread_id}/messages")
-async def post_message(thread_id: str, body: MessageIn, user: Dict[str, Any] = Depends(get_current_user)):
+async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] = Depends(get_current_user)):
     t = await _assert_thread_member(thread_id, user["id"])
     text = (body.text or "").strip()
     img = body.image_data_url or ""
     if not text and not img:
         raise HTTPException(status_code=400, detail="Message can't be empty.")
+
+    # ── Offensive-word filter — block on send so the message never lands
+    # in chat_messages. Returns 422 (custom) so the client can show a
+    # friendly tooltip instead of a generic error.
+    if _contains_offensive(text):
+        raise HTTPException(status_code=422, detail="Your message contains language that's not allowed.")
+
+    # ── Block list check — both directions. If either party has blocked
+    # the other we silently 403 (do not leak which side did the block).
+    other_id = next((p for p in t["participants"] if p != user["id"]), None)
+    if other_id:
+        blocked = await db.chat_blocks.find_one({
+            "$or": [
+                {"blocker_id": user["id"], "blocked_id": other_id},
+                {"blocker_id": other_id,    "blocked_id": user["id"]},
+            ]
+        })
+        if blocked:
+            raise HTTPException(status_code=403, detail="You can't message this user right now.")
+
+    # ── Client-side dedupe — same key from the same sender in the last
+    # 30 seconds returns the prior doc instead of creating a new one.
+    if body.client_dedupe_key:
+        recent = await db.chat_messages.find_one({
+            "thread_id": thread_id, "sender_id": user["id"],
+            "client_dedupe_key": body.client_dedupe_key,
+            "created_at": {"$gte": _now() - timedelta(seconds=30)},
+        })
+        if recent:
+            return _serialize(dict(recent))
+
+    # ── Soft rate-limit — max 30 messages / 60s per sender per thread.
+    sixty_ago = _now() - timedelta(seconds=60)
+    recent_count = await db.chat_messages.count_documents({
+        "thread_id": thread_id, "sender_id": user["id"],
+        "created_at": {"$gte": sixty_ago},
+    })
+    if recent_count >= 30:
+        raise HTTPException(status_code=429, detail="You're sending messages too fast — slow down.")
+
+    # ── Optional reply quote — embed a snapshot so the bubble survives
+    # even if the original message gets deleted later.
+    reply_quote: Optional[Dict[str, Any]] = None
+    if body.reply_to_id:
+        orig = await db.chat_messages.find_one({"id": body.reply_to_id, "thread_id": thread_id})
+        if orig and not orig.get("deleted"):
+            reply_quote = {
+                "id":      orig["id"],
+                "sender_id": orig.get("sender_id"),
+                "text":    (orig.get("text") or "")[:160],
+                "has_image": bool(orig.get("image_data_url")),
+            }
+
     doc = {
         "id": str(uuid.uuid4()),
         "thread_id": thread_id,
@@ -418,13 +567,31 @@ async def post_message(thread_id: str, body: MessageIn, user: Dict[str, Any] = D
         "text": text,
         "image_data_url": img,
         "deleted": False,
+        "deleted_for_everyone": False,
         "edited": False,
         "read_by": [user["id"]],
+        # Delivered tracking — populated when recipient's WS receives the
+        # `message.new` event or when they next call /messages.
+        "delivered_to": [user["id"]],
+        "reply_to": reply_quote,
+        "reactions": {},      # emoji → [user_ids]
+        "starred_by": [],     # user_ids who starred this message
+        "client_dedupe_key": body.client_dedupe_key,
         "created_at": _now(),
         "updated_at": _now(),
     }
     await db.chat_messages.insert_one(doc.copy())
     await db.chat_threads.update_one({"id": thread_id}, {"$set": {"last_message_at": _now()}})
+
+    # If the other party is currently connected via WS, mark delivered now.
+    other = other_id or ""
+    if other and manager.is_online(other):
+        await db.chat_messages.update_one(
+            {"id": doc["id"]},
+            {"$addToSet": {"delivered_to": other}},
+        )
+        doc["delivered_to"] = list(set(doc["delivered_to"] + [other]))
+
     # WS broadcast to both participants
     await manager.send_to(list(t["participants"]), {
         "type": "message.new",
@@ -480,6 +647,211 @@ async def delete_message(msg_id: str, user: Dict[str, Any] = Depends(get_current
     return {"ok": True}
 
 
+# ============== Sprint 1 — Reactions / Star / Pin / Block / Report / Search ==============
+
+@router.post("/chat/messages/{msg_id}/react")
+async def toggle_reaction(msg_id: str, body: ReactionIn, user: Dict[str, Any] = Depends(get_current_user)):
+    """Toggle this user's emoji reaction on a message. Sending the same
+    emoji a second time removes it; a new emoji replaces the previous one
+    (one reaction per user per message — WhatsApp/Insta style)."""
+    m = await db.chat_messages.find_one({"id": msg_id})
+    if not m or m.get("deleted_for_everyone"):
+        raise HTTPException(status_code=404, detail="Message not found.")
+    await _assert_thread_member(m["thread_id"], user["id"])
+    reactions: Dict[str, List[str]] = dict(m.get("reactions") or {})
+    # Remove this user from every emoji bucket first.
+    for emo in list(reactions.keys()):
+        if user["id"] in reactions[emo]:
+            reactions[emo] = [u for u in reactions[emo] if u != user["id"]]
+            if not reactions[emo]:
+                reactions.pop(emo)
+    # Toggle on if the user hadn't already had this exact emoji.
+    if body.emoji not in (m.get("reactions") or {}) or user["id"] not in ((m.get("reactions") or {}).get(body.emoji) or []):
+        reactions.setdefault(body.emoji, []).append(user["id"])
+    await db.chat_messages.update_one({"id": msg_id}, {"$set": {"reactions": reactions, "updated_at": _now()}})
+    t = await db.chat_threads.find_one({"id": m["thread_id"]})
+    if t:
+        await manager.send_to(list(t["participants"]), {"type": "message.reacted", "thread_id": m["thread_id"], "message_id": msg_id, "reactions": reactions})
+    return {"ok": True, "reactions": reactions}
+
+
+@router.post("/chat/messages/{msg_id}/star")
+async def toggle_star(msg_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Toggle star (per-user, like Gmail/WhatsApp). Starred list endpoint below."""
+    m = await db.chat_messages.find_one({"id": msg_id})
+    if not m:
+        raise HTTPException(status_code=404, detail="Message not found.")
+    await _assert_thread_member(m["thread_id"], user["id"])
+    starred = list(m.get("starred_by") or [])
+    if user["id"] in starred:
+        starred.remove(user["id"])
+        starred_now = False
+    else:
+        starred.append(user["id"])
+        starred_now = True
+    await db.chat_messages.update_one({"id": msg_id}, {"$set": {"starred_by": starred}})
+    return {"ok": True, "starred": starred_now}
+
+
+@router.get("/chat/starred")
+async def list_starred(limit: int = 100, user: Dict[str, Any] = Depends(get_current_user)):
+    rows = await db.chat_messages.find(
+        {"starred_by": user["id"], "deleted_for_everyone": {"$ne": True}},
+        {"_id": 0},
+    ).sort("created_at", -1).limit(max(1, min(int(limit or 100), 500))).to_list(500)
+    return {"messages": [_serialize(dict(r)) for r in rows]}
+
+
+@router.post("/chat/threads/{thread_id}/pin")
+async def toggle_pin(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    t = await _assert_thread_member(thread_id, user["id"])
+    pinned = list(t.get("pinned_by") or [])
+    if user["id"] in pinned:
+        pinned.remove(user["id"])
+        now_pinned = False
+    else:
+        pinned.append(user["id"])
+        now_pinned = True
+    await db.chat_threads.update_one({"id": thread_id}, {"$set": {"pinned_by": pinned}})
+    return {"ok": True, "pinned": now_pinned}
+
+
+# ── Mark delivered (called on WS receive or on first /messages fetch) ──
+@router.post("/chat/{thread_id}/delivered")
+async def mark_delivered(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    await _assert_thread_member(thread_id, user["id"])
+    res = await db.chat_messages.update_many(
+        {"thread_id": thread_id, "sender_id": {"$ne": user["id"]}, "delivered_to": {"$ne": user["id"]}},
+        {"$addToSet": {"delivered_to": user["id"]}},
+    )
+    t = await db.chat_threads.find_one({"id": thread_id})
+    if t and res.modified_count:
+        await manager.send_to(list(t["participants"]), {
+            "type": "message.delivered", "thread_id": thread_id, "by_user_id": user["id"],
+        })
+    return {"ok": True, "count": res.modified_count}
+
+
+# ── Typing indicator (WS-only fanout, no DB row) ──
+@router.post("/chat/{thread_id}/typing")
+async def typing_ping(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    t = await _assert_thread_member(thread_id, user["id"])
+    others = [p for p in t["participants"] if p != user["id"]]
+    await manager.send_to(others, {
+        "type": "typing", "thread_id": thread_id, "user_id": user["id"], "at": _now().isoformat(),
+    })
+    return {"ok": True}
+
+
+# ── Online / last-seen for the OTHER party of a thread ──
+@router.get("/chat/{thread_id}/presence")
+async def thread_presence(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    t = await _assert_thread_member(thread_id, user["id"])
+    other_id = next((p for p in t["participants"] if p != user["id"]), None)
+    if not other_id:
+        return {"online": False, "last_seen": None}
+    online = manager.is_online(other_id)
+    last_seen = None
+    if not online:
+        u = await db.users.find_one({"id": other_id}, {"_id": 0, "last_seen_at": 1})
+        last_seen = (u or {}).get("last_seen_at")
+        if isinstance(last_seen, datetime):
+            last_seen = last_seen.isoformat()
+    return {"online": online, "last_seen": last_seen}
+
+
+# ── Block / Unblock ──
+@router.post("/chat/block/{target_user_id}")
+async def block_user(target_user_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    if target_user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Can't block yourself.")
+    await db.chat_blocks.update_one(
+        {"blocker_id": user["id"], "blocked_id": target_user_id},
+        {"$set": {"blocker_id": user["id"], "blocked_id": target_user_id, "created_at": _now()}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@router.delete("/chat/block/{target_user_id}")
+async def unblock_user(target_user_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    await db.chat_blocks.delete_one({"blocker_id": user["id"], "blocked_id": target_user_id})
+    return {"ok": True}
+
+
+@router.get("/chat/blocks")
+async def list_blocks(user: Dict[str, Any] = Depends(get_current_user)):
+    rows = await db.chat_blocks.find({"blocker_id": user["id"]}, {"_id": 0}).to_list(500)
+    return {"blocks": [_serialize(dict(r)) for r in rows]}
+
+
+# ── Report ──
+@router.post("/chat/report")
+async def report_user(body: ReportIn, user: Dict[str, Any] = Depends(get_current_user)):
+    if body.target_user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Can't report yourself.")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "reporter_id": user["id"],
+        "target_user_id": body.target_user_id,
+        "reason": (body.reason or "").strip(),
+        "message_id": body.message_id,
+        "status": "open",
+        "created_at": _now(),
+    }
+    await db.chat_reports.insert_one(doc.copy())
+    return _serialize(dict(doc))
+
+
+# ── Search messages within a single thread (or globally across mine) ──
+@router.get("/chat/search/messages")
+async def search_messages(
+    q: str = Query(..., min_length=2, max_length=80),
+    thread_id: Optional[str] = None,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    safe = re.escape(q.strip())
+    base: Dict[str, Any] = {
+        "text": {"$regex": safe, "$options": "i"},
+        "deleted_for_everyone": {"$ne": True},
+    }
+    if thread_id:
+        await _assert_thread_member(thread_id, user["id"])
+        base["thread_id"] = thread_id
+    else:
+        # All threads this user participates in.
+        my_threads = await db.chat_threads.find({"participants": user["id"]}, {"_id": 0, "id": 1}).to_list(2000)
+        base["thread_id"] = {"$in": [t["id"] for t in my_threads]}
+    rows = await db.chat_messages.find(base, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
+    return {"messages": [_serialize(dict(r)) for r in rows]}
+
+
+# ── "Delete for everyone" — only the sender, within 1 hour ──
+DELETE_FOR_EVERYONE_WINDOW = timedelta(hours=1)
+
+
+@router.delete("/chat/messages/{msg_id}/for-everyone")
+async def delete_for_everyone(msg_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    m = await db.chat_messages.find_one({"id": msg_id})
+    if not m:
+        raise HTTPException(status_code=404, detail="Message not found.")
+    if m["sender_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You can only delete your own messages.")
+    created = m["created_at"] if isinstance(m["created_at"], datetime) else datetime.fromisoformat(m["created_at"])
+    if _now() - created > DELETE_FOR_EVERYONE_WINDOW:
+        raise HTTPException(status_code=400, detail="The 1-hour window for delete-for-everyone has passed.")
+    await db.chat_messages.update_one(
+        {"id": msg_id},
+        {"$set": {"deleted": True, "deleted_for_everyone": True, "text": "", "image_data_url": "", "updated_at": _now()}},
+    )
+    t = await db.chat_threads.find_one({"id": m["thread_id"]})
+    if t:
+        await manager.send_to(list(t["participants"]), {
+            "type": "message.deleted", "thread_id": m["thread_id"], "message_id": msg_id, "for_everyone": True,
+        })
+    return {"ok": True}
+
+
 # ============== WebSocket ==============
 
 @router.websocket("/ws/chat")
@@ -497,6 +869,12 @@ async def websocket_chat(ws: WebSocket, token: str = Query(...)):
         await ws.close(code=4401)
         return
     await manager.connect(user_id, ws)
+    # Track presence — bump last_seen_at on connect AND disconnect so the
+    # "Last seen N min ago" string is always fresh.
+    try:
+        await db.users.update_one({"id": user_id}, {"$set": {"last_seen_at": _now()}})
+    except Exception:
+        pass
     try:
         # Send a hello so the client can confirm connection
         await ws.send_json({"type": "hello", "user_id": user_id})
@@ -514,3 +892,7 @@ async def websocket_chat(ws: WebSocket, token: str = Query(...)):
         pass
     finally:
         manager.disconnect(user_id, ws)
+        try:
+            await db.users.update_one({"id": user_id}, {"$set": {"last_seen_at": _now()}})
+        except Exception:
+            pass
