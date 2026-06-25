@@ -89,9 +89,15 @@ export default function ChatThreadScreen() {
   // open it full-screen with a clean dark backdrop so subtle photos
   // become clearly readable.
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  // Per-thread chat-lock unlock state (kept locally so the gate disappears
-  // immediately after a successful PIN entry).
-  const [unlockedThisSession, setUnlockedThisSession] = useState(false);
+  // Per-thread chat-lock unlock state — held as a REF (not useState) so
+  // mutating it is synchronous and doesn't depend on React batching across
+  // child→parent state updates. The gate guard reads `unlockedThisSessionRef.current`
+  // at render time so a freshly-mutated value is always picked up on the
+  // same render that flips `locked=true`.
+  const unlockedThisSessionRef = useRef(false);
+  // Bumped to force a re-render after we mutate the ref. The actual gate
+  // value lives in the ref so it can be flipped synchronously.
+  const [, forceRerender] = useState(0);
   const wpSettings = useChatSettings();
   const scrollRef = useRef<ScrollView | null>(null);
 
@@ -206,7 +212,7 @@ export default function ChatThreadScreen() {
   if (!threadId) return null;
 
   const locked = wpSettings.isThreadLocked(threadId);
-  const alreadyUnlocked = wpSettings.isUnlocked(threadId) || unlockedThisSession;
+  const alreadyUnlocked = wpSettings.isUnlocked(threadId) || unlockedThisSessionRef.current;
   if (locked && !alreadyUnlocked) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
@@ -214,7 +220,7 @@ export default function ChatThreadScreen() {
           unlockKey={threadId}
           title="This chat is locked"
           subtitle="Enter your chat PIN to view the conversation."
-          onUnlocked={() => { wpSettings.markUnlocked(threadId); setUnlockedThisSession(true); }}
+          onUnlocked={() => { wpSettings.markUnlocked(threadId); unlockedThisSessionRef.current = true; forceRerender((n) => n + 1); }}
         />
       </SafeAreaView>
     );
@@ -485,7 +491,7 @@ export default function ChatThreadScreen() {
               otherUserId={thread?.other?.id || ""}
               otherUserName={thread?.other?.name || "this user"}
               onClose={() => setProfileOpen(false)}
-              onLockToggled={() => setUnlockedThisSession(true)}
+              onLockToggled={() => { unlockedThisSessionRef.current = true; forceRerender((n) => n + 1); }}
             />
 
             <TouchableOpacity
@@ -822,13 +828,13 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
 
       <View style={ppbStyles.divider} />
 
-      <TouchableOpacity onPress={toggleBlock} disabled={busy || blocked === null} style={ppbStyles.row} testID="chat-profile-block">
+      <TouchableOpacity onPress={toggleBlock} disabled={busy} style={ppbStyles.row} testID="chat-profile-block">
         <View style={[ppbStyles.icon, { backgroundColor: blocked ? colors.brand100 : "#FFE6E6" }]}>
           <Feather name={blocked ? "user-check" : "user-x"} size={16} color={blocked ? colors.primary : "#B3261E"} />
         </View>
         <View style={{ flex: 1 }}>
           <Text style={[ppbStyles.title, !blocked && { color: "#B3261E" }]}>
-            {blocked === null ? "Loading…" : blocked ? `Unblock ${otherUserName}` : `Block ${otherUserName}`}
+            {blocked ? `Unblock ${otherUserName}` : `Block ${otherUserName}`}
           </Text>
           <Text style={ppbStyles.sub}>
             {blocked ? "They will be able to message you again." : "Stop receiving messages from this user."}
