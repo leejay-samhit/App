@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 21 — Backend smoke regression after a FRONTEND-ONLY image-fitter change (no backend code modified). All 9 targeted tests PASSED (9/9, 100%). Verified that (a) admin shop-layout endpoints still accept `data:image/jpeg;base64,...` payloads from the new fitter for both the top-level `image_data_url` (e.g. block_type=background) and per-slide `items[].image_data_url` (e.g. block_type=banner_slider), (b) PATCH /api/admin/shop-layout/{id} accepts data-URL updates, (c) admin product endpoints accept fitter-produced data URLs in both `image_url` and `images[]` for POST and PATCH, and (d) iter15 chat-settings / chat-lock / admin-broadcast endpoints remain green (no collateral damage). All test-created blocks and products were cleaned up via DELETE in each test's finally block. Test-credential file present and used (support@networkrupay.com / Nlee@1115 via conftest fixture; Alice login for chat-settings).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration21_image_fitter.py",
+    "/app/test_reports/pytest/iter21_image_fitter.xml",
+    "/app/test_reports/iteration_21.json"
+  ],
+  "action_items": [
+    "None — backend smoke is clean. Main agent can proceed; the fitter change is backend-compatible.",
+    "(Carryover from iter20, NOT re-tested here because this iteration is backend-only): the chat-lock-bounce on /app/frontend/app/chat/[id].tsx still requires the useRef-based fix (see iteration_20.json action_items[0])."
+  ],
+  "critical_code_review_comments": [
+    "Frontend code review (limited spot-check on /app/frontend/src/image-fitter.ts behaviour as inferred from payloads): image_data_url payload size cap on backend is 4_000_000 chars (~3MB base64 → ~2.2MB binary). Confirm the fitter's JPEG-compress step stays well under that for the largest preset (1080×600 banner_slider). No backend change needed unless users hit 413 on real uploads.",
+    "Shop-layout admin GET returns `{items: [...]}` envelope while the public /api/shop-layout returns a bare list — fine, but worth noting for any future test author. Tests now handle both shapes."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration21_image_fitter.py (new — 9 pytest test cases)"
+  ],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "N/A — backend-only per review_request.testing_type"},
+  "seed_data_creation": "None persisted. Each test creates its own block/product with TEST_iter21_* prefix and deletes it in finally. Alice/Bob unchanged.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend is solid for the image-fitter change — no schema changes were needed, base64 data: URLs flow through POST/PATCH for both /api/admin/shop-layout and /api/admin/products. If main agent later modifies the fitter to produce significantly larger JPEGs, re-run /app/backend/tests/test_iteration21_image_fitter.py to confirm payloads still fit under the 4_000_000-char cap on `image_data_url` (defined at /app/backend/routes/shop_layout.py:61 & :80). NOTE: admin shop-layout GET returns a `{items: [...]}` envelope (not a bare list); product GET returns a bare list. Useful for the next test author. Carryover bug from iter20 (chat-lock-bounce) is unrelated to this iteration and still pending the useRef fix.",
+  "rca_of_issue": "N/A — no bug found this iteration. The frontend-only image-fitter change is fully backwards-compatible with the existing backend API contract."
+}

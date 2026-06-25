@@ -66,24 +66,14 @@ export type RichProductEndpoints = {
 const emptyStyled = (): StyledText => ({ text: "", bold: false, font_size: null, align: "left" });
 
 async function pickAndCompressImage(opts?: { aspect?: [number, number]; width?: number }) {
-  const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (!perm.granted) {
-    Alert.alert("Permission needed", "Please allow photo library access.");
-    return null;
-  }
-  const r = await ImagePicker.launchImageLibraryAsync({
-    mediaTypes: ImagePicker.MediaTypeOptions.Images,
-    quality: 0.85,
-    allowsEditing: true,
-    aspect: opts?.aspect ?? [4, 3],
-  });
-  if (r.canceled || !r.assets?.[0]?.uri) return null;
-  const m = await ImageManipulator.manipulateAsync(
-    r.assets[0].uri,
-    [{ resize: { width: opts?.width ?? 900 } }],
-    { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true },
-  );
-  return m.base64 ? `data:image/jpeg;base64,${m.base64}` : null;
+  // Delegate to the smart fitter so product hero images get a clean centre-crop
+  // to the recommended 1:1 800×800 spec. Square is the default for product
+  // photography (matches the gallery + grid renderers). The legacy
+  // aspect/width opts are kept for backward compat but no longer honoured —
+  // callers that need a different ratio should switch to pickAndFitImage().
+  const { pickAndFitImage } = await import("./image-fitter");
+  void opts;
+  return await pickAndFitImage("product_image");
 }
 
 // ─── Internal helpers (collapsible section + styled-text editor) ───

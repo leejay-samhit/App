@@ -373,24 +373,12 @@ type BoxItem = { name: string; image_data_url: string };
 const emptyStyled = (): StyledText => ({ text: "", bold: false, font_size: null, align: "left" });
 
 async function pickAndCompressImage(opts?: { aspect?: [number, number]; width?: number }) {
-  const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (!perm.granted) {
-    Alert.alert("Permission needed", "Please allow photo library access.");
-    return null;
-  }
-  const r = await ImagePicker.launchImageLibraryAsync({
-    mediaTypes: ImagePicker.MediaTypeOptions.Images,
-    quality: 0.85,
-    allowsEditing: true,
-    aspect: opts?.aspect ?? [4, 3],
-  });
-  if (r.canceled || !r.assets?.[0]?.uri) return null;
-  const m = await ImageManipulator.manipulateAsync(
-    r.assets[0].uri,
-    [{ resize: { width: opts?.width ?? 900 } }],
-    { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true },
-  );
-  return m.base64 ? `data:image/jpeg;base64,${m.base64}` : null;
+  // Smart-fitter delegate — product images centre-crop to the 1:1 spec
+  // (800×800). See /src/image-fitter.ts for the catalogue of per-target
+  // aspect ratios used across the app.
+  const { pickAndFitImage } = await import("../../src/image-fitter");
+  void opts;
+  return await pickAndFitImage("product_image");
 }
 
 function Section({ title, icon, summary, defaultOpen, children, testID }: {

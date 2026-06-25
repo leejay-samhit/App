@@ -19,6 +19,7 @@ import { GradientCard } from "../../src/gradient-card";
 import { LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
 import { DraggableLayoutList } from "../../src/draggable-layout-list";
 import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
+import { pickAndFitImage, IMAGE_SPECS, ImageTarget } from "../../src/image-fitter";
 
 // First-visit walkthrough for /admin/shop-layout. The shop-layout editor is
 // powerful so the guide is intentionally generous — 7 short steps.
@@ -601,25 +602,26 @@ function BlockFormModal({
     setViewAllLink((block as any)?.view_all_link || "");
   }, [visible, block, defaultScope, defaultScopeCategory]);
 
-  const pickImage = async (cb: (url: string) => void) => {
+  // Smart picker — auto-crops + resizes to the destination block's native
+  // aspect ratio. Pass the block_type so the right preset (banner 16:9,
+  // category 1:1, brand 9:5, etc.) is used; falls back to a square crop
+  // for blocks we haven't catalogued yet.
+  const pickImage = async (cb: (url: string) => void, target?: ImageTarget) => {
     setPicking(true);
     try {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) { Alert.alert("Permission needed", "Please allow photo library access."); return; }
-      const r = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        quality: 0.8, allowsEditing: true,
-      });
-      if (!r.canceled && r.assets?.[0]?.uri) {
-        const m = await ImageManipulator.manipulateAsync(
-          r.assets[0].uri,
-          [{ resize: { width: 1200 } }],
-          { compress: 0.75, format: ImageManipulator.SaveFormat.JPEG, base64: true },
-        );
-        if (m.base64) cb(`data:image/jpeg;base64,${m.base64}`);
-      }
+      const tgt: ImageTarget = target || (type as ImageTarget) || "banner_slider";
+      const dataUrl = await pickAndFitImage(IMAGE_SPECS[tgt] ? tgt : "banner_slider");
+      if (dataUrl) cb(dataUrl);
     } catch (e) { Alert.alert("Image pick failed", formatApiError(e)); }
     finally { setPicking(false); }
+  };
+
+  // Recommended-size hint shown next to each image picker so the admin
+  // sees the optimal source resolution at a glance.
+  const pickerHintFor = (target?: ImageTarget): string => {
+    const tgt: ImageTarget = target || (type as ImageTarget) || "banner_slider";
+    const spec = IMAGE_SPECS[tgt];
+    return spec ? `Auto-fits to ${spec.label}` : "Auto-fits to block size";
   };
 
   const usesItems = ["banner_slider", "brand_slider", "offer_cards"].includes(type);
@@ -784,7 +786,8 @@ function BlockFormModal({
             {usesImage ? (
               <>
                 <Text style={styles.label}>Image (required)</Text>
-                <TouchableOpacity onPress={() => pickImage(setImageDataUrl)} style={styles.imagePicker}>
+                <Text style={styles.hint}>{pickerHintFor("background")} — any size you upload is auto-cropped to fit.</Text>
+                <TouchableOpacity onPress={() => pickImage(setImageDataUrl, "background")} style={styles.imagePicker}>
                   {imageDataUrl ? (
                     <Image source={{ uri: imageDataUrl }} style={styles.imagePreview} resizeMode="cover" />
                   ) : (
@@ -889,7 +892,7 @@ function BlockFormModal({
 
                     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12, paddingHorizontal: 4 }}>
                       <View style={{ flex: 1, paddingRight: 10 }}>
-                        <Text style={[styles.label, { marginTop: 0 }]}>Show "View More" link</Text>
+                        <Text style={[styles.label, { marginTop: 0 }]}>Show {`"View More"`} link</Text>
                         <Text style={styles.hint}>Appears at the top-right of the section header.</Text>
                       </View>
                       <Switch value={showViewAll} onValueChange={setShowViewAll} />
@@ -897,7 +900,7 @@ function BlockFormModal({
 
                     {showViewAll ? (
                       <>
-                        <Text style={styles.label}>"View More" target</Text>
+                        <Text style={styles.label}>{`"View More"`} target</Text>
                         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
                           <TouchableOpacity onPress={() => setViewAllLink("")} style={[styles.chip, !viewAllLink && styles.chipActive]}>
                             <Text style={[styles.chipText, !viewAllLink && { color: colors.primaryFg }]}>Whole shop</Text>
@@ -932,11 +935,13 @@ function BlockFormModal({
                   </TouchableOpacity>
                 </View>
                 {items.length === 0 ? (
-                  <Text style={styles.hint}>Tap + to add a {type === "banner_slider" ? "slide" : type === "category_circles" ? "category" : type === "brand_slider" ? "brand" : "offer"}.</Text>
-                ) : null}
+                  <Text style={styles.hint}>Tap + to add a {type === "banner_slider" ? "slide" : type === "category_circles" ? "category" : type === "brand_slider" ? "brand" : "offer"}. {pickerHintFor(type as ImageTarget)}</Text>
+                ) : (
+                  <Text style={styles.hint}>{pickerHintFor(type as ImageTarget)} — upload any size, we&apos;ll auto-crop to fit.</Text>
+                )}
                 {items.map((it, idx) => (
                   <View key={`item-${idx}`} style={styles.itemRow}>
-                    <TouchableOpacity onPress={() => pickImage((url) => updateItem(idx, { image_data_url: url }))} style={styles.itemThumb}>
+                    <TouchableOpacity onPress={() => pickImage((url) => updateItem(idx, { image_data_url: url }), type as ImageTarget)} style={styles.itemThumb}>
                       {it.image_data_url ? (
                         <Image source={{ uri: it.image_data_url }} style={{ width: "100%", height: "100%", borderRadius: 8 }} resizeMode="cover" />
                       ) : (
