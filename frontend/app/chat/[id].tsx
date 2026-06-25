@@ -476,6 +476,17 @@ export default function ChatThreadScreen() {
                 <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>Starred</Text>
               </View>
             </View>
+
+            {/* ── Privacy + Block — June 2026 ─────────────────────────
+                Quick access to per-chat privacy controls and user blocking
+                without leaving the conversation. */}
+            <ProfilePrivacyBlockRows
+              threadId={threadId || ""}
+              otherUserId={thread?.other?.id || ""}
+              otherUserName={thread?.other?.name || "this user"}
+              onClose={() => setProfileOpen(false)}
+            />
+
             <TouchableOpacity
               onPress={() => setProfileOpen(false)}
               style={{ marginTop: 20, backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: "center" }}
@@ -681,4 +692,183 @@ const styles = StyleSheet.create({
   previewBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.94)", alignItems: "center", justifyContent: "center" },
   previewImg: { width: "100%", height: "100%" },
   previewClose: { position: "absolute", top: 50, right: 18, width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" },
+});
+
+
+// ── Profile-card Privacy + Block rows ──────────────────────────────────────
+// Renders inside the chat-header profile modal. Surfaces the per-thread lock
+// toggle, the chat-tab wallpaper jump-link, and Block / Unblock.
+function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose }: { threadId: string; otherUserId: string; otherUserName: string; onClose: () => void; }) {
+  const router = useRouter();
+  const { settings, isThreadLocked, reload } = useChatSettings();
+  const [blocked, setBlocked] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [pinSheet, setPinSheet] = useState<null | "lock" | "unlock">(null);
+  const [pin, setPin] = useState("");
+  const [pinErr, setPinErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!otherUserId) return;
+    (async () => {
+      try {
+        const { data } = await api.get<{ blocks: { blocked_id: string }[] }>("/chat/blocks");
+        setBlocked(!!data.blocks?.find((b) => b.blocked_id === otherUserId));
+      } catch { setBlocked(false); }
+    })();
+  }, [otherUserId]);
+
+  const locked = isThreadLocked(threadId);
+
+  const toggleLock = () => {
+    if (!settings?.has_pin) {
+      Alert.alert(
+        "Set up chat lock first",
+        "Add a chat PIN in Chat → Settings before locking individual conversations.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Open Settings", onPress: () => { onClose(); router.push("/chat/settings" as any); } },
+        ],
+      );
+      return;
+    }
+    setPin(""); setPinErr(null);
+    setPinSheet(locked ? "unlock" : "lock");
+  };
+
+  const submitLock = async () => {
+    if (pin.length < 4) { setPinErr("Enter your 4–6 digit PIN."); return; }
+    setBusy(true); setPinErr(null);
+    try {
+      const next = locked
+        ? (settings?.locked_thread_ids || []).filter((t) => t !== threadId)
+        : [...(settings?.locked_thread_ids || []), threadId];
+      await api.patch("/chat/lock/threads", { pin, locked_thread_ids: next });
+      await reload();
+      setPinSheet(null); setPin("");
+    } catch (e) {
+      setPinErr(formatApiError(e));
+    } finally { setBusy(false); }
+  };
+
+  const toggleBlock = () => {
+    if (!otherUserId) return;
+    const action = blocked ? "Unblock" : "Block";
+    Alert.alert(
+      `${action} ${otherUserName}?`,
+      blocked
+        ? "They will be able to message you again."
+        : "They won't be able to send you messages, and you won't see new ones from them.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: action, style: blocked ? "default" : "destructive",
+          onPress: async () => {
+            setBusy(true);
+            try {
+              if (blocked) await api.delete(`/chat/block/${otherUserId}`);
+              else         await api.post(`/chat/block/${otherUserId}`);
+              setBlocked(!blocked);
+            } catch (e) {
+              Alert.alert("Couldn't update", formatApiError(e));
+            } finally { setBusy(false); }
+          },
+        },
+      ],
+    );
+  };
+
+  return (
+    <View style={{ marginTop: 16, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background }}>
+      <Text style={{ fontSize: 11, fontWeight: "800", color: colors.textMuted, letterSpacing: 1, paddingHorizontal: 14, paddingTop: 12 }}>
+        PRIVACY
+      </Text>
+
+      <TouchableOpacity onPress={toggleLock} style={ppbStyles.row} testID="chat-profile-lock">
+        <View style={[ppbStyles.icon, { backgroundColor: colors.brand100 }]}>
+          <Feather name={locked ? "lock" : "unlock"} size={16} color={colors.primary} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={ppbStyles.title}>{locked ? "Chat locked" : "Lock this chat"}</Text>
+          <Text style={ppbStyles.sub}>{locked ? "Requires PIN to open from chat list." : "Hide this conversation behind your chat PIN."}</Text>
+        </View>
+        <Feather name="chevron-right" size={16} color={colors.textMuted} />
+      </TouchableOpacity>
+
+      <View style={ppbStyles.divider} />
+
+      <TouchableOpacity onPress={() => { onClose(); router.push("/chat/settings" as any); }} style={ppbStyles.row} testID="chat-profile-wallpaper">
+        <View style={[ppbStyles.icon, { backgroundColor: colors.brand100 }]}>
+          <Feather name="image" size={16} color={colors.primary} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={ppbStyles.title}>Wallpaper</Text>
+          <Text style={ppbStyles.sub}>Choose a background for your chats.</Text>
+        </View>
+        <Feather name="chevron-right" size={16} color={colors.textMuted} />
+      </TouchableOpacity>
+
+      <View style={ppbStyles.divider} />
+
+      <TouchableOpacity onPress={toggleBlock} disabled={busy || blocked === null} style={ppbStyles.row} testID="chat-profile-block">
+        <View style={[ppbStyles.icon, { backgroundColor: blocked ? colors.brand100 : "#FFE6E6" }]}>
+          <Feather name={blocked ? "user-check" : "user-x"} size={16} color={blocked ? colors.primary : "#B3261E"} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[ppbStyles.title, !blocked && { color: "#B3261E" }]}>
+            {blocked === null ? "Loading…" : blocked ? `Unblock ${otherUserName}` : `Block ${otherUserName}`}
+          </Text>
+          <Text style={ppbStyles.sub}>
+            {blocked ? "They will be able to message you again." : "Stop receiving messages from this user."}
+          </Text>
+        </View>
+        {busy ? <ActivityIndicator size="small" color={colors.primary} /> : <Feather name="chevron-right" size={16} color={colors.textMuted} />}
+      </TouchableOpacity>
+
+      {/* Inline PIN prompt for the lock toggle. */}
+      <Modal visible={!!pinSheet} transparent animationType="fade" onRequestClose={() => setPinSheet(null)}>
+        <Pressable style={ppbStyles.pinBackdrop} onPress={() => setPinSheet(null)}>
+          <Pressable style={ppbStyles.pinCard} onPress={() => {}}>
+            <Text style={ppbStyles.pinTitle}>{pinSheet === "lock" ? "Lock this chat" : "Unlock this chat"}</Text>
+            <Text style={ppbStyles.pinSub}>Enter your chat PIN to confirm.</Text>
+            <TextInput
+              style={ppbStyles.pinInput}
+              value={pin}
+              onChangeText={(v) => setPin(v.replace(/[^0-9]/g, "").slice(0, 6))}
+              placeholder="••••••"
+              placeholderTextColor={colors.textMuted}
+              secureTextEntry keyboardType="number-pad" maxLength={6} autoFocus
+              testID="chat-profile-lock-pin"
+            />
+            {pinErr ? <Text style={{ color: "#B3261E", fontSize: 12, marginTop: 6 }}>{pinErr}</Text> : null}
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+              <TouchableOpacity onPress={() => setPinSheet(null)} style={[ppbStyles.pinBtn, { backgroundColor: colors.surfaceMuted }]}>
+                <Text style={ppbStyles.pinBtnLabel}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={submitLock} disabled={busy} style={[ppbStyles.pinBtn, { backgroundColor: colors.primary }, busy && { opacity: 0.6 }]} testID="chat-profile-lock-confirm">
+                {busy ? <ActivityIndicator color="#fff" /> : <Text style={[ppbStyles.pinBtnLabel, { color: "#fff" }]}>Confirm</Text>}
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+const ppbStyles = StyleSheet.create({
+  row: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 12 },
+  icon: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center" },
+  title: { fontSize: 14, fontWeight: "700", color: colors.text },
+  sub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  divider: { height: 1, backgroundColor: colors.border, marginHorizontal: 14 },
+  pinBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center", padding: 24 },
+  pinCard: { width: "100%", maxWidth: 360, backgroundColor: colors.surface, borderRadius: 18, padding: 20 },
+  pinTitle: { fontSize: 16, fontWeight: "800", color: colors.text },
+  pinSub: { fontSize: 13, color: colors.textMuted, marginTop: 4 },
+  pinInput: {
+    marginTop: 14, height: 52, borderRadius: 10, borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.background, textAlign: "center", fontSize: 22, letterSpacing: 8, color: colors.text,
+  },
+  pinBtn: { flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: "center", justifyContent: "center" },
+  pinBtnLabel: { fontSize: 14, fontWeight: "700", color: colors.text },
 });
