@@ -27,7 +27,7 @@ type Message = {
   updated_at: string;
 };
 
-type Thread = { id: string; other: { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; profile_image_hidden?: boolean }; is_downline: boolean };
+type Thread = { id: string; other: { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; profile_image_hidden?: boolean }; is_downline: boolean; is_announcement?: boolean };
 
 const EDIT_WINDOW_MIN = 15;
 
@@ -358,24 +358,33 @@ export default function ChatThreadScreen() {
         ) : null}
 
         {/* Composer */}
-        <View style={styles.composer}>
-          <TouchableOpacity onPress={onPickImage} disabled={picking || !!editingId} style={[styles.composerIcon, (picking || !!editingId) && { opacity: 0.4 }]} testID="composer-image">
-            {picking ? <ActivityIndicator size="small" color={colors.primary} /> : <Feather name="image" size={20} color={colors.primary} />}
-          </TouchableOpacity>
-          <TextInput
-            style={styles.composerInput}
-            value={draft}
-            onChangeText={setDraft}
-            placeholder={editingId ? "Edit your message…" : "Message…"}
-            placeholderTextColor={colors.textMuted}
-            multiline
-            maxLength={4000}
-            onSubmitEditing={onSend}
-          />
-          <TouchableOpacity onPress={onSend} disabled={!draft.trim() || sending} style={[styles.sendBtn, (!draft.trim() || sending) && { opacity: 0.4 }]} testID="composer-send">
-            {sending ? <ActivityIndicator size="small" color={colors.primaryFg} /> : <Feather name={editingId ? "check" : "send"} size={18} color={colors.primaryFg} />}
-          </TouchableOpacity>
-        </View>
+        {thread?.is_announcement && (user as any)?.admin_role !== "super_admin" ? (
+          <View style={styles.announcementBanner} testID="announcement-readonly">
+            <Feather name="volume-2" size={16} color={colors.primary} />
+            <Text style={styles.announcementBannerText}>
+              Slangcart Announcements — one-way channel from the Slangcart team.
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.composer}>
+            <TouchableOpacity onPress={onPickImage} disabled={picking || !!editingId} style={[styles.composerIcon, (picking || !!editingId) && { opacity: 0.4 }]} testID="composer-image">
+              {picking ? <ActivityIndicator size="small" color={colors.primary} /> : <Feather name="image" size={20} color={colors.primary} />}
+            </TouchableOpacity>
+            <TextInput
+              style={styles.composerInput}
+              value={draft}
+              onChangeText={setDraft}
+              placeholder={editingId ? "Edit your message…" : "Message…"}
+              placeholderTextColor={colors.textMuted}
+              multiline
+              maxLength={4000}
+              onSubmitEditing={onSend}
+            />
+            <TouchableOpacity onPress={onSend} disabled={!draft.trim() || sending} style={[styles.sendBtn, (!draft.trim() || sending) && { opacity: 0.4 }]} testID="composer-send">
+              {sending ? <ActivityIndicator size="small" color={colors.primaryFg} /> : <Feather name={editingId ? "check" : "send"} size={18} color={colors.primaryFg} />}
+            </TouchableOpacity>
+          </View>
+        )}
       </KeyboardAvoidingView>
 
       {/* Quick-react popup (Sprint 1.1) — single-tap on a bubble shows 6
@@ -628,6 +637,13 @@ const styles = StyleSheet.create({
   avatarBubble: { width: 26, height: 26, borderRadius: 13, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center", marginBottom: 4 },
   avatarBubbleText: { fontSize: 11, fontWeight: "900", color: colors.primary },
   composer: { flexDirection: "row", alignItems: "flex-end", gap: 8, paddingHorizontal: spacing.screen, paddingVertical: 10, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
+  announcementBanner: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: spacing.screen, paddingVertical: 14,
+    borderTopWidth: 1, borderTopColor: colors.border,
+    backgroundColor: colors.brand100,
+  },
+  announcementBannerText: { flex: 1, fontSize: 12, color: colors.text, fontWeight: "500" },
   composerIcon: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
   composerInput: { flex: 1, fontSize: 14, color: colors.textMain, backgroundColor: colors.surfaceMuted, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, borderWidth: 1, borderColor: colors.border, maxHeight: 100 },
   sendBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: colors.primary },

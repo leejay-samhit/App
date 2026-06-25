@@ -1,17 +1,45 @@
-import { Stack } from "expo-router";
+import { Stack, router as expoRouter } from "expo-router";
 import { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
 import { Text, TextInput, View, useWindowDimensions, StyleSheet, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as SplashScreen from "expo-splash-screen";
+import * as Notifications from "expo-notifications";
+import * as Linking from "expo-linking";
 import { AuthProvider, useAuth } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
 import { LocationGate } from "../src/location-gate";
 import { SplashOverlay } from "../src/splash-overlay";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
-import { colors } from "../src/theme";
-import { TABLET_MIN_WIDTH, READABLE_MAX_WIDTH } from "../src/theme";
+import { colors, TABLET_MIN_WIDTH, READABLE_MAX_WIDTH } from "../src/theme";
+import { registerForPush } from "../src/push";
+
+// ── Push notifications: module-scope wiring (required by playbook) ──
+// Foreground display behaviour — show the banner + play sound even while
+// the user is inside the app, otherwise chat pings would be silently
+// swallowed when the destination thread isn't open.
+if (Platform.OS !== "web") {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+      shouldShowBanner: true,
+      shouldShowList: true,
+    }),
+  });
+}
+
+// Android: a high-importance default channel must exist BEFORE any push
+// lands, so create it at module scope.
+if (Platform.OS === "android") {
+  Notifications.setNotificationChannelAsync("default", {
+    name: "Default",
+    importance: Notifications.AndroidImportance.MAX,
+    sound: "default",
+  }).catch(() => {});
+}
 
 // Keep the native (Expo) splash screen visible until React Native has had a
 // chance to mount our own JS splash overlay. Without this, there's a brief
@@ -74,6 +102,19 @@ function TamperGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// Re-register the push token on every successful sign-in. Tokens can rotate
+// (Android updates after app upgrades / data clears), so doing this on every
+// auth transition keeps the SuprSend mapping current.
+function PushReRegister() {
+  const { user } = useAuth();
+  useEffect(() => {
+    if (user?.id) {
+      registerForPush(user.id).catch(() => {});
+    }
+  }, [user?.id]);
+  return null;
+}
+
 export default function RootLayout() {
   // Once React has mounted and our SplashOverlay is in the tree, hide the
   // native Expo splash. The handoff to the JS-rendered splash is now
@@ -82,11 +123,51 @@ export default function RootLayout() {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
+  // ── Notification tap routing — warm + cold-start. Pushes carry an
+  // `action_url` (e.g. `/chat/{thread_id}`) and we navigate to it via
+  // expo-router. http(s) deep links are handed to Linking instead.
+  return <RootLayoutInner />;
+}
+
+function RootLayoutInner() {
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+
+    const handleData = (data: any) => {
+      try {
+        const url: string | undefined = data?.action_url || data?.deeplink;
+        if (!url) return;
+        if (url.startsWith("http")) {
+          Linking.openURL(url).catch(() => {});
+        } else {
+          expoRouter.push(url as any);
+        }
+      } catch {
+        /* ignore — bad payload, never crash the app on a push tap */
+      }
+    };
+
+    // Warm tap — user taps a banner while the app is open.
+    const tapSub = Notifications.addNotificationResponseReceivedListener((response) => {
+      handleData(response.notification?.request?.content?.data || {});
+    });
+
+    // Cold start — if a push *launched* the app, the response is queued.
+    Notifications.getLastNotificationResponseAsync().then((response) => {
+      if (response) handleData(response.notification?.request?.content?.data || {});
+    }).catch(() => {});
+
+    return () => {
+      tapSub.remove();
+    };
+  }, []);
+
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#143D2E" }}>
       <SafeAreaProvider>
         <BrandingProvider>
           <AuthProvider>
+            <PushReRegister />
             <GlobalFont>
               {/* Standard status bar — Android reserves space for it automatically
                   now that edge-to-edge is off, matching how Chrome browser

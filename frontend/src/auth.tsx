@@ -3,6 +3,7 @@ import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { api, setAuthToken, setSessionTokens, onSessionInvalidated, getAuthToken, getRefreshToken } from "./api";
 import { runAndCacheIntegrity, IntegrityVerdict } from "./tamper-detection";
+import { registerForPush, clearPushRegistrationCache } from "./push";
 import {
   authenticateAndGetTokens,
   disableBiometricLogin,
@@ -185,6 +186,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     syncBiometricTokens(data.token ?? null, data.refresh_token ?? null, data.user?.email ?? null)
       .then(refreshBiometricStatus)
       .catch(() => {});
+    // Register the device's native push token so chat / broadcast pushes
+    // can target this user. Fire-and-forget — push wire-up must never
+    // block login (helper swallows its own errors, e.g. denied permission).
+    if (data.user?.id) {
+      registerForPush(data.user.id).catch(() => {});
+    }
   };
 
   // ── Biometric methods ────────────────────────────────────────────
@@ -297,6 +304,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     await setSessionTokens(null, null);
     await disableBiometricLogin().catch(() => {});
     await refreshBiometricStatus();
+    clearPushRegistrationCache();
     setUser(null);
     setSessionEndReason(null);
   };

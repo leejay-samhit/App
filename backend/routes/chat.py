@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from core.config import JWT_SECRET, JWT_ALGORITHM
 from core.db import db
 from core.security import get_current_user
+from routes.push import send_push
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -500,6 +501,7 @@ async def list_threads(user: Dict[str, Any] = Depends(get_current_user)):
             "id": t["id"],
             "other": brief,
             "is_downline": is_downline,
+            "is_announcement": bool(t.get("is_announcement")),
             "last_message": _serialize(dict(last_msg)) if last_msg else None,
             "unread_count": unread,
             "last_message_at": (t.get("last_message_at") or t.get("created_at")).isoformat() if isinstance(t.get("last_message_at") or t.get("created_at"), datetime) else (t.get("last_message_at") or t.get("created_at")),
@@ -584,6 +586,19 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
     img = body.image_data_url or ""
     if not text and not img:
         raise HTTPException(status_code=400, detail="Message can't be empty.")
+
+    # ── Announcement thread guard — only super admins may post into a
+    # thread that was created as a one-way broadcast channel. Regular
+    # users see the thread as read-only on the client; this enforces it
+    # server-side as well.
+    if t.get("is_announcement"):
+        is_super = (user.get("role") == "admin" and
+                    (user.get("admin_role") or "super_admin") == "super_admin")
+        if not is_super:
+            raise HTTPException(
+                status_code=403,
+                detail="This is a one-way announcements channel — you can't reply here.",
+            )
 
     # ── Offensive-word filter — block on send so the message never lands
     # in chat_messages. Returns 422 (custom) so the client can show a
@@ -675,6 +690,26 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
         "thread_id": thread_id,
         "message": _serialize(dict(doc)),
     })
+
+    # ── Push notification to the recipient (best-effort, never blocks).
+    # Skipped if the recipient is currently online via WS — they already
+    # got the message in real-time and a push would be noisy.
+    if other_id and not manager.is_online(other_id):
+        try:
+            sender_name = user.get("name") or "Someone"
+            preview = text if text else "📷 Photo"
+            await send_push(
+                recipients=[other_id],
+                data={
+                    "title":      f"💬 {sender_name}",
+                    "message":    preview[:240],
+                    "action_url": f"/chat/{thread_id}",
+                },
+                idempotency_key=f"chat-{doc['id']}",
+            )
+        except Exception as e:
+            logger.warning(f"chat push failed (non-blocking): {e}")
+
     return _serialize(dict(doc))
 
 
@@ -751,6 +786,7 @@ async def thread_details(thread_id: str, user: Dict[str, Any] = Depends(get_curr
     return {
         "thread_id": thread_id,
         "other": brief,
+        "is_announcement": bool(t.get("is_announcement")),
         "media_count": media_count,
         "starred_count": starred_count,
     }

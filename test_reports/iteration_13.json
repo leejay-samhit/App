@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 13 — Push Notifications + Super Admin Broadcast backend tests. 12/16 tests passed. Push register-push auth gating + JWT mismatch guard + deferred-status fallback all work. /api/push/test correctly requires super_admin. Broadcast create/list/detail endpoints exist and gate on super_admin correctly. Regression: normal chat flow (request → accept → bidirectional messages) still works despite placeholder EMERGENT_PUSH_KEY (push failure is non-blocking — confirmed). /api/branding and /api/users/me/privacy still 200. CRITICAL BUG FOUND: broadcast audience resolver queries the wrong DB field, so broadcasts NEVER deliver to anyone in this database (returns 400 'No users in this audience.' even with two freshly-approved users). All four downstream tests (announcement thread visibility, post-guard, thread-details flag) cascade-failed because of this single root cause.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/admin/broadcasts",
+        "issue": "Audience filter queries `status: {$in: ['approved','active']}` but the users collection stores approval state under `approval_status` (legacy users have no `status` field at all). Result: _audience_user_ids() returns []; every broadcast (audience=all/users/providers/vendors) returns 400 'No users in this audience.' even after admin-approving non-admin users. Fix: replace the key `status` with `approval_status` in routes/broadcast.py:73 (and consider whether the optional `is_service_provider/is_vendor` clauses should additionally allow `service_status='approved'` for providers). Reference: /app/backend/routes/broadcast.py:71-86.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "GET /api/chat/search/messages",
+        "issue": "FastAPI startup warning: Duplicate Operation ID `search_messages_api_chat_search_messages_get`. The handler `search_messages` is defined twice in routes/chat.py (lines 532-558 AND 967-986) under the same path. Second definition is dead code (route is registered first one wins) and clutters OpenAPI. Reference: /app/backend/routes/chat.py:532, /app/backend/routes/chat.py:967."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration13_push_broadcast.py",
+    "/app/test_reports/pytest/iteration13.xml"
+  ],
+  "action_items": [
+    "Fix /app/backend/routes/broadcast.py:_audience_user_ids — change MongoDB filter key `status` → `approval_status`. Without this fix the entire Broadcast feature is non-functional.",
+    "After the fix, re-run /app/backend/tests/test_iteration13_push_broadcast.py — the four currently-failing tests (audience='all' delivery, announcement thread visibility for the user, announcement post-guard, /chat/{tid}/details is_announcement) should all pass automatically (they depend on a successful broadcast).",
+    "Remove the duplicate /chat/search/messages handler in routes/chat.py (lines 967-986). Keep the first declaration (lines 532-558) since it appears before any /chat/{thread_id}/... dynamic route as the comment notes.",
+    "Optional: extend the audience resolver so `audience='providers'` also picks up users with `service_status='approved'` (separate from `is_service_provider:true`) to match the rest of the codebase's provider-detection convention."
+  ],
+  "critical_code_review_comments": [
+    "broadcast.py:73 — the audience query uses `status` while the user schema (server.py:310, server.py:4065) uses `approval_status`. This shipped untested against real data.",
+    "chat.py — `search_messages` handler is declared twice with the same route path causing a duplicate-Operation-ID warning at startup.",
+    "push.py:33 — `_client` is created at module import time and re-uses the `placeholder` key snapshot from env. Acceptable for dev but worth noting; if EMERGENT_PUSH_KEY is rotated at runtime the running worker won't pick it up until restart."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration13_push_broadcast.py (new)"
+  ],
+  "success_rate": {"backend": "75% (12/16)", "frontend": "N/A — frontend out of scope"},
+  "seed_data_creation": "Created two TEST_ users (alice/bob) via /api/auth/register and approved them via /api/admin/approvals/{id}/approve. These remain in the DB (status=pending → approval_status=approved). Admin may purge them later via the existing demo-user purge mechanism if desired.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 4 failures share a single root cause in broadcast.py:_audience_user_ids. Once the field name is corrected to `approval_status`, rerun `pytest backend/tests/test_iteration13_push_broadcast.py -v` end-to-end; expect 16/16 green. The test file is idempotent (creates fresh TEST_ users per run). No upstream Emergent push key required — the integration intentionally returns 'deferred' on 401 and tests assert that contract.",
+  "rca_of_issue": "Reproduction: 1) login super_admin, 2) register a fresh user via /api/auth/register, 3) approve via POST /api/admin/approvals/{user_id}/approve (sets approval_status='approved'), 4) POST /api/admin/broadcasts {title,message,audience:'all'} → returns 400 'No users in this audience.' Mongo query in routes/broadcast.py line 73 looks for `status` ∈ {approved,active}, but the users collection populated by server.py only writes `approval_status`. Fix: change line 73 to `\"approval_status\": {\"$in\": [\"approved\", \"active\"]}`. Mitigation: none on the consumer side — the feature is fully blocked until the field name is corrected on the backend."
+}
