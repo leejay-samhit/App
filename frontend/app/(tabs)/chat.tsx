@@ -1,6 +1,6 @@
 // Chat home — thread list (downline pinned on top), search by referral code,
 // pending requests inbox. Real-time updates via WebSocket.
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl,
   ActivityIndicator, TextInput, Alert, Image, Modal,
@@ -349,16 +349,28 @@ export default function ChatListScreen() {
 }
 
 // Gate wrapper — when chat lock is on and the tab hasn't been unlocked yet
-// this session, render the lock screen instead of the chat list.
+// this session, render the lock screen instead of the chat list. Once
+// shown for the first time in this mount, we never bounce back to the gate
+// even if context state updates flip `isTabLocked` to true mid-session
+// (avoids React-18 cross-component setState batching races).
 function ChatTabGate({ children }: { children: React.ReactNode }) {
   const { isTabLocked, isUnlocked, markUnlocked } = useChatSettings();
-  const [unlocked, setUnlocked] = useState(false);
-  if (!isTabLocked() || isUnlocked("tab") || unlocked) return <>{children}</>;
-  return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
-      <ChatLockGate unlockKey="tab" onUnlocked={() => { markUnlocked("tab"); setUnlocked(true); }} />
-    </SafeAreaView>
-  );
+  const sessionShownRef = useRef(false);
+  const [, forceRerender] = useState(0);
+  const tabLocked = isTabLocked();
+  const alreadyUnlocked = sessionShownRef.current || isUnlocked("tab");
+  if (tabLocked && !alreadyUnlocked) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+        <ChatLockGate
+          unlockKey="tab"
+          onUnlocked={() => { markUnlocked("tab"); sessionShownRef.current = true; forceRerender((n) => n + 1); }}
+        />
+      </SafeAreaView>
+    );
+  }
+  sessionShownRef.current = true;
+  return <>{children}</>;
 }
 
 const styles = StyleSheet.create({

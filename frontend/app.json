@@ -47,7 +47,6 @@
       }
     },
     "android": {
-      "googleServicesFile": "./google-services.json",
       "package": "com.slangcart.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",

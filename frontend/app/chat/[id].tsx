@@ -89,12 +89,14 @@ export default function ChatThreadScreen() {
   // open it full-screen with a clean dark backdrop so subtle photos
   // become clearly readable.
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  // Per-thread chat-lock unlock state — held as a REF (not useState) so
-  // mutating it is synchronous and doesn't depend on React batching across
-  // child→parent state updates. The gate guard reads `unlockedThisSessionRef.current`
-  // at render time so a freshly-mutated value is always picked up on the
-  // same render that flips `locked=true`.
-  const unlockedThisSessionRef = useRef(false);
+  // Chat-lock gating — once the chat content has been rendered for this
+  // thread within the current mount, we NEVER bounce back to the lock gate
+  // even if `locked` flips to true (e.g. when the user locks the chat from
+  // inside the profile modal). The ref is reset on unmount, so cold
+  // navigation back to a locked thread correctly shows the gate again.
+  // This pattern sidesteps all React-18 cross-component state batching
+  // races that previously caused the "lock-bounce" regression.
+  const sessionShownRef = useRef(false);
   // Bumped to force a re-render after we mutate the ref. The actual gate
   // value lives in the ref so it can be flipped synchronously.
   const [, forceRerender] = useState(0);
@@ -212,7 +214,11 @@ export default function ChatThreadScreen() {
   if (!threadId) return null;
 
   const locked = wpSettings.isThreadLocked(threadId);
-  const alreadyUnlocked = wpSettings.isUnlocked(threadId) || unlockedThisSessionRef.current;
+  // Once we've already shown the chat content in this mount, we will not
+  // bounce back to the gate, regardless of how `locked` flips afterwards.
+  // The ref is reset on unmount, so cold-navigating to a locked thread
+  // still correctly shows the gate.
+  const alreadyUnlocked = sessionShownRef.current || wpSettings.isUnlocked(threadId);
   if (locked && !alreadyUnlocked) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
@@ -220,11 +226,14 @@ export default function ChatThreadScreen() {
           unlockKey={threadId}
           title="This chat is locked"
           subtitle="Enter your chat PIN to view the conversation."
-          onUnlocked={() => { wpSettings.markUnlocked(threadId); unlockedThisSessionRef.current = true; forceRerender((n) => n + 1); }}
+          onUnlocked={() => { wpSettings.markUnlocked(threadId); sessionShownRef.current = true; forceRerender((n) => n + 1); }}
         />
       </SafeAreaView>
     );
   }
+  // We're about to render the chat content — mark the session-shown ref so
+  // subsequent `locked` flips don't bounce us back to the gate.
+  sessionShownRef.current = true;
   const bgStyle = wallpaperStyle(wpSettings.wallpaperFor(threadId), wpSettings.settings?.presets || {});
 
   return (
@@ -491,7 +500,7 @@ export default function ChatThreadScreen() {
               otherUserId={thread?.other?.id || ""}
               otherUserName={thread?.other?.name || "this user"}
               onClose={() => setProfileOpen(false)}
-              onLockToggled={() => { unlockedThisSessionRef.current = true; forceRerender((n) => n + 1); }}
+              onLockToggled={() => { sessionShownRef.current = true; forceRerender((n) => n + 1); }}
             />
 
             <TouchableOpacity
