@@ -703,18 +703,13 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
   const { settings, isThreadLocked, reload, markUnlocked } = useChatSettings();
   const [blocked, setBlocked] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
-  const [pinSheet, setPinSheet] = useState<null | "lock" | "unlock">(null);
+  // Unified sheet state — RN-Web breaks pointer events on sibling <Modal>
+  // portals, so we render a single Modal whose body branches on `sheet.kind`.
+  type ConfirmPayload = { kind: "confirm"; title: string; body: string; ctaLabel: string; destructive?: boolean; onCtaPress: () => void | Promise<void> };
+  type PinPayload     = { kind: "pin"; mode: "lock" | "unlock" };
+  const [sheet, setSheet] = useState<null | ConfirmPayload | PinPayload>(null);
   const [pin, setPin] = useState("");
   const [pinErr, setPinErr] = useState<string | null>(null);
-  // Custom confirm sheet so Block / Unblock + the "set up PIN" nag work on
-  // web (Alert.alert two-button form is a no-op on react-native-web).
-  const [confirm, setConfirm] = useState<null | {
-    title: string;
-    body: string;
-    ctaLabel: string;
-    destructive?: boolean;
-    onCtaPress: () => void | Promise<void>;
-  }>(null);
 
   const refreshBlocks = useCallback(async () => {
     if (!otherUserId) return;
@@ -730,16 +725,17 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
 
   const toggleLock = () => {
     if (!settings?.has_pin) {
-      setConfirm({
+      setSheet({
+        kind: "confirm",
         title: "Set up chat lock first",
         body: "Add a chat PIN in Chat → Settings before locking individual conversations.",
         ctaLabel: "Open Settings",
-        onCtaPress: () => { setConfirm(null); onClose(); router.push("/chat/settings" as any); },
+        onCtaPress: () => { setSheet(null); onClose(); router.push("/chat/settings" as any); },
       });
       return;
     }
     setPin(""); setPinErr(null);
-    setPinSheet(locked ? "unlock" : "lock");
+    setSheet({ kind: "pin", mode: locked ? "unlock" : "lock" });
   };
 
   const submitLock = async () => {
@@ -750,12 +746,9 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
         ? (settings?.locked_thread_ids || []).filter((t) => t !== threadId)
         : [...(settings?.locked_thread_ids || []), threadId];
       await api.patch("/chat/lock/threads", { pin, locked_thread_ids: next });
-      // Mark this thread as already-unlocked for the remainder of the session
-      // so the user isn't immediately bounced to the gate after locking from
-      // inside the open conversation.
       markUnlocked(threadId);
       await reload();
-      setPinSheet(null); setPin("");
+      setSheet(null); setPin("");
     } catch (e) {
       setPinErr(formatApiError(e));
     } finally { setBusy(false); }
@@ -764,7 +757,8 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
   const toggleBlock = () => {
     if (!otherUserId) return;
     const willBlock = !blocked;
-    setConfirm({
+    setSheet({
+      kind: "confirm",
       title: `${willBlock ? "Block" : "Unblock"} ${otherUserName}?`,
       body: willBlock
         ? "They won't be able to send you messages, and you won't see new ones from them."
@@ -772,20 +766,19 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
       ctaLabel: willBlock ? "Block" : "Unblock",
       destructive: willBlock,
       onCtaPress: async () => {
-        setConfirm(null);
+        setSheet(null);
         setBusy(true);
         try {
           if (willBlock) await api.post(`/chat/block/${otherUserId}`);
           else           await api.delete(`/chat/block/${otherUserId}`);
-          // Re-fetch instead of optimistic toggle so the UI never lies if
-          // the server quietly rejected the change.
           await refreshBlocks();
         } catch (e) {
-          setConfirm({
+          setSheet({
+            kind: "confirm",
             title: "Couldn't update",
             body: formatApiError(e),
             ctaLabel: "OK",
-            onCtaPress: () => setConfirm(null),
+            onCtaPress: () => setSheet(null),
           });
         } finally { setBusy(false); }
       },
@@ -839,54 +832,53 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
         {busy ? <ActivityIndicator size="small" color={colors.primary} /> : <Feather name="chevron-right" size={16} color={colors.textMuted} />}
       </TouchableOpacity>
 
-      {/* Inline PIN prompt for the lock toggle. */}
-      <Modal visible={!!pinSheet} transparent animationType="fade" onRequestClose={() => setPinSheet(null)}>
-        <Pressable style={ppbStyles.pinBackdrop} onPress={() => setPinSheet(null)}>
+      {/* Single Modal that switches between the PIN sheet and the confirm
+          sheet. RN-Web breaks pointer events on sibling <Modal> portals so
+          we collapse both into one body-branching modal. */}
+      <Modal visible={!!sheet} transparent animationType="fade" onRequestClose={() => setSheet(null)}>
+        <Pressable style={ppbStyles.pinBackdrop} onPress={() => setSheet(null)}>
           <Pressable style={ppbStyles.pinCard} onPress={() => {}}>
-            <Text style={ppbStyles.pinTitle}>{pinSheet === "lock" ? "Lock this chat" : "Unlock this chat"}</Text>
-            <Text style={ppbStyles.pinSub}>Enter your chat PIN to confirm.</Text>
-            <TextInput
-              style={ppbStyles.pinInput}
-              value={pin}
-              onChangeText={(v) => setPin(v.replace(/[^0-9]/g, "").slice(0, 6))}
-              placeholder="••••••"
-              placeholderTextColor={colors.textMuted}
-              secureTextEntry keyboardType="number-pad" maxLength={6} autoFocus
-              testID="chat-profile-lock-pin"
-            />
-            {pinErr ? <Text style={{ color: "#B3261E", fontSize: 12, marginTop: 6 }}>{pinErr}</Text> : null}
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-              <TouchableOpacity onPress={() => setPinSheet(null)} style={[ppbStyles.pinBtn, { backgroundColor: colors.surfaceMuted }]}>
-                <Text style={ppbStyles.pinBtnLabel}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={submitLock} disabled={busy} style={[ppbStyles.pinBtn, { backgroundColor: colors.primary }, busy && { opacity: 0.6 }]} testID="chat-profile-lock-confirm">
-                {busy ? <ActivityIndicator color="#fff" /> : <Text style={[ppbStyles.pinBtnLabel, { color: "#fff" }]}>Confirm</Text>}
-              </TouchableOpacity>
-            </View>
-          </Pressable>
-        </Pressable>
-      </Modal>
-
-      {/* Inline confirm sheet — replaces Alert.alert two-button flows which
-          silently no-op on react-native-web. Same component handles the
-          "Block / Unblock" and "Set up chat lock first" prompts. */}
-      <Modal visible={!!confirm} transparent animationType="fade" onRequestClose={() => setConfirm(null)}>
-        <Pressable style={ppbStyles.pinBackdrop} onPress={() => setConfirm(null)}>
-          <Pressable style={ppbStyles.pinCard} onPress={() => {}}>
-            <Text style={ppbStyles.pinTitle}>{confirm?.title || ""}</Text>
-            <Text style={[ppbStyles.pinSub, { marginTop: 6 }]}>{confirm?.body || ""}</Text>
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
-              <TouchableOpacity onPress={() => setConfirm(null)} style={[ppbStyles.pinBtn, { backgroundColor: colors.surfaceMuted }]} testID="chat-profile-confirm-cancel">
-                <Text style={ppbStyles.pinBtnLabel}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => { confirm?.onCtaPress(); }}
-                style={[ppbStyles.pinBtn, { backgroundColor: confirm?.destructive ? "#B3261E" : colors.primary }]}
-                testID="chat-profile-confirm-ok"
-              >
-                <Text style={[ppbStyles.pinBtnLabel, { color: "#fff" }]}>{confirm?.ctaLabel || "OK"}</Text>
-              </TouchableOpacity>
-            </View>
+            {sheet?.kind === "pin" ? (
+              <>
+                <Text style={ppbStyles.pinTitle}>{sheet.mode === "lock" ? "Lock this chat" : "Unlock this chat"}</Text>
+                <Text style={ppbStyles.pinSub}>Enter your chat PIN to confirm.</Text>
+                <TextInput
+                  style={ppbStyles.pinInput}
+                  value={pin}
+                  onChangeText={(v) => setPin(v.replace(/[^0-9]/g, "").slice(0, 6))}
+                  placeholder="••••••"
+                  placeholderTextColor={colors.textMuted}
+                  secureTextEntry keyboardType="number-pad" maxLength={6} autoFocus
+                  testID="chat-profile-lock-pin"
+                />
+                {pinErr ? <Text style={{ color: "#B3261E", fontSize: 12, marginTop: 6 }}>{pinErr}</Text> : null}
+                <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+                  <TouchableOpacity onPress={() => setSheet(null)} style={[ppbStyles.pinBtn, { backgroundColor: colors.surfaceMuted }]}>
+                    <Text style={ppbStyles.pinBtnLabel}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={submitLock} disabled={busy} style={[ppbStyles.pinBtn, { backgroundColor: colors.primary }, busy && { opacity: 0.6 }]} testID="chat-profile-lock-confirm">
+                    {busy ? <ActivityIndicator color="#fff" /> : <Text style={[ppbStyles.pinBtnLabel, { color: "#fff" }]}>Confirm</Text>}
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : sheet?.kind === "confirm" ? (
+              <>
+                <Text style={ppbStyles.pinTitle}>{sheet.title}</Text>
+                <Text style={[ppbStyles.pinSub, { marginTop: 6 }]}>{sheet.body}</Text>
+                <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
+                  <TouchableOpacity onPress={() => setSheet(null)} style={[ppbStyles.pinBtn, { backgroundColor: colors.surfaceMuted }]} testID="chat-profile-confirm-cancel">
+                    <Text style={ppbStyles.pinBtnLabel}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => { sheet.onCtaPress(); }}
+                    style={[ppbStyles.pinBtn, { backgroundColor: sheet.destructive ? "#B3261E" : colors.primary }]}
+                    testID="chat-profile-confirm-ok"
+                  >
+                    <Text style={[ppbStyles.pinBtnLabel, { color: "#fff" }]}>{sheet.ctaLabel}</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : null}
           </Pressable>
         </Pressable>
       </Modal>
