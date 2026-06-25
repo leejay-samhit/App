@@ -500,6 +500,35 @@ async def _assert_thread_member(thread_id: str, user_id: str) -> Dict[str, Any]:
     return t
 
 
+@router.get("/chat/search/messages")
+async def search_messages(
+    q: str = Query(..., min_length=2, max_length=80),
+    thread_id: Optional[str] = None,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Full-text search across the caller's threads.
+
+    IMPORTANT: this static-prefix route MUST be declared before any
+    `/chat/{thread_id}/...` dynamic route — otherwise FastAPI matches
+    `search` as the `thread_id` path param and returns 404 (route
+    shadowing).
+    """
+    safe = re.escape(q.strip())
+    base: Dict[str, Any] = {
+        "text": {"$regex": safe, "$options": "i"},
+        "deleted_for_everyone": {"$ne": True},
+    }
+    if thread_id:
+        await _assert_thread_member(thread_id, user["id"])
+        base["thread_id"] = thread_id
+    else:
+        # All threads this user participates in.
+        my_threads = await db.chat_threads.find({"participants": user["id"]}, {"_id": 0, "id": 1}).to_list(2000)
+        base["thread_id"] = {"$in": [t["id"] for t in my_threads]}
+    rows = await db.chat_messages.find(base, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
+    return {"messages": [_serialize(dict(r)) for r in rows]}
+
+
 @router.get("/chat/{thread_id}/messages")
 async def list_messages(thread_id: str, before: Optional[str] = None, limit: int = 50, user: Dict[str, Any] = Depends(get_current_user)):
     await _assert_thread_member(thread_id, user["id"])
@@ -521,7 +550,7 @@ async def list_messages(thread_id: str, before: Optional[str] = None, limit: int
     return {"messages": [_serialize(dict(m)) for m in msgs]}
 
 
-@router.get("/chat/search/messages")
+@router.get("/chat/search/messages-DUPLICATE-REMOVED")
 async def search_messages(
     q: str = Query(..., min_length=2, max_length=80),
     thread_id: Optional[str] = None,

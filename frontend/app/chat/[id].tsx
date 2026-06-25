@@ -447,26 +447,6 @@ export default function ChatThreadScreen() {
           </View>
         </Pressable>
       </Modal>
-                <Feather name="edit-2" size={18} color={colors.textMain} />
-                <Text style={styles.sheetRowText}>Edit</Text>
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.sheetRowDisabled}>
-                <Feather name="edit-2" size={18} color={colors.textMuted} />
-                <Text style={[styles.sheetRowText, { color: colors.textMuted }]}>Edit (15 min window, no reply)</Text>
-              </View>
-            )}
-            <TouchableOpacity onPress={() => actionMessage && onDelete(actionMessage)} style={styles.sheetRow}>
-              <Feather name="trash-2" size={18} color="#B91C1C" />
-              <Text style={[styles.sheetRowText, { color: "#B91C1C" }]}>Delete</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setActionMessage(null)} style={[styles.sheetRow, { borderTopWidth: 1, borderTopColor: colors.border }]}>
-              <Feather name="x" size={18} color={colors.textMuted} />
-              <Text style={[styles.sheetRowText, { color: colors.textMuted }]}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        </Pressable>
-      </Modal>
 
       {/* Full-screen image preview — opens when user taps any image bubble. */}
       <Modal visible={!!previewImage} transparent animationType="fade" onRequestClose={() => setPreviewImage(null)} statusBarTranslucent>
