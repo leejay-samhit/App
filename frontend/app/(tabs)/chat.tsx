@@ -133,7 +133,7 @@ export default function ChatListScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.headerRow}>
-        <Text style={styles.title}>Chat</Text>
+        <Text style={styles.title}>Slang-Connect</Text>
         {requests.incoming.length > 0 ? (
           <View style={styles.badge}><Text style={styles.badgeText}>{requests.incoming.length} new</Text></View>
         ) : null}

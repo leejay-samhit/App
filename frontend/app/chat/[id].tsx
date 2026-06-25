@@ -27,7 +27,7 @@ type Message = {
   updated_at: string;
 };
 
-type Thread = { id: string; other: { id: string; name: string; referral_code: string; avatar?: string }; is_downline: boolean };
+type Thread = { id: string; other: { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; profile_image_hidden?: boolean }; is_downline: boolean };
 
 const EDIT_WINDOW_MIN = 15;
 
@@ -46,6 +46,43 @@ export default function ChatThreadScreen() {
   const [actionMessage, setActionMessage] = useState<Message | null>(null);
   // Sprint 1 chat upgrade — reply-to + send dedupe key.
   const [replyTo, setReplyTo] = useState<Message | null>(null);
+  // Sprint 1.1 — header profile-card modal (avatar / media / starred summary).
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileDetail, setProfileDetail] = useState<{ media_count: number; starred_count: number } | null>(null);
+  // Quick-react picker — anchors near the tapped message. Tap closes it.
+  const [quickReactFor, setQuickReactFor] = useState<Message | null>(null);
+
+  // Pull header counts (media + starred) lazily when the user taps the header.
+  const loadProfileDetail = useCallback(async () => {
+    if (!threadId) return;
+    try {
+      const r = await api.get(`/chat/${threadId}/details`);
+      setProfileDetail({ media_count: r.data?.media_count || 0, starred_count: r.data?.starred_count || 0 });
+    } catch {}
+  }, [threadId]);
+
+  // Optimistic reaction — flip the local state instantly, then persist.
+  // If the server rejects, we silently re-sync on next /messages refresh.
+  const reactNow = useCallback(async (m: Message, emoji: string) => {
+    if (!user?.id) return;
+    setMessages((prev) => prev.map((x) => {
+      if (x.id !== m.id) return x;
+      const rx: Record<string, string[]> = { ...((x as any).reactions || {}) };
+      // Remove this user from every emoji bucket first (toggle / replace).
+      for (const k of Object.keys(rx)) {
+        rx[k] = (rx[k] || []).filter((u) => u !== user.id);
+        if (rx[k].length === 0) delete rx[k];
+      }
+      const had = (((m as any).reactions || {})[emoji] || []).includes(user.id);
+      if (!had) {
+        rx[emoji] = [...(rx[emoji] || []), user.id];
+      }
+      return { ...x, reactions: rx } as any;
+    }));
+    setQuickReactFor(null);
+    setActionMessage(null);
+    try { await api.post(`/chat/messages/${m.id}/react`, { emoji }); } catch {}
+  }, [user?.id]);
   // Image preview / zoom modal (2026-06-01) — tap any image bubble to
   // open it full-screen with a clean dark backdrop so subtle photos
   // become clearly readable.
@@ -168,16 +205,29 @@ export default function ChatThreadScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
-        <View style={styles.avatarSmall}>
-          <Text style={styles.avatarSmallText}>{(thread?.other.name || "?").substring(0, 1).toUpperCase()}</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-            <Text style={styles.headerName} numberOfLines={1}>{thread?.other.name || "Chat"}</Text>
-            {thread?.is_downline ? <View style={styles.downlineBadge}><Text style={styles.downlineBadgeText}>DOWNLINE</Text></View> : null}
+        {/* Header is fully tappable — opens the profile-card modal with
+            avatar, refid, media count, starred count. */}
+        <TouchableOpacity
+          onPress={() => { setProfileOpen(true); loadProfileDetail(); }}
+          activeOpacity={0.7}
+          style={{ flexDirection: "row", alignItems: "center", flex: 1, gap: 10 }}
+          testID="chat-header-profile"
+        >
+          <View style={[styles.avatarSmall, { overflow: "hidden" }]}>
+            {thread?.other?.profile_image ? (
+              <Image source={{ uri: thread.other.profile_image }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+            ) : (
+              <Text style={styles.avatarSmallText}>{(thread?.other.name || "?").substring(0, 1).toUpperCase()}</Text>
+            )}
           </View>
-          <Text style={styles.headerSub}>#{thread?.other.referral_code || ""}</Text>
-        </View>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <Text style={styles.headerName} numberOfLines={1}>{thread?.other.name || "Chat"}</Text>
+              {thread?.is_downline ? <View style={styles.downlineBadge}><Text style={styles.downlineBadgeText}>DOWNLINE</Text></View> : null}
+            </View>
+            <Text style={styles.headerSub}>#{thread?.other.referral_code || ""}</Text>
+          </View>
+        </TouchableOpacity>
       </View>
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={20}>
@@ -210,8 +260,9 @@ export default function ChatThreadScreen() {
               return (
                 <Pressable
                   key={m.id}
+                  onPress={() => { if (!m.deleted) setQuickReactFor(m); }}
                   onLongPress={() => { if (!m.deleted) setActionMessage(m); }}
-                  delayLongPress={250}
+                  delayLongPress={300}
                   style={{ flexDirection: "row", alignItems: "flex-end", justifyContent: mine ? "flex-end" : "flex-start", gap: 6 }}
                 >
                   {!mine ? (
@@ -327,6 +378,83 @@ export default function ChatThreadScreen() {
         </View>
       </KeyboardAvoidingView>
 
+      {/* Quick-react popup (Sprint 1.1) — single-tap on a bubble shows 6
+          common emojis floating near the message. Optimistic update so the
+          chosen emoji appears INSTANTLY without waiting for the server. */}
+      <Modal visible={!!quickReactFor} transparent animationType="fade" onRequestClose={() => setQuickReactFor(null)}>
+        <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.35)", justifyContent: "center", alignItems: "center" }} onPress={() => setQuickReactFor(null)}>
+          <View style={{ backgroundColor: colors.surface, borderRadius: 28, paddingHorizontal: 10, paddingVertical: 6, flexDirection: "row", gap: 4, elevation: 6 }}>
+            {["👍", "❤️", "😂", "😮", "😢", "🙏"].map((emo) => (
+              <TouchableOpacity
+                key={emo}
+                onPress={() => { if (quickReactFor) reactNow(quickReactFor, emo); }}
+                style={{ width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" }}
+                testID={`chat-quick-react-${emo}`}
+              >
+                <Text style={{ fontSize: 24 }}>{emo}</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              onPress={() => { if (quickReactFor) { setActionMessage(quickReactFor); setQuickReactFor(null); } }}
+              style={{ width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted }}
+            >
+              <Feather name="more-horizontal" size={18} color={colors.textMain} />
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Modal>
+
+      {/* Profile-card modal (Sprint 1.1) — tap the chat header to see the
+          other party's avatar, refid, media count, and starred count. */}
+      <Modal visible={profileOpen} transparent animationType="slide" onRequestClose={() => setProfileOpen(false)}>
+        <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)" }} onPress={() => setProfileOpen(false)}>
+          <View style={{ flex: 1 }} />
+          <View onStartShouldSetResponder={() => true} style={{ backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 22 }}>
+            <View style={{ width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
+            <View style={{ alignItems: "center" }}>
+              <View style={{ width: 96, height: 96, borderRadius: 48, overflow: "hidden", backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" }}>
+                {thread?.other?.profile_image ? (
+                  <Image source={{ uri: thread.other.profile_image }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+                ) : (
+                  <Text style={{ fontSize: 40, fontWeight: "800", color: colors.primary }}>
+                    {(thread?.other?.name || "?").substring(0, 1).toUpperCase()}
+                  </Text>
+                )}
+              </View>
+              <Text style={{ fontSize: 18, fontWeight: "800", color: colors.textMain, marginTop: 12 }}>
+                {thread?.other?.name || "User"}
+              </Text>
+              {thread?.other?.referral_code ? (
+                <Text style={{ fontSize: 13, color: colors.textMuted, marginTop: 2 }}>#{thread.other.referral_code}</Text>
+              ) : null}
+              {thread?.other?.profile_image_hidden ? (
+                <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, fontStyle: "italic" }}>
+                  Profile picture is hidden by this user
+                </Text>
+              ) : null}
+            </View>
+            <View style={{ flexDirection: "row", gap: 12, marginTop: 22 }}>
+              <View style={{ flex: 1, backgroundColor: colors.surfaceMuted, borderRadius: 14, paddingVertical: 14, alignItems: "center" }}>
+                <Feather name="image" size={18} color={colors.primary} />
+                <Text style={{ fontSize: 18, fontWeight: "800", color: colors.textMain, marginTop: 4 }}>{profileDetail?.media_count ?? "—"}</Text>
+                <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>Media shared</Text>
+              </View>
+              <View style={{ flex: 1, backgroundColor: colors.surfaceMuted, borderRadius: 14, paddingVertical: 14, alignItems: "center" }}>
+                <Feather name="star" size={18} color="#F59E0B" />
+                <Text style={{ fontSize: 18, fontWeight: "800", color: colors.textMain, marginTop: 4 }}>{profileDetail?.starred_count ?? "—"}</Text>
+                <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>Starred</Text>
+              </View>
+            </View>
+            <TouchableOpacity
+              onPress={() => setProfileOpen(false)}
+              style={{ marginTop: 20, backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: "center" }}
+            >
+              <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Modal>
+
       {/* Action sheet — long-press a message to react / reply / copy / star / delete / report. */}
       <Modal visible={!!actionMessage} transparent animationType="fade" onRequestClose={() => setActionMessage(null)}>
         <Pressable style={styles.sheetOverlay} onPress={() => setActionMessage(null)}>
@@ -336,11 +464,7 @@ export default function ChatThreadScreen() {
               {["👍", "❤️", "😂", "😮", "😢", "🙏"].map((emo) => (
                 <TouchableOpacity
                   key={emo}
-                  onPress={async () => {
-                    if (!actionMessage) return;
-                    try { await api.post(`/chat/messages/${actionMessage.id}/react`, { emoji: emo }); } catch {}
-                    setActionMessage(null);
-                  }}
+                  onPress={() => { if (actionMessage) reactNow(actionMessage, emo); }}
                   style={{ width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted }}
                   testID={`chat-react-${emo}`}
                 >

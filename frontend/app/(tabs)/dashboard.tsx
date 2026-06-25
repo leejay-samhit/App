@@ -62,7 +62,7 @@ export default function DashboardScreen() {
   // we wired into the helper). Branding service can later expose
   // `support_whatsapp` so admin can edit it via the admin panel.
   const supportWhatsapp = (branding as any)?.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
-  const appName = branding?.app_name || "NetworkRupay";
+  const appName = branding?.app_name || "Slangcart";
   const router = useRouter();
   const [data, setData] = useState<Dashboard | null>(null);
   const [recentNotifs, setRecentNotifs] = useState<Notif[]>([]);
@@ -254,7 +254,7 @@ export default function DashboardScreen() {
 
         {/* WhatsApp welcome card — added 2026-06-10.
             Lets the user tap once to open WhatsApp with a pre-filled
-            "Hi NetworkRupay, I just registered as <name>" message going to
+            "Hi Slangcart, I just registered as <name>" message going to
             the admin support number. Free (uses wa.me URL scheme), works
             on every device with WhatsApp installed. */}
         <TouchableOpacity

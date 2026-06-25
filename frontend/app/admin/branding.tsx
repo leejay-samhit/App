@@ -225,7 +225,7 @@ export default function AdminBranding() {
 
           <Field label="Payee Display Name" value={draft.payment_methods?.payee_name || ""}
                  onChangeText={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), payee_name: v } }))}
-                 placeholder={draft.app_name || "NetworkRupay"} testID="branding-pm-payeename" />
+                 placeholder={draft.app_name || "Slangcart"} testID="branding-pm-payeename" />
 
           {/* Splash overlay (admin-uploaded launch image + duration) */}
           <SectionHeader icon="image" label="App launch splash" />

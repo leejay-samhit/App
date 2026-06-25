@@ -72,7 +72,7 @@ export type Branding = {
 };
 
 const DEFAULT_BRANDING: Branding = {
-  app_name: "NetworkPay",
+  app_name: "Slangcart",
   tagline: "Track your referrals, earnings and grow your team.",
   login_subtitle: "Sign in to your network",
   payment_hero: "Complete your registration",
@@ -118,7 +118,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 // Persisted last-good branding response. Hydrated synchronously-ish on
 // BrandingProvider mount so the very first paint already shows the LIVE
 // app_name / tagline / colors / logo — instead of flashing the hardcoded
-// DEFAULT_BRANDING (e.g. "NetworkPay" → "NetworkRupay").
+// DEFAULT_BRANDING (e.g. "Slangcart" → "Slangcart").
 const BRANDING_CACHE_KEY = "@app/brandingV1";
 
 const BrandingContext = createContext<Ctx | undefined>(undefined);

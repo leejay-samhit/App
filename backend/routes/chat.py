@@ -138,7 +138,7 @@ def _serialize(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def _user_brief(u: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not u:
-        return {"id": "", "name": "Unknown", "referral_code": "", "avatar": "", "sponsor_code": "", "is_vendor": False, "is_service_provider": False}
+        return {"id": "", "name": "Unknown", "referral_code": "", "avatar": "", "sponsor_code": "", "is_vendor": False, "is_service_provider": False, "profile_image": None}
     return {
         "id": u.get("id", ""),
         "name": u.get("name") or u.get("email") or "User",
@@ -149,7 +149,32 @@ def _user_brief(u: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         # (Downline / Vendors / Services / All / Unread). Cheap booleans.
         "is_vendor":            bool(u.get("is_vendor")),
         "is_service_provider":  bool(u.get("is_service_provider")),
+        # June 2026 — include the raw profile_image so the chat header /
+        # profile-card modal can render the photo. Privacy mask is applied
+        # by the calling endpoint via `_apply_user_brief_privacy()` below.
+        "profile_image":        u.get("profile_image") or None,
+        "profile_visibility":   u.get("profile_visibility") or "everyone",
     }
+
+
+async def _apply_user_brief_privacy(brief: Dict[str, Any], viewer_id: str) -> Dict[str, Any]:
+    """Strip `profile_image` from a `_user_brief()` output when the viewer
+    isn't allowed to see it, per `routes/privacy.can_view_profile_image`.
+    """
+    from routes.privacy import can_view_profile_image  # local import to avoid cycles
+    if not brief or not brief.get("id"):
+        return brief
+    target = {
+        "id": brief["id"],
+        "is_service_provider": brief.get("is_service_provider"),
+        "is_vendor": brief.get("is_vendor"),
+        "profile_visibility": brief.get("profile_visibility") or "everyone",
+        "profile_image": brief.get("profile_image"),
+    }
+    if not await can_view_profile_image(viewer_id, target):
+        brief.pop("profile_image", None)
+        brief["profile_image_hidden"] = True
+    return brief
 
 
 async def _is_downline(target_user_id: str, my_referral_code: str) -> bool:
@@ -469,9 +494,11 @@ async def list_threads(user: Dict[str, Any] = Depends(get_current_user)):
             "thread_id": t["id"], "sender_id": other_id, "deleted": {"$ne": True},
             "read_by": {"$ne": user["id"]},
         })
+        brief = _user_brief(other)
+        brief = await _apply_user_brief_privacy(brief, user["id"])
         out.append({
             "id": t["id"],
-            "other": _user_brief(other),
+            "other": brief,
             "is_downline": is_downline,
             "last_message": _serialize(dict(last_msg)) if last_msg else None,
             "unread_count": unread,
@@ -695,6 +722,53 @@ async def delete_message(msg_id: str, user: Dict[str, Any] = Depends(get_current
     if t:
         await manager.send_to(list(t["participants"]), {"type": "message.deleted", "thread_id": m["thread_id"], "message_id": msg_id})
     return {"ok": True}
+
+
+@router.get("/chat/{thread_id}/details")
+async def thread_details(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """June 2026 — header tap shows the 'other party' profile-card.
+
+    Returns the masked user brief PLUS aggregate counts the chat
+    UI surfaces (media shared, starred by me) so the modal can render
+    all of it in one round-trip.
+    """
+    t = await _assert_thread_member(thread_id, user["id"])
+    other_id = next((p for p in t["participants"] if p != user["id"]), None)
+    other_doc = await db.users.find_one({"id": other_id}) if other_id else None
+    brief = _user_brief(other_doc)
+    brief = await _apply_user_brief_privacy(brief, user["id"])
+
+    media_count = await db.chat_messages.count_documents({
+        "thread_id": thread_id,
+        "image_data_url": {"$exists": True, "$ne": ""},
+        "deleted_for_everyone": {"$ne": True},
+    })
+    starred_count = await db.chat_messages.count_documents({
+        "thread_id": thread_id,
+        "starred_by": user["id"],
+        "deleted_for_everyone": {"$ne": True},
+    })
+    return {
+        "thread_id": thread_id,
+        "other": brief,
+        "media_count": media_count,
+        "starred_count": starred_count,
+    }
+
+
+@router.get("/chat/{thread_id}/media")
+async def thread_media(thread_id: str, limit: int = 200, user: Dict[str, Any] = Depends(get_current_user)):
+    """All image attachments in this thread (chronological)."""
+    await _assert_thread_member(thread_id, user["id"])
+    rows = await db.chat_messages.find(
+        {
+            "thread_id": thread_id,
+            "image_data_url": {"$exists": True, "$ne": ""},
+            "deleted_for_everyone": {"$ne": True},
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).limit(max(1, min(int(limit or 200), 500))).to_list(500)
+    return {"messages": [_serialize(dict(r)) for r in rows]}
 
 
 # ============== Sprint 1 — Reactions / Star / Pin / Block / Report / Search ==============

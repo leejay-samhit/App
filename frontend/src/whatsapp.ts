@@ -60,9 +60,9 @@ export async function openWhatsApp(message: string, phone?: string | null): Prom
 }
 
 /**
- * Build the standard "Hi NetworkRupay" welcome message using the user's
+ * Build the standard "Hi Slangcart" welcome message using the user's
  * profile fields. Falls back to safe placeholders so we never produce
- * "Hi NetworkRupay, I just registered as undefined."
+ * "Hi Slangcart, I just registered as undefined."
  */
 export function buildWelcomeMessage(opts: {
   name?: string | null;
@@ -71,6 +71,6 @@ export function buildWelcomeMessage(opts: {
 }): string {
   const name = (opts.name || "a new user").trim();
   const code = (opts.referral_code || "—").trim();
-  const app  = (opts.app_name || "NetworkRupay").trim();
+  const app  = (opts.app_name || "Slangcart").trim();
   return `Hi ${app}, I just registered as ${name}. Looking forward to getting started! My referral code: ${code}`;
 }

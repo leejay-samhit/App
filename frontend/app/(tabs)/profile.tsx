@@ -39,7 +39,7 @@ export default function ProfileScreen() {
   } = useAuth();
   const branding = useBranding();
   const supportWhatsapp = (branding as any)?.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
-  const appName = branding?.app_name || "NetworkRupay";
+  const appName = branding?.app_name || "Slangcart";
   const router = useRouter();
   const [upi, setUpi] = useState("");
   const [bank, setBank] = useState("");
