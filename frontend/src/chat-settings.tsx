@@ -11,7 +11,7 @@
  * lock/wallpaper mutation. Mutations are exposed as methods that POST/PATCH
  * and refresh the local state.
  */
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from "react";
 import { api } from "./api";
 import { useAuth } from "./auth";
 
@@ -71,8 +71,10 @@ export function ChatSettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<ChatSettings | null>(null);
   const [loading, setLoading] = useState(false);
   // In-memory unlock set — forgotten on app restart so the user must
-  // re-authenticate after a cold launch.
-  const unlockedRef = useRef<Set<string>>(new Set());
+  // re-authenticate after a cold launch. Kept as state (not just a ref) so
+  // calling markUnlocked() also triggers a re-render in consumers that
+  // gate on the value.
+  const [unlockedKeys, setUnlockedKeys] = useState<Set<string>>(new Set());
 
   const reload = useCallback(async () => {
     if (!user?.id) {
@@ -130,10 +132,15 @@ export function ChatSettingsProvider({ children }: { children: ReactNode }) {
   }, [settings]);
 
   const markUnlocked = useCallback((key: "tab" | string) => {
-    unlockedRef.current.add(key);
+    setUnlockedKeys((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
   }, []);
-  const isUnlocked = useCallback((key: "tab" | string) => unlockedRef.current.has(key), []);
-  const clearUnlocks = useCallback(() => { unlockedRef.current = new Set(); }, []);
+  const isUnlocked = useCallback((key: "tab" | string) => unlockedKeys.has(key), [unlockedKeys]);
+  const clearUnlocks = useCallback(() => { setUnlockedKeys(new Set()); }, []);
 
   const value = useMemo<Ctx>(() => ({
     settings, loading, reload,
