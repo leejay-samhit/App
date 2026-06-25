@@ -700,35 +700,42 @@ const styles = StyleSheet.create({
 // toggle, the chat-tab wallpaper jump-link, and Block / Unblock.
 function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose }: { threadId: string; otherUserId: string; otherUserName: string; onClose: () => void; }) {
   const router = useRouter();
-  const { settings, isThreadLocked, reload } = useChatSettings();
+  const { settings, isThreadLocked, reload, markUnlocked } = useChatSettings();
   const [blocked, setBlocked] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [pinSheet, setPinSheet] = useState<null | "lock" | "unlock">(null);
   const [pin, setPin] = useState("");
   const [pinErr, setPinErr] = useState<string | null>(null);
+  // Custom confirm sheet so Block / Unblock + the "set up PIN" nag work on
+  // web (Alert.alert two-button form is a no-op on react-native-web).
+  const [confirm, setConfirm] = useState<null | {
+    title: string;
+    body: string;
+    ctaLabel: string;
+    destructive?: boolean;
+    onCtaPress: () => void | Promise<void>;
+  }>(null);
 
-  useEffect(() => {
+  const refreshBlocks = useCallback(async () => {
     if (!otherUserId) return;
-    (async () => {
-      try {
-        const { data } = await api.get<{ blocks: { blocked_id: string }[] }>("/chat/blocks");
-        setBlocked(!!data.blocks?.find((b) => b.blocked_id === otherUserId));
-      } catch { setBlocked(false); }
-    })();
+    try {
+      const { data } = await api.get<{ blocks: { blocked_id: string }[] }>("/chat/blocks");
+      setBlocked(!!data.blocks?.find((b) => b.blocked_id === otherUserId));
+    } catch { setBlocked(false); }
   }, [otherUserId]);
+
+  useEffect(() => { refreshBlocks(); }, [refreshBlocks]);
 
   const locked = isThreadLocked(threadId);
 
   const toggleLock = () => {
     if (!settings?.has_pin) {
-      Alert.alert(
-        "Set up chat lock first",
-        "Add a chat PIN in Chat → Settings before locking individual conversations.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Open Settings", onPress: () => { onClose(); router.push("/chat/settings" as any); } },
-        ],
-      );
+      setConfirm({
+        title: "Set up chat lock first",
+        body: "Add a chat PIN in Chat → Settings before locking individual conversations.",
+        ctaLabel: "Open Settings",
+        onCtaPress: () => { setConfirm(null); onClose(); router.push("/chat/settings" as any); },
+      });
       return;
     }
     setPin(""); setPinErr(null);
@@ -743,6 +750,10 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
         ? (settings?.locked_thread_ids || []).filter((t) => t !== threadId)
         : [...(settings?.locked_thread_ids || []), threadId];
       await api.patch("/chat/lock/threads", { pin, locked_thread_ids: next });
+      // Mark this thread as already-unlocked for the remainder of the session
+      // so the user isn't immediately bounced to the gate after locking from
+      // inside the open conversation.
+      markUnlocked(threadId);
       await reload();
       setPinSheet(null); setPin("");
     } catch (e) {
@@ -752,29 +763,33 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
 
   const toggleBlock = () => {
     if (!otherUserId) return;
-    const action = blocked ? "Unblock" : "Block";
-    Alert.alert(
-      `${action} ${otherUserName}?`,
-      blocked
-        ? "They will be able to message you again."
-        : "They won't be able to send you messages, and you won't see new ones from them.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: action, style: blocked ? "default" : "destructive",
-          onPress: async () => {
-            setBusy(true);
-            try {
-              if (blocked) await api.delete(`/chat/block/${otherUserId}`);
-              else         await api.post(`/chat/block/${otherUserId}`);
-              setBlocked(!blocked);
-            } catch (e) {
-              Alert.alert("Couldn't update", formatApiError(e));
-            } finally { setBusy(false); }
-          },
-        },
-      ],
-    );
+    const willBlock = !blocked;
+    setConfirm({
+      title: `${willBlock ? "Block" : "Unblock"} ${otherUserName}?`,
+      body: willBlock
+        ? "They won't be able to send you messages, and you won't see new ones from them."
+        : "They will be able to message you again.",
+      ctaLabel: willBlock ? "Block" : "Unblock",
+      destructive: willBlock,
+      onCtaPress: async () => {
+        setConfirm(null);
+        setBusy(true);
+        try {
+          if (willBlock) await api.post(`/chat/block/${otherUserId}`);
+          else           await api.delete(`/chat/block/${otherUserId}`);
+          // Re-fetch instead of optimistic toggle so the UI never lies if
+          // the server quietly rejected the change.
+          await refreshBlocks();
+        } catch (e) {
+          setConfirm({
+            title: "Couldn't update",
+            body: formatApiError(e),
+            ctaLabel: "OK",
+            onCtaPress: () => setConfirm(null),
+          });
+        } finally { setBusy(false); }
+      },
+    });
   };
 
   return (
@@ -846,6 +861,30 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
               </TouchableOpacity>
               <TouchableOpacity onPress={submitLock} disabled={busy} style={[ppbStyles.pinBtn, { backgroundColor: colors.primary }, busy && { opacity: 0.6 }]} testID="chat-profile-lock-confirm">
                 {busy ? <ActivityIndicator color="#fff" /> : <Text style={[ppbStyles.pinBtnLabel, { color: "#fff" }]}>Confirm</Text>}
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Inline confirm sheet — replaces Alert.alert two-button flows which
+          silently no-op on react-native-web. Same component handles the
+          "Block / Unblock" and "Set up chat lock first" prompts. */}
+      <Modal visible={!!confirm} transparent animationType="fade" onRequestClose={() => setConfirm(null)}>
+        <Pressable style={ppbStyles.pinBackdrop} onPress={() => setConfirm(null)}>
+          <Pressable style={ppbStyles.pinCard} onPress={() => {}}>
+            <Text style={ppbStyles.pinTitle}>{confirm?.title || ""}</Text>
+            <Text style={[ppbStyles.pinSub, { marginTop: 6 }]}>{confirm?.body || ""}</Text>
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
+              <TouchableOpacity onPress={() => setConfirm(null)} style={[ppbStyles.pinBtn, { backgroundColor: colors.surfaceMuted }]} testID="chat-profile-confirm-cancel">
+                <Text style={ppbStyles.pinBtnLabel}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => { confirm?.onCtaPress(); }}
+                style={[ppbStyles.pinBtn, { backgroundColor: confirm?.destructive ? "#B3261E" : colors.primary }]}
+                testID="chat-profile-confirm-ok"
+              >
+                <Text style={[ppbStyles.pinBtnLabel, { color: "#fff" }]}>{confirm?.ctaLabel || "OK"}</Text>
               </TouchableOpacity>
             </View>
           </Pressable>
