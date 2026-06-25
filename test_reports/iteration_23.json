@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 23 — retest of the settings-loaded guard fix for the chat-lock cold-gate regression. ALL THREE TARGET SCENARIOS NOW PASS. (1) PRIMARY (lock-from-inside-chat): tapping 'Lock this chat' in the profile modal → entering PIN 1234 → Confirm → composer + chat content REMAIN VISIBLE, no bounce, NO ChatLockGate, profile label flips to 'Chat locked / Requires PIN to open from chat list', backend persists locked_thread_ids=[threadId]. (2) COLD-GATE THREAD: with locked_thread_ids=[threadId] and lock_chat_tab=false, hard-reloading /chat/<threadId> shows the brief loading state followed by ChatLockGate at t≈0.7s; entering 1234 transitions to chat content (composer + history). (3) COLD-GATE TAB: with lock_chat_tab=true, hard-reloading /chat shows the gate; entering 1234 reveals the chat list (Slang-Connect / Find / threads). The fix (settings-loaded guard in BOTH /app/frontend/app/chat/[id].tsx:220-228 and /app/frontend/app/(tabs)/chat.tsx:364-372 — returning an ActivityIndicator until wpSettings.settings !== null, then evaluating the lock gate, then conditionally flipping sessionShownRef) correctly resolves the iter22 regression WITHOUT breaking the iter22 primary win. Required: `sudo supervisorctl restart expo` after deploy because metro CI mode does not hot-reload; an initial run before restart returned stale code and reproduced the regression, but post-restart all three flows pass. No new react-native issues. Backend endpoints unchanged & green.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Metro CI mode (deploy-time gotcha, not a runtime bug)", "issue": "Expo is run with CI=true so file edits do NOT hot-reload — `sudo supervisorctl restart expo` is required after fixes touching app code. A fresh tester who skips this restart will see stale bundle and false-FAIL the cold-gate scenarios. Mention only for next iteration's tester.", "testID": "n/a", "priority": "LOW"},
+      {"component": "All TouchableOpacity onPress on RN-Web (carryover from iter19/20/22)", "issue": "playwright `page.click(force=True)` still does not trigger onPress on TouchableOpacity / Pressable in the RN-Web preview env. Workaround: dispatch synthetic mousedown + mouseup + click via page.evaluate. Production users on real mobile/touch unaffected.", "testID": "n/a — global", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "PRIMARY: Lock-from-inside-chat → stay-in-chat", "issue": "PASS. PATCH /api/chat/lock/threads → 200; locked_thread_ids=['4f3c…']; ChatLockGate does NOT appear; composer + header remain visible; lock row label flips to 'Chat locked'.", "affected_testIDs": ["chat-profile-lock","chat-profile-lock-pin","chat-profile-lock-confirm","chat-header-profile","composer-send"]},
+      {"flow": "Cold-gate thread — hard reload /chat/<threadId> with thread locked", "issue": "PASS (regression FIXED). Settings-loaded guard prevents the early sessionShownRef flip; ChatLockGate is rendered after settings resolve; PIN 1234 unlocks and chat content appears.", "affected_testIDs": ["chat-lock-pin","composer-send"]},
+      {"flow": "Cold-gate tab — hard reload /chat with lock_chat_tab=true", "issue": "PASS (regression FIXED). Same settings-loaded guard in ChatTabGate; PIN 1234 unlocks and chat list renders (Slang-Connect / Find / Bob thread visible).", "affected_testIDs": ["chat-lock-pin"]},
+      {"flow": "Block/Unblock + Wallpaper from inside profile modal (carryover)", "issue": "Indirectly verified (rows visible in profile modal at correct labels; not exercised end-to-end this iteration because they were not the focus of the fix and were green in iter22). If a separate retest is desired, action item (b) covers it.", "affected_testIDs": ["chat-profile-block","chat-profile-wallpaper"]}
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_23.json",
+    "/app/test_reports/iter23_screenshots/"
+  ],
+  "action_items": [
+    "(a) NO CODE CHANGES REQUIRED — the iter22-regression fix in /app/frontend/app/chat/[id].tsx (lines ~214-251) and /app/frontend/app/(tabs)/chat.tsx (ChatTabGate, lines ~356-387) is correct. Main agent can ship.",
+    "(b) (optional) Run a fast secondary regression of Block/Unblock confirm-sheet and Wallpaper navigation if other recent profile-modal work was done; both rows render with correct labels in the modal but were not exercised end-to-end this iter since they fall outside the lock-cold-gate scope.",
+    "(c) Add a brief deploy note in PR description: 'Run `sudo supervisorctl restart expo` after merge — metro is in CI mode and does not auto-pick up edits to app/(tabs)/chat.tsx / app/chat/[id].tsx.'"
+  ],
+  "critical_code_review_comments": [
+    "/app/frontend/app/chat/[id].tsx:220-228 — settings-loaded guard correctly returns an ActivityIndicator BEFORE evaluating isThreadLocked() and BEFORE touching sessionShownRef. This is the right invariant: the ref must never flip until we KNOW (from real backend settings) the thread is unlocked.",
+    "/app/frontend/app/(tabs)/chat.tsx:364-372 — mirror guard in ChatTabGate is symmetric and correct.",
+    "Cleanliness — the early-return loader is a tiny full-screen ActivityIndicator centered in a SafeAreaView, identical pattern in both files. Consider extracting to a shared <ChatGateLoader/> in src/ if more callers appear; current duplication (≈10 lines) is acceptable.",
+    "/app/frontend/src/chat-settings.tsx:71 — `settings` still initialized to null and silently means 'not loaded yet'. Consumers must keep handling the null phase; consider a future-cleanup `loaded: boolean` flag, but not blocking."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (no backend changes; all chat-lock endpoints continue to respond 200 with correct persisted state)", "frontend": "3/3 PASS — primary no-bounce, cold-gate thread, cold-gate tab (incl. PIN-unlock for both cold-gate cases)."},
+  "seed_data_creation": "Final cleanup state on test_alice_73dc7f@test.com: has_pin=true, locked_thread_ids=[], lock_chat_tab=false. PIN remains 1234. Use POST /api/auth/login → token field is `token` (NOT access_token).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Lock-cold-gate is fully fixed across all three target scenarios. The two settings-loaded guards in chat/[id].tsx and (tabs)/chat.tsx are the canonical pattern — do not remove them. If future iterations add new gate consumers, apply the same pattern: (a) early-return a loader while settings is null, (b) evaluate isXxxLocked only after settings is non-null, (c) only flip sessionShownRef inside an `if (!locked)` branch (or after a confirmed unlock). REMEMBER: `sudo supervisorctl restart expo` after editing app/* in this CI-mode metro setup. Login token field is `token` (not `access_token`). RN-Web TouchableOpacity playwright clicks still need the JS-dispatchEvent (mousedown+mouseup+click) workaround.",
+  "rca_of_issue": "N/A — this iteration confirms the iter22-regression-fix (settings-loaded guard) is correct and the cold-gate race is gone. See iter22 report for original RCA."
+}

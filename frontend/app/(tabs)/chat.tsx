@@ -354,9 +354,22 @@ export default function ChatListScreen() {
 // even if context state updates flip `isTabLocked` to true mid-session
 // (avoids React-18 cross-component setState batching races).
 function ChatTabGate({ children }: { children: React.ReactNode }) {
-  const { isTabLocked, isUnlocked, markUnlocked } = useChatSettings();
+  const { settings, isTabLocked, isUnlocked, markUnlocked } = useChatSettings();
   const sessionShownRef = useRef(false);
   const [, forceRerender] = useState(0);
+  // Wait for chat settings to load before evaluating the lock gate —
+  // otherwise `isTabLocked()` returns false (settings null) on the very
+  // first render, we'd flip sessionShownRef to true, and never show the
+  // gate even after settings arrive with lock_chat_tab=true.
+  if (!settings) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+          <ActivityIndicator color={colors.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
   const tabLocked = isTabLocked();
   const alreadyUnlocked = sessionShownRef.current || isUnlocked("tab");
   if (tabLocked && !alreadyUnlocked) {

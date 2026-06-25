@@ -213,6 +213,20 @@ export default function ChatThreadScreen() {
 
   if (!threadId) return null;
 
+  // Wait for chat settings to load before evaluating the lock gate — this
+  // avoids a race where `settings=null` ⇒ `isThreadLocked` returns false
+  // ⇒ we flip sessionShownRef and never show the gate even after settings
+  // arrive with locked=true.
+  if (!wpSettings.settings) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.primary} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   const locked = wpSettings.isThreadLocked(threadId);
   // Once we've already shown the chat content in this mount, we will not
   // bounce back to the gate, regardless of how `locked` flips afterwards.
