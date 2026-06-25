@@ -485,6 +485,7 @@ export default function ChatThreadScreen() {
               otherUserId={thread?.other?.id || ""}
               otherUserName={thread?.other?.name || "this user"}
               onClose={() => setProfileOpen(false)}
+              onLockToggled={() => setUnlockedThisSession(true)}
             />
 
             <TouchableOpacity
@@ -698,7 +699,7 @@ const styles = StyleSheet.create({
 // ── Profile-card Privacy + Block rows ──────────────────────────────────────
 // Renders inside the chat-header profile modal. Surfaces the per-thread lock
 // toggle, the chat-tab wallpaper jump-link, and Block / Unblock.
-function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose }: { threadId: string; otherUserId: string; otherUserName: string; onClose: () => void; }) {
+function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose, onLockToggled }: { threadId: string; otherUserId: string; otherUserName: string; onClose: () => void; onLockToggled?: () => void; }) {
   const router = useRouter();
   const { settings, isThreadLocked, reload, markUnlocked } = useChatSettings();
   const [blocked, setBlocked] = useState<boolean | null>(null);
@@ -746,6 +747,10 @@ function ProfilePrivacyBlockRows({ threadId, otherUserId, otherUserName, onClose
         ? (settings?.locked_thread_ids || []).filter((t) => t !== threadId)
         : [...(settings?.locked_thread_ids || []), threadId];
       await api.patch("/chat/lock/threads", { pin, locked_thread_ids: next });
+      // Flip the parent screen's local session-unlock state SYNCHRONOUSLY
+      // so the next render of the gate sees `alreadyUnlocked=true` even if
+      // the context-state update from markUnlocked hasn't propagated yet.
+      onLockToggled?.();
       markUnlocked(threadId);
       await reload();
       setSheet(null); setPin("");
