@@ -16,6 +16,7 @@ import {
 import { Feather } from "@expo/vector-icons";
 import { api } from "./api";
 import { colors, radii, formatINR } from "./theme";
+import { ContentContainer, SHOP_CARD_RADIUS, SHOP_BANNER_RADIUS, SHOP_SECTION_GAP, SHOP_TYPO } from "./content-container";
 
 /* ─────────────────────────── Types ─────────────────────────── */
 
@@ -127,12 +128,13 @@ function BannerSliderBlock({
 }: { block: LayoutBlock; onProductPress?: (id: string) => void; onCategoryPress?: (c: string) => void }) {
   const [idx, setIdx] = useState(0);
   const items = block.items || [];
-  const height = resolveBlockHeight(block);
-  // Slide width must exactly match the visible carousel width. The shop tab
-  // uses 12px horizontal padding on each side (24px total), so the carousel
-  // takes up `screenWidth - 24`. Mismatched widths cause the next slide to
-  // peek from the right edge — the exact bug a customer reported.
-  const slideWidth = screenWidth - 24;
+  // June 2026 Shop redesign — banner height clamped to spec range 180–220 dp.
+  // Use the block's configured size when set; default to 200 dp.
+  const heightRaw = resolveBlockHeight(block);
+  const height = Math.max(180, Math.min(220, heightRaw || 200));
+  // Slide width = inner width of the ContentContainer (16 dp padding each
+  // side). Banner must never overflow the container per spec.
+  const slideWidth = screenWidth - 32;
   // Auto-advance every 4s
   useEffect(() => {
     if (items.length <= 1) return;
@@ -141,7 +143,7 @@ function BannerSliderBlock({
   }, [items.length]);
   if (items.length === 0) return null;
   return (
-    <View style={{ marginBottom: 14 }}>
+    <View>
       <FlatList
         horizontal
         pagingEnabled
@@ -258,7 +260,7 @@ function CategoryCirclesBlock({
   if (apiCats === null) return <SkeletonBlock height={100} />;
   if (items.length === 0) return null;
   return (
-    <View style={{ marginBottom: 14 }}>
+    <View>
       {block.title ? <SectionTitle block={block} /> : null}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
         {items.map((it: any, i) => (
@@ -291,7 +293,7 @@ function BrandSliderBlock({ block }: { block: LayoutBlock }) {
   const items = block.items || [];
   if (items.length === 0) return null;
   return (
-    <View style={{ marginBottom: 14 }}>
+    <View>
       {block.title ? <SectionTitle block={block} /> : null}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
         {items.map((it, i) => (
@@ -318,7 +320,7 @@ function OfferCardsBlock({
   const items = block.items || [];
   if (items.length === 0) return null;
   return (
-    <View style={{ marginBottom: 14 }}>
+    <View>
       {block.title ? <SectionTitle block={block} /> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
         {items.map((it, i) => (
@@ -445,7 +447,7 @@ function ProductGridBlock({
   const nameLines = perRow >= 3 ? 1 : 2;
   const fontMul = perRow >= 4 ? 0.85 : perRow >= 3 ? 0.92 : 1;
   return (
-    <View style={{ marginBottom: 14 }}>
+    <View>
       {(block.title || block.show_view_all) ? (
         <View style={styles.gridHeader}>
           <View style={{ flex: 1, minWidth: 0 }}>
@@ -510,7 +512,7 @@ function HorizontalSliderBlock({
 }: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void }) {
   if (products.length === 0) return <SkeletonBlock height={180} />;
   return (
-    <View style={{ marginBottom: 14 }}>
+    <View>
       {block.title ? <SectionTitle block={block} /> : null}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4, paddingRight: 4 }}>
         {products.slice(0, block.product_count || 10).map((p) => {
@@ -545,7 +547,7 @@ function HorizontalSliderBlock({
 
 function SectionTitle({ block }: { block: LayoutBlock }) {
   return (
-    <View style={{ marginBottom: 8 }}>
+    <View>
       <Text style={[
         styles.sectionTitleText,
         block.text_color ? { color: block.text_color } : null,
@@ -825,42 +827,58 @@ export function ShopLayoutRenderer({
   if (visible.length === 0) return null;
 
   return (
-    <View style={{ marginBottom: 16 }}>
+    <View>
       {visible.map((b) => {
         // Resolve products for product-driven blocks
         let prods: Product[] = [];
         if (["product_grid", "horizontal_slider", "flash_sale"].includes(b.block_type)) {
           prods = sourceCache[b.id] || [];
         }
+        // June 2026 Shop redesign — every block (admin-created or hardcoded)
+        // is wrapped in <ContentContainer> so they all align on the same
+        // vertical rail (16 dp left/right) with a consistent 16 dp inter-
+        // section gap. The block components themselves no longer add their
+        // own marginBottom — that's now ContentContainer's job. This
+        // guarantees a new block-type added in the future inherits the
+        // page layout automatically without touching ShopHome.
+        let node: React.ReactNode = null;
         switch (b.block_type) {
           case "banner_slider":
-            return <BannerSliderBlock key={b.id} block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />;
+            node = <BannerSliderBlock block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />; break;
           case "category_circles":
-            return <CategoryCirclesBlock key={b.id} block={b} onCategoryPress={wrapCategoryPress(b.id)} />;
+            node = <CategoryCirclesBlock block={b} onCategoryPress={wrapCategoryPress(b.id)} />; break;
           case "brand_slider":
-            return <BrandSliderBlock key={b.id} block={b} />;
+            node = <BrandSliderBlock block={b} />; break;
           case "offer_cards":
-            return <OfferCardsBlock key={b.id} block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />;
+            node = <OfferCardsBlock block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />; break;
           case "announcement_strip":
-            return <AnnouncementStripBlock key={b.id} block={b} />;
+            node = <AnnouncementStripBlock block={b} />; break;
           case "flash_sale":
-            return <FlashSaleBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
+            node = <FlashSaleBlock block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />; break;
           case "product_grid":
-            return <ProductGridBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} onViewAll={(target) => { trackClick(b.id); onCategoryPress?.(target || ""); }} />;
+            node = <ProductGridBlock block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} onViewAll={(target) => { trackClick(b.id); onCategoryPress?.(target || ""); }} />; break;
           case "horizontal_slider":
-            return <HorizontalSliderBlock key={b.id} block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />;
+            node = <HorizontalSliderBlock block={b} products={prods} onProductPress={wrapProductPress(b.id)} onAddToCart={wrapAddToCart(b.id)} />; break;
           case "section_header":
-            return <SectionHeaderBlock key={b.id} block={b} />;
+            node = <SectionHeaderBlock block={b} />; break;
           case "text":
-            return <TextBlock key={b.id} block={b} />;
+            node = <TextBlock block={b} />; break;
           case "background":
-            return <BackgroundBlock key={b.id} block={b} onProductPress={wrapProductPress(b.id)} />;
+            node = <BackgroundBlock block={b} onProductPress={wrapProductPress(b.id)} />; break;
           case "content_box":
-            return <ContentBoxBlock key={b.id} block={b} products={productsById} onProductPress={wrapProductPress(b.id)} />;
+            node = <ContentBoxBlock block={b} products={productsById} onProductPress={wrapProductPress(b.id)} />; break;
           default:
             return null;
         }
+        return (
+          <ContentContainer key={b.id}>
+            {node}
+          </ContentContainer>
+        );
       })}
+      {/* Footer space — final 16 dp breather so the last block doesn't sit
+          flush against the bottom tab bar. */}
+      <View style={{ height: 16 }} />
     </View>
   );
 }
@@ -868,9 +886,9 @@ export function ShopLayoutRenderer({
 /* ─────────────────────────── Styles ─────────────────────────── */
 
 const styles = StyleSheet.create({
-  skeleton: { backgroundColor: colors.surfaceMuted, borderRadius: 14, marginBottom: 8, opacity: 0.6 },
-  // Banner slider
-  slide: { borderRadius: 18, overflow: "hidden", position: "relative" },
+  skeleton: { backgroundColor: colors.surfaceMuted, borderRadius: SHOP_CARD_RADIUS, opacity: 0.6 },
+  // Banner slider — 16 px radius per spec.
+  slide: { borderRadius: SHOP_BANNER_RADIUS, overflow: "hidden", position: "relative" },
   slideOverlay: { position: "absolute", left: 16, right: 16, bottom: 16, backgroundColor: "rgba(0,0,0,0.32)", padding: 12, borderRadius: 12 },
   slideSub: { fontSize: 10, fontWeight: "900", color: "#fff", letterSpacing: 1.4, opacity: 0.9 },
   slideTitle: { fontSize: 20, fontWeight: "900", color: "#fff", letterSpacing: -0.4, marginTop: 2 },
@@ -879,7 +897,7 @@ const styles = StyleSheet.create({
   dotsRow: { flexDirection: "row", justifyContent: "center", gap: 5, marginTop: 8 },
   dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.border },
   dotActive: { backgroundColor: colors.primary, width: 18 },
-  // Category circles
+  // Category circles — equal width / icon size / spacing per spec.
   circleTile: { alignItems: "center", width: 70 },
   circleAvatar: { width: 60, height: 60, borderRadius: 30, overflow: "hidden", alignItems: "center", justifyContent: "center" },
   circleImg: { width: "100%", height: "100%" },
@@ -889,82 +907,97 @@ const styles = StyleSheet.create({
   brandImg: { width: "100%", height: "100%" },
   brandText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
   // Offer cards
-  offerCard: { flexBasis: "48%", flexGrow: 1, borderRadius: 14, overflow: "hidden", minHeight: 90, position: "relative" },
+  offerCard: { flexBasis: "48%", flexGrow: 1, borderRadius: SHOP_CARD_RADIUS, overflow: "hidden", minHeight: 90, position: "relative" },
   offerImg: { width: "100%", height: "100%", position: "absolute" },
   offerContent: { padding: 14, backgroundColor: "rgba(255,255,255,0.65)", minHeight: 90 },
   offerSub: { fontSize: 9, fontWeight: "900", letterSpacing: 1.2, color: colors.primary },
   offerTitle: { fontSize: 14, fontWeight: "900", color: colors.textMain, marginTop: 2, letterSpacing: -0.3 },
-  // Announcement strip
-  announceStrip: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, marginBottom: 12 },
+  // Announcement / Offer strip
+  announceStrip: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10 },
   announceText: { fontSize: 12, fontWeight: "700" },
-  // Flash sale
-  flashWrap: { padding: 12, borderRadius: 16, marginBottom: 14 },
+  // Flash sale / Deal of the Day
+  flashWrap: { padding: 12, borderRadius: SHOP_BANNER_RADIUS },
   flashHeader: { flexDirection: "row", alignItems: "center", marginBottom: 10, gap: 8 },
-  flashTitle: { fontSize: 16, fontWeight: "900", color: "#991B1B", letterSpacing: -0.3 },
+  flashTitle: { ...SHOP_TYPO.sectionTitle, color: "#991B1B" },
   flashSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   flashTimer: { flexDirection: "row", alignItems: "center", gap: 3 },
   flashTimerBox: { backgroundColor: "#111827", paddingHorizontal: 6, paddingVertical: 3, borderRadius: 6, minWidth: 28, alignItems: "center" },
   flashTimerText: { color: "#fff", fontSize: 12, fontWeight: "900", letterSpacing: 0.4 },
   flashTimerSep: { color: "#111827", fontWeight: "900" },
   flashEnded: { fontSize: 11, fontWeight: "800", color: colors.textMuted, fontStyle: "italic" },
-  flashCard: { width: 110, backgroundColor: "#fff", borderRadius: 10, overflow: "hidden" },
+  flashCard: { width: 110, backgroundColor: "#fff", borderRadius: SHOP_CARD_RADIUS, overflow: "hidden" },
   flashCardImageWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted },
   flashCardImg: { width: "100%", height: "100%" },
-  flashCardName: { fontSize: 11, fontWeight: "700", color: colors.textMain, padding: 6, paddingBottom: 0 },
+  flashCardName: { ...SHOP_TYPO.productName, fontSize: 12, padding: 6, paddingBottom: 0 },
   flashCardPrice: { fontSize: 13, fontWeight: "900", color: "#DC2626", paddingHorizontal: 6, paddingBottom: 6 },
-  // Product grid
-  gridHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4, gap: 8 },
+  // Product grid — 2 columns, equal width/height per spec.
+  gridHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 },
   gridViewAllBtn: { flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.brand100 },
   gridViewAllText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
-  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  gridCard: { flexBasis: "48%", flexGrow: 0, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
-  gridImgWrap: { width: "100%", aspectRatio: 1.1, backgroundColor: colors.surfaceMuted, position: "relative" },
+  // gap:16 → matches the global 16 dp inter-card gap requested in the spec.
+  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 16 },
+  gridCard: {
+    flexBasis: "47.5%", flexGrow: 0,
+    backgroundColor: "#FFFFFF",
+    borderRadius: SHOP_CARD_RADIUS,
+    borderWidth: 1, borderColor: colors.border,
+    overflow: "hidden",
+    padding: 8,
+    // Soft shadow (iOS) + elevation (Android) per spec.
+    ...Platform.select({
+      ios: {
+        shadowColor: "#000", shadowOpacity: 0.05, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
+      },
+      android: { elevation: 1 },
+    }),
+  },
+  gridImgWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative", borderRadius: 8, overflow: "hidden" },
   gridImg: { width: "100%", height: "100%" },
   gridOOSBadge: { position: "absolute", top: 8, left: 8, backgroundColor: "#B91C1C", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
   gridOOSText: { fontSize: 8, color: "#fff", fontWeight: "900", letterSpacing: 0.6 },
-  gridName: { fontSize: 12, fontWeight: "700", color: colors.textMain, minHeight: 30, lineHeight: 15 },
+  gridName: { ...SHOP_TYPO.productName, color: colors.textMain, minHeight: 36, lineHeight: 18, marginTop: 8 },
   gridFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6 },
-  gridPrice: { fontSize: 14, fontWeight: "900", color: colors.primary, letterSpacing: -0.3 },
-  gridAdd: { width: 30, height: 30, borderRadius: 10, alignItems: "center", justifyContent: "center" },
-  // Horizontal slider
-  hCard: { width: 130, backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, overflow: "hidden", padding: 8 },
+  gridPrice: { ...SHOP_TYPO.price, color: colors.primary, letterSpacing: -0.3 },
+  gridAdd: { width: 32, height: 32, borderRadius: 10, alignItems: "center", justifyContent: "center" },
+  // Horizontal product slider (Best Sellers / Featured / Recently Added)
+  hCard: { width: 140, backgroundColor: colors.surface, borderRadius: SHOP_CARD_RADIUS, borderWidth: 1, borderColor: colors.border, overflow: "hidden", padding: 8 },
   hImgWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, borderRadius: 8, overflow: "hidden" },
   hImg: { width: "100%", height: "100%" },
-  hName: { fontSize: 11, fontWeight: "700", color: colors.textMain, marginTop: 6, minHeight: 28 },
-  hPrice: { fontSize: 13, fontWeight: "900", color: colors.primary, marginTop: 2 },
-  // Section header
-  sectionHeaderWrap: { marginTop: 6, marginBottom: 6 },
-  sectionTitleText: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3, textTransform: "none" },
+  hName: { ...SHOP_TYPO.productName, fontSize: 13, marginTop: 8, minHeight: 32 },
+  hPrice: { ...SHOP_TYPO.price, color: colors.primary, marginTop: 4 },
+  // Section header — Bold 18 per spec.
+  sectionHeaderWrap: { marginTop: 0, marginBottom: 8 },
+  sectionTitleText: { ...SHOP_TYPO.sectionTitle, color: colors.textMain },
   sectionTitleSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   // Text block
-  textBlock: { backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, padding: 14, marginBottom: 12 },
+  textBlock: { backgroundColor: colors.surface, borderRadius: SHOP_CARD_RADIUS, borderWidth: 1, borderColor: colors.border, padding: 14 },
   textBlockTitle: { fontSize: 14, fontWeight: "900", color: colors.textMain, marginBottom: 4 },
   textBlockBody: { fontSize: 13, color: colors.textMuted, lineHeight: 20 },
   // Product card (content_box)
-  productCard: { backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, overflow: "hidden", marginBottom: 12 },
+  productCard: { backgroundColor: colors.surface, borderRadius: SHOP_CARD_RADIUS, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   productImageWrap: { width: "100%", backgroundColor: colors.surfaceMuted, position: "relative" },
   productImage: { width: "100%", height: "100%" },
   productImageEmpty: { flex: 1, alignItems: "center", justifyContent: "center" },
   oosBadge: { position: "absolute", top: 10, left: 10, backgroundColor: "#B91C1C", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
   oosBadgeText: { fontSize: 9, fontWeight: "900", color: "#fff", letterSpacing: 0.6 },
   productInfo: { padding: 12 },
-  productName: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
+  productName: { ...SHOP_TYPO.sectionTitle, fontSize: 16, color: colors.textMain },
   productDesc: { fontSize: 12, color: colors.textMuted, marginTop: 3, lineHeight: 18 },
   productFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 10 },
-  productPrice: { fontSize: 17, fontWeight: "900", color: colors.primary, letterSpacing: -0.4 },
+  productPrice: { ...SHOP_TYPO.price, fontSize: 17, color: colors.primary, letterSpacing: -0.4 },
   viewBtn: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: colors.primary, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999 },
   viewBtnText: { fontSize: 11, fontWeight: "800", color: colors.primaryFg },
   // Manual content box fallback
-  contentBox: { backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, overflow: "hidden", marginBottom: 12 },
+  contentBox: { backgroundColor: colors.surface, borderRadius: SHOP_CARD_RADIUS, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   contentImage: { width: "100%" },
   contentTitle: { fontSize: 16, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4 },
   contentSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   contentBody: { fontSize: 13, color: colors.textMain, lineHeight: 20, marginTop: 6 },
-  // Background banner (single image)
-  bannerBox: { borderRadius: radii.card, overflow: "hidden", marginBottom: 12, backgroundColor: colors.brand100, position: "relative" },
+  // Background banner (single image) — 16 px radius matching slider.
+  bannerBox: { borderRadius: SHOP_BANNER_RADIUS, overflow: "hidden", backgroundColor: colors.brand100, position: "relative" },
   bannerOverlay: { position: "absolute", left: 16, bottom: 16, right: 16, backgroundColor: "rgba(0,0,0,0.35)", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12 },
   bannerEyebrow: { fontSize: 10, fontWeight: "900", color: "#fff", letterSpacing: 1.4, opacity: 0.9 },
-  bannerTitle: { fontSize: 18, fontWeight: "900", color: "#fff", letterSpacing: -0.4, marginTop: 2 },
+  bannerTitle: { ...SHOP_TYPO.sectionTitle, color: "#fff", marginTop: 2 },
   bannerCta: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, marginTop: 8, alignSelf: "flex-start" },
   bannerCtaText: { fontSize: 11, fontWeight: "800" },
 });
