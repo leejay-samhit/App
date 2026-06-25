@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 11 — Profile Picture Privacy (Group 8) backend validated. Created /app/backend/tests/test_iteration11_privacy.py with 26 tests covering GET/PATCH /api/users/me/privacy, POST /api/users/me/profile-image visibility-stamping, and direct module semantics for routes.privacy.is_public_account and can_view_profile_image (own/SP/vendor/everyone/downline/accepted_requests). Result: 26/26 PASS in 5.58s. Service Provider and Vendor accounts are correctly hard-locked to 'everyone' on both READ and WRITE — even when DB is tampered (set to 'downline') the API coerces back. Downline chain A→B→C verified (C is descendant of A; unrelated X is not). accepted_requests verified via direct chat_threads insert with sorted participants.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration11_privacy.py",
+    "/app/test_reports/pytest/iteration11_privacy.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routes/privacy.py is_public_account: vendor branch correctly requires BOTH is_vendor:true AND vendor_status:'approved' (matches review request spec). SP branch is OR (is_service_provider:true OR service_status:'approved') — also matches spec.",
+    "PATCH /api/users/me/privacy correctly persists 'everyone' for SP/Vendor regardless of payload (verified by re-reading users collection directly after a 'downline' attempt).",
+    "POST /api/users/me/profile-image always stamps profile_visibility — SP/Vendor get 'everyone' even when previous DB value was tampered to 'downline'.",
+    "Minor: PrivacyUpdate Pydantic model min_length=4 would reject a hypothetical 3-char value at validation time before reaching the VISIBILITY_LEVELS check (no current valid value is shorter than 4 so not a real issue, just a coupling between min_length and enum)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration11_privacy.py (new)"
+  ],
+  "success_rate": {"backend": "100% (26/26)", "frontend": "N/A (backend only)"},
+  "seed_data_creation": "Six users created on-the-fly per module fixture (test_priv_a/b/c/sp/v/x_<random>@example.com) via POST /api/auth/register; approval_status flipped to 'approved' directly via pymongo. SP/Vendor flags set via direct Mongo update. All test data is teardown-cleaned at module exit.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Privacy module is fully GREEN. The test file uses a class-level shared asyncio loop (TestCanViewProfileImage.setup_class) because motor's AsyncIOMotorClient binds to whichever loop first touches it — calling asyncio.run() per-test crashes with 'Event loop is closed'. Re-use this pattern when invoking async db helpers directly from pytest.",
+  "rca_of_issue": "No bugs found. Two test-script issues fixed locally during the run: (1) motor 'Event loop is closed' — fixed by using a single shared event loop for all async helper calls in TestCanViewProfileImage; (2) BFS spillover placed the 'unrelated viewer X' under A's tree, making the downline-deny test false-positive — fixed by force-setting X.sponsor_id=None after registration."
+}

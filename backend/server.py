@@ -182,6 +182,7 @@ from routes import service_admin as service_admin_router  # noqa: E402
 from routes import service_provider as service_provider_router  # noqa: E402
 from routes import finance as finance_router  # noqa: E402
 from routes import refunds as refunds_router  # noqa: E402
+from routes import privacy as privacy_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -1967,9 +1968,22 @@ async def update_profile_image(payload: ProfileImageUpload, user: Dict[str, Any]
             detail=f"Image too large. Please use a photo under ~1 MB (got {len(img)//1024} KB).",
         )
     ts = datetime.utcnow().isoformat()
+    # June 2026 — also stamp a default `profile_visibility` on first-ever
+    # upload so the field always exists when other endpoints check it.
+    # SP/Vendor accounts are HARD-LOCKED to "everyone" (enforced again
+    # by routes/privacy.update_my_privacy) so even a tampered client can
+    # never hide a public account.
+    from routes.privacy import is_public_account, DEFAULT_VISIBILITY  # local import to avoid cycles
+    desired_vis = "everyone" if is_public_account(user) else (
+        user.get("profile_visibility") or DEFAULT_VISIBILITY
+    )
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"profile_image": img, "profile_image_updated_at": ts}},
+        {"$set": {
+            "profile_image": img,
+            "profile_image_updated_at": ts,
+            "profile_visibility": desired_vis,
+        }},
     )
     fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
     return fresh
@@ -8995,6 +9009,7 @@ app.include_router(service_admin_router.router, prefix="/api")
 app.include_router(service_provider_router.router, prefix="/api")
 app.include_router(finance_router.router, prefix="/api")
 app.include_router(refunds_router.router, prefix="/api")
+app.include_router(privacy_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

@@ -134,6 +134,34 @@ export default function ProfileScreen() {
     }
   }, [biometricReady, enableBiometric, disableBiometric]);
 
+  // ── Profile-picture privacy (June 2026) ─────────────────────────────
+  // Normal users can choose: everyone / downline / accepted_requests.
+  // Service Providers + Vendors are locked to "everyone" by the backend.
+  const [privacyVis, setPrivacyVis] = useState<string>(((user as any)?.profile_visibility) || "everyone");
+  const [privacyLocked, setPrivacyLocked] = useState<boolean>(false);
+  const [privacySaving, setPrivacySaving] = useState<string | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await api.get("/users/me/privacy");
+        setPrivacyVis(r.data?.profile_visibility || "everyone");
+        setPrivacyLocked(!!r.data?.locked);
+      } catch {}
+    })();
+  }, [user?.id]);
+  const onSetPrivacy = useCallback(async (level: "everyone" | "downline" | "accepted_requests") => {
+    if (privacyLocked || level === privacyVis) return;
+    setPrivacySaving(level);
+    try {
+      const r = await api.patch("/users/me/privacy", { profile_visibility: level });
+      setPrivacyVis(r.data?.profile_visibility || level);
+    } catch (e: any) {
+      Alert.alert("Couldn't update", e?.response?.data?.detail || "Try again.");
+    } finally {
+      setPrivacySaving(null);
+    }
+  }, [privacyLocked, privacyVis]);
+
   useEffect(() => {
     setUpi(user?.upi_id || "");
     setBank(user?.bank_account || "");
@@ -362,6 +390,69 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </>
             ) : null}
+          </View>
+
+          {/* ───── PRIVACY GROUP (June 2026) ─────
+              Lets normal users restrict who can see their profile picture.
+              Service Providers + Vendors are server-locked to "Everyone"
+              so customers can identify them — we surface a friendly notice
+              instead of the options. */}
+          <Text style={styles.groupLabel}>PRIVACY</Text>
+          <View style={[styles.payoutCard, { paddingVertical: 14 }]}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <Feather name="eye" size={14} color={colors.primary} />
+              <Text style={styles.kycTitle}>Profile picture visibility</Text>
+            </View>
+            {privacyLocked ? (
+              <View style={{ backgroundColor: colors.brand100, padding: 12, borderRadius: 10, marginTop: 6 }}>
+                <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700", marginBottom: 4 }}>
+                  ALWAYS VISIBLE
+                </Text>
+                <Text style={{ fontSize: 12, color: colors.textMain, lineHeight: 18 }}>
+                  Your profile picture is always visible to everyone so customers can easily identify and contact you.
+                </Text>
+              </View>
+            ) : (
+              <View style={{ marginTop: 8, gap: 6 }}>
+                {([
+                  { value: "everyone",          label: "Everyone",                  sub: "All app users can see your photo.", icon: "globe" },
+                  { value: "downline",          label: "Downline Only",             sub: "Only people referred under you.",   icon: "users" },
+                  { value: "accepted_requests", label: "Accepted Message Requests", sub: "Only chats you've accepted.",       icon: "message-square" },
+                ] as const).map((opt) => {
+                  const active = privacyVis === opt.value;
+                  const saving = privacySaving === opt.value;
+                  return (
+                    <TouchableOpacity
+                      key={opt.value}
+                      onPress={() => onSetPrivacy(opt.value)}
+                      disabled={!!privacySaving}
+                      activeOpacity={0.85}
+                      style={{
+                        flexDirection: "row", alignItems: "center", gap: 12,
+                        padding: 12, borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: active ? colors.primary : colors.border,
+                        backgroundColor: active ? colors.brand100 : colors.surface,
+                      }}
+                      testID={`privacy-${opt.value}`}
+                    >
+                      <View style={{ width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: active ? colors.primary : colors.border, alignItems: "center", justifyContent: "center" }}>
+                        {active ? <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary }} /> : null}
+                      </View>
+                      <Feather name={opt.icon as any} size={16} color={active ? colors.primary : colors.textMuted} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }}>{opt.label}</Text>
+                        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>{opt.sub}</Text>
+                      </View>
+                      {saving ? <ActivityIndicator size="small" color={colors.primary} /> : null}
+                    </TouchableOpacity>
+                  );
+                })}
+                <Text style={{ fontSize: 10, color: colors.textMuted, marginTop: 4, lineHeight: 16 }}>
+                  When hidden, others will see your default avatar with your initial. Service providers and vendors are always public.
+                </Text>
+              </View>
+            )}
           </View>
 
           <Text style={styles.groupLabel}>PAYOUT DETAILS</Text>
