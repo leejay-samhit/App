@@ -104,6 +104,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(dt: Any) -> datetime:
+    """Coerce a value (ISO string or datetime) into a tz-aware UTC datetime.
+
+    Mongo returns naive UTC datetimes for fields written via Motor; mixing
+    those with `_now()` (aware UTC) raises TypeError on subtraction. Normalise
+    here so every elapsed-time check works regardless of source.
+    """
+    if isinstance(dt, str):
+        try:
+            d = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except Exception:
+            return _now()
+    elif isinstance(dt, datetime):
+        d = dt
+    else:
+        return _now()
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d
+
+
 def _serialize(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not doc:
         return None
@@ -500,6 +521,28 @@ async def list_messages(thread_id: str, before: Optional[str] = None, limit: int
     return {"messages": [_serialize(dict(m)) for m in msgs]}
 
 
+@router.get("/chat/search/messages")
+async def search_messages(
+    q: str = Query(..., min_length=2, max_length=80),
+    thread_id: Optional[str] = None,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    safe = re.escape(q.strip())
+    base: Dict[str, Any] = {
+        "text": {"$regex": safe, "$options": "i"},
+        "deleted_for_everyone": {"$ne": True},
+    }
+    if thread_id:
+        await _assert_thread_member(thread_id, user["id"])
+        base["thread_id"] = thread_id
+    else:
+        # All threads this user participates in.
+        my_threads = await db.chat_threads.find({"participants": user["id"]}, {"_id": 0, "id": 1}).to_list(2000)
+        base["thread_id"] = {"$in": [t["id"] for t in my_threads]}
+    rows = await db.chat_messages.find(base, {"_id": 0}).sort("created_at", -1).limit(100).to_list(100)
+    return {"messages": [_serialize(dict(r)) for r in rows]}
+
+
 @router.post("/chat/{thread_id}/messages")
 async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] = Depends(get_current_user)):
     t = await _assert_thread_member(thread_id, user["id"])
@@ -610,7 +653,7 @@ async def edit_message(msg_id: str, body: MessagePatch, user: Dict[str, Any] = D
         raise HTTPException(status_code=403, detail="You can only edit your own messages.")
     if m.get("deleted"):
         raise HTTPException(status_code=400, detail="This message was deleted.")
-    age = _now() - (m["created_at"] if isinstance(m["created_at"], datetime) else datetime.fromisoformat(m["created_at"]))
+    age = _now() - _as_utc(m["created_at"])
     if age > timedelta(minutes=EDIT_WINDOW_MIN):
         raise HTTPException(status_code=400, detail=f"Edit window expired ({EDIT_WINDOW_MIN} min).")
     # Block edit if the other person has already replied AFTER this message
@@ -837,7 +880,7 @@ async def delete_for_everyone(msg_id: str, user: Dict[str, Any] = Depends(get_cu
         raise HTTPException(status_code=404, detail="Message not found.")
     if m["sender_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="You can only delete your own messages.")
-    created = m["created_at"] if isinstance(m["created_at"], datetime) else datetime.fromisoformat(m["created_at"])
+    created = _as_utc(m["created_at"])
     if _now() - created > DELETE_FOR_EVERYONE_WINDOW:
         raise HTTPException(status_code=400, detail="The 1-hour window for delete-for-everyone has passed.")
     await db.chat_messages.update_one(
