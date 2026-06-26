@@ -141,65 +141,94 @@ export default function ChatSettingsScreen() {
 }
 
 // Biometric toggle — flips `use_biometric` via /chat/lock/change with current PIN.
+// Uses an inline PIN modal so this works on iOS, Android AND web (the old
+// implementation relied on `Alert.prompt` which is iOS-only).
 function BiometricRow() {
   const { settings, reload } = useChatSettings();
   const [busy, setBusy] = useState(false);
+  const [pinSheetOpen, setPinSheetOpen] = useState(false);
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState<string | null>(null);
   if (!settings) return null;
-  if (Platform.OS === "web") return null;
 
-  const flip = async () => {
+  const open = async () => {
+    setErr(null);
+    if (Platform.OS !== "web") {
+      try {
+        const hw = await LocalAuth.hasHardwareAsync();
+        const enrolled = await LocalAuth.isEnrolledAsync();
+        if (!hw || !enrolled) {
+          Alert.alert("Biometric unavailable", "Enrol a fingerprint or face in your phone settings first.");
+          return;
+        }
+      } catch { /* fall through */ }
+    }
+    setPin("");
+    setPinSheetOpen(true);
+  };
+
+  const submit = async () => {
+    if (!pin || pin.length < 4) { setErr("Enter your 4–6 digit PIN."); return; }
+    setBusy(true); setErr(null);
     try {
-      const hw = await LocalAuth.hasHardwareAsync();
-      const enrolled = await LocalAuth.isEnrolledAsync();
-      if (!hw || !enrolled) {
-        Alert.alert("Biometric unavailable", "Enrol a fingerprint or face in your phone settings first.");
-        return;
-      }
-    } catch { /* fall through */ }
-
-    Alert.prompt?.(
-      settings.use_biometric ? "Disable biometric unlock" : "Enable biometric unlock",
-      "Enter your chat PIN to confirm.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "OK",
-          onPress: async (pin) => {
-            if (!pin || pin.length < 4) return;
-            setBusy(true);
-            try {
-              await api.post("/chat/lock/change", {
-                old_pin: pin,
-                new_pin: pin,
-                use_biometric: !settings.use_biometric,
-              });
-              await reload();
-            } catch (e) {
-              Alert.alert("Couldn't update", formatApiError(e));
-            } finally {
-              setBusy(false);
-            }
-          },
-        },
-      ],
-      "secure-text",
-    );
+      await api.post("/chat/lock/change", {
+        old_pin: pin,
+        new_pin: pin,
+        use_biometric: !settings.use_biometric,
+      });
+      await reload();
+      setPinSheetOpen(false);
+      setPin("");
+    } catch (e) {
+      setErr(formatApiError(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <View style={styles.toggleRow}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.toggleLabel}>Use fingerprint / face</Text>
-        <Text style={styles.toggleHint}>Unlock chats with your device biometric instead of typing the PIN.</Text>
+    <>
+      <View style={styles.toggleRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.toggleLabel}>Use fingerprint / face</Text>
+          <Text style={styles.toggleHint}>
+            {Platform.OS === "web"
+              ? "Saves the preference — works on your phone, not on this browser."
+              : "Unlock chats with your device biometric instead of typing the PIN."}
+          </Text>
+        </View>
+        <Switch
+          value={settings.use_biometric}
+          onValueChange={open}
+          trackColor={{ true: colors.primary, false: colors.border }}
+          disabled={busy}
+          testID="chat-lock-bio-toggle"
+        />
       </View>
-      <Switch
-        value={settings.use_biometric}
-        onValueChange={flip}
-        trackColor={{ true: colors.primary, false: colors.border }}
-        disabled={busy}
-        testID="chat-lock-bio-toggle"
-      />
-    </View>
+
+      <Modal visible={pinSheetOpen} transparent animationType="fade" onRequestClose={() => setPinSheetOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setPinSheetOpen(false)}>
+          <Pressable style={[styles.modalCard, { borderTopLeftRadius: 18, borderTopRightRadius: 18, marginHorizontal: 24, borderRadius: 18 }]} onPress={() => {}}>
+            <Text style={styles.modalTitle}>
+              {settings.use_biometric ? "Disable biometric unlock" : "Enable biometric unlock"}
+            </Text>
+            <Text style={[styles.toggleHint, { marginTop: 6 }]}>
+              Enter your chat PIN to confirm.
+            </Text>
+            <PinInput value={pin} onChangeText={setPin} placeholder="Chat PIN" testID="bio-pin" />
+            {err ? <Text style={styles.modalErr}>{err}</Text> : null}
+            <View style={styles.modalBtns}>
+              <TouchableOpacity onPress={() => { setPinSheetOpen(false); setPin(""); setErr(null); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
+                <Text style={styles.modalBtnLabel}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={submit} disabled={busy} style={[styles.modalBtn, { backgroundColor: colors.primary }, busy && { opacity: 0.6 }]} testID="bio-pin-submit">
+                {busy ? <ActivityIndicator color="#fff" /> : <Text style={[styles.modalBtnLabel, { color: "#fff" }]}>Confirm</Text>}
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
   );
 }
 

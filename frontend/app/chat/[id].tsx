@@ -51,6 +51,21 @@ export default function ChatThreadScreen() {
   // Sprint 1.1 — header profile-card modal (avatar / media / starred summary).
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileDetail, setProfileDetail] = useState<{ media_count: number; starred_count: number } | null>(null);
+  // ── June 2026 chat experience upgrades ───────────────────────────────
+  // Header overflow menu (Clear chat options).
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  // Confirm sheet for destructive clear-chat operations.
+  const [clearConfirm, setClearConfirm] = useState<null | "me" | "everyone">(null);
+  // Profile pic full-screen viewer (tap avatar inside profile modal).
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  // Media-gallery + Starred drawer toggles. The body of the profile modal
+  // switches between "summary", "media", and "starred" so the user can
+  // explore everything without leaving the modal stack.
+  const [profileView, setProfileView] = useState<"summary" | "media" | "starred">("summary");
+  const [mediaList, setMediaList] = useState<Message[] | null>(null);
+  const [starredList, setStarredList] = useState<Message[] | null>(null);
+  // Phone-gallery-style zoomable image preview (used by the media grid).
+  const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
   // Quick-react picker — anchors near the tapped message. Tap closes it.
   const [quickReactFor, setQuickReactFor] = useState<Message | null>(null);
 
@@ -61,6 +76,42 @@ export default function ChatThreadScreen() {
       const r = await api.get(`/chat/${threadId}/details`);
       setProfileDetail({ media_count: r.data?.media_count || 0, starred_count: r.data?.starred_count || 0 });
     } catch {}
+  }, [threadId]);
+
+  // Lazy-loaded full media + starred lists for the profile-modal drawer.
+  // Called when the user taps "Media" or "Starred" from the summary view.
+  const loadMediaList = useCallback(async () => {
+    if (!threadId) return;
+    try {
+      const r = await api.get<{ messages: Message[] }>(`/chat/${threadId}/media`, { params: { limit: 500 } });
+      setMediaList(r.data?.messages || []);
+    } catch { setMediaList([]); }
+  }, [threadId]);
+  const loadStarredList = useCallback(async () => {
+    try {
+      // /chat/starred is user-global; filter to this thread for the modal.
+      const r = await api.get<{ messages: Message[] }>(`/chat/starred`, { params: { limit: 500 } });
+      const filtered = (r.data?.messages || []).filter((m) => m.thread_id === threadId);
+      setStarredList(filtered);
+    } catch { setStarredList([]); }
+  }, [threadId]);
+
+  // Clear-chat handler — wipes all messages in the thread (and media +
+  // starred summary). scope="me" only hides for the viewer; scope="everyone"
+  // soft-deletes for BOTH sides and resets media/starred for both users.
+  const clearChat = useCallback(async (scope: "me" | "everyone") => {
+    if (!threadId) return;
+    try {
+      await api.delete(`/chat/${threadId}/messages`, { params: { scope } });
+      setMessages([]);
+      setMediaList([]);
+      setStarredList([]);
+      setProfileDetail({ media_count: 0, starred_count: 0 });
+      setClearConfirm(null);
+      setHeaderMenuOpen(false);
+    } catch (e) {
+      Alert.alert("Couldn't clear", formatApiError(e));
+    }
   }, [threadId]);
 
   // Optimistic reaction — flip the local state instantly, then persist.
@@ -133,6 +184,13 @@ export default function ChatThreadScreen() {
       setMessages((prev) => prev.map((m) => m.id === ev.message.id ? ev.message : m));
     } else if (ev.type === "message.deleted" && ev.thread_id === threadId) {
       setMessages((prev) => prev.map((m) => m.id === ev.message_id ? { ...m, deleted: true, text: "", image_data_url: "" } : m));
+    } else if (ev.type === "thread.cleared" && ev.thread_id === threadId) {
+      // The other party (or me from another device) wiped the entire chat
+      // for everyone. Reset the local view immediately.
+      setMessages([]);
+      setMediaList([]);
+      setStarredList([]);
+      setProfileDetail({ media_count: 0, starred_count: 0 });
     }
   });
 
@@ -279,6 +337,10 @@ export default function ChatThreadScreen() {
             <Text style={styles.headerSub}>#{thread?.other.referral_code || ""}</Text>
           </View>
         </TouchableOpacity>
+        {/* ── Header overflow menu (Clear chat etc.) ────────────── */}
+        <TouchableOpacity onPress={() => setHeaderMenuOpen(true)} style={styles.iconBtn} testID="chat-header-menu">
+          <Feather name="more-vertical" size={18} color={colors.textMain} />
+        </TouchableOpacity>
       </View>
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={20}>
@@ -290,6 +352,13 @@ export default function ChatThreadScreen() {
             contentContainerStyle={{ padding: spacing.screen, gap: 6, paddingBottom: 12 }}
             onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
           >
+            {/* End-to-end encryption notice — subtle WhatsApp-style banner. */}
+            <View style={styles.e2eBanner} pointerEvents="none">
+              <Feather name="lock" size={11} color={colors.textMuted} />
+              <Text style={styles.e2eBannerText}>
+                Messages and calls are end-to-end encrypted. No one outside this chat can read or listen to them.
+              </Text>
+            </View>
             {messages.length === 0 ? (
               <View style={styles.emptyState}>
                 <Feather name="message-square" size={26} color={colors.textMuted} />
@@ -472,7 +541,12 @@ export default function ChatThreadScreen() {
           <View onStartShouldSetResponder={() => true} style={{ backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 22 }}>
             <View style={{ width: 36, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
             <View style={{ alignItems: "center" }}>
-              <View style={{ width: 96, height: 96, borderRadius: 48, overflow: "hidden", backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" }}>
+              <TouchableOpacity
+                activeOpacity={thread?.other?.profile_image ? 0.85 : 1}
+                onPress={() => { if (thread?.other?.profile_image) setAvatarPreview(thread.other.profile_image); }}
+                style={{ width: 96, height: 96, borderRadius: 48, overflow: "hidden", backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" }}
+                testID="chat-profile-avatar"
+              >
                 {thread?.other?.profile_image ? (
                   <Image source={{ uri: thread.other.profile_image }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
                 ) : (
@@ -480,7 +554,7 @@ export default function ChatThreadScreen() {
                     {(thread?.other?.name || "?").substring(0, 1).toUpperCase()}
                   </Text>
                 )}
-              </View>
+              </TouchableOpacity>
               <Text style={{ fontSize: 18, fontWeight: "800", color: colors.textMain, marginTop: 12 }}>
                 {thread?.other?.name || "User"}
               </Text>
@@ -494,16 +568,26 @@ export default function ChatThreadScreen() {
               ) : null}
             </View>
             <View style={{ flexDirection: "row", gap: 12, marginTop: 22 }}>
-              <View style={{ flex: 1, backgroundColor: colors.surfaceMuted, borderRadius: 14, paddingVertical: 14, alignItems: "center" }}>
+              <TouchableOpacity
+                onPress={() => { setProfileView("media"); if (!mediaList) loadMediaList(); }}
+                style={{ flex: 1, backgroundColor: colors.surfaceMuted, borderRadius: 14, paddingVertical: 14, alignItems: "center" }}
+                testID="chat-profile-media-card"
+              >
                 <Feather name="image" size={18} color={colors.primary} />
                 <Text style={{ fontSize: 18, fontWeight: "800", color: colors.textMain, marginTop: 4 }}>{profileDetail?.media_count ?? "—"}</Text>
                 <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>Media shared</Text>
-              </View>
-              <View style={{ flex: 1, backgroundColor: colors.surfaceMuted, borderRadius: 14, paddingVertical: 14, alignItems: "center" }}>
+                <Text style={{ fontSize: 10, color: colors.primary, marginTop: 6, fontWeight: "700" }}>View all →</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => { setProfileView("starred"); if (!starredList) loadStarredList(); }}
+                style={{ flex: 1, backgroundColor: colors.surfaceMuted, borderRadius: 14, paddingVertical: 14, alignItems: "center" }}
+                testID="chat-profile-starred-card"
+              >
                 <Feather name="star" size={18} color="#F59E0B" />
                 <Text style={{ fontSize: 18, fontWeight: "800", color: colors.textMain, marginTop: 4 }}>{profileDetail?.starred_count ?? "—"}</Text>
                 <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>Starred</Text>
-              </View>
+                <Text style={{ fontSize: 10, color: colors.primary, marginTop: 6, fontWeight: "700" }}>View all →</Text>
+              </TouchableOpacity>
             </View>
 
             {/* ── Privacy + Block — June 2026 ─────────────────────────
@@ -659,6 +743,171 @@ export default function ChatThreadScreen() {
           </TouchableOpacity>
         </Pressable>
       </Modal>
+
+      {/* Profile-pic full-screen viewer — tap avatar in the profile modal. */}
+      <Modal visible={!!avatarPreview} transparent animationType="fade" onRequestClose={() => setAvatarPreview(null)} statusBarTranslucent>
+        <Pressable style={styles.previewBackdrop} onPress={() => setAvatarPreview(null)} testID="chat-avatar-preview-backdrop">
+          {avatarPreview ? (
+            <Image source={{ uri: avatarPreview }} style={styles.previewImg} resizeMode="contain" />
+          ) : null}
+          <TouchableOpacity onPress={() => setAvatarPreview(null)} style={styles.previewClose}>
+            <Feather name="x" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+        </Pressable>
+      </Modal>
+
+      {/* Media gallery view (4-col grid) — opens from profile modal. */}
+      <Modal visible={profileView === "media"} animationType="slide" onRequestClose={() => setProfileView("summary")}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+          <View style={styles.headerRow}>
+            <TouchableOpacity onPress={() => setProfileView("summary")} style={styles.iconBtn} testID="chat-media-back">
+              <Feather name="arrow-left" size={20} color={colors.textMain} />
+            </TouchableOpacity>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.headerName}>Shared media</Text>
+              <Text style={styles.headerSub}>{(mediaList || []).length} item{(mediaList || []).length === 1 ? "" : "s"}</Text>
+            </View>
+          </View>
+          {mediaList === null ? (
+            <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+          ) : mediaList.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Feather name="image" size={26} color={colors.textMuted} />
+              <Text style={styles.emptyStateText}>No media shared yet</Text>
+            </View>
+          ) : (
+            <ScrollView contentContainerStyle={{ padding: 4, flexDirection: "row", flexWrap: "wrap" }}>
+              {mediaList.map((m, i) => (
+                <TouchableOpacity key={m.id} activeOpacity={0.8} onPress={() => setGalleryIndex(i)} style={{ width: "25%", aspectRatio: 1, padding: 2 }} testID={`chat-media-tile-${i}`}>
+                  <Image source={{ uri: m.image_data_url }} style={{ width: "100%", height: "100%", borderRadius: 4, backgroundColor: "#000" }} resizeMode="cover" />
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          )}
+        </SafeAreaView>
+      </Modal>
+
+      {/* Phone-gallery-style zoomable preview — opens from a media tile. */}
+      <Modal visible={galleryIndex !== null} transparent animationType="fade" onRequestClose={() => setGalleryIndex(null)} statusBarTranslucent>
+        <Pressable style={styles.previewBackdrop} onPress={() => setGalleryIndex(null)}>
+          {galleryIndex !== null && mediaList && mediaList[galleryIndex]?.image_data_url ? (
+            <ScrollView
+              maximumZoomScale={4} minimumZoomScale={1}
+              contentContainerStyle={{ flex: 1, alignItems: "center", justifyContent: "center" }}
+              showsHorizontalScrollIndicator={false} showsVerticalScrollIndicator={false}
+              bouncesZoom
+            >
+              <Image source={{ uri: mediaList[galleryIndex].image_data_url }} style={styles.previewImg} resizeMode="contain" />
+            </ScrollView>
+          ) : null}
+          <TouchableOpacity onPress={() => setGalleryIndex(null)} style={styles.previewClose}>
+            <Feather name="x" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+          {galleryIndex !== null && mediaList && mediaList.length > 1 ? (
+            <View style={{ position: "absolute", bottom: 36, alignSelf: "center", flexDirection: "row", gap: 12 }}>
+              <TouchableOpacity
+                onPress={(e) => { (e as any).stopPropagation?.(); setGalleryIndex(Math.max(0, (galleryIndex || 0) - 1)); }}
+                style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" }}
+              >
+                <Feather name="chevron-left" size={20} color="#fff" />
+              </TouchableOpacity>
+              <View style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)" }}>
+                <Text style={{ color: "#fff", fontWeight: "700" }}>{(galleryIndex || 0) + 1} / {mediaList.length}</Text>
+              </View>
+              <TouchableOpacity
+                onPress={(e) => { (e as any).stopPropagation?.(); setGalleryIndex(Math.min(mediaList.length - 1, (galleryIndex || 0) + 1)); }}
+                style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" }}
+              >
+                <Feather name="chevron-right" size={20} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          ) : null}
+        </Pressable>
+      </Modal>
+
+      {/* Starred messages list — opens from profile modal. */}
+      <Modal visible={profileView === "starred"} animationType="slide" onRequestClose={() => setProfileView("summary")}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+          <View style={styles.headerRow}>
+            <TouchableOpacity onPress={() => setProfileView("summary")} style={styles.iconBtn} testID="chat-starred-back">
+              <Feather name="arrow-left" size={20} color={colors.textMain} />
+            </TouchableOpacity>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.headerName}>Starred messages</Text>
+              <Text style={styles.headerSub}>{(starredList || []).length} item{(starredList || []).length === 1 ? "" : "s"}</Text>
+            </View>
+          </View>
+          {starredList === null ? (
+            <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+          ) : starredList.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Feather name="star" size={26} color={colors.textMuted} />
+              <Text style={styles.emptyStateText}>No starred messages</Text>
+            </View>
+          ) : (
+            <ScrollView contentContainerStyle={{ padding: spacing.screen, gap: 10 }}>
+              {starredList.map((m) => (
+                <View key={m.id} style={{ backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, padding: 12 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                    <Feather name="star" size={12} color="#F59E0B" />
+                    <Text style={{ fontSize: 11, fontWeight: "800", color: colors.textMuted }}>
+                      {m.sender_id === myId ? "You" : (thread?.other?.name || "")} · {formatTime(m.created_at)}
+                    </Text>
+                  </View>
+                  {m.image_data_url ? (
+                    <Image source={{ uri: m.image_data_url }} style={{ width: "100%", height: 200, borderRadius: 8, backgroundColor: "#000" }} resizeMode="cover" />
+                  ) : null}
+                  {m.text ? <Text style={{ fontSize: 14, color: colors.textMain, marginTop: m.image_data_url ? 8 : 0 }}>{m.text}</Text> : null}
+                </View>
+              ))}
+            </ScrollView>
+          )}
+        </SafeAreaView>
+      </Modal>
+
+      {/* Header overflow menu — Clear chat options. */}
+      <Modal visible={headerMenuOpen} transparent animationType="fade" onRequestClose={() => setHeaderMenuOpen(false)}>
+        <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.35)" }} onPress={() => setHeaderMenuOpen(false)}>
+          <View style={{ position: "absolute", top: 56, right: 12, backgroundColor: colors.surface, borderRadius: 12, paddingVertical: 6, minWidth: 220, borderWidth: 1, borderColor: colors.border }}>
+            <TouchableOpacity onPress={() => { setHeaderMenuOpen(false); setClearConfirm("me"); }} style={styles.sheetRow} testID="chat-menu-clear-me">
+              <Feather name="trash-2" size={16} color={colors.textMain} />
+              <Text style={styles.sheetRowText}>Clear chat for me</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => { setHeaderMenuOpen(false); setClearConfirm("everyone"); }} style={styles.sheetRow} testID="chat-menu-clear-everyone">
+              <Feather name="trash" size={16} color="#B91C1C" />
+              <Text style={[styles.sheetRowText, { color: "#B91C1C" }]}>Clear chat for everyone</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Modal>
+
+      {/* Confirm dialog for clear-chat. */}
+      <Modal visible={!!clearConfirm} transparent animationType="fade" onRequestClose={() => setClearConfirm(null)}>
+        <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center", padding: 24 }} onPress={() => setClearConfirm(null)}>
+          <Pressable style={{ width: "100%", maxWidth: 360, backgroundColor: colors.surface, borderRadius: 18, padding: 20 }} onPress={() => {}}>
+            <Text style={{ fontSize: 16, fontWeight: "800", color: colors.textMain }}>
+              {clearConfirm === "everyone" ? "Clear chat for everyone?" : "Clear chat for me?"}
+            </Text>
+            <Text style={{ fontSize: 13, color: colors.textMuted, marginTop: 8, lineHeight: 18 }}>
+              {clearConfirm === "everyone"
+                ? "All messages, shared media, and starred items in this chat will be erased for BOTH you and the other person. This cannot be undone."
+                : "All messages, shared media, and starred items will be hidden from your view only. The other person will still see them."}
+            </Text>
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
+              <TouchableOpacity onPress={() => setClearConfirm(null)} style={{ flex: 1, paddingVertical: 12, borderRadius: 10, backgroundColor: colors.surfaceMuted, alignItems: "center" }} testID="chat-clear-cancel">
+                <Text style={{ fontSize: 14, fontWeight: "700", color: colors.textMain }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => clearConfirm && clearChat(clearConfirm)}
+                style={{ flex: 1, paddingVertical: 12, borderRadius: 10, backgroundColor: clearConfirm === "everyone" ? "#B91C1C" : colors.primary, alignItems: "center" }}
+                testID="chat-clear-confirm"
+              >
+                <Text style={{ fontSize: 14, fontWeight: "700", color: "#fff" }}>{clearConfirm === "everyone" ? "Clear for everyone" : "Clear for me"}</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -694,6 +943,14 @@ const styles = StyleSheet.create({
   bubbleText: { fontSize: 14, lineHeight: 19 },
   deletedText: { fontSize: 12, fontStyle: "italic", color: colors.textMuted },
   bubbleImg: { width: 240, height: 240, borderRadius: 12, marginBottom: 4, backgroundColor: "#000" },
+  // End-to-end encryption notice shown at the top of every chat history.
+  e2eBanner: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, paddingHorizontal: 16, paddingVertical: 8, marginVertical: 8,
+    marginHorizontal: 12, borderRadius: 12,
+    backgroundColor: "rgba(255, 246, 218, 0.85)",
+  },
+  e2eBannerText: { flex: 1, fontSize: 11, color: "#7A6C45", textAlign: "center", lineHeight: 15 },
   imgZoomHint: { position: "absolute", right: 8, bottom: 10, width: 22, height: 22, borderRadius: 11, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
   bubbleFooter: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", marginTop: 3, gap: 2 },
   bubbleMeta: { fontSize: 9, color: colors.textMuted, letterSpacing: 0.3 },

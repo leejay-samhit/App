@@ -15,7 +15,7 @@ import { useChatSocket } from "../../src/use-chat-socket";
 import { useChatSettings } from "../../src/chat-settings";
 import { ChatLockGate } from "../../src/chat-lock-gate";
 
-type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; is_vendor?: boolean; is_service_provider?: boolean };
+type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; is_vendor?: boolean; is_service_provider?: boolean };
 type Thread = { id: string; other: UserBrief; is_downline: boolean; unread_count: number; last_message: any; last_message_at?: string };
 type Request = { id: string; from_user_id: string; to_user_id: string; status: string; message: string; created_at: string; from?: UserBrief; to?: UserBrief };
 
@@ -281,7 +281,13 @@ export default function ChatListScreen() {
           ) : (
             filteredThreads.map((t) => (
               <TouchableOpacity key={t.id} style={styles.threadCard} activeOpacity={0.85} onPress={() => router.push(`/chat/${t.id}` as any)} testID={`thread-${t.id}`}>
-                <View style={styles.avatar}><Text style={styles.avatarText}>{(t.other.name || "?").substring(0, 1).toUpperCase()}</Text></View>
+                <View style={[styles.avatar, { overflow: "hidden" }]}>
+                  {t.other.profile_image ? (
+                    <Image source={{ uri: t.other.profile_image }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+                  ) : (
+                    <Text style={styles.avatarText}>{(t.other.name || "?").substring(0, 1).toUpperCase()}</Text>
+                  )}
+                </View>
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                     <Text style={styles.userName} numberOfLines={1}>{t.other.name}</Text>

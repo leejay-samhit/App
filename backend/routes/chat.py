@@ -562,7 +562,7 @@ async def search_messages(
 async def list_messages(thread_id: str, before: Optional[str] = None, limit: int = 50, user: Dict[str, Any] = Depends(get_current_user)):
     await _assert_thread_member(thread_id, user["id"])
     limit = max(1, min(200, int(limit or 50)))
-    q: Dict[str, Any] = {"thread_id": thread_id}
+    q: Dict[str, Any] = {"thread_id": thread_id, "hidden_for_users": {"$ne": user["id"]}}
     if before:
         try:
             q["created_at"] = {"$lt": datetime.fromisoformat(before.replace("Z", "+00:00"))}
@@ -759,6 +759,64 @@ async def delete_message(msg_id: str, user: Dict[str, Any] = Depends(get_current
     return {"ok": True}
 
 
+@router.delete("/chat/{thread_id}/messages")
+async def clear_thread_messages(
+    thread_id: str,
+    scope: str = "me",
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Clear ALL messages in a thread.
+
+    scope=me        → hide the messages (and any starred / media) from the
+                       current viewer only; the other party still sees them.
+                       Implemented by appending the user's id to a
+                       `hidden_for_users` array on every message.
+    scope=everyone → soft-delete every message for BOTH sides. Also wipes
+                       images, text, reactions, and starred-by lists so
+                       shared-media + starred summaries reset on both
+                       sides. Cannot be undone.
+    """
+    t = await _assert_thread_member(thread_id, user["id"])
+    scope = (scope or "me").lower().strip()
+    if scope not in ("me", "everyone"):
+        raise HTTPException(status_code=400, detail="scope must be 'me' or 'everyone'.")
+
+    if scope == "me":
+        # Append this user to hidden_for_users on every message in the
+        # thread (idempotent — $addToSet). Also remove them from starred_by
+        # so their starred summary resets.
+        await db.chat_messages.update_many(
+            {"thread_id": thread_id},
+            {
+                "$addToSet": {"hidden_for_users": user["id"]},
+                "$pull": {"starred_by": user["id"]},
+                "$set": {"updated_at": _now()},
+            },
+        )
+        return {"ok": True, "scope": "me"}
+
+    # scope == "everyone" — wipe for both sides.
+    await db.chat_messages.update_many(
+        {"thread_id": thread_id},
+        {
+            "$set": {
+                "deleted": True,
+                "deleted_for_everyone": True,
+                "text": "",
+                "image_data_url": "",
+                "reactions": {},
+                "starred_by": [],
+                "updated_at": _now(),
+            },
+        },
+    )
+    await manager.send_to(
+        list(t["participants"]),
+        {"type": "thread.cleared", "thread_id": thread_id, "by": user["id"]},
+    )
+    return {"ok": True, "scope": "everyone"}
+
+
 @router.get("/chat/{thread_id}/details")
 async def thread_details(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)):
     """June 2026 — header tap shows the 'other party' profile-card.
@@ -777,11 +835,13 @@ async def thread_details(thread_id: str, user: Dict[str, Any] = Depends(get_curr
         "thread_id": thread_id,
         "image_data_url": {"$exists": True, "$ne": ""},
         "deleted_for_everyone": {"$ne": True},
+        "hidden_for_users": {"$ne": user["id"]},
     })
     starred_count = await db.chat_messages.count_documents({
         "thread_id": thread_id,
         "starred_by": user["id"],
         "deleted_for_everyone": {"$ne": True},
+        "hidden_for_users": {"$ne": user["id"]},
     })
     return {
         "thread_id": thread_id,
@@ -801,6 +861,7 @@ async def thread_media(thread_id: str, limit: int = 200, user: Dict[str, Any] = 
             "thread_id": thread_id,
             "image_data_url": {"$exists": True, "$ne": ""},
             "deleted_for_everyone": {"$ne": True},
+            "hidden_for_users": {"$ne": user["id"]},
         },
         {"_id": 0},
     ).sort("created_at", -1).limit(max(1, min(int(limit or 200), 500))).to_list(500)
@@ -856,7 +917,7 @@ async def toggle_star(msg_id: str, user: Dict[str, Any] = Depends(get_current_us
 @router.get("/chat/starred")
 async def list_starred(limit: int = 100, user: Dict[str, Any] = Depends(get_current_user)):
     rows = await db.chat_messages.find(
-        {"starred_by": user["id"], "deleted_for_everyone": {"$ne": True}},
+        {"starred_by": user["id"], "deleted_for_everyone": {"$ne": True}, "hidden_for_users": {"$ne": user["id"]}},
         {"_id": 0},
     ).sort("created_at", -1).limit(max(1, min(int(limit or 100), 500))).to_list(500)
     return {"messages": [_serialize(dict(r)) for r in rows]}
