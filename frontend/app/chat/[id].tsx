@@ -16,6 +16,7 @@ import { colors, radii, spacing } from "../../src/theme";
 import { useChatSocket } from "../../src/use-chat-socket";
 import { useChatSettings, wallpaperStyle } from "../../src/chat-settings";
 import { ChatLockGate } from "../../src/chat-lock-gate";
+import ZoomableImage from "../../src/zoomable-image";
 
 type Message = {
   id: string;
@@ -730,9 +731,9 @@ export default function ChatThreadScreen() {
 
       {/* Full-screen image preview — opens when user taps any image bubble. */}
       <Modal visible={!!previewImage} transparent animationType="fade" onRequestClose={() => setPreviewImage(null)} statusBarTranslucent>
-        <Pressable style={styles.previewBackdrop} onPress={() => setPreviewImage(null)} testID="chat-image-preview-backdrop">
+        <View style={styles.previewBackdrop} testID="chat-image-preview-backdrop">
           {previewImage ? (
-            <Image source={{ uri: previewImage }} style={styles.previewImg} resizeMode="contain" />
+            <ZoomableImage uri={previewImage} />
           ) : null}
           <TouchableOpacity
             onPress={() => setPreviewImage(null)}
@@ -741,19 +742,19 @@ export default function ChatThreadScreen() {
           >
             <Feather name="x" size={24} color="#FFFFFF" />
           </TouchableOpacity>
-        </Pressable>
+        </View>
       </Modal>
 
       {/* Profile-pic full-screen viewer — tap avatar in the profile modal. */}
       <Modal visible={!!avatarPreview} transparent animationType="fade" onRequestClose={() => setAvatarPreview(null)} statusBarTranslucent>
-        <Pressable style={styles.previewBackdrop} onPress={() => setAvatarPreview(null)} testID="chat-avatar-preview-backdrop">
+        <View style={styles.previewBackdrop} testID="chat-avatar-preview-backdrop">
           {avatarPreview ? (
-            <Image source={{ uri: avatarPreview }} style={styles.previewImg} resizeMode="contain" />
+            <ZoomableImage uri={avatarPreview} />
           ) : null}
           <TouchableOpacity onPress={() => setAvatarPreview(null)} style={styles.previewClose}>
             <Feather name="x" size={24} color="#FFFFFF" />
           </TouchableOpacity>
-        </Pressable>
+        </View>
       </Modal>
 
       {/* Media gallery view (4-col grid) — opens from profile modal. */}
@@ -789,16 +790,9 @@ export default function ChatThreadScreen() {
 
       {/* Phone-gallery-style zoomable preview — opens from a media tile. */}
       <Modal visible={galleryIndex !== null} transparent animationType="fade" onRequestClose={() => setGalleryIndex(null)} statusBarTranslucent>
-        <Pressable style={styles.previewBackdrop} onPress={() => setGalleryIndex(null)}>
+        <View style={styles.previewBackdrop}>
           {galleryIndex !== null && mediaList && mediaList[galleryIndex]?.image_data_url ? (
-            <ScrollView
-              maximumZoomScale={4} minimumZoomScale={1}
-              contentContainerStyle={{ flex: 1, alignItems: "center", justifyContent: "center" }}
-              showsHorizontalScrollIndicator={false} showsVerticalScrollIndicator={false}
-              bouncesZoom
-            >
-              <Image source={{ uri: mediaList[galleryIndex].image_data_url }} style={styles.previewImg} resizeMode="contain" />
-            </ScrollView>
+            <ZoomableImage uri={mediaList[galleryIndex].image_data_url} />
           ) : null}
           <TouchableOpacity onPress={() => setGalleryIndex(null)} style={styles.previewClose}>
             <Feather name="x" size={24} color="#FFFFFF" />
@@ -806,7 +800,7 @@ export default function ChatThreadScreen() {
           {galleryIndex !== null && mediaList && mediaList.length > 1 ? (
             <View style={{ position: "absolute", bottom: 36, alignSelf: "center", flexDirection: "row", gap: 12 }}>
               <TouchableOpacity
-                onPress={(e) => { (e as any).stopPropagation?.(); setGalleryIndex(Math.max(0, (galleryIndex || 0) - 1)); }}
+                onPress={() => setGalleryIndex(Math.max(0, (galleryIndex || 0) - 1))}
                 style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" }}
               >
                 <Feather name="chevron-left" size={20} color="#fff" />
@@ -815,14 +809,14 @@ export default function ChatThreadScreen() {
                 <Text style={{ color: "#fff", fontWeight: "700" }}>{(galleryIndex || 0) + 1} / {mediaList.length}</Text>
               </View>
               <TouchableOpacity
-                onPress={(e) => { (e as any).stopPropagation?.(); setGalleryIndex(Math.min(mediaList.length - 1, (galleryIndex || 0) + 1)); }}
+                onPress={() => setGalleryIndex(Math.min(mediaList.length - 1, (galleryIndex || 0) + 1))}
                 style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" }}
               >
                 <Feather name="chevron-right" size={20} color="#fff" />
               </TouchableOpacity>
             </View>
           ) : null}
-        </Pressable>
+        </View>
       </Modal>
 
       {/* Starred messages list — opens from profile modal. */}
