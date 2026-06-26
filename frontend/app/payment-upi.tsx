@@ -59,7 +59,7 @@ const APPS: { key: "gpay" | "phonepe" | "paytm"; label: string; pkg: string; ico
  * fraud check.
  *
  * Anything NOT in this list is treated as a merchant / bank-domain VPA
- * (e.g. `networkpay@hdfcbank`, `merchant@razorpay`) where deep-link
+ * (e.g. `slangcart@hdfcbank`, `merchant@razorpay`) where deep-link
  * payments work reliably and we can show the GPay/PhonePe/Paytm buttons.
  *
  * Source: cross-referenced from NPCI's PSP-handle directory + popular
@@ -234,7 +234,7 @@ export default function UpiManualPayment() {
   // intent payments with "Declined for security reasons". We force the
   // user down the QR / Copy-UPI-ID path which always works regardless of
   // the payee VPA type. When the admin upgrades to a merchant/bank VPA
-  // (e.g. networkpay@hdfcbank), the direct-pay buttons re-appear
+  // (e.g. slangcart@hdfcbank), the direct-pay buttons re-appear
   // automatically — no toggle required.
   const looksLikeMerchant = isLikelyMerchantVpa(cfg?.payee_upi_id);
 

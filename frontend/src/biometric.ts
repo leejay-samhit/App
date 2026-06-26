@@ -181,7 +181,7 @@ export async function authenticateAndGetTokens(): Promise<
       : "Please enrol a fingerprint or face in your phone's settings first." };
   }
   const result = await LocalAuth.authenticateAsync({
-    promptMessage: "Unlock NetworkPay",
+    promptMessage: "Unlock Slangcart",
     cancelLabel: "Use password instead",
     fallbackLabel: "",
     disableDeviceFallback: true, // we want biometric ONLY — not the OS PIN

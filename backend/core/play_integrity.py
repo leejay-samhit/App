@@ -21,7 +21,7 @@ To activate:
     User", download its JSON key.
   • Set env vars in backend/.env:
       PLAY_INTEGRITY_ENABLED=1
-      PLAY_INTEGRITY_PACKAGE_NAME=com.networkpay.app
+      PLAY_INTEGRITY_PACKAGE_NAME=com.slangcart.app
       GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
   • Restart backend.
 
@@ -39,7 +39,7 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger("play_integrity")
 
-PACKAGE_NAME = os.environ.get("PLAY_INTEGRITY_PACKAGE_NAME", "com.networkpay.app")
+PACKAGE_NAME = os.environ.get("PLAY_INTEGRITY_PACKAGE_NAME", "com.slangcart.app")
 GOOGLE_CREDS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 PLAY_INTEGRITY_API_URL = (
     "https://playintegrity.googleapis.com/v1/{package}:decodeIntegrityToken"

@@ -545,7 +545,7 @@ async def google_exchange(request: Request, payload: GoogleExchange):
         }
         await db.users.insert_one(user)
         is_new = True
-        await _create_notification(user_id, "welcome", "Welcome to NetworkPay!", "Signed in with Google. Complete the ₹100 activation to start earning.")
+        await _create_notification(user_id, "welcome", "Welcome to Slangcart!", "Signed in with Google. Complete the ₹100 activation to start earning.")
     else:
         # Existing user: backfill google_id/picture if missing, refresh picture
         update = {}
@@ -1470,7 +1470,7 @@ async def payment_config(user: Dict[str, Any] = Depends(get_current_user)):
             "email": user.get("email"),
             "contact": user.get("phone") or "",
         },
-        "description": "NetworkPay registration fee",
+        "description": "Slangcart registration fee",
     }
 
 
@@ -8817,7 +8817,7 @@ async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, use
         "gst_amount":      gst_amt,
         "total":           total,
         "currency":        "INR",
-        "biller_name":     branding.get("business_name") or branding.get("app_name") or "NetworkPay",
+        "biller_name":     branding.get("business_name") or branding.get("app_name") or "Slangcart",
         "biller_gst":      branding.get("business_gst"),
         "biller_address":  branding.get("business_address"),
         "biller_city":     branding.get("business_city"),

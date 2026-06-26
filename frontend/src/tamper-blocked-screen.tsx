@@ -34,7 +34,7 @@ type Props = {
   supportEmail?: string;
 };
 
-export default function TamperBlockedScreen({ verdict, onRetry, supportEmail = "support@networkpay.in" }: Props) {
+export default function TamperBlockedScreen({ verdict, onRetry, supportEmail = "support@slangcart.com" }: Props) {
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.scroll} bounces={false}>

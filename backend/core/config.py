@@ -81,7 +81,7 @@ ADMIN_ROLES_NON_FINANCE = ("super_admin", "manager", "support")
 
 # ---- Branding ----
 DEFAULT_BRANDING: Dict[str, Any] = {
-    "app_name": "NetworkPay",
+    "app_name": "Slangcart",
     "tagline": "Track your referrals, earnings and grow your team.",
     "login_subtitle": "Sign in to your network",
     "payment_hero": "Complete your registration",

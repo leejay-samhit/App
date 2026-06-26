@@ -61,7 +61,7 @@ export default function PhoneRevealInvoice() {
       await Share.share({
         message:
           `Invoice ${inv.invoice_no}\n\n` +
-          `${inv.biller_name || "NetworkPay"}\n\n` +
+          `${inv.biller_name || "Slangcart"}\n\n` +
           `Service: Phone-reveal for ${inv.provider_name}\n` +
           `Fee: ${formatINR(inv.fee)}\n` +
           `GST (${inv.gst_pct}%): ${formatINR(inv.gst_amount)}\n` +
@@ -93,7 +93,7 @@ export default function PhoneRevealInvoice() {
 
       <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 40 }}>
         <View style={s.card}>
-          <Text style={s.bizName}>{inv.biller_name || "NetworkPay"}</Text>
+          <Text style={s.bizName}>{inv.biller_name || "Slangcart"}</Text>
           {inv.biller_address ? (
             <Text style={s.bizAddr}>
               {[inv.biller_address, inv.biller_city, inv.biller_state, inv.biller_pincode]

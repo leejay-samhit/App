@@ -135,7 +135,7 @@ def invoice_number_for(tx: Dict[str, Any]) -> str:
 
 def _company_block(b: Dict[str, Any]) -> Dict[str, str]:
     return {
-        "name": b.get("business_name") or b.get("app_name") or "Network RuPay Solutions Pvt Ltd",
+        "name": b.get("business_name") or b.get("app_name") or "Slangcart",
         "address": b.get("business_address") or "",
         "city": b.get("business_city") or "",
         "state": b.get("business_state") or "",

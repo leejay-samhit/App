@@ -165,7 +165,7 @@ export default function DashboardScreen() {
     if (!data?.referral_code) return;
     try {
       await Share.share({
-        message: `Hi! Join NetworkPay using my referral code *${data.referral_code}* and earn ₹400 for every 4 friends you bring. Sign up: networkpay.app/r/${data.referral_code}`,
+        message: `Hi! Join Slangcart using my referral code *${data.referral_code}* and earn ₹400 for every 4 friends you bring. Sign up: slangcart.com/r/${data.referral_code}`,
       });
     } catch {}
   };

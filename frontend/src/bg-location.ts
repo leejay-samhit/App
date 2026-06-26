@@ -149,7 +149,7 @@ export async function startBackgroundProviderLocation(): Promise<{
       pausesUpdatesAutomatically: false,
       showsBackgroundLocationIndicator: false,
       foregroundService: {
-        notificationTitle: "NetworkPay is sharing your location",
+        notificationTitle: "Slangcart is sharing your location",
         notificationBody: "We update your pin every 30 minutes so nearby customers can find you.",
         notificationColor: "#143D2E",
       },

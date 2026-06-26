@@ -192,7 +192,7 @@ export default function PendingApproval() {
         </TouchableOpacity>
 
         <Text style={styles.note}>
-          Need help? Contact us at <Text style={{ fontWeight: "700", color: colors.textMain }}>support@networkpay.app</Text>
+          Need help? Contact us at <Text style={{ fontWeight: "700", color: colors.textMain }}>support@slangcart.com</Text>
         </Text>
       </ScrollView>
     </SafeAreaView>

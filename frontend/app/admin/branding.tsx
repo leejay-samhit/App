@@ -97,7 +97,7 @@ export default function AdminBranding() {
   };
 
   const onReset = () => {
-    Alert.alert("Reset to defaults?", "All branding will revert to the original NetworkPay theme.", [
+    Alert.alert("Reset to defaults?", "All branding will revert to the original Slangcart theme.", [
       { text: "Cancel", style: "cancel" },
       {
         text: "Reset", style: "destructive", onPress: async () => {
@@ -204,7 +204,7 @@ export default function AdminBranding() {
           </View>
           <Field label="Payee UPI ID" value={draft.payment_methods?.payee_upi_id || ""}
                  onChangeText={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), payee_upi_id: v.trim() } }))}
-                 placeholder="e.g. networkpay@hdfcbank" testID="branding-pm-upiid" />
+                 placeholder="e.g. slangcart@hdfcbank" testID="branding-pm-upiid" />
 
           {/* Live VPA-class hint: shown only when admin has typed a UPI ID. */}
           {draft.payment_methods?.payee_upi_id ? (() => {

@@ -87,13 +87,13 @@ const DEFAULT_BRANDING: Branding = {
     { key: "services", label: "Services", icon: "briefcase", visible: true },
     { key: "profile", label: "Profile", icon: "user", visible: true },
   ],
-  business_name: "Network RuPay Solutions Pvt Ltd",
+  business_name: "Slangcart",
   business_address: "Near Police Station, Beside Ram Mandiram, Valluru",
   business_city: "Cuddapah",
   business_state: "Andhra Pradesh",
   business_pincode: "516293",
   business_gst: "",
-  support_email: "support@networkrupay.com",
+  support_email: "support@slangcart.com",
   support_phone: "+91 91547 35888",
 };
 
