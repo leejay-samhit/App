@@ -4,10 +4,14 @@ import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 import { useBranding } from "../../src/branding";
+import { DesktopShell, useIsDesktop } from "../../src/desktop-shell";
 
 export default function TabsLayout() {
   const { tabs } = useBranding();
   const insets = useSafeAreaInsets();
+  // Desktop web (≥ 1024 px) uses a permanent left sidebar instead of the
+  // bottom tab bar. The tab bar itself is hidden by `tabBarStyle.display`.
+  const isDesktop = useIsDesktop();
   // Lift the tab bar comfortably above the device's navigation buttons
   // (Android 3-button nav / gesture pill, iOS home indicator).
   const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 28 : 18);
@@ -40,25 +44,26 @@ export default function TabsLayout() {
   const byKey = Object.fromEntries(tabs.map((t) => [t.key, t]));
 
   return (
-    <Tabs
-      initialRouteName="shop"
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: colors.primary,
-        tabBarInactiveTintColor: colors.textMuted,
-        tabBarHideOnKeyboard: true,
-        tabBarStyle: {
-          backgroundColor: colors.surface,
-          borderTopColor: colors.border,
-          borderTopWidth: 1,
-          height: 62 + bottomPad,
-          paddingTop: 10,
-          paddingBottom: bottomPad,
-        },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: "600", marginTop: 2 },
-        tabBarItemStyle: { paddingVertical: 4 },
-      }}
-    >
+    <DesktopShell>
+      <Tabs
+        initialRouteName="shop"
+        screenOptions={{
+          headerShown: false,
+          tabBarActiveTintColor: colors.primary,
+          tabBarInactiveTintColor: colors.textMuted,
+          tabBarHideOnKeyboard: true,
+          tabBarStyle: isDesktop ? { display: "none" } : {
+            backgroundColor: colors.surface,
+            borderTopColor: colors.border,
+            borderTopWidth: 1,
+            height: 62 + bottomPad,
+            paddingTop: 10,
+            paddingBottom: bottomPad,
+          },
+          tabBarLabelStyle: { fontSize: 11, fontWeight: "600", marginTop: 2 },
+          tabBarItemStyle: { paddingVertical: 4 },
+        }}
+      >
       {order.map((key) => {
         const t = byKey[key];
         const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : key === "services" ? "briefcase" : key === "chat" ? "message-circle" : "user");
@@ -82,6 +87,7 @@ export default function TabsLayout() {
           />
         );
       })}
-    </Tabs>
+      </Tabs>
+    </DesktopShell>
   );
 }
