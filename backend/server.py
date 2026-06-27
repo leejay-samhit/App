@@ -9029,7 +9029,10 @@ app.include_router(chat_settings_router.router, prefix="/api")
 # in backend/.env to extend without code changes.
 # ============================================================
 _DEFAULT_ALLOWED_ORIGINS = [
-    # Production custom domain
+    # Production custom domain — Slangcart
+    "https://www.slangcart.com",
+    "https://slangcart.com",
+    # Legacy custom domain — kept for backward compatibility
     "https://www.networkrupay.com",
     "https://networkrupay.com",
     # Emergent deployment URL
@@ -9061,7 +9064,7 @@ app.add_middleware(
     allow_origin_regex=(
         r"https?://"
         r"(?:[a-z0-9-]+\.)*"
-        r"(?:emergent\.host|emergentagent\.com|networkrupay\.com|"
+        r"(?:emergent\.host|emergentagent\.com|slangcart\.com|networkrupay\.com|"
         r"emergent\.sh|pages\.dev|vercel\.app|netlify\.app)"
         r"(?::\d+)?$"
     ),
