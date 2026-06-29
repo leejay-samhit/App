@@ -1,0 +1,43 @@
+{
+  "summary": "Backend multi-session auth fix (Phase 2, 2026-06-27) FULLY VERIFIED. All 7 test scenarios PASS against the public EXPO_PUBLIC_BACKEND_URL. The user-reported bug ('logging into web kicks out the APK') is resolved: two concurrent logins under the same account now both stay valid; single-device logout no longer affects the other device; refresh-token rotation cleanly swaps the caller's sid without disturbing other sessions; the 10-slot cap correctly evicts the oldest sessions when exceeded; explicit logout keeps the revoked session dead even after a third login; and a forged no-sid (legacy) access token is rejected once the user has a populated active_session_ids array. Google OAuth path (/auth/google/exchange line 568-571) calls register_session identically to email login — verified by code review.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/login", "issue": "server.py line 415 mints an access token WITHOUT sid that is immediately overwritten on line 425. Dead/wasted call — harmless but should be removed for clarity."},
+      {"endpoint": "POST /api/auth/login", "issue": "Comment at server.py lines 416-420 still says 'Single-session enforcement' though the behaviour is now multi-session. Stale doc-comment, no functional impact."},
+      {"endpoint": "core/security.py", "issue": "MAX_SESSIONS_PER_USER is a module constant; docstring claims it can be 'lifted via env' but no env override exists. Cosmetic — fine for now."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_multi_session_auth.py",
+    "/app/test_reports/pytest/iteration25_multisession_part1.xml",
+    "/app/test_reports/pytest/iteration25_multisession_slotcap.xml"
+  ],
+  "action_items": [
+    "(Optional cleanup) Remove the redundant sid-less create_access_token call at server.py:415 — the next line replaces it.",
+    "(Optional cleanup) Update the stale 'Single-session enforcement' comment block (server.py lines 416-420) to reflect multi-session semantics.",
+    "(Optional) Make MAX_SESSIONS_PER_USER env-driven (e.g. os.environ.get('MAX_SESSIONS_PER_USER', 10)) as the docstring implies."
+  ],
+  "critical_code_review_comments": [
+    "register_session uses atomic $set + $push with $each $slice -10 — correct.",
+    "revoke_session uses two queries (pull then conditional unset) — non-atomic but race window is benign (logout vs concurrent refresh on the same sid).",
+    "rotate_session = pull(old) + register_session(new). Briefly puts the slot count at N-1 before pushing back; safe.",
+    "get_current_user behaviour matrix exactly matches the documented spec including legacy single-sid grandfather path.",
+    "All three login paths (register, email login, google exchange) consistently call register_session with a freshly minted sid. ✓"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_multi_session_auth.py (new — 7 test methods across 7 classes covering all scenarios)"
+  ],
+  "success_rate": {"backend": "100% (7/7 tests passed)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "One throwaway user per run (test_multisession_<uuid>@test.com) created via /api/auth/register for the register-then-login test. Not cleaned up — harmless test cruft. Alice (existing seeded test user) is reused for the multi-session, logout, refresh, slot-cap and isolation tests.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Slot-cap test issues 12 logins for Alice spaced 7 s apart to stay under the /auth/login 10/min slowapi rate limit; run it AFTER any other Alice-login-heavy test or insert ~60 s sleep. Test file: /app/backend/tests/test_multi_session_auth.py. To run all 7 in one go without rate-limit pain, use `--deselect ...::TestSlotCap` for the fast batch then run TestSlotCap separately. The legacy backward-compat test requires JWT_SECRET to be present in the test environment (it is, via backend/.env) — otherwise it self-skips.",
+  "rca_of_issue": "ORIGINAL BUG: User document held a single `active_session_id` string; every login overwrote it; the FIRST device's JWT then failed `token.sid == user.active_session_id` in get_current_user → 401 session_revoked → forced logout on the older device. FIX VERIFIED: `active_session_ids: List[str]` (Mongo $push $each $slice -10) authoritatively holds up to 10 concurrent device sids; login adds, logout pulls only the caller's sid, refresh rotates one slot. Behaviour matrix in get_current_user handles new-array, legacy-scalar grandfather, and legacy-no-sid grandfather paths cleanly. All 7 tests green against the production-style preview URL."
+}

@@ -128,6 +128,9 @@ from core.security import (  # noqa: E402
     create_refresh_token,
     decode_refresh_token,
     new_session_id,
+    register_session,
+    revoke_session,
+    rotate_session,
     get_current_user,
     require_admin,
     require_admin_role,
@@ -348,7 +351,7 @@ async def register(request: Request, payload: RegisterRequest):
 
     # Mint a fresh session — registration immediately logs the user in.
     sid = new_session_id()
-    await db.users.update_one({"id": user_id}, {"$set": {"active_session_id": sid}})
+    await register_session(user_id, sid)
     token = create_access_token(user_id, email, "user", sid=sid)
     refresh = create_refresh_token(user_id, sid)
     return {"token": token, "refresh_token": refresh, "user": serialize_user(user_doc)}
@@ -416,6 +419,9 @@ async def login(request: Request, payload: LoginRequest):
     # detail="session_revoked" — the FE turns that into a "Signed in
     # elsewhere" banner and forces a clean logout on the old device.
     sid = new_session_id()
+    # Register the new sid alongside any existing concurrent sessions
+    # (multi-device support — APK + web stay logged in simultaneously).
+    await register_session(user["id"], sid)
     token = create_access_token(user["id"], email, user.get("role", "user"), sid=sid)
     refresh = create_refresh_token(user["id"], sid)
     # Multi-IP anomaly check: if the user has logged-in from a different IP
@@ -431,14 +437,13 @@ async def login(request: Request, payload: LoginRequest):
                 details={"previous_ip": recent_ip},
                 severity="warning",
             )
-        # Stamp the user with the current login IP/time + session id so future
-        # logins can diff against it (single upsert).
+        # Stamp the user with the current login IP/time (the sid was
+        # already pushed to active_session_ids by register_session above).
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": {
                 "last_login_ip": client_ip,
                 "last_login_at": now_utc().isoformat(),
-                "active_session_id": sid,
             }},
         )
     except Exception:
@@ -561,7 +566,7 @@ async def google_exchange(request: Request, payload: GoogleExchange):
         raise HTTPException(status_code=403, detail=f"Account blocked: {reason}")
 
     sid = new_session_id()
-    await db.users.update_one({"id": user["id"]}, {"$set": {"active_session_id": sid}})
+    await register_session(user["id"], sid)
     token = create_access_token(user["id"], email, user.get("role", "user"), sid=sid)
     refresh = create_refresh_token(user["id"], sid)
     return {"token": token, "refresh_token": refresh, "user": serialize_user(user), "is_new": is_new}
@@ -586,15 +591,29 @@ async def me(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @api_router.post("/auth/logout")
-async def logout(user: Dict[str, Any] = Depends(get_current_user)):
-    # Invalidate the device session — wipes active_session_id so even if the
-    # old access token is still inside its 15-min window, it'll be rejected
-    # by the single-session check on the very next request.
+async def logout(
+    user: Dict[str, Any] = Depends(get_current_user),
+    creds: HTTPAuthorizationCredentials = Depends(security),
+):
+    # Revoke ONLY the current device's sid — other concurrent sessions
+    # (e.g. APK if user logged out from web, or vice versa) stay alive.
     try:
-        await db.users.update_one(
-            {"id": user["id"]},
-            {"$unset": {"active_session_id": ""}},
-        )
+        token = creds.credentials if creds else None
+        sid: Optional[str] = None
+        if token:
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                sid = payload.get("sid")
+            except Exception:
+                sid = None
+        if sid:
+            await revoke_session(user["id"], sid)
+        else:
+            # Legacy token (no sid) — nuke all sessions as the safe default.
+            await db.users.update_one(
+                {"id": user["id"]},
+                {"$unset": {"active_session_id": "", "active_session_ids": ""}},
+            )
     except Exception:
         pass
     return {"ok": True}
@@ -630,12 +649,18 @@ async def refresh_token(request: Request, payload: _RefreshPayload):
         raise HTTPException(status_code=401, detail="refresh_invalid")
     if user.get("is_blocked"):
         raise HTTPException(status_code=403, detail="Account blocked")
-    # The user's current sid must match the one in this refresh token.
-    if user.get("active_session_id") and user.get("active_session_id") != sid:
+    # The refresh token's sid must still be in the user's active set —
+    # otherwise this device was logged out (or its session evicted from
+    # the 10-slot pool).
+    active_sids = user.get("active_session_ids") or []
+    legacy_sid = user.get("active_session_id")
+    sid_known = (sid in active_sids) or (not active_sids and legacy_sid == sid)
+    if not sid_known:
         raise HTTPException(status_code=401, detail="session_revoked")
-    # Rotate: new sid, new refresh + access.
+    # Rotate within this device's slot — new sid replaces old, other
+    # devices' sids remain untouched.
     new_sid = new_session_id()
-    await db.users.update_one({"id": user_id}, {"$set": {"active_session_id": new_sid}})
+    await rotate_session(user_id, sid, new_sid)
     email = user.get("email", "")
     role = user.get("role", "user")
     new_access = create_access_token(user_id, email, role, sid=new_sid)
