@@ -1,0 +1,38 @@
+{
+  "summary": "Iter-26 backend cold-start optimization VERIFIED. All 10 pytest cases pass against the public EXPO_PUBLIC_BACKEND_URL. The slimmed on_startup() (only users.email + users.referral_code unique indexes synchronous) lets uvicorn bind and answer /api/branding in ~0.16 s after `sudo supervisorctl restart backend` — well under the 3 s target. Background _background_init() task completes shortly after (backend logs show 'Background init complete' ~6-8 s after start) and creates the rest: sponsor_id, 5 partial-unique transaction indexes, system_wallet_deposits.utr unique, and all 22 perf indexes. Verified ix_txn_user_created (perf) AND uniq_user_type_order (partial-unique) are present on db.transactions after restart; users.email + users.referral_code present in the sync path. Multi-session auth from iter-25 still works (two concurrent Alice tokens both valid on /auth/me). Email-uniqueness still enforced — duplicate Alice email registration returns 400.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "review-request mentioned /api/shop/products", "issue": "Endpoint does not exist (returns 404). Actual public catalog endpoint is /api/products. Test was adjusted to hit /api/products which returns 200. Not a regression — just a doc/spec mismatch in the review request."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration26_cold_start.py",
+    "/app/test_reports/pytest/iteration26.xml"
+  ],
+  "action_items": [
+    "(Optional) The login endpoint returns {'token', 'refresh_token', 'user'} — the review request and some legacy iter-25 reports referenced 'access_token'. If you want JWT industry-standard naming, alias 'token' → 'access_token' (or vice-versa) but this is purely cosmetic; current callers all expect 'token'.",
+    "(Informational) /api/shop/products does not exist; if mobile UI expects this path, route is /api/products. Confirm frontend uses correct path."
+  ],
+  "critical_code_review_comments": [
+    "server.py:6614-6636 on_startup() correctly contains only the two hard-required unique indexes (users.email, users.referral_code) plus three asyncio.create_task() spawns. Will not block uvicorn binding.",
+    "server.py:6639+ _background_init() wraps every sub-step in its own try/except so a single failed idempotent op won't halt the rest. ✓",
+    "Background task spawned via asyncio.create_task — runs in the same event loop after startup completes; no extra thread, fine for IO-bound index builds.",
+    "Note: _background_init is fire-and-forget. If it raises before the inner try/except (e.g., import error at task entry), the exception would be swallowed by the event loop's default handler — currently fine because the function body is fully wrapped in try/except."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration26_cold_start.py (new — 10 tests across 5 classes)"
+  ],
+  "success_rate": {"backend": "100% (10/10 tests passed)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "One throwaway user per run (test_iter26_<8hex>@test.com) created via /api/auth/register. Not cleaned up — harmless test cruft consistent with the iter-25 pattern. Alice/Bob are reused for login/multi-session/uniqueness assertions.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Cold-start measured ~0.16 s on the public preview URL after `sudo supervisorctl restart backend`. Background-init signature in backend.err.log is the line 'Background init complete' which appears after the indexes have been built. To verify indexes directly, the test uses pymongo + MONGO_URL/DB_NAME from /app/backend/.env (works in the test container). Login response uses key 'token' (not 'access_token').",
+  "rca_of_issue": "N/A — defensive optimization. The reported `ensure-environment` 90 s timeout occurs at Emergent platform infrastructure (as.int.apis.emergentagent.com) BEFORE the container is built; no code change can fix it. The user's startup-slimming defence (move 23 non-critical indexes into _background_init) is verified safe and makes the K8s startup probe pass in well under 1 s once the container does come up."
+}

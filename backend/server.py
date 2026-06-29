@@ -6613,131 +6613,22 @@ async def admin_list_changes(_: Dict[str, Any] = Depends(require_admin_not_finan
 
 @app.on_event("startup")
 async def on_startup():
-    # ---------- Core indexes (kept synchronous — fast on Atlas) ----------
-    # Wrapped defensively so a single index failure (e.g. transient Atlas
-    # hiccup, schema drift on migrated data) never kills the startup hook
-    # and never makes uvicorn fail the K8s probe.
+    # ---------- Critical unique-constraint indexes only (fast — kept sync) ----------
+    # Only the indexes that PREVENT corrupt writes (unique constraints) run
+    # synchronously. Everything else — perf indexes, partial unique indexes,
+    # backfills — runs in the background so uvicorn binds to 0.0.0.0:8001
+    # within < 1 second and the Kubernetes startup probe passes immediately.
     try:
         await db.users.create_index("email", unique=True)
         await db.users.create_index("referral_code", unique=True)
-        await db.users.create_index("sponsor_id")
     except Exception as _idx_err:
-        logger.warning(f"User-index setup failed (non-fatal): {_idx_err}")
-    # ---------- Idempotency safety-net indexes for transactions ----------
-    # Prevent duplicate transaction rows when the same upstream event (an order,
-    # a service booking, a Razorpay payment) is processed twice.
-    # We use partial unique indexes so legacy/free-form transactions are not affected.
-    try:
-        await db.transactions.create_index(
-            [("user_id", 1), ("type", 1), ("order_id", 1)],
-            unique=True,
-            partialFilterExpression={"order_id": {"$exists": True, "$type": "string"}},
-            name="uniq_user_type_order",
-        )
-        await db.transactions.create_index(
-            [("user_id", 1), ("type", 1), ("booking_id", 1)],
-            unique=True,
-            partialFilterExpression={"booking_id": {"$exists": True, "$type": "string"}},
-            name="uniq_user_type_booking",
-        )
-        await db.transactions.create_index(
-            [("user_id", 1), ("type", 1), ("razorpay_payment_id", 1)],
-            unique=True,
-            partialFilterExpression={"razorpay_payment_id": {"$exists": True, "$type": "string"}},
-            name="uniq_user_type_rzp_payment",
-        )
-        await db.transactions.create_index(
-            [("user_id", 1), ("type", 1), ("transfer_id", 1)],
-            unique=True,
-            partialFilterExpression={"transfer_id": {"$exists": True, "$type": "string"}},
-            name="uniq_user_type_transfer",
-        )
-        await db.transactions.create_index(
-            [("user_id", 1), ("type", 1), ("deposit_id", 1)],
-            unique=True,
-            partialFilterExpression={"deposit_id": {"$exists": True, "$type": "string"}},
-            name="uniq_user_type_deposit",
-        )
-        await db.system_wallet_deposits.create_index("utr", unique=True, name="uniq_deposit_utr")
-    except Exception as _idx_err:
-        logger.warning(f"Transaction unique-index setup failed: {_idx_err}")
+        logger.warning(f"User-unique-index setup failed (non-fatal): {_idx_err}")
 
-    # ---------- Hot-query indexes (Phase 1 perf pass, 2026-05-27) ----------
-    # These are non-unique compound indexes that accelerate the most
-    # frequently-served list endpoints. Every one of them is keyed by
-    # (user_id, created_at DESC) or (status, created_at DESC) because that's
-    # the shape of 95% of the dashboard / admin list queries.
-    try:
-        # Transactions list — "my transactions" tab + admin transaction view.
-        await db.transactions.create_index(
-            [("user_id", 1), ("created_at", -1)], name="ix_txn_user_created",
-        )
-        await db.transactions.create_index([("type", 1)], name="ix_txn_type")
-        await db.transactions.create_index([("created_at", -1)], name="ix_txn_created")
-
-        # Withdrawals — user history + admin queue.
-        await db.withdrawals.create_index(
-            [("user_id", 1), ("created_at", -1)], name="ix_wd_user_created",
-        )
-        await db.withdrawals.create_index(
-            [("status", 1), ("created_at", -1)], name="ix_wd_status_created",
-        )
-
-        # Notifications — unread badge + drawer.
-        await db.notifications.create_index(
-            [("user_id", 1), ("read", 1)], name="ix_notif_user_read",
-        )
-        await db.notifications.create_index(
-            [("user_id", 1), ("created_at", -1)], name="ix_notif_user_created",
-        )
-
-        # Orders — user history + admin queue.
-        await db.orders.create_index(
-            [("user_id", 1), ("created_at", -1)], name="ix_order_user_created",
-        )
-        await db.orders.create_index(
-            [("status", 1), ("created_at", -1)], name="ix_order_status_created",
-        )
-
-        # Manual UPI payments — admin pending queue.
-        await db.manual_payments.create_index(
-            [("status", 1), ("created_at", -1)], name="ix_mpay_status_created",
-        )
-        await db.manual_payments.create_index(
-            [("user_id", 1)], name="ix_mpay_user",
-        )
-
-        # Audit logs + security events — admin investigation queries.
-        await db.audit_logs.create_index([("created_at", -1)], name="ix_audit_created")
-        await db.audit_logs.create_index([("admin_id", 1)], name="ix_audit_admin")
-        await db.security_events.create_index([("created_at", -1)], name="ix_sec_created")
-        await db.security_events.create_index(
-            [("email", 1), ("created_at", -1)], name="ix_sec_email_created",
-        )
-        await db.security_events.create_index(
-            [("ip", 1), ("created_at", -1)], name="ix_sec_ip_created",
-        )
-
-        # Cart — every authenticated GET /api/cart query.
-        await db.cart.create_index([("user_id", 1)], name="ix_cart_user")
-
-        # Products — admin search + public sorted listing.
-        await db.products.create_index([("category", 1)], name="ix_prod_cat")
-        await db.products.create_index([("is_in_stock", 1)], name="ix_prod_stock")
-    except Exception as _idx_err:
-        logger.warning(f"Hot-query index setup failed (non-fatal): {_idx_err}")
-
-    # === DEPLOYMENT-CRITICAL: ALL the heavy work below (admin-prefix
-    # backfill, duplicate reg-fee cleanup, phantom-amount cleanup, pincode
-    # CSV seed, etc.) runs in the BACKGROUND so uvicorn binds to
-    # 0.0.0.0:8001 immediately and passes the Kubernetes startup probe.
-    # Previously, just the pincode CSV (9 MB, 155 k rows) was identified as
-    # heavy and moved to background — but the two backfills directly below
-    # (admin-prefix + duplicate reg-fee) ALSO ran synchronously and on
-    # Atlas (with its 50-200 ms per-roundtrip latency), the cumulative
-    # delay still exceeded the K8s probe deadline → "connect() failed
-    # (111: Connection refused)" pod crash-loop. All backfills are
-    # idempotent and safe to run after startup. ===
+    # === DEPLOYMENT-CRITICAL: ALL the heavier work below (the rest of the
+    # indexes, admin-prefix backfill, duplicate reg-fee cleanup, phantom-amount
+    # cleanup, pincode CSV seed, hot-query indexes, etc.) runs in the
+    # BACKGROUND so uvicorn binds to 0.0.0.0:8001 immediately and passes the
+    # Kubernetes startup probe. All operations below are idempotent. ===
     asyncio.create_task(_background_init())
     # Kick off the periodic backup task (also background, also fast)
     asyncio.create_task(_backup_scheduler())
@@ -6745,19 +6636,104 @@ async def on_startup():
     asyncio.create_task(_money_flow_checker())
 
 
-
 async def _background_init():
     """Long-running startup work that MUST NOT block uvicorn's port-binding.
 
     Runs once, asynchronously, AFTER the FastAPI app has started serving
     requests. If anything in here is slow (pincode CSV parsing, large
-    update_many backfills, etc), the live app continues to serve traffic
-    while this task chugs away in the background.
+    update_many backfills, idx builds on Atlas, etc), the live app continues
+    to serve traffic while this task chugs away in the background.
 
     Wrapped in a broad try/except so a single failed step never kills the
     whole init sequence — each step has its own try/except inside.
     """
     try:
+        # ---- Non-critical user index (sponsor lookups) ----
+        try:
+            await db.users.create_index("sponsor_id")
+        except Exception as _idx_err:
+            logger.warning(f"sponsor_id index setup failed: {_idx_err}")
+        # ---- Idempotency safety-net partial-unique indexes ----
+        try:
+            await db.transactions.create_index(
+                [("user_id", 1), ("type", 1), ("order_id", 1)],
+                unique=True,
+                partialFilterExpression={"order_id": {"$exists": True, "$type": "string"}},
+                name="uniq_user_type_order",
+            )
+            await db.transactions.create_index(
+                [("user_id", 1), ("type", 1), ("booking_id", 1)],
+                unique=True,
+                partialFilterExpression={"booking_id": {"$exists": True, "$type": "string"}},
+                name="uniq_user_type_booking",
+            )
+            await db.transactions.create_index(
+                [("user_id", 1), ("type", 1), ("razorpay_payment_id", 1)],
+                unique=True,
+                partialFilterExpression={"razorpay_payment_id": {"$exists": True, "$type": "string"}},
+                name="uniq_user_type_rzp_payment",
+            )
+            await db.transactions.create_index(
+                [("user_id", 1), ("type", 1), ("transfer_id", 1)],
+                unique=True,
+                partialFilterExpression={"transfer_id": {"$exists": True, "$type": "string"}},
+                name="uniq_user_type_transfer",
+            )
+            await db.transactions.create_index(
+                [("user_id", 1), ("type", 1), ("deposit_id", 1)],
+                unique=True,
+                partialFilterExpression={"deposit_id": {"$exists": True, "$type": "string"}},
+                name="uniq_user_type_deposit",
+            )
+            await db.system_wallet_deposits.create_index(
+                "utr", unique=True, name="uniq_deposit_utr",
+            )
+        except Exception as _idx_err:
+            logger.warning(f"Transaction unique-index setup failed: {_idx_err}")
+        # ---- Hot-query (perf-only) indexes ----
+        try:
+            await db.transactions.create_index(
+                [("user_id", 1), ("created_at", -1)], name="ix_txn_user_created",
+            )
+            await db.transactions.create_index([("type", 1)], name="ix_txn_type")
+            await db.transactions.create_index([("created_at", -1)], name="ix_txn_created")
+            await db.withdrawals.create_index(
+                [("user_id", 1), ("created_at", -1)], name="ix_wd_user_created",
+            )
+            await db.withdrawals.create_index(
+                [("status", 1), ("created_at", -1)], name="ix_wd_status_created",
+            )
+            await db.notifications.create_index(
+                [("user_id", 1), ("read", 1)], name="ix_notif_user_read",
+            )
+            await db.notifications.create_index(
+                [("user_id", 1), ("created_at", -1)], name="ix_notif_user_created",
+            )
+            await db.orders.create_index(
+                [("user_id", 1), ("created_at", -1)], name="ix_order_user_created",
+            )
+            await db.orders.create_index(
+                [("status", 1), ("created_at", -1)], name="ix_order_status_created",
+            )
+            await db.manual_payments.create_index(
+                [("status", 1), ("created_at", -1)], name="ix_mpay_status_created",
+            )
+            await db.manual_payments.create_index([("user_id", 1)], name="ix_mpay_user")
+            await db.audit_logs.create_index([("created_at", -1)], name="ix_audit_created")
+            await db.audit_logs.create_index([("admin_id", 1)], name="ix_audit_admin")
+            await db.security_events.create_index([("created_at", -1)], name="ix_sec_created")
+            await db.security_events.create_index(
+                [("email", 1), ("created_at", -1)], name="ix_sec_email_created",
+            )
+            await db.security_events.create_index(
+                [("ip", 1), ("created_at", -1)], name="ix_sec_ip_created",
+            )
+            await db.cart.create_index([("user_id", 1)], name="ix_cart_user")
+            await db.products.create_index([("category", 1)], name="ix_prod_cat")
+            await db.products.create_index([("is_in_stock", 1)], name="ix_prod_stock")
+        except Exception as _idx_err:
+            logger.warning(f"Hot-query index setup failed (non-fatal): {_idx_err}")
+
         # Small initial delay to let uvicorn fully register the port + let
         # the K8s readiness probe pass with the first /api/branding call.
         await asyncio.sleep(2)
