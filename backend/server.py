@@ -412,15 +412,11 @@ async def login(request: Request, payload: LoginRequest):
             "other": user.get("approval_reject_reason") or "Your registration was rejected. Please contact support.",
         }
         raise HTTPException(status_code=403, detail=msg_map.get(cat, msg_map["other"]))
-    token = create_access_token(user["id"], email, user.get("role", "user"))
-    # Single-session enforcement: mint a fresh session id and persist it on
-    # the user doc. Any previously-issued access token for this user that
-    # carried a different `sid` will fail get_current_user with
-    # detail="session_revoked" — the FE turns that into a "Signed in
-    # elsewhere" banner and forces a clean logout on the old device.
+    # Multi-session login: mint a fresh session id and ADD it to the
+    # user's active_session_ids set (capped at MAX_SESSIONS_PER_USER).
+    # Concurrent logins from other devices (e.g. APK + web slangcart.com)
+    # keep their own sids and stay authenticated.
     sid = new_session_id()
-    # Register the new sid alongside any existing concurrent sessions
-    # (multi-device support — APK + web stay logged in simultaneously).
     await register_session(user["id"], sid)
     token = create_access_token(user["id"], email, user.get("role", "user"), sid=sid)
     refresh = create_refresh_token(user["id"], sid)

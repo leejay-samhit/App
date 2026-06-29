@@ -33,6 +33,7 @@ import uuid
 
 import bcrypt
 import jwt
+import os
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -78,8 +79,12 @@ def new_session_id() -> str:
 
 # Maximum number of concurrent device sessions a single user may hold.
 # Phone APK + web slangcart.com + secondary devices comfortably fit; oldest
-# evicted when the cap is exceeded. Lifted via env if a power user complains.
-MAX_SESSIONS_PER_USER = 10
+# evicted when the cap is exceeded. Override at deploy time via the
+# MAX_SESSIONS_PER_USER env var if a power user complains.
+try:
+    MAX_SESSIONS_PER_USER = max(1, int(os.environ.get("MAX_SESSIONS_PER_USER", "10")))
+except (TypeError, ValueError):
+    MAX_SESSIONS_PER_USER = 10
 
 
 async def register_session(user_id: str, sid: str) -> None:
