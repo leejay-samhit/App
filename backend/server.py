@@ -187,6 +187,7 @@ from routes import finance as finance_router  # noqa: E402
 from routes import refunds as refunds_router  # noqa: E402
 from routes import privacy as privacy_router  # noqa: E402
 from routes import push as push_router  # noqa: E402
+from routes import vendor_pos as vendor_pos_router  # noqa: E402
 from routes import broadcast as broadcast_router  # noqa: E402
 from routes import maintenance as maintenance_router  # noqa: E402
 from routes import chat_settings as chat_settings_router  # noqa: E402
@@ -9010,6 +9011,9 @@ app.include_router(service_admin_router.router, prefix="/api")
 app.include_router(service_provider_router.router, prefix="/api")
 app.include_router(finance_router.router, prefix="/api")
 app.include_router(refunds_router.router, prefix="/api")
+# Vendor Cloud-POS (SALES_BACKEND_SPEC, 29-Jun-2026). Strictly vendor
+# business-records + inventory sync — does NOT touch wallets/ledgers.
+app.include_router(vendor_pos_router.router, prefix="/api")
 app.include_router(privacy_router.router, prefix="/api")
 app.include_router(push_router.router, prefix="/api")
 app.include_router(broadcast_router.router, prefix="/api")

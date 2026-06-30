@@ -1,0 +1,32 @@
+{
+  "summary": "Vendor Cloud-POS (SALES_BACKEND_SPEC.md) — backend-only testing. 36/36 pytest tests passed (100%). Covered all 22 endpoints: settings GET/PUT (incl. partial-update preservation + counter prefix mirror), invoice counter peek vs consume (peek doesn't bump, two consumes yield N then N+1), sales create happy path (server-side totals & invoice no.), oversell→409 with stock unchanged, multi-line atomic rollback (good item restocked when sibling overshoots), CONCURRENT race (two parallel qty=4 against stock=5 → exactly one 200 + one 409, no oversell), list with status/q/payment_mode filters, get-by-id tenant isolation, cancel + refund restocks (and 409 on repeat), HTML invoice, bulk-import with client_id dedupe (3 imported then 0 imported + 3 skipped, id_map preserved), dashboard / cash-summary / statement (monotonic running balance) / analytics, customers upsert-by-phone dedupe + tenant-404 + patch, admin RO sales/dashboard/global-summary 200 for admin & 403 for vendor. CRITICAL wallet invariant verified: wallet_balance and transactions count unchanged across create+cancel+refund. Auth required: 401/403 returned for all unauthenticated /vendor/me/pos/* and /admin/* calls.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_vendor_pos.py",
+    "/app/test_reports/pytest/iteration28_vendor_pos.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "vendor_pos.py:534 — Endpoint path is `/invoice.pdf` but it returns text/html (HTMLResponse). Spec §5 says this is intentional for v1 (PDF rendering stays client-side via invoicePrint.js), but the misleading suffix may confuse FE clients that hardcode `.pdf` and expect application/pdf. Consider aliasing /invoice.html in a follow-up, OR documenting the contract clearly.",
+    "vendor_pos.py:567/573 — `def _today_bounds() -> (str, str):` uses the obsolete tuple-syntax annotation; Python interprets it as a single tuple type. Cosmetic only — should be `Tuple[str, str]` (works as-is).",
+    "vendor_pos.py:88 — `_ensure_vendor` deliberately allows ANY authenticated user (`role=user`) into the POS without a vendor flag. This is documented in the docstring but is worth flagging to product: in v1 a buyer-only user can technically create POS sales and customer rows under their own user.id scope. Future tightening recommended once `is_vendor` role exists."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_vendor_pos.py (NEW — 36 pytest cases covering all 22 endpoints + wallet invariant + concurrent race)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "n/a (backend-only request)"},
+  "seed_data_creation": "Test fixtures insert ad-hoc products via pymongo (id prefix `TEST_pos_`, vendor_id stamped) for Alice. All TEST_* products, sales, customers, settings & invoice counters for Alice and Bob are wiped in the module-scoped autouse teardown so reruns are idempotent.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Reuse /app/backend/tests/test_vendor_pos.py for regression of POS endpoints. Tests are sync (pymongo) — no asyncio loop quirks. Fixtures use ALICE/BOB/ADMIN credentials from /app/memory/test_credentials.md. Counter tests reset last_number to 0 directly via mongo to make assertions deterministic. The concurrent oversell test uses ThreadPoolExecutor with 2 workers; if reliability matters, raise the worker count and run multiple times.",
+  "rca_of_issue": "N/A — no bugs found. Initial test-run failures were caused by mixing motor (asyncio) with pytest's per-test loop scoping; fixed by switching the helper layer to synchronous pymongo while keeping the routes themselves async on the server side."
+}

@@ -3,7 +3,7 @@ Pydantic request/response models extracted from server.py.
 
 This module is a pure data-class container -- no business logic, no I/O.
 """
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -566,4 +566,92 @@ class ServiceBookRequest(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=300)
     scheduled_date: Optional[str] = None  # ISO date the customer wants service
 
+
+
+# ─── Vendor POS / Cloud Sales (June 2026 SALES_BACKEND_SPEC) ──────────────────
+# All vendor POS / cloud-invoice request bodies. Strict tenant isolation is
+# enforced in the route layer (vendor_id is always derived from the JWT, never
+# trusted from the body). These models DELIBERATELY exclude any commission,
+# wallet, GST-ledger, or platform-fee fields — see SALES_BACKEND_SPEC §0.
+PosPaymentMode = Literal["cash", "upi", "debit", "credit", "netbank", "wallet", "credit_sale"]
+PosCustomerKind = Literal["walkin", "named"]
+PosSaleStatus = Literal["completed", "cancelled", "refunded"]
+
+
+class PosSaleItemIn(BaseModel):
+    product_id: str
+    name: str
+    hsn: Optional[str] = None
+    unit: str = "pc"
+    qty: float = Field(gt=0)
+    price: float = Field(ge=0)
+    discount: Optional[str] = None  # "5%" or "50" — kept as string per FE
+    gst_pct: float = Field(default=0.0, ge=0, le=100)
+
+
+class PosSalePaymentIn(BaseModel):
+    mode: PosPaymentMode
+    amount: float = Field(ge=0)
+    reference: Optional[str] = None
+
+
+class PosCustomerIn(BaseModel):
+    kind: PosCustomerKind = "walkin"
+    name: str = "Walk-in Customer"
+    phone: Optional[str] = None
+    gstin: Optional[str] = None
+    address: Optional[str] = None
+    email: Optional[str] = None
+
+
+class PosCreateSaleRequest(BaseModel):
+    items: List[PosSaleItemIn] = Field(min_length=1)
+    payments: List[PosSalePaymentIn] = Field(default_factory=list)
+    customer: PosCustomerIn = Field(default_factory=PosCustomerIn)
+    gst_inclusive: bool = False
+    bill_discount: Optional[str] = None
+    round_off: bool = True
+    notes: Optional[str] = None
+    # Optional client-supplied id used for bulk-import dedupe.
+    client_id: Optional[str] = None
+    # Optional explicit invoice number — if absent the server assigns one
+    # via the vendor's atomic counter.
+    invoice_no: Optional[str] = None
+
+
+class PosRefundRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=300)
+
+
+class PosBulkImportRequest(BaseModel):
+    sales: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class PosSettingsUpdate(BaseModel):
+    invoice_prefix: Optional[str] = Field(default=None, max_length=8)
+    invoice_pad: Optional[int] = Field(default=None, ge=1, le=10)
+    business_name: Optional[str] = Field(default=None, max_length=120)
+    business_address: Optional[str] = Field(default=None, max_length=400)
+    business_phone: Optional[str] = Field(default=None, max_length=20)
+    business_email: Optional[str] = Field(default=None, max_length=120)
+    business_gstin: Optional[str] = Field(default=None, max_length=20)
+    default_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    gst_inclusive: Optional[bool] = None
+    opening_balance: Optional[float] = Field(default=None, ge=0)
+
+
+class PosCustomerUpsert(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    gstin: Optional[str] = Field(default=None, max_length=20)
+    address: Optional[str] = Field(default=None, max_length=400)
+    email: Optional[str] = Field(default=None, max_length=120)
+
+
+class PosCustomerPatch(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=120)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    gstin: Optional[str] = Field(default=None, max_length=20)
+    address: Optional[str] = Field(default=None, max_length=400)
+    email: Optional[str] = Field(default=None, max_length=120)
 
