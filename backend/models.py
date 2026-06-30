@@ -256,6 +256,14 @@ class SettingsUpdate(BaseModel):
     payout_l10: Optional[float] = Field(default=None, ge=0)
     directs_required: Optional[int] = Field(default=None, ge=1, le=20)
     auto_approve_on_payment: Optional[bool] = None
+    # ── Service Provider — "Get phone number" reveal fee (June 2026) ──
+    # Both optional — admins toggle these from the web admin panel without
+    # affecting other settings. Defaults remain those in DEFAULT_SETTINGS
+    # (phone_reveal_fee=1.0 / phone_reveal_gst_pct=18.0). The existing PUT
+    # /admin/settings handler does a generic `$set` of any non-None field,
+    # so adding them here is enough to make GET/PATCH/PUT round-trip them.
+    phone_reveal_fee: Optional[float] = Field(default=None, ge=0)
+    phone_reveal_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 class CartItem(BaseModel):
