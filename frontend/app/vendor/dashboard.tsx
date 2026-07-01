@@ -132,6 +132,35 @@ export default function VendorDashboard() {
               {stats.today_orders} order{stats.today_orders === 1 ? "" : "s"} · {stats.published_count} of {stats.products_count} products live
             </Text>
           </GradientCard>
+
+          {/* Cloud POS quick-links — mirrors the full /vendor/* module on the web. */}
+          <View style={{ marginBottom: 14 }}>
+            <Text style={{ fontSize: 11, fontWeight: "800", color: colors.textMuted, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 8 }}>Cloud POS</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              {[
+                { key: "pos", label: "New sale", icon: "shopping-cart", path: "/vendor/pos", primary: true },
+                { key: "sales", label: "Sales", icon: "list", path: "/vendor/sales" },
+                { key: "invoices", label: "Invoices", icon: "file-text", path: "/vendor/invoices" },
+                { key: "cash", label: "Cash", icon: "dollar-sign", path: "/vendor/cash" },
+                { key: "analytics", label: "Analytics", icon: "bar-chart-2", path: "/vendor/analytics" },
+                { key: "settings", label: "POS settings", icon: "settings", path: "/vendor/settings" },
+              ].map(t => (
+                <TouchableOpacity key={t.key} onPress={() => router.push(t.path as any)}
+                  style={{
+                    width: "31%", padding: 12, borderRadius: 12,
+                    backgroundColor: t.primary ? colors.primary : colors.surface,
+                    borderWidth: t.primary ? 0 : 1, borderColor: colors.border,
+                    alignItems: "center",
+                  }}
+                  activeOpacity={0.85}
+                  testID={`vendor-pos-link-${t.key}`}
+                >
+                  <Feather name={t.icon as any} size={20} color={t.primary ? "#fff" : colors.primary} />
+                  <Text style={{ marginTop: 6, fontSize: 12, fontWeight: "700", color: t.primary ? "#fff" : colors.textMain }}>{t.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
           <View style={styles.statsGrid}>
             <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
             <StatCard icon="package" label="TODAY ORDERS" value={String(stats.today_orders)} color="#1F5E9E" />
