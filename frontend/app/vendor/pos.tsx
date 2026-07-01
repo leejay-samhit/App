@@ -94,10 +94,12 @@ export default function VendorPOS() {
         items: cart, payments, customer, gst_inclusive: gstIncl,
         bill_discount: billDisc || null, round_off: true, notes,
       });
-      Alert.alert("Sale saved", `Invoice ${sale.invoice_no} · ₹${sale.totals.grand_total}`, [
-        { text: "View", onPress: () => router.push(`/vendor/invoices?open=${sale.id}` as any) },
-        { text: "New sale", onPress: () => { setCart([]); setPayments([{ mode: "cash", amount: 0 }]); setBillDisc(""); setNotes(""); load(); } },
-      ]);
+      // Web-compatible: skip button-Alert (RN-Web no-op) and navigate straight
+      // to the invoice preview so the user sees confirmation + can print/share.
+      setCart([]); setPayments([{ mode: "cash", amount: 0 }]); setBillDisc(""); setNotes("");
+      setPayOpen(false);
+      load();
+      router.push(`/vendor/invoices?open=${sale.id}` as any);
     } catch (e: any) {
       const detail = e?.response?.data?.detail;
       if (typeof detail === "object" && detail?.error === "stock_insufficient") {

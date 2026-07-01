@@ -1,6 +1,6 @@
 // Sales history — list past sales with filters.
 import React, { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, Alert, RefreshControl } from "react-native";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, Alert, RefreshControl, Modal } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { Stack, useRouter } from "expo-router";
@@ -16,6 +16,9 @@ export default function VendorSalesHistory() {
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Web-compatible confirm modal (Alert.alert with buttons is a no-op on RN-Web).
+  const [confirm, setConfirm] = useState<null | { title: string; body: string; action: "cancel" | "refund"; sale: PosSale }>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -28,16 +31,21 @@ export default function VendorSalesHistory() {
   useEffect(() => { load(); }, [load]);
 
   const doCancel = (s: PosSale) => {
-    Alert.alert("Cancel this sale?", `Invoice ${s.invoice_no} · ${formatINR(s.totals.grand_total)}`, [
-      { text: "No", style: "cancel" },
-      { text: "Yes, cancel", style: "destructive", onPress: async () => { try { await cancelSale(s.id); load(); } catch (e) { Alert.alert("Failed", formatApiError(e)); } } },
-    ]);
+    setConfirm({ title: "Cancel this sale?", body: `Invoice ${s.invoice_no} · ${formatINR(s.totals.grand_total)} — stock will be restored.`, action: "cancel", sale: s });
   };
   const doRefund = (s: PosSale) => {
-    Alert.alert("Refund this sale?", `Invoice ${s.invoice_no} will be marked refunded and stock restored.`, [
-      { text: "No", style: "cancel" },
-      { text: "Yes, refund", style: "destructive", onPress: async () => { try { await refundSale(s.id); load(); } catch (e) { Alert.alert("Failed", formatApiError(e)); } } },
-    ]);
+    setConfirm({ title: "Refund this sale?", body: `Invoice ${s.invoice_no} will be marked refunded and stock restored.`, action: "refund", sale: s });
+  };
+  const runConfirm = async () => {
+    if (!confirm) return;
+    setConfirmBusy(true);
+    try {
+      if (confirm.action === "cancel") await cancelSale(confirm.sale.id);
+      else await refundSale(confirm.sale.id);
+      setConfirm(null);
+      load();
+    } catch (e) { Alert.alert("Failed", formatApiError(e)); }
+    finally { setConfirmBusy(false); }
   };
 
   return (
@@ -96,6 +104,24 @@ export default function VendorSalesHistory() {
           </View>
         ))}
       </ScrollView>
+
+      {/* Web-safe confirm modal — replaces Alert.alert (no-op on RN-Web). */}
+      <Modal visible={!!confirm} transparent animationType="fade" onRequestClose={() => setConfirm(null)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 24 }}>
+          <View style={{ backgroundColor: colors.surface, borderRadius: 16, padding: 18 }}>
+            <Text style={{ fontSize: 16, fontWeight: "800", color: colors.textMain }}>{confirm?.title}</Text>
+            <Text style={{ fontSize: 13, color: colors.textMuted, marginTop: 6, lineHeight: 18 }}>{confirm?.body}</Text>
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+              <TouchableOpacity onPress={() => setConfirm(null)} style={{ flex: 1, paddingVertical: 12, borderRadius: 10, backgroundColor: colors.surfaceMuted, alignItems: "center" }} testID="sales-confirm-cancel">
+                <Text style={{ fontWeight: "700", color: colors.textMain }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={runConfirm} disabled={confirmBusy} style={{ flex: 1, paddingVertical: 12, borderRadius: 10, backgroundColor: "#B91C1C", alignItems: "center", opacity: confirmBusy ? 0.6 : 1 }} testID="sales-confirm-ok">
+                {confirmBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ fontWeight: "800", color: "#fff" }}>{confirm?.action === "refund" ? "Refund" : "Cancel sale"}</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
