@@ -144,13 +144,18 @@ function StyledTextEditor({ value, onChange, placeholder, testID }: {
 // ─── Main component ───
 
 export function RichProductEditor({
-  visible, existing, onClose, onSaved, endpoints,
+  visible, existing, onClose, onSaved, endpoints, hidePublishedToggle,
 }: {
   visible: boolean;
   existing: RichProduct | null;
   onClose: () => void;
   onSaved: () => void;
   endpoints: RichProductEndpoints;
+  /** UPDATE 1 (June 2026) — Vendors no longer control publish state; the
+   *  publish toggle is admin-only. Pass true from the vendor dashboard to
+   *  hide the switch AND stop sending `is_published` to the server (the
+   *  backend forces false on vendor create + strips it from PATCH). */
+  hidePublishedToggle?: boolean;
 }) {
   // Role-gate the AI image generator. Only SUPER ADMIN sees the AI block.
   // Vendors must post product images manually. This protects the single
@@ -484,7 +489,6 @@ export function RichProductEditor({
         description: description.trim(),
         stock: isNaN(stockN) ? 0 : stockN,
         category: category.trim() || undefined,
-        is_published: published,
         brand: brand.trim(),
         sub_features: subFeatures.filter((s) => s.trim()),
         images: galleryImages,
@@ -506,6 +510,12 @@ export function RichProductEditor({
         sub_category: isClothes ? (subCategory || undefined) : undefined,
         clothing_size: isClothes ? (clothingSize || undefined) : undefined,
       };
+      // UPDATE 1 — Only admin editor sends is_published. Vendor editor omits
+      // it entirely so the server keeps its own decision (backend also strips
+      // this field from vendor PATCH as a defense-in-depth check).
+      if (!hidePublishedToggle) {
+        payload.is_published = published;
+      }
       if (existing?.id) {
         await api.patch(endpoints.update(existing.id), payload);
       } else {
@@ -717,13 +727,22 @@ export function RichProductEditor({
 
               <Text style={modalStyles.fieldLabel}>Description</Text>
               <TextInput value={description} onChangeText={setDescription} multiline style={[modalStyles.input, { minHeight: 70, paddingTop: 12 }]} testID="product-description" />
-              <View style={modalStyles.switchRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={modalStyles.switchTitle}>Published</Text>
-                  <Text style={modalStyles.switchSub}>Hidden products are not shown to users in the shop.</Text>
+              {hidePublishedToggle ? (
+                <View style={modalStyles.publishNotice}>
+                  <Feather name="shield" size={14} color={colors.primary} />
+                  <Text style={modalStyles.publishNoticeText}>
+                    Your product is submitted for admin review. It becomes visible in the Shop once an admin approves it.
+                  </Text>
                 </View>
-                <Switch value={published} onValueChange={setPublished} testID="product-published" />
-              </View>
+              ) : (
+                <View style={modalStyles.switchRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={modalStyles.switchTitle}>Published</Text>
+                    <Text style={modalStyles.switchSub}>Hidden products are not shown to users in the shop.</Text>
+                  </View>
+                  <Switch value={published} onValueChange={setPublished} testID="product-published" />
+                </View>
+              )}
             </Section>
 
             {/* ── Section 2: Brand & Sub-features ── */}
@@ -983,6 +1002,13 @@ const modalStyles = StyleSheet.create({
   switchRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 16, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   switchTitle: { fontSize: 13, fontWeight: "700", color: colors.textMain },
   switchSub: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
+  publishNotice: {
+    flexDirection: "row", alignItems: "flex-start", gap: 10, marginTop: 16,
+    paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.primary + "40",
+    backgroundColor: colors.primary + "10",
+  },
+  publishNoticeText: { flex: 1, fontSize: 12, color: colors.textMain, lineHeight: 17, fontWeight: "600" },
   btn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
 });
 

@@ -17,6 +17,7 @@ import { Feather } from "@expo/vector-icons";
 import { api } from "./api";
 import { colors, radii, formatINR } from "./theme";
 import { ContentContainer, SHOP_CARD_RADIUS, SHOP_BANNER_RADIUS, SHOP_SECTION_GAP, SHOP_TYPO } from "./content-container";
+import { useAuth } from "./auth";
 
 /* ─────────────────────────── Types ─────────────────────────── */
 
@@ -82,6 +83,7 @@ export type Product = {
   stock?: number;
   is_in_stock?: boolean;
   category?: string;
+  vendor_id?: string | null;
 };
 
 type RendererProps = {
@@ -692,6 +694,12 @@ export function ShopLayoutRenderer({
   const [blocks, setBlocks] = useState<LayoutBlock[] | null>(null);
   const [productsById, setProductsById] = useState<Record<string, Product>>({});
   const [sourceCache, setSourceCache] = useState<Record<string, Product[]>>({});
+  // UPDATE 1 — Hide the current vendor's own products from all admin-managed
+  // layout blocks so a vendor can't accidentally buy their own inventory.
+  const { user } = useAuth();
+  const currentUserId = user?.id || null;
+  const excludeOwn = <T extends { vendor_id?: string | null }>(arr: T[]): T[] =>
+    (currentUserId ? arr.filter((p) => !p.vendor_id || p.vendor_id !== currentUserId) : arr);
 
   useEffect(() => {
     let cancelled = false;
@@ -707,7 +715,9 @@ export function ShopLayoutRenderer({
         if (cancelled) return;
         const blocks: LayoutBlock[] = bRes.data?.items || [];
         const pData = pRes.data;
-        const pList: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
+        const pListRaw: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
+        // UPDATE 1 — Drop the current vendor's own products before caching.
+        const pList: Product[] = excludeOwn(pListRaw);
         const map: Record<string, Product> = {};
         pList.forEach((p) => { map[p.id] = p; });
         setProductsById(map);
@@ -735,7 +745,7 @@ export function ShopLayoutRenderer({
                 });
                 const data = r.data;
                 const arr: Product[] = Array.isArray(data) ? data : (data?.items || []);
-                cacheUpdates[b.id] = arr;
+                cacheUpdates[b.id] = excludeOwn(arr);
               } catch {
                 cacheUpdates[b.id] = [];
               }
@@ -756,7 +766,7 @@ export function ShopLayoutRenderer({
       }
     })();
     return () => { cancelled = true; };
-  }, [scope, category]);
+  }, [scope, category, currentUserId]);
 
   const visible = useMemo(
     () => (blocks || []).filter((b) => b.active).sort((a, b) => a.sort_order - b.sort_order),

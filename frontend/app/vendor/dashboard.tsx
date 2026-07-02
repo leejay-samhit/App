@@ -405,6 +405,7 @@ export default function VendorDashboard() {
           create: "/vendor/me/products",
           update: (id: string) => `/vendor/me/products/${id}`,
         }}
+        hidePublishedToggle={true}
       />
 
       {/* Interested customers modal */}

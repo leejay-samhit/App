@@ -9,13 +9,17 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { api, formatApiError } from "../../../src/api";
 import { colors, radii, spacing, formatINR } from "../../../src/theme";
 import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
+import { useAuth } from "../../../src/auth";
 
-type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string };
+type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; vendor_id?: string | null };
 
 export default function ShopCategoryScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ name?: string }>();
   const category = String(params?.name || "");
+  // UPDATE 1 — Hide the current vendor's own products from themselves.
+  const { user } = useAuth();
+  const currentUserId = user?.id || null;
   const [refreshing, setRefreshing] = useState(false);
   const [hasLayout, setHasLayout] = useState<boolean | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -44,12 +48,15 @@ export default function ShopCategoryScreen() {
           const cat = norm(p.category);
           const cid = norm(p.category_id);
           const cname = norm(p.category_name);
-          return cat === target || cid === target || cname === target;
+          const catMatch = cat === target || cid === target || cname === target;
+          // UPDATE 1 — Hide the current vendor's own products from themselves.
+          if (currentUserId && p.vendor_id && p.vendor_id === currentUserId) return false;
+          return catMatch;
         }),
       );
     } catch (e) { /* silent */ }
     finally { setLoadingProducts(false); setRefreshing(false); }
-  }, [category]);
+  }, [category, currentUserId]);
 
   useEffect(() => { load(); }, [load]);
 

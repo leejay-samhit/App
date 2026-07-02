@@ -28,6 +28,7 @@ import { api, formatApiError } from "./api";
 import { colors, spacing } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
 import { getCurrentCoords } from "./location";
+import { useAuth } from "./auth";
 import { LocationBanner } from "./location-banner";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -43,6 +44,7 @@ type Product = {
   stock?: number;
   rating?: number;
   interested_count?: number;
+  vendor_id?: string | null;
 };
 
 // ── Pure helpers ─────────────────────────────────────────────────────────
@@ -128,6 +130,9 @@ export function ShopHome({
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
+  // UPDATE 1 (June 2026) — Hide the current vendor's own products.
+  const { user } = useAuth();
+  const currentUserId = user?.id || null;
 
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -216,12 +221,17 @@ export function ShopHome({
     try {
       const r = await api.get<any>("/products");
       const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
-      setProducts(list.filter((p) => p && p.is_in_stock !== false));
+      const inStock = list.filter((p) => p && p.is_in_stock !== false);
+      // UPDATE 1 — Hide the current vendor's own products from themselves.
+      const scoped = currentUserId
+        ? inStock.filter((p) => !p.vendor_id || p.vendor_id !== currentUserId)
+        : inStock;
+      setProducts(scoped);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn("ShopHome /products failed:", formatApiError(e));
     } finally { setLoading(false); }
-  }, []);
+  }, [currentUserId]);
 
   // Admin-managed categories — fetched in parallel with products.
   //

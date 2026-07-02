@@ -24,6 +24,7 @@ import { ShopLayoutRenderer } from "../../src/shop-layout-renderer";
 import { ShopHome } from "../../src/shop-home";
 import { getCurrentCoords, formatDistance, formatActiveAgo } from "../../src/location";
 import { useDoubleTapExit } from "../../src/use-double-tap-exit";
+import { useAuth } from "../../src/auth";
 
 type Product = {
   id: string;
@@ -35,6 +36,7 @@ type Product = {
   stock?: number;
   is_in_stock?: boolean;
   interested_count?: number;
+  vendor_id?: string | null;
 };
 type ServiceCategory = {
   id: string;
@@ -78,6 +80,11 @@ export default function ShopScreen() {
   // Shop is the user's landing tab — apply double-tap-back-to-exit pattern
   // so hardware back at the root doesn't immediately close the app.
   useDoubleTapExit();
+  // UPDATE 1 (June 2026) — Vendor shop scoping.  We hide a vendor's own
+  // products from the public Shop/Home/Category screens so they can't
+  // "buy" their own inventory.  Anonymous & non-vendor users see everything.
+  const { user } = useAuth();
+  const currentUserId = user?.id || null;
   // Detect which tab we're rendering for. Both /shop and /services route to
   // this same component (services.tsx re-exports the default). Pathname tells
   // us which mode to lock — this also hides the Shop/Services toggle pills.
@@ -139,7 +146,11 @@ export default function ShopScreen() {
       // Backend returns a raw array; older code expected `{items: [...]}`. Handle both.
       const { data } = await api.get<any>("/products");
       const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
-      setItems(list);
+      // UPDATE 1 — Hide the current vendor's own products from themselves.
+      const filtered = currentUserId
+        ? list.filter((p) => !p.vendor_id || p.vendor_id !== currentUserId)
+        : list;
+      setItems(filtered);
       // Admin-curated shop categories with icons/images (best-effort).
       try {
         const sc = await api.get<{ items: ShopCat[] }>("/shop-categories");
@@ -156,7 +167,7 @@ export default function ShopScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [currentUserId]);
 
   // Register interest in an out-of-stock product so vendor knows demand exists.
   const registerInterest = useCallback(async (p: Product) => {

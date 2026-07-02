@@ -1,0 +1,32 @@
+{
+  "summary": "Backend-only verification of UPDATE 1 (Vendor Shop scoping + publish gating). Wrote pytest suite /app/backend/tests/test_vendor_publish_gating.py (9 tests, 4 test classes) covering all requested scenarios. ALL 9 TESTS PASS (100%). Verified: (1) POST /api/vendor/me/products force-sets is_published=False even when payload sends is_published=true; (2) POST without is_published also defaults to False; (3) GET /api/vendor/me/products returns vendor's own unpublished products; (4) GET /api/products (public) hides unpublished products; (5) PATCH /api/admin/products/{id} still toggles is_published (no regression); (6) after admin publishes, PATCH /api/vendor/me/products/{id} with is_published=false silently drops the field (product stays published) while other fields (description) update; (7) vendor PATCH with only is_published returns 400 'No fields provided' because the update dict is empty after stripping — expected behavior; (8) GET /api/admin/products still lists both published and unpublished; (9) end-to-end vendor CRUD (create → list → PATCH non-publish field → delete) works. Alice (test_alice_73dc7f@test.com) was already an approved vendor from iter28/29 so no re-application flow was needed. Cleanup fixture removes all TEST_-prefixed products created during the run.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_vendor_publish_gating.py",
+    "/app/test_reports/pytest/update1_publish_gating.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:7590 — vendor_update_product raises 400 'No fields provided' when the vendor PATCH payload contained ONLY is_published (which is then stripped). This is technically correct behavior but a bit surprising for older clients — a newer client that still sends the toggle will now hit a 400 instead of a silent no-op. Consider returning 200 with the unchanged product (or a 204) so vendor UIs that fire a bulk PATCH containing is_published together with legitimate fields work smoothly, while pure-toggle attempts still can't publish. Currently mixed-field PATCH works fine (verified in test_vendor_patch_cannot_unpublish).",
+    "server.py:7561 — vendor_create_product does `**{k:v for k,v in p.dict().items() if k != 'vendor_id'}` and then overrides is_published=False. It's readable but the model still declares `is_published: bool = True` as default in ProductCreate — cosmetic-only, but a future dev reading only the model might miss the runtime override. Consider adding an inline comment near the model, or drop is_published entirely from ProductCreate.",
+    "models.py:63 — ProductCreate.is_published default is True which contradicts the vendor endpoint semantics. Admin endpoint /admin/products still respects it, so the default is only meaningful for admin creates. Fine as-is but worth documenting."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_vendor_publish_gating.py (new)"
+  ],
+  "success_rate": {"backend": "100% (9/9 pytest passing)", "frontend": "not tested (backend-only scope per request)"},
+  "seed_data_creation": "No new seed data. All test products are TEST_-prefixed and cleaned up via a module-scoped teardown fixture. Alice's vendor status (is_vendor=true, vendor_status=approved) from iteration_29 was reused unchanged.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "UPDATE 1 backend is verified and stable. Test suite at /app/backend/tests/test_vendor_publish_gating.py can be run standalone: `pytest backend/tests/test_vendor_publish_gating.py -v`. It self-cleans. Alice (test_alice_73dc7f@test.com / Passw0rd!) is an approved vendor with is_vendor=true. Admin creds: support@networkrupay.com / Nlee@1115. Note that vendor PATCH with ONLY is_published returns 400 by design — this is documented in the test.",
+  "rca_of_issue": "N/A — no failures. UPDATE 1 implementation in server.py (vendor_create_product at L7553 forces is_published=False; vendor_update_product at L7576 strips is_published from the update dict via `k not in ('vendor_id', 'is_published')`) is correctly enforced. Admin publish path (/api/admin/products/{id}) remains untouched. Public GET /api/products at products_public.py:39 continues to filter to published only."
+}

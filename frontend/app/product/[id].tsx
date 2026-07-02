@@ -175,6 +175,20 @@ export default function ProductDetailScreen() {
       </View>
 
       <ScrollView contentContainerStyle={{ paddingBottom: 130 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
+        {/* UPDATE 1 (June 2026) — Owner-facing notice: if a vendor lands on
+            their own product page (via a direct link or a notification), let
+            them know they can edit it via the Vendor panel — they can't buy
+            their own inventory. */}
+        {product.vendor_id && user?.id && product.vendor_id === user.id ? (
+          <TouchableOpacity onPress={() => router.push("/vendor/dashboard" as any)} style={styles.ownerBanner} activeOpacity={0.85}>
+            <Feather name="user-check" size={16} color={colors.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.ownerBannerTitle}>This is your product</Text>
+              <Text style={styles.ownerBannerSub}>Tap to edit in your Vendor dashboard.</Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.primary} />
+          </TouchableOpacity>
+        ) : null}
         {/* Breadcrumb: Category > Brand > Vendor */}
         {breadcrumb.length ? (
           <View style={styles.breadcrumb}>
@@ -645,6 +659,16 @@ const styles = StyleSheet.create({
   title: { flex: 1, fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
   breadcrumb: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 4, paddingHorizontal: spacing.screen, paddingTop: 10, paddingBottom: 4 },
   crumbText: { fontSize: 11, color: colors.textMuted, fontWeight: "700" },
+  ownerBanner: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    marginHorizontal: spacing.screen, marginTop: 10,
+    paddingVertical: 12, paddingHorizontal: 14,
+    borderRadius: 12, borderWidth: 1,
+    borderColor: colors.primary + "40",
+    backgroundColor: colors.primary + "10",
+  },
+  ownerBannerTitle: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  ownerBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   heroWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative", overflow: "hidden" },
   heroImg: { width: "100%", height: "100%" },
   heroDots: {

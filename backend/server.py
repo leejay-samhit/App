@@ -7562,6 +7562,11 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
         "vendor_id": vendor["id"],          # force-stamp
         "vendor_email": vendor.get("email"),
         "created_at": now_utc().isoformat(),
+        # UPDATE 1 (June 2026) — Publish is admin-only. Vendors create their
+        # products in a HIDDEN state; only an admin can flip is_published=True
+        # via /api/admin/products/{id}. This prevents self-listing abuse and
+        # keeps the public shop moderated.
+        "is_published": False,
     }
     await db.products.insert_one(doc)
     doc.pop("_id", None)
@@ -7575,7 +7580,13 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
         raise HTTPException(status_code=404, detail="Product not found")
     if target.get("vendor_id") != vendor["id"]:
         raise HTTPException(status_code=403, detail="Not your product")
-    update = {k: v for k, v in payload.dict().items() if v is not None and k != "vendor_id"}
+    # UPDATE 1 — Strip `is_published` from vendor updates: only admins can
+    # publish/unpublish. If a vendor sends the field (older client), we drop it
+    # silently so the current admin decision is respected.
+    update = {
+        k: v for k, v in payload.dict().items()
+        if v is not None and k not in ("vendor_id", "is_published")
+    }
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
     await db.products.update_one({"id": product_id}, {"$set": update})
