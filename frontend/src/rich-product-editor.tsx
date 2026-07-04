@@ -561,13 +561,20 @@ export function RichProductEditor({
   ];
 
   /**
-   * Load the 91mobiles-style spec template into `specTabs`. If some fields
-   * are already known (e.g. RAM/storage from the autosuggest pick, brand
-   * from the master search) we prefill those cells so the vendor doesn't
-   * have to re-type them.
+   * Load the 91mobiles-style spec template into `specTabs`.
+   *
+   * UPDATED (August 2026) — Now fetches REAL values from the backend
+   * `/products/master/91mobiles-specs` endpoint (which scrapes GSMArena
+   * because 91mobiles' detail pages are Cloudflare-locked). Falls back to
+   * the empty template with prefilled attrs if the network hop fails.
+   *
+   *   mode="merge"   → keep existing tabs, append missing categories
+   *   mode="replace" → wipe existing tabs, populate fresh (used by "Replace" btn)
    */
-  const loadM91Template = (mode: "merge" | "replace" = "merge") => {
-    const filled = M91_SPEC_TEMPLATE.map((t) => ({
+  const loadM91Template = async (mode: "merge" | "replace" = "merge") => {
+    // Build the empty/attrs-prefilled template first — that's our baseline
+    // if the network fetch fails.
+    const emptyFilled = M91_SPEC_TEMPLATE.map((t) => ({
       name: t.name,
       rows: t.rows.map((r) => {
         const l = r.label.toLowerCase();
@@ -575,7 +582,6 @@ export function RichProductEditor({
         if (l === "brand" && (brand || attrsBrand)) v = brand || attrsBrand;
         else if (l === "model" && name) v = name;
         else if (l === "ram" && attrsRam) v = attrsRam;
-        else if (l === "ram type" && attrsRam) v = "";
         else if (l === "internal memory" && attrsStorage) v = attrsStorage;
         else if (l === "operating system" && attrsOs) v = attrsOs;
         else if (l === "chipset" && attrsCpuModel) v = attrsCpuModel;
@@ -583,6 +589,45 @@ export function RichProductEditor({
         return { label: r.label, value: v };
       }),
     }));
+
+    // Fire the API — we ONLY do this when there's enough to identify a
+    // product (name + brand, or a rich name that carries the brand).
+    const queryName = (masterQuery || name || "").trim();
+    const queryBrand = (brand || attrsBrand || "").trim();
+    let filled = emptyFilled;
+    if (queryName.length >= 2) {
+      try {
+        setAiBusy(true);  // reuse the "busy" indicator
+        const r = await api.get<any>("/products/master/91mobiles-specs", {
+          params: { name: queryName, ...(queryBrand ? { brand: queryBrand } : {}) },
+        });
+        const tabs: any[] = r.data?.spec_tabs || [];
+        if (tabs.length > 0) {
+          // Merge API values into our labels — API returns tabs+labels in the
+          // same order as `M91_SPEC_TEMPLATE`, but we still lookup by name to
+          // survive future re-ordering.
+          filled = M91_SPEC_TEMPLATE.map((t) => {
+            const apiTab = tabs.find((x) => (x?.name || "").toLowerCase() === t.name.toLowerCase());
+            return {
+              name: t.name,
+              rows: t.rows.map((r) => {
+                const apiRow = apiTab?.rows?.find((rr: any) => (rr?.label || "").toLowerCase() === r.label.toLowerCase());
+                // Prefer API value; fall back to the attrs-prefilled value we computed above.
+                const attrsRow = emptyFilled
+                  .find((x) => x.name === t.name)?.rows
+                  .find((rr) => rr.label === r.label);
+                return { label: r.label, value: (apiRow?.value || attrsRow?.value || "") };
+              }),
+            };
+          });
+        }
+      } catch {
+        // Silent fallback — we still get the label skeleton, and the vendor
+        // can fill values manually.
+        filled = emptyFilled;
+      } finally { setAiBusy(false); }
+    }
+
     if (mode === "replace" || specTabs.length === 0) {
       setSpecTabs(filled);
     } else {

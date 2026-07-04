@@ -1,0 +1,41 @@
+{
+  "summary": "Backend-only verification of iteration 31: new GSMArena-backed spec-template endpoint GET /api/products/master/91mobiles-specs. Wrote pytest suite /app/backend/tests/test_iteration31_91mobiles_specs.py — 19 tests across 6 classes covering auth (401/422), payload shape, category coverage (all 11 tabs), specs-filled threshold (>=50), real-value asserts (iPhone 15 Screen Size contains '6.1', Launch Date contains '2023'), Mongo cache hit (<1500ms round-trip), 5 popular phones (iPhone 15, Galaxy S24 Ultra, OnePlus 12R, POCO X6 Pro, Pixel 8), graceful 404s (unknown brand + unmatchable name), regression checks for /api/products/master/search and /api/products, and vendor create-with-IMEI persistence. ALL 19 TESTS PASS (100%). Live cold-fetch works (GSMArena returned 200 for every brand catalog and detail page). iPhone 15 payload: specs_filled=65/73, Screen Size='6.1 inches', Launch Date='2023, September 12', Chipset='Apple A16 Bionic (4 nm)'. Cache hit round-trip ~400-800ms (Mongo lookup + preview network). One QUALITY issue found (not blocking): fuzzy matcher picks 'Poco X6 Neo' when asked for 'POCO X6 Pro' — the actual POCO X6 Pro exists on GSMArena but the score of the Neo variant beats it in _pick_best_match because 'pro' vs 'neo' aren't disambiguated strongly enough (both are 3-letter non-numeric tokens). specs_filled still hits 65/73 so the test passes, but the returned matched_name is a semantically wrong device.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/products/master/91mobiles-specs?name=POCO+X6+Pro&brand=POCO",
+        "issue": "Fuzzy matcher returns matched_name='Poco X6 Neo' instead of the actual 'Poco X6 Pro'. Both share {poco, x6} tokens; 'pro'/'neo' aren't given decisive weight, so overlap 2/3 + string similarity ranks Neo high enough to pass. Frontend will populate the wrong device's specs. Fix idea in _pick_best_match: (a) require non-numeric variant tokens like Pro/Ultra/Plus/Neo/Lite to match verbatim if present in the query, or (b) apply a heavy penalty when the candidate contains a variant-token that the query does NOT contain (or vice-versa)."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration31_91mobiles_specs.py",
+    "/app/test_reports/pytest/iteration31_91mobiles_specs.xml"
+  ],
+  "action_items": [
+    "OPTIONAL/NICE-TO-HAVE: Improve _pick_best_match in /app/backend/routes/products_master_specs.py so that variant-suffix tokens (Pro / Ultra / Plus / Max / Neo / Lite / Mini) participate in the strict gate — currently POCO X6 Pro returns Poco X6 Neo. Suggested change: extend the `numeric_tokens` strict gate to also include a whitelist of well-known variant words, so a query containing 'pro' will only match candidates that also contain 'pro'. Add a regression case to the pytest for the fixed match."
+  ],
+  "critical_code_review_comments": [
+    "routes/products_master_specs.py:291-340 — _pick_best_match handles numeric-token strictness but does not treat variant/suffix tokens (Pro, Ultra, Plus, Max, Neo, Lite, Mini, SE, FE) as decisive, which causes the POCO X6 Pro → Poco X6 Neo mismatch observed in testing. Consider adding a variant-token whitelist to the strict gate.",
+    "routes/products_master_specs.py:497 — the endpoint raises HTTPException(502) if spec_tabs is empty. Currently no test exercises this branch because we couldn't induce it against live GSMArena, so it is only theoretically covered.",
+    "routes/products_master_specs.py:472-485 — cache TTL check parses `at` as ISO string but silently swallows exceptions. If a cache row ever has an unexpected `at` type, the code falls through to a fresh scrape without logging — consider a log.debug so cache misses are diagnosable in prod.",
+    "routes/products_master_specs.py — file is 521 lines and self-contained (regex-based HTML parsing + brand list fetching + template mapping + endpoint). Below the 700-line hard limit; no split required, but consider extracting _TEMPLATE and _BRAND_URLS into a separate constants module for readability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration31_91mobiles_specs.py (new — 19 pytest tests)",
+    "/app/test_reports/pytest/iteration31_91mobiles_specs.xml (new — JUnit results)"
+  ],
+  "success_rate": {"backend": "100% (19/19 pytest passing)", "frontend": "not tested (backend-only scope per request)"},
+  "seed_data_creation": "None. Test creates one TEST_-prefixed vendor product and immediately deletes it in a try/finally block. Uses existing pre-seeded vendor account Alice (test_alice_73dc7f@test.com).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iteration 31 (GSMArena spec-template endpoint) backend is verified. Test file: /app/backend/tests/test_iteration31_91mobiles_specs.py — runs standalone in ~2s once GSMArena+Mongo caches are warm (first cold run ~30s to walk 5 brand catalogs @ 3 pages each). Endpoint requires JWT (any authenticated user works). Response shape: {source, matched_url, matched_name, hero_image, spec_tabs[{name,rows[{label,value}]}], specs_filled, specs_total}. Real values confirmed: iPhone 15 → 65/73 filled, Screen Size='6.1 inches', Launch Date='2023, September 12'. Known limitation: fuzzy matcher may pick a variant sibling (Neo vs Pro) — see minor issue.",
+  "rca_of_issue": "N/A for the fix itself — the bug that iteration 31 targeted (empty spec values when clicking 'Load 91mobiles template') is resolved. The endpoint returns real values from GSMArena, and cache reuse works. The only new finding is the POCO X6 Pro → Poco X6 Neo fuzzy-match mismatch (documented above), which is a QUALITY issue in name matching, not a functional break of the fix."
+}
