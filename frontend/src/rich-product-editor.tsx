@@ -324,6 +324,15 @@ export function RichProductEditor({
     if (Array.isArray(row.whats_in_box) && row.whats_in_box.length) {
       put(setWhatsInBox, whatsInBox.length === 0, row.whats_in_box);
     }
+    // UPDATE 2c — When picking a 91mobiles result, auto-load the 91mobiles
+    // spec template so the vendor sees the exact same column structure buyers
+    // will recognise on 91mobiles. We do this AFTER field patches so any
+    // sniffed values (brand/model/RAM/storage) prefill their cells.
+    if (row.source === "91mobiles" && specTabs.length === 0) {
+      // Defer to next tick so React commits the field-setter batch first,
+      // giving loadM91Template the fresh brand/RAM/etc. values.
+      setTimeout(() => loadM91Template("merge"), 0);
+    }
     // Collapse the dropdown but keep the query so the vendor sees what they picked.
     setMasterOpen(false);
     setMasterQuery(row.name || "");
@@ -407,6 +416,144 @@ export function RichProductEditor({
 
   const onAddExtraAttr = () => setExtraAttrs([...extraAttrs, { key: "", value: "" }]);
   const onAddSpecTab = () => setSpecTabs([...specTabs, { name: `Tab ${specTabs.length + 1}`, rows: [] }]);
+
+  // UPDATE 2c (June 2026) — 91mobiles spec template. Populates spec_tabs with
+  // the exact category structure 91mobiles uses on its mobile-phone detail
+  // pages so a vendor's listing matches the look-and-feel buyers see there.
+  // Values are left BLANK for the vendor to fill (we don't have detail-page
+  // data yet — Cloudflare blocks scraping).  If the vendor already picked a
+  // 91mobiles autosuggest row we prefill the handful of fields we DO know
+  // (brand, model, RAM/storage sniffed from the name).
+  const M91_SPEC_TEMPLATE: { name: string; rows: { label: string; value: string }[] }[] = [
+    { name: "General", rows: [
+      { label: "Launch Date", value: "" },
+      { label: "Operating System", value: "" },
+      { label: "Custom UI", value: "" },
+      { label: "SIM Slot(s)", value: "" },
+      { label: "SIM Size", value: "" },
+      { label: "Network", value: "" },
+      { label: "Model", value: "" },
+      { label: "Brand", value: "" },
+    ]},
+    { name: "Design", rows: [
+      { label: "Height", value: "" },
+      { label: "Width", value: "" },
+      { label: "Thickness", value: "" },
+      { label: "Weight", value: "" },
+      { label: "Build Material", value: "" },
+      { label: "Colours", value: "" },
+      { label: "Waterproof", value: "" },
+      { label: "Ruggedness", value: "" },
+    ]},
+    { name: "Display", rows: [
+      { label: "Screen Size", value: "" },
+      { label: "Screen Resolution", value: "" },
+      { label: "Pixel Density", value: "" },
+      { label: "Display Type", value: "" },
+      { label: "Refresh Rate", value: "" },
+      { label: "Touch Screen", value: "" },
+      { label: "Screen-to-Body Ratio", value: "" },
+      { label: "Screen Protection", value: "" },
+    ]},
+    { name: "Performance", rows: [
+      { label: "Chipset", value: "" },
+      { label: "CPU", value: "" },
+      { label: "Architecture", value: "" },
+      { label: "Fabrication", value: "" },
+      { label: "Graphics", value: "" },
+      { label: "RAM", value: "" },
+      { label: "RAM Type", value: "" },
+    ]},
+    { name: "Storage", rows: [
+      { label: "Internal Memory", value: "" },
+      { label: "Expandable Memory", value: "" },
+      { label: "USB OTG", value: "" },
+    ]},
+    { name: "Rear Camera", rows: [
+      { label: "Main Camera Resolution", value: "" },
+      { label: "Sensor Size", value: "" },
+      { label: "Optical Zoom", value: "" },
+      { label: "Autofocus", value: "" },
+      { label: "Flash", value: "" },
+      { label: "Video Recording", value: "" },
+      { label: "OIS", value: "" },
+      { label: "Camera Features", value: "" },
+    ]},
+    { name: "Front Camera", rows: [
+      { label: "Front Camera Resolution", value: "" },
+      { label: "Aperture", value: "" },
+      { label: "Video Recording", value: "" },
+      { label: "Front Flash", value: "" },
+    ]},
+    { name: "Battery", rows: [
+      { label: "Capacity", value: "" },
+      { label: "Type", value: "" },
+      { label: "Removable", value: "" },
+      { label: "Quick Charging", value: "" },
+      { label: "Wireless Charging", value: "" },
+      { label: "USB Type-C", value: "" },
+    ]},
+    { name: "Connectivity", rows: [
+      { label: "Network Support", value: "" },
+      { label: "5G Bands", value: "" },
+      { label: "4G Bands", value: "" },
+      { label: "VoLTE", value: "" },
+      { label: "Wi-Fi", value: "" },
+      { label: "Bluetooth", value: "" },
+      { label: "GPS", value: "" },
+      { label: "NFC", value: "" },
+      { label: "USB Connectivity", value: "" },
+    ]},
+    { name: "Sensors", rows: [
+      { label: "Fingerprint Sensor", value: "" },
+      { label: "Fingerprint Position", value: "" },
+      { label: "Face Unlock", value: "" },
+      { label: "Accelerometer", value: "" },
+      { label: "Gyroscope", value: "" },
+      { label: "Proximity", value: "" },
+      { label: "Compass", value: "" },
+      { label: "Barometer", value: "" },
+    ]},
+    { name: "Multimedia", rows: [
+      { label: "Audio Jack", value: "" },
+      { label: "Loudspeaker", value: "" },
+      { label: "Speaker", value: "" },
+      { label: "Dolby Audio", value: "" },
+    ]},
+  ];
+
+  /**
+   * Load the 91mobiles-style spec template into `specTabs`. If some fields
+   * are already known (e.g. RAM/storage from the autosuggest pick, brand
+   * from the master search) we prefill those cells so the vendor doesn't
+   * have to re-type them.
+   */
+  const loadM91Template = (mode: "merge" | "replace" = "merge") => {
+    const filled = M91_SPEC_TEMPLATE.map((t) => ({
+      name: t.name,
+      rows: t.rows.map((r) => {
+        const l = r.label.toLowerCase();
+        let v = r.value;
+        if (l === "brand" && (brand || attrsBrand)) v = brand || attrsBrand;
+        else if (l === "model" && name) v = name;
+        else if (l === "ram" && attrsRam) v = attrsRam;
+        else if (l === "ram type" && attrsRam) v = "";
+        else if (l === "internal memory" && attrsStorage) v = attrsStorage;
+        else if (l === "operating system" && attrsOs) v = attrsOs;
+        else if (l === "chipset" && attrsCpuModel) v = attrsCpuModel;
+        else if (l === "cpu" && attrsCpuModel) v = attrsCpuModel;
+        return { label: r.label, value: v };
+      }),
+    }));
+    if (mode === "replace" || specTabs.length === 0) {
+      setSpecTabs(filled);
+    } else {
+      // MERGE: keep existing tabs, append template tabs that aren't already there (by name)
+      const existingNames = new Set(specTabs.map((t) => t.name.toLowerCase().trim()));
+      const additions = filled.filter((t) => !existingNames.has(t.name.toLowerCase().trim()));
+      setSpecTabs([...specTabs, ...additions]);
+    }
+  };
   const onAddSpecRow = (idx: number) => {
     const next = [...specTabs];
     next[idx] = { ...next[idx], rows: [...next[idx].rows, { label: "", value: "" }] };
@@ -1130,6 +1277,21 @@ export function RichProductEditor({
               <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 8 }}>
                 Group specs into tabs (General, Display, Battery, etc). Each tab holds label/value rows.
               </Text>
+              {/* UPDATE 2c — One-tap load of the 91mobiles-style spec skeleton
+                  so vendor listings match the detail-page structure buyers
+                  see there.  Merges by default so existing tabs are kept. */}
+              <View style={sectionStyles.tplRow}>
+                <TouchableOpacity onPress={() => loadM91Template("merge")} style={sectionStyles.tplBtn} testID="product-spec-tpl-merge">
+                  <Feather name="download" size={13} color={colors.primary} />
+                  <Text style={sectionStyles.tplBtnText}>Load 91mobiles template</Text>
+                </TouchableOpacity>
+                {specTabs.length > 0 ? (
+                  <TouchableOpacity onPress={() => loadM91Template("replace")} style={[sectionStyles.tplBtn, sectionStyles.tplBtnGhost]} testID="product-spec-tpl-replace">
+                    <Feather name="refresh-cw" size={12} color={colors.textMuted} />
+                    <Text style={[sectionStyles.tplBtnText, { color: colors.textMuted }]}>Replace</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
               {specTabs.map((tab, ti) => (
                 <View key={ti} style={sectionStyles.specTabCard}>
                   <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
@@ -1360,6 +1522,15 @@ const sectionStyles = StyleSheet.create({
   masterChipCountActive: { backgroundColor: "rgba(255,255,255,0.28)" },
   masterChipCountText: { fontSize: 9, fontWeight: "900", color: colors.primary },
   masterChipCountTextActive: { color: "#fff" },
+  tplRow: { flexDirection: "row", gap: 8, marginBottom: 10, flexWrap: "wrap" },
+  tplBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10,
+    borderWidth: 1, borderColor: colors.primary + "40",
+    backgroundColor: colors.primary + "10",
+  },
+  tplBtnGhost: { backgroundColor: colors.surface, borderColor: colors.border },
+  tplBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary },
 
   // Clothes-only block
   clothesBlock: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: colors.primary + "08", borderWidth: 1, borderColor: colors.primary + "30" },
