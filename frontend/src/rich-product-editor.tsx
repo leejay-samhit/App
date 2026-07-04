@@ -710,7 +710,15 @@ export function RichProductEditor({
                               </View>
                             )}
                             <View style={{ flex: 1 }}>
-                              <Text style={sectionStyles.masterName} numberOfLines={2}>{row.name}</Text>
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <Text style={sectionStyles.masterName} numberOfLines={2}>{row.name}</Text>
+                                {row.source === "91mobiles" ? (
+                                  <View style={sectionStyles.masterSrcBadge}>
+                                    <Feather name="globe" size={9} color="#7C3AED" />
+                                    <Text style={sectionStyles.masterSrcBadgeText}>91mobiles</Text>
+                                  </View>
+                                ) : null}
+                              </View>
                               <Text style={sectionStyles.masterMeta} numberOfLines={1}>
                                 {[row.brand, row.category].filter(Boolean).join(" · ") || "—"}
                               </Text>
@@ -1280,6 +1288,13 @@ const sectionStyles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", gap: 8,
   },
   masterEmptyText: { flex: 1, fontSize: 11, color: colors.textMuted, fontWeight: "600" },
+  masterSrcBadge: {
+    flexDirection: "row", alignItems: "center", gap: 3,
+    paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: 4, backgroundColor: "#7C3AED14",
+    borderWidth: 1, borderColor: "#7C3AED30",
+  },
+  masterSrcBadgeText: { fontSize: 9, fontWeight: "800", color: "#7C3AED", letterSpacing: 0.3 },
 
   // Clothes-only block
   clothesBlock: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: colors.primary + "08", borderWidth: 1, borderColor: colors.primary + "30" },
