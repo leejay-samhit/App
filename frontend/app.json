@@ -21,7 +21,7 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "Capture KYC documents and selfie for verification",
+        "NSCameraUsageDescription": "Scan product barcodes and capture KYC selfies",
         "NSPhotoLibraryUsageDescription": "Upload KYC documents from your photos",
         "NSLocationWhenInUseUsageDescription": "Show nearby providers and accurate delivery estimates.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Keep your map pin fresh so customers nearby can find you.",

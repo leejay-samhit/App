@@ -1,0 +1,37 @@
+{
+  "summary": "Backend-only testing for iteration 32 (gallery field + _BRAND_PAGES=5 for Vivo X100). Wrote /app/backend/tests/test_iteration32_gallery_and_vivo.py (14 tests). All 14 passed on final run. Verified: (a) new `gallery` list of >=5 fdn.gsmarena.com/imgroot HTTPS URLs on iPhone 15 payload, (b) `gallery` capped at <=12 items, (c) `hero_image` still populated, (d) specs_filled >=40 for iPhone 15 (real value ~50+), (e) Vivo X100 (previously 404) now returns 200 with matched_name containing 'X100' — confirms _BRAND_PAGES=5 change works, (f) unmatchable query ZZZTest99/apple still returns 404, (g) no regression on iPhone 15 / Galaxy S24 Ultra / OnePlus 12R / Pixel 8 (all 200 with gallery+specs), (h) cache path <1500ms on second call, (i) vendor product create + PATCH /api/vendor/me/products/{id} still persists serial_number/imei_1/imei_2. One flaky 502 (Cloudflare Bad Gateway on preview ingress) hit Pixel 8 on the first run and cleared on retry — not a code issue.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/products/master/91mobiles-specs", "issue": "Occasional 502 Bad Gateway observed once for Pixel 8 during initial cold-cache fetch (~9s server time — see backend.out.log). Cleared on retry. Likely Cloudflare ingress timeout while GSMArena took ~9s. Consider raising uvicorn/worker timeout or adding a retry-once wrapper around the outbound GSMArena fetch."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration32_gallery_and_vivo.py",
+    "/app/test_reports/pytest/iteration32.xml"
+  ],
+  "action_items": [
+    "No code changes required — all iteration-32 acceptance criteria pass.",
+    "Optional hardening: wrap the outbound GSMArena GET in _fetch_specs_for_url with a single retry on network/timeout errors to mitigate the rare ingress 502 we saw on Pixel 8 during cold-cache fetch."
+  ],
+  "critical_code_review_comments": [
+    "products_master_specs.py:_fetch_gallery_images correctly handles the underscore-vs-dash slug quirk (GSMArena serves 301 on the dash URL then 200 on the underscore variant — logs show this pattern). Good defensive coding with follow_redirects=True.",
+    "gallery cap of 12 is enforced in _fetch_gallery_images (line 435) — verified by test_gallery_capped_at_12.",
+    "products_master_cache stores the full payload including `gallery`, so cache hits also return the new field — verified by TestCacheFast.test_second_call_is_fast."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration32_gallery_and_vivo.py (NEW — 14 pytest cases covering gallery field, Vivo X100 fix, regression checks, cache, vendor IMEI/serial persistence)"
+  ],
+  "success_rate": {"backend": "100% (14/14 tests passed)", "frontend": "not tested (backend-only scope per review request)"},
+  "seed_data_creation": "No permanent seed data. Test class TestVendorSerialImeiPersistence creates one TEST_iter32_serial_imei product and deletes it in the finally block.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 32 backend changes fully verified. Frontend (rich-product-editor.tsx 404-banner + gallery consumption, barcode-scanner-modal.tsx) was explicitly out of scope — expo-camera cannot be exercised on web preview. If a future iteration needs to verify the frontend banner, login as Alice (test_alice_73dc7f@test.com/Passw0rd!), open Add Product editor, click 'Load 91mobiles template' with an unmatched name (e.g. 'ZZZTest99') and assert the yellow banner testID renders.",
+  "rca_of_issue": "One transient failure during the initial run: Pixel 8 GSMArena fetch took ~9s and the preview ingress returned 502 Bad Gateway to the client while the backend was still waiting. Retry succeeded immediately (2.32s). This is an infrastructure-timing artifact of the emergent preview URL, not a code defect. The endpoint itself completed successfully (backend logs show `GET .../Pixel+8 HTTP/1.1 200 OK` on the retry). Recommend a single httpx retry in _fetch_specs_for_url as low-priority hardening."
+}

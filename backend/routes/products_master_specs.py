@@ -180,10 +180,10 @@ _BRAND_URLS: Dict[str, str] = {
     "lg": "https://www.gsmarena.com/lg-phones-20.php",
 }
 # How many pages to walk per brand.  GSMArena renders 50 phones per page and
-# we want ~150 recent devices per brand (covers ~3 years). Requests are HTTP
-# GETs to gsmarena which happily serves anonymously; total 3 requests per
-# uncached brand ≈ 1.5 seconds on average.
-_BRAND_PAGES = 3
+# we want ~250 recent devices per brand (covers ~4-5 years including older
+# flagships like Vivo X100, OnePlus 11, iPhone 12/13 which are still sold in
+# India). 5 pages ≈ 250 phones. Trade-off: uncached brand hit is ~2.5s.
+_BRAND_PAGES = 5
 
 
 def _clean(s: Optional[str]) -> str:
@@ -383,6 +383,58 @@ def _extract_hero_image(html: str) -> str:
     return m.group(1) if m else ""
 
 
+def _pictures_url_from_product_url(product_url: str) -> str:
+    """Convert `apple_iphone_15-12559.php` → `apple-iphone-15-pictures-12559.php`.
+
+    GSMArena uses underscores in the product page slug but dashes on the
+    pictures gallery page — a small but critical difference.  We also need
+    to inject the literal token `-pictures-` right before the numeric id.
+    """
+    m = re.match(r"^(https?://www\.gsmarena\.com/)([a-z0-9_\-\(\)]+?)-(\d+)\.php$", product_url)
+    if not m:
+        return ""
+    prefix, slug, pid = m.group(1), m.group(2), m.group(3)
+    slug_dashed = slug.replace("_", "-")
+    return f"{prefix}{slug_dashed}-pictures-{pid}.php"
+
+
+async def _fetch_gallery_images(product_url: str) -> List[str]:
+    """Scrape the HD gallery from a GSMArena pictures page.
+
+    Returns a list of the highest-quality image URLs available (usually
+    1024w2 = 1024px wide) with the hero (1024w2 gsmarena_001.jpg) first.
+    Returns [] on any failure — gallery is non-critical decoration.
+    """
+    pics_url = _pictures_url_from_product_url(product_url)
+    if not pics_url:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+            r = await client.get(pics_url, headers=_HEADERS)
+        if r.status_code != 200:
+            return []
+        html = r.text
+    except Exception as e:
+        log.info("GSMArena gallery fetch failed for %s: %s", pics_url, e)
+        return []
+    # GSMArena renders each gallery image as
+    #   <img src="https://fdn.gsmarena.com/imgroot/reviews/…/-1024w2/gsmarena_001.jpg">
+    urls = re.findall(
+        r'<img[^>]+src="(https?://fdn\.gsmarena\.com/imgroot/[^"]+\.jpg)"',
+        html,
+    )
+    # De-dup while preserving order
+    seen: set = set()
+    out: List[str] = []
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    # Cap at 12 images so the vendor form isn't overwhelmed.
+    return out[:12]
+
+
 def _map_to_template(raw: Dict[str, str]) -> List[Dict[str, Any]]:
     """Convert GSMArena data-spec dict to 91mobiles-style spec_tabs."""
     tabs: List[Dict[str, Any]] = []
@@ -442,22 +494,29 @@ def _map_to_template(raw: Dict[str, str]) -> List[Dict[str, Any]]:
     return tabs
 
 
-async def _fetch_specs_for_url(product_url: str) -> Tuple[List[Dict[str, Any]], str]:
-    """Return (spec_tabs, hero_image_url). Never raises."""
+async def _fetch_specs_for_url(product_url: str) -> Tuple[List[Dict[str, Any]], str, List[str]]:
+    """Return (spec_tabs, hero_image_url, gallery_images). Never raises.
+
+    Also fetches the HD gallery from `<slug>-pictures-<id>.php` — up to 12
+    high-resolution photos ready for the vendor product gallery.
+    """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
             r = await client.get(product_url, headers=_HEADERS)
         if r.status_code != 200:
-            return [], ""
+            return [], "", []
         html = r.text
     except Exception as e:
         log.info("GSMArena detail fetch failed: %s", e)
-        return [], ""
+        return [], "", []
     raw = _extract_data_specs(html)
     hero = _extract_hero_image(html)
-    if not raw:
-        return [], hero
-    return _map_to_template(raw), hero
+    gallery: List[str] = []
+    if raw:
+        # Fire gallery fetch in parallel with the spec map (which is CPU).
+        gallery = await _fetch_gallery_images(product_url)
+        return _map_to_template(raw), hero, gallery
+    return [], hero, gallery
 
 
 # ── Route ────────────────────────────────────────────────────────────
@@ -510,7 +569,7 @@ async def gsmarena_specs(
     if not match:
         raise HTTPException(status_code=404, detail="Could not confidently match product on GSMArena")
 
-    tabs, hero = await _fetch_specs_for_url(match["url"])
+    tabs, hero, gallery = await _fetch_specs_for_url(match["url"])
     if not tabs:
         raise HTTPException(status_code=502, detail="GSMArena returned no spec data")
 
@@ -522,6 +581,7 @@ async def gsmarena_specs(
         "matched_url": match["url"],
         "matched_name": match["name"],
         "hero_image": hero or match.get("thumb", ""),
+        "gallery": gallery,  # HD 1024w2 photos scraped from the pictures page
         "spec_tabs": tabs,
         "specs_filled": filled_rows,
         "specs_total": total_rows,

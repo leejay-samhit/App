@@ -21,6 +21,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "./api";
 import { colors, radii } from "./theme";
 import { useAuth } from "./auth";
+import { BarcodeScannerModal, type ScannerTarget } from "./barcode-scanner-modal";
 
 // ── Types ──
 export type StyledText = { text?: string; bold?: boolean; font_size?: number | null; align?: "left" | "center" | "right" };
@@ -232,6 +233,9 @@ export function RichProductEditor({
   const [serialNumber, setSerialNumber] = useState<string>("");
   const [imei1, setImei1] = useState<string>("");
   const [imei2, setImei2] = useState<string>("");
+  // ── UPDATE 3 (August 2026) — Barcode scanner target + spec-not-found hint ──
+  const [scannerTarget, setScannerTarget] = useState<ScannerTarget | null>(null);
+  const [specsNotFoundHint, setSpecsNotFoundHint] = useState<string>("");
   // ── AI Reference image (NOT shown in product gallery — used only to
   // prompt the AI). Kept separate from cover/gallery so the original
   // reference can be re-used by the "Regenerate" button.
@@ -595,6 +599,7 @@ export function RichProductEditor({
     const queryName = (masterQuery || name || "").trim();
     const queryBrand = (brand || attrsBrand || "").trim();
     let filled = emptyFilled;
+    let apiSucceeded = false;
     if (queryName.length >= 2) {
       try {
         setAiBusy(true);  // reuse the "busy" indicator
@@ -603,6 +608,18 @@ export function RichProductEditor({
         });
         const tabs: any[] = r.data?.spec_tabs || [];
         if (tabs.length > 0) {
+          apiSucceeded = true;
+          setSpecsNotFoundHint("");
+          // UPDATE 3 — Pull HD gallery + hero image from GSMArena.
+          const heroImg: string = r.data?.hero_image || "";
+          const gallery: string[] = Array.isArray(r.data?.gallery) ? r.data.gallery : [];
+          if (heroImg && !imageUrl) setImageUrl(heroImg);
+          if (gallery.length > 0 && galleryImages.length === 0) {
+            // Add heroImg first if it's not already in the gallery, then the
+            // gallery photos.  Cap at 12 total.
+            const withHero = heroImg && !gallery.includes(heroImg) ? [heroImg, ...gallery] : gallery;
+            setGalleryImages(withHero.slice(0, 12));
+          }
           // Merge API values into our labels — API returns tabs+labels in the
           // same order as `M91_SPEC_TEMPLATE`, but we still lookup by name to
           // survive future re-ordering.
@@ -612,7 +629,6 @@ export function RichProductEditor({
               name: t.name,
               rows: t.rows.map((r) => {
                 const apiRow = apiTab?.rows?.find((rr: any) => (rr?.label || "").toLowerCase() === r.label.toLowerCase());
-                // Prefer API value; fall back to the attrs-prefilled value we computed above.
                 const attrsRow = emptyFilled
                   .find((x) => x.name === t.name)?.rows
                   .find((rr) => rr.label === r.label);
@@ -620,13 +636,27 @@ export function RichProductEditor({
               }),
             };
           });
+        } else {
+          // API returned empty spec_tabs — surface the not-found hint.
+          setSpecsNotFoundHint(`Specs not found for "${queryName}" — please enter manually.`);
+          filled = emptyFilled;
         }
-      } catch {
-        // Silent fallback — we still get the label skeleton, and the vendor
-        // can fill values manually.
+      } catch (err: any) {
+        // 404 or network error — surface the hint.
+        const status = err?.response?.status;
+        if (status === 404) {
+          setSpecsNotFoundHint(`Specs not found for "${queryName}" — please enter manually.`);
+        } else {
+          setSpecsNotFoundHint("Couldn't reach the spec catalog. Please enter manually.");
+        }
         filled = emptyFilled;
       } finally { setAiBusy(false); }
+    } else {
+      setSpecsNotFoundHint("");
     }
+    // A short-lived success indicator would be nice but even better: clear
+    // the hint if a subsequent call succeeded (already handled above).
+    void apiSucceeded;
 
     if (mode === "replace" || specTabs.length === 0) {
       setSpecTabs(filled);
@@ -1258,30 +1288,41 @@ export function RichProductEditor({
               </Text>
 
               <Text style={modalStyles.fieldLabel}>Serial number</Text>
-              <TextInput
-                value={serialNumber}
-                onChangeText={setSerialNumber}
-                placeholder="e.g. SN-2024-A12345678"
-                placeholderTextColor={colors.textMuted}
-                style={modalStyles.input}
-                autoCapitalize="characters"
-                testID="product-serial"
-              />
+              <View style={sectionStyles.scanRow}>
+                <TextInput
+                  value={serialNumber}
+                  onChangeText={setSerialNumber}
+                  placeholder="e.g. SN-2024-A12345678"
+                  placeholderTextColor={colors.textMuted}
+                  style={[modalStyles.input, { flex: 1 }]}
+                  autoCapitalize="characters"
+                  testID="product-serial"
+                />
+                <TouchableOpacity onPress={() => setScannerTarget("serial")} style={sectionStyles.scanBtn} testID="product-serial-scan">
+                  <Feather name="camera" size={16} color={colors.primary} />
+                </TouchableOpacity>
+              </View>
 
               <Text style={[modalStyles.fieldLabel, { marginTop: 12 }]}>IMEI-1</Text>
-              <TextInput
-                value={imei1}
-                onChangeText={(t) => setImei1(t.replace(/[^\d]/g, "").slice(0, 15))}
-                placeholder="15-digit IMEI (dial *#06# on the device)"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="number-pad"
-                maxLength={15}
-                style={[
-                  modalStyles.input,
-                  imei1.length > 0 && !isValidImei(imei1) && sectionStyles.inputError,
-                ]}
-                testID="product-imei-1"
-              />
+              <View style={sectionStyles.scanRow}>
+                <TextInput
+                  value={imei1}
+                  onChangeText={(t) => setImei1(t.replace(/[^\d]/g, "").slice(0, 15))}
+                  placeholder="15-digit IMEI (dial *#06#)"
+                  placeholderTextColor={colors.textMuted}
+                  keyboardType="number-pad"
+                  maxLength={15}
+                  style={[
+                    modalStyles.input,
+                    { flex: 1 },
+                    imei1.length > 0 && !isValidImei(imei1) && sectionStyles.inputError,
+                  ]}
+                  testID="product-imei-1"
+                />
+                <TouchableOpacity onPress={() => setScannerTarget("imei_1")} style={sectionStyles.scanBtn} testID="product-imei-1-scan">
+                  <Feather name="camera" size={16} color={colors.primary} />
+                </TouchableOpacity>
+              </View>
               {imei1.length > 0 ? (
                 <View style={sectionStyles.imeiHintRow}>
                   {isValidImei(imei1) ? (
@@ -1301,19 +1342,25 @@ export function RichProductEditor({
               ) : null}
 
               <Text style={[modalStyles.fieldLabel, { marginTop: 12 }]}>IMEI-2 (dual-SIM devices)</Text>
-              <TextInput
-                value={imei2}
-                onChangeText={(t) => setImei2(t.replace(/[^\d]/g, "").slice(0, 15))}
-                placeholder="Second 15-digit IMEI (if applicable)"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="number-pad"
-                maxLength={15}
-                style={[
-                  modalStyles.input,
-                  imei2.length > 0 && !isValidImei(imei2) && sectionStyles.inputError,
-                ]}
-                testID="product-imei-2"
-              />
+              <View style={sectionStyles.scanRow}>
+                <TextInput
+                  value={imei2}
+                  onChangeText={(t) => setImei2(t.replace(/[^\d]/g, "").slice(0, 15))}
+                  placeholder="Second 15-digit IMEI (if applicable)"
+                  placeholderTextColor={colors.textMuted}
+                  keyboardType="number-pad"
+                  maxLength={15}
+                  style={[
+                    modalStyles.input,
+                    { flex: 1 },
+                    imei2.length > 0 && !isValidImei(imei2) && sectionStyles.inputError,
+                  ]}
+                  testID="product-imei-2"
+                />
+                <TouchableOpacity onPress={() => setScannerTarget("imei_2")} style={sectionStyles.scanBtn} testID="product-imei-2-scan">
+                  <Feather name="camera" size={16} color={colors.primary} />
+                </TouchableOpacity>
+              </View>
               {imei2.length > 0 ? (
                 <View style={sectionStyles.imeiHintRow}>
                   {isValidImei(imei2) ? (
@@ -1498,6 +1545,18 @@ export function RichProductEditor({
                   </TouchableOpacity>
                 ) : null}
               </View>
+              {/* UPDATE 3 (August 2026) — Empty-state banner surfaces when the
+                  backend can't find the phone on GSMArena so the vendor
+                  knows they'll need to fill values manually. */}
+              {specsNotFoundHint ? (
+                <View style={sectionStyles.notFoundBanner} testID="specs-not-found-hint">
+                  <Feather name="alert-circle" size={14} color="#B37500" />
+                  <Text style={sectionStyles.notFoundText}>{specsNotFoundHint}</Text>
+                  <TouchableOpacity onPress={() => setSpecsNotFoundHint("")} testID="specs-not-found-close">
+                    <Feather name="x" size={14} color="#B37500" />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
               {specTabs.map((tab, ti) => (
                 <View key={ti} style={sectionStyles.specTabCard}>
                   <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
@@ -1598,6 +1657,19 @@ export function RichProductEditor({
           </View>
         </View>
       </KeyboardAvoidingView>
+      {/* UPDATE 3 — Barcode scanner overlay. Rendered as sibling so it
+          floats above the RichProductEditor modal. */}
+      <BarcodeScannerModal
+        visible={scannerTarget !== null}
+        target={scannerTarget || "serial"}
+        onClose={() => setScannerTarget(null)}
+        onScanned={(value) => {
+          if (scannerTarget === "serial") setSerialNumber(value);
+          else if (scannerTarget === "imei_1") setImei1(value.replace(/\D/g, "").slice(0, 15));
+          else if (scannerTarget === "imei_2") setImei2(value.replace(/\D/g, "").slice(0, 15));
+          setScannerTarget(null);
+        }}
+      />
     </Modal>
   );
 }
@@ -1744,6 +1816,23 @@ const sectionStyles = StyleSheet.create({
     marginTop: 6, paddingHorizontal: 4,
   },
   imeiHintText: { fontSize: 11, fontWeight: "700" },
+  // Scan-button row (Serial / IMEI-1 / IMEI-2)
+  scanRow: { flexDirection: "row", alignItems: "stretch", gap: 8 },
+  scanBtn: {
+    width: 44, height: 44, borderRadius: 10,
+    alignItems: "center", justifyContent: "center",
+    borderWidth: 1, borderColor: colors.primary + "50",
+    backgroundColor: colors.primary + "12",
+  },
+  // "Specs not found" banner
+  notFoundBanner: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    paddingVertical: 10, paddingHorizontal: 12,
+    marginBottom: 10, borderRadius: 10,
+    backgroundColor: "#FFF4E5",
+    borderWidth: 1, borderColor: "#FFD59E",
+  },
+  notFoundText: { flex: 1, fontSize: 12, fontWeight: "700", color: "#8A5300", lineHeight: 17 },
 
   // Clothes-only block
   clothesBlock: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: colors.primary + "08", borderWidth: 1, borderColor: colors.primary + "30" },
