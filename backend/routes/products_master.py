@@ -69,6 +69,24 @@ _M91_TIMEOUT_SECS = 6.0
 _M91_CACHE_HOURS = 24
 _M91_MIN_LOCAL_HITS = 3  # if local returns fewer than this, augment with 91mobiles
 
+# ── Deodap (Shopify) autosuggest — general merchandise wholesale store ──
+# Deodap.in is a Shopify storefront so its `search/suggest.json` endpoint
+# is public, unauthenticated, and CORS-friendly.  Great fit for
+# home-goods / accessories / gadgets that 91mobiles doesn't carry (91mobiles
+# is phones-only).  We always query BOTH sources in parallel when local is
+# thin, then merge.
+_DEODAP_URL = "https://deodap.in/search/suggest.json"
+_DEODAP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Referer": "https://deodap.in/",
+}
+_DEODAP_TIMEOUT_SECS = 6.0
+
 
 def _norm(s: Any) -> str:
     """Lowercase, collapse whitespace, strip punctuation for de-dupe keys."""
@@ -231,6 +249,109 @@ async def _fetch_91mobiles(query: str) -> List[Dict[str, Any]]:
     return out
 
 
+# ── Deodap (Shopify) helpers ───────────────────────────────────────────
+
+def _shape_deodap_row(row: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Convert one Shopify search/suggest.json product entry into our shape.
+
+    Shopify's autosuggest returns per-product:
+      { id, title, price, image, url, vendor, product_type, tags[], ... }
+    We surface the price as a numeric rupee value (Shopify hands us either
+    a numeric string "1860.00" or a dict with amount/currency depending on
+    the storefront config — we handle both).
+    """
+    title = _strip_html(row.get("title") or "")
+    if not title:
+        return None
+    # Price coercion — supports "1860.00", 1860, or { amount: "1860.00" }.
+    raw_price = row.get("price")
+    price = 0
+    if isinstance(raw_price, (int, float)):
+        price = int(raw_price)
+    elif isinstance(raw_price, str):
+        try:
+            price = int(float(raw_price))
+        except ValueError:
+            price = 0
+    elif isinstance(raw_price, dict):
+        try:
+            price = int(float(raw_price.get("amount") or 0))
+        except (ValueError, TypeError):
+            price = 0
+
+    image = row.get("image") or ""
+    if image and image.startswith("//"):
+        image = f"https:{image}"
+
+    vendor = _strip_html(row.get("vendor") or "")
+    product_type = _strip_html(row.get("product_type") or "")
+    # Deodap covers accessories, home goods, kitchen, electronics — the
+    # product_type is the closest to a category.
+    category = product_type or "General"
+
+    # Build a deep link back to the Deodap product page so the vendor can
+    # verify pricing / description / dimensions before publishing.
+    url = row.get("url") or ""
+    external_url = f"https://deodap.in{url}" if url and url.startswith("/") else url
+
+    return {
+        "source": "deodap",
+        "id": f"deodap-{row.get('id')}",
+        "name": title,
+        "brand": vendor,
+        "image_url": image,
+        "images": [image] if image else [],
+        "price": price,
+        "category": category,
+        "description": _strip_html(row.get("body") or "")[:280],
+        "sub_features": [],
+        "attrs_brand": vendor,
+        "attrs_os": "",
+        "attrs_ram": "",
+        "attrs_cpu_model": "",
+        "attrs_cpu_speed": "",
+        "attrs_storage": "",
+        "extra_attrs": {},
+        "price_summary": None,
+        "protection_summary": None,
+        "warranty_summary": None,
+        "delivery_summary": None,
+        "spec_tabs": [],
+        "whats_in_box": [],
+        "external_url": external_url,
+    }
+
+
+async def _fetch_deodap(query: str) -> List[Dict[str, Any]]:
+    """Hit Deodap's Shopify autosuggest API. Never raises."""
+    params = {
+        "q": query,
+        "resources[type]": "product",
+        "resources[limit]": 10,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_DEODAP_TIMEOUT_SECS, follow_redirects=True) as client:
+            r = await client.get(_DEODAP_URL, params=params, headers=_DEODAP_HEADERS)
+        if r.status_code != 200:
+            log.info("Deodap suggest non-200: %s", r.status_code)
+            return []
+        data = r.json()
+    except Exception as e:
+        log.info("Deodap fetch failed (%s): %s", type(e).__name__, e)
+        return []
+    prods = (
+        data.get("resources", {})
+            .get("results", {})
+            .get("products", [])
+    )
+    out: List[Dict[str, Any]] = []
+    for row in prods:
+        s = _shape_deodap_row(row)
+        if s:
+            out.append(s)
+    return out
+
+
 @router.get("/products/master/search")
 async def master_search(
     q: str = Query(..., min_length=1, description="Search query"),
@@ -310,28 +431,38 @@ async def master_search(
 
     local_shaped = [_shape_master_row(p, source="local") for p in sorted(seen.values(), key=local_score, reverse=True)]
 
-    # ── External augment (91mobiles) ──
+    # ── External augment (91mobiles + Deodap) ──
     external_available = True
     external_used = False
-    external_shaped: List[Dict[str, Any]] = []
+    external_91: List[Dict[str, Any]] = []
+    external_deodap: List[Dict[str, Any]] = []
     if len(local_shaped) < _M91_MIN_LOCAL_HITS:
         query_norm = _norm(query)
+        # Fire BOTH external providers in parallel — total latency is
+        # max(91mobiles, deodap) ≈ 700-1200ms cold, ~10ms warm.
         cached = await _cache_get(query_norm)
-        if cached is not None:
-            external_shaped = cached
+        if cached is not None and isinstance(cached, dict):
+            external_91 = cached.get("m91") or []
+            external_deodap = cached.get("deodap") or []
         else:
             try:
-                external_shaped = await asyncio.wait_for(_fetch_91mobiles(query), timeout=_M91_TIMEOUT_SECS + 1)
-                if external_shaped:
-                    await _cache_set(query_norm, external_shaped)
-            except Exception:
-                external_shaped = []
-        external_used = bool(external_shaped)
+                external_91, external_deodap = await asyncio.gather(
+                    asyncio.wait_for(_fetch_91mobiles(query), timeout=_M91_TIMEOUT_SECS + 1),
+                    asyncio.wait_for(_fetch_deodap(query), timeout=_DEODAP_TIMEOUT_SECS + 1),
+                    return_exceptions=False,
+                )
+            except Exception as e:
+                log.info("external merge failed: %s", e)
+                external_91, external_deodap = [], []
+            if external_91 or external_deodap:
+                await _cache_set(query_norm, {"m91": external_91, "deodap": external_deodap})
+        external_used = bool(external_91 or external_deodap)
 
-    # Merge — local rows first (they carry richer specs vendors want)
+    # Merge — local rows first (they carry richer specs vendors want),
+    # then 91mobiles (phones — richer for mobiles), then Deodap (general merch).
     merged: List[Dict[str, Any]] = list(local_shaped)
     already: set = {(_norm(r["name"]), _norm(r.get("brand"))) for r in merged}
-    for row in external_shaped:
+    for row in external_91 + external_deodap:
         key = (_norm(row.get("name")), _norm(row.get("brand")))
         if key in already:
             continue
@@ -344,10 +475,11 @@ async def master_search(
         "query": query,
         "count": len(merged),
         "items": merged,
-        # Whether the 91mobiles fallback was queried this call — helps the
-        # client show "Searching web…" hints and (later) a badge on external rows.
         "external_available": external_available,
         "external_used": external_used,
         "local_hits": len(local_shaped),
+        # Per-source counts so the frontend chip badges show live totals.
+        "m91_hits": len(external_91),
+        "deodap_hits": len(external_deodap),
     }
 

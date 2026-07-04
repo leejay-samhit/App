@@ -1,0 +1,46 @@
+{
+  "summary": "Backend-only testing for iteration 33 (Deodap = 3rd data source in Smart Product-Master Search). Wrote /app/backend/tests/test_iteration33_deodap.py (11 tests, ALL PASSED). Verified: (1) Auth gate returns 401 unauth. (2) q=headphone returns items with BOTH source='91mobiles' AND source='deodap' — m91_hits=4, deodap_hits=10 observed. (3) New response fields m91_hits and deodap_hits present, typed as int, alongside existing local_hits/count/external_used/external_available. (4) Deodap rows carry valid HTTPS image_url (or //cdn.shopify.com), numeric price > 0, source='deodap', and external_url containing 'deodap.in'. (5) Local iPhone product still appears FIRST in merged items[] for q=iphone (before 91mobiles/deodap rows). (6) De-duplication holds — no (normalized name, brand) duplicates across sources on any tested query (headphone/iphone/clock). (7) q=wall+clock → deodap_hits > 0 (Deodap dominates for general merchandise). (8) q=iphone+15+pro+max → 91mobiles rows returned when local hits < 3 (skipped by design if local >= 3). (9) Cache works: cold call ~1246ms (both providers), warm call ~205ms — >5x speedup and merged item list is byte-identical, m91_hits/deodap_hits stable. (10) Regression — GET /api/products/master/91mobiles-specs?name=iPhone+15&brand=Apple still returns 200. (11) Regression — GET /api/products still returns local products; POST /api/vendor/me/products still accepts serial_number/imei_1/imei_2 and persists them through GET.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/products/master/search",
+        "issue": "Zero-result external queries are NOT cached — every repeat call for a query that returned m91=0 AND deodap=0 hits both upstream providers again. Root cause: products_master.py:457 gates the cache write behind `if external_91 or external_deodap`. Impact is small (only affects gibberish queries) but wastes ~1s per repeat + increases risk of upstream rate-limiting. Suggest also caching empty results with a shorter TTL (e.g. 1h) to prevent hammering."
+      },
+      {
+        "endpoint": "GET /api/products/master/search (docstring)",
+        "issue": "Function docstring at products_master.py:361 still says 'across the LOCAL catalog + 91mobiles autosuggest' — mention of Deodap is missing. Also line 107 in _shape_master_row still comments 'local | 91mobiles' — should include 'deodap'. Purely doc/comment nits, no functional impact."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration33_deodap.py",
+    "/app/test_reports/pytest/iteration33_deodap.xml"
+  ],
+  "action_items": [
+    "No functional code changes required — all iteration-33 acceptance criteria pass.",
+    "Optional polish: cache empty-result external queries with a shorter TTL to avoid repeat hammering of Deodap/91mobiles when a vendor types a random string.",
+    "Optional polish: update docstring in products_master.py:master_search and the 'source' comment in _shape_master_row (line 107) to mention deodap alongside 91mobiles."
+  ],
+  "critical_code_review_comments": [
+    "products_master.py:449-453 correctly uses asyncio.gather with per-provider asyncio.wait_for timeouts — one slow provider does not stall the other. Good defensive pattern.",
+    "products_master.py:465 iterates external_91 first then external_deodap — this preserves the documented ordering (local → 91mobiles → deodap) since dedupe skips already-seen (name, brand) keys.",
+    "products_master.py:_shape_deodap_row (line 254) safely handles all three Shopify price shapes (int/float, string, dict with amount). Also normalises the leading '//cdn.shopify.com/...' image URL to https://. Robust.",
+    "products_master.py:_cache_get returns a dict now (was a list in iteration 32) and master_search does `isinstance(cached, dict)` check — safe forward migration if an old list-format doc still exists in the cache collection (it would fall through to a fresh fetch)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration33_deodap.py (NEW — 11 pytest cases covering Deodap integration, response shape, local-first ordering, dedup, cache, and 3 regression checks)"
+  ],
+  "success_rate": {"backend": "100% (11/11 tests passed)", "frontend": "not tested (backend-only scope per review request)"},
+  "seed_data_creation": "No permanent seed data. TestRegressionVendorImei creates one TEST_iter33_deodap_<uuid> vendor product and deletes it in the finally block. TestCacheWarm purges the products_master_cache row for key='earphone' at test start to guarantee a cold-miss measurement.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 33 (Deodap 3rd data source) fully verified backend-side. Frontend (rich-product-editor.tsx Deodap chip + row badge) was explicitly out of scope. If a future iteration needs to verify the frontend chip, login as Alice (test_alice_73dc7f@test.com/Passw0rd!), open Add Product editor, type 'headphone' in Smart Search, and assert a row with a 'Deodap' badge appears alongside 91mobiles rows. The cache collection is `db.products_master_cache` with 24h TTL — purge with `db.products_master_cache.delete_many({})` for a clean cold-cache test run. Cache-write bug for zero-result queries is documented under backend_issues.minor — low priority.",
+  "rca_of_issue": "No blocking bugs. During test authoring I initially observed the cache warm call taking ~1100ms (same as cold), traced to my test using a randomised query 'headphoneXXXX' that returned zero external results — the endpoint (correctly per current logic) does not persist an empty result to cache, so both calls hit external. This is a MINOR performance nit reported under backend_issues.minor, not a regression. The retest with q='earphone' (which returns real results) showed the expected warm-cache speedup (cold ~1246ms → warm ~205ms, 6x faster; merged item list byte-identical). Second nit: 91mobiles-specs endpoint requires an explicit `brand=Apple` query param — passing only `name=iPhone 15` returns 404 because the endpoint's brand fallback lowercases the first token ('iphone') which is not a key in _BRAND_URLS. This was noted in iteration 32 tests as well (they always pass brand explicitly), so it is NOT a regression from Deodap changes."
+}

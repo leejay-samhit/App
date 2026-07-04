@@ -275,9 +275,10 @@ export function RichProductEditor({
   const [masterOpen, setMasterOpen] = useState(false);
   const [masterBusy, setMasterBusy] = useState(false);
   const [masterExternalHint, setMasterExternalHint] = useState<string>("");
-  // UPDATE 2b — Source filter chips: "all" | "local" (Slangcart) | "91mobiles"
-  // Lets the vendor scope results to just our catalog or the external one.
-  const [masterSource, setMasterSource] = useState<"all" | "local" | "91mobiles">("all");
+  // UPDATE 2b — Source filter chips: "all" | "local" (Slangcart) | "91mobiles" | "deodap"
+  // Lets the vendor scope results to just our catalog or a specific
+  // external one when Smart Search merges multiple providers.
+  const [masterSource, setMasterSource] = useState<"all" | "local" | "91mobiles" | "deodap">("all");
   const masterCacheRef = React.useRef<Map<string, { at: number; items: any[]; external: boolean }>>(new Map());
   const masterDebounceRef = React.useRef<any>(null);
 
@@ -980,7 +981,8 @@ export function RichProductEditor({
                       {([
                         { key: "all", label: "All", icon: "layers" as const, count: masterResults.length },
                         { key: "local", label: "Slangcart", icon: "shopping-bag" as const, count: masterResults.filter((r: any) => r.source === "local").length },
-                        { key: "91mobiles", label: "91mobiles", icon: "globe" as const, count: masterResults.filter((r: any) => r.source === "91mobiles").length },
+                        { key: "91mobiles", label: "91mobiles", icon: "smartphone" as const, count: masterResults.filter((r: any) => r.source === "91mobiles").length },
+                        { key: "deodap", label: "Deodap", icon: "package" as const, count: masterResults.filter((r: any) => r.source === "deodap").length },
                       ]).map((c) => {
                         const active = masterSource === c.key;
                         return (
@@ -1028,8 +1030,13 @@ export function RichProductEditor({
                                 <Text style={sectionStyles.masterName} numberOfLines={2}>{row.name}</Text>
                                 {row.source === "91mobiles" ? (
                                   <View style={sectionStyles.masterSrcBadge}>
-                                    <Feather name="globe" size={9} color="#7C3AED" />
+                                    <Feather name="smartphone" size={9} color="#7C3AED" />
                                     <Text style={sectionStyles.masterSrcBadgeText}>91mobiles</Text>
+                                  </View>
+                                ) : row.source === "deodap" ? (
+                                  <View style={sectionStyles.masterSrcBadgeDeodap}>
+                                    <Feather name="package" size={9} color="#0F766E" />
+                                    <Text style={sectionStyles.masterSrcBadgeDeodapText}>Deodap</Text>
                                   </View>
                                 ) : null}
                               </View>
@@ -1780,6 +1787,13 @@ const sectionStyles = StyleSheet.create({
     borderWidth: 1, borderColor: "#7C3AED30",
   },
   masterSrcBadgeText: { fontSize: 9, fontWeight: "800", color: "#7C3AED", letterSpacing: 0.3 },
+  masterSrcBadgeDeodap: {
+    flexDirection: "row", alignItems: "center", gap: 3,
+    paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: 4, backgroundColor: "#0F766E14",
+    borderWidth: 1, borderColor: "#0F766E30",
+  },
+  masterSrcBadgeDeodapText: { fontSize: 9, fontWeight: "800", color: "#0F766E", letterSpacing: 0.3 },
   masterChipsRow: {
     flexDirection: "row", gap: 6, marginTop: 8, flexWrap: "wrap",
   },
