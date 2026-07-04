@@ -65,6 +65,34 @@ export type RichProductEndpoints = {
 
 const emptyStyled = (): StyledText => ({ text: "", bold: false, font_size: null, align: "left" });
 
+/**
+ * Luhn checksum — the industry-standard IMEI validation (also used by credit
+ * cards). A valid 15-digit IMEI passes the following algorithm:
+ *   1. Starting from the rightmost digit, double every second digit.
+ *   2. If a doubled value has two digits (>=10), sum its digits (or subtract 9).
+ *   3. Sum all resulting digits. Result must be a multiple of 10.
+ *
+ * We accept `null`/empty as VALID because the field is optional. Anything with
+ * non-digit chars is coerced by stripping them first.
+ *
+ * References: https://en.wikipedia.org/wiki/Luhn_algorithm  •  ITU-T E.212
+ */
+export function isValidImei(raw: string | null | undefined): boolean {
+  if (!raw) return true;                               // optional field
+  const digits = String(raw).replace(/\D/g, "");
+  if (digits.length !== 15) return false;              // IMEI must be 15 digits
+  let sum = 0;
+  for (let i = 0; i < 15; i++) {
+    let n = parseInt(digits[i], 10);
+    if ((15 - i) % 2 === 0) {                          // "every second from right"
+      n *= 2;
+      if (n > 9) n -= 9;
+    }
+    sum += n;
+  }
+  return sum % 10 === 0;
+}
+
 async function pickAndCompressImage(opts?: { aspect?: [number, number]; width?: number }) {
   // Delegate to the smart fitter so product hero images get a clean centre-crop
   // to the recommended 1:1 800×800 spec. Square is the default for product
@@ -197,6 +225,13 @@ export function RichProductEditor({
   // ── Clothes-specific ──
   const [subCategory, setSubCategory] = useState<string>(""); // male|female|boys|girls
   const [clothingSize, setClothingSize] = useState<string>("");
+  // ── Device identity (July 2026) — Serial + IMEI-1 + IMEI-2 ──
+  // Optional across ALL products.  IMEIs are validated client-side with a
+  // Luhn checksum (industry-standard 15-digit ID for phones).  Backend
+  // just stores whatever the frontend accepts — no rejection.
+  const [serialNumber, setSerialNumber] = useState<string>("");
+  const [imei1, setImei1] = useState<string>("");
+  const [imei2, setImei2] = useState<string>("");
   // ── AI Reference image (NOT shown in product gallery — used only to
   // prompt the AI). Kept separate from cover/gallery so the original
   // reference can be re-used by the "Regenerate" button.
@@ -368,6 +403,9 @@ export function RichProductEditor({
     setNewSubFeature("");
     setSubCategory(e.sub_category || "");
     setClothingSize(e.clothing_size || "");
+    setSerialNumber((e as any).serial_number || "");
+    setImei1((e as any).imei_1 || "");
+    setImei2((e as any).imei_2 || "");
     // Reset AI state — reference image is never persisted on the product.
     setAiReference("");
     setAiProduced(false);
@@ -746,6 +784,19 @@ export function RichProductEditor({
       Alert.alert("Cover image required", "Please add a product cover image.");
       return;
     }
+    // Device identity validation (July 2026) — blocks save on invalid IMEIs.
+    if (imei1 && !isValidImei(imei1)) {
+      Alert.alert("Invalid IMEI-1", "IMEI-1 must be 15 digits and pass the Luhn checksum. Dial *#06# on the device to see it exactly.");
+      return;
+    }
+    if (imei2 && !isValidImei(imei2)) {
+      Alert.alert("Invalid IMEI-2", "IMEI-2 must be 15 digits and pass the Luhn checksum.");
+      return;
+    }
+    if (imei1 && imei2 && imei1 === imei2) {
+      Alert.alert("Duplicate IMEIs", "IMEI-1 and IMEI-2 cannot be identical.");
+      return;
+    }
     setSaving(true);
     try {
       const extras: Record<string, string> = {};
@@ -778,6 +829,11 @@ export function RichProductEditor({
         whats_in_box: whatsInBox.filter((b) => b.name.trim() || b.image_data_url),
         sub_category: isClothes ? (subCategory || undefined) : undefined,
         clothing_size: isClothes ? (clothingSize || undefined) : undefined,
+        // Device identity (July 2026) — trimmed, `undefined` when blank so
+        // the backend keeps a null/empty value rather than a literal "".
+        serial_number: serialNumber.trim() || undefined,
+        imei_1: imei1.replace(/\s+/g, "") || undefined,
+        imei_2: imei2.replace(/\s+/g, "") || undefined,
       };
       // UPDATE 1 — Only admin editor sends is_published. Vendor editor omits
       // it entirely so the server keeps its own decision (backend also strips
@@ -1134,6 +1190,111 @@ export function RichProductEditor({
                   <Switch value={published} onValueChange={setPublished} testID="product-published" />
                 </View>
               )}
+            </Section>
+
+            {/* ── Section 1b: Device Identity (Serial / IMEI-1 / IMEI-2) ── */}
+            {/* Optional across ALL products so single-unit vendors (phone
+                shops especially) can track exact stock.  IMEIs are validated
+                with the Luhn checksum client-side; the backend just stores. */}
+            <Section
+              title="Device Identity"
+              icon="hash"
+              summary={
+                [
+                  serialNumber && `SN ${serialNumber.slice(0, 8)}${serialNumber.length > 8 ? "…" : ""}`,
+                  imei1 && `IMEI-1 ${imei1.slice(0, 6)}…`,
+                  imei2 && `IMEI-2 ${imei2.slice(0, 6)}…`,
+                ].filter(Boolean).join(" · ") || "Serial number • IMEI-1 • IMEI-2 (optional)"
+              }
+              testID="section-device-id"
+            >
+              <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 8 }}>
+                Optional. For phones / branded electronics tracked per unit. IMEIs must be exactly 15 digits and pass the Luhn checksum.
+              </Text>
+
+              <Text style={modalStyles.fieldLabel}>Serial number</Text>
+              <TextInput
+                value={serialNumber}
+                onChangeText={setSerialNumber}
+                placeholder="e.g. SN-2024-A12345678"
+                placeholderTextColor={colors.textMuted}
+                style={modalStyles.input}
+                autoCapitalize="characters"
+                testID="product-serial"
+              />
+
+              <Text style={[modalStyles.fieldLabel, { marginTop: 12 }]}>IMEI-1</Text>
+              <TextInput
+                value={imei1}
+                onChangeText={(t) => setImei1(t.replace(/[^\d]/g, "").slice(0, 15))}
+                placeholder="15-digit IMEI (dial *#06# on the device)"
+                placeholderTextColor={colors.textMuted}
+                keyboardType="number-pad"
+                maxLength={15}
+                style={[
+                  modalStyles.input,
+                  imei1.length > 0 && !isValidImei(imei1) && sectionStyles.inputError,
+                ]}
+                testID="product-imei-1"
+              />
+              {imei1.length > 0 ? (
+                <View style={sectionStyles.imeiHintRow}>
+                  {isValidImei(imei1) ? (
+                    <>
+                      <Feather name="check-circle" size={12} color="#0F9D58" />
+                      <Text style={[sectionStyles.imeiHintText, { color: "#0F9D58" }]}>Valid IMEI ({imei1.length}/15)</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Feather name="alert-triangle" size={12} color="#B3261E" />
+                      <Text style={[sectionStyles.imeiHintText, { color: "#B3261E" }]}>
+                        {imei1.length < 15 ? `${imei1.length}/15 digits` : "Failed Luhn checksum — please re-check"}
+                      </Text>
+                    </>
+                  )}
+                </View>
+              ) : null}
+
+              <Text style={[modalStyles.fieldLabel, { marginTop: 12 }]}>IMEI-2 (dual-SIM devices)</Text>
+              <TextInput
+                value={imei2}
+                onChangeText={(t) => setImei2(t.replace(/[^\d]/g, "").slice(0, 15))}
+                placeholder="Second 15-digit IMEI (if applicable)"
+                placeholderTextColor={colors.textMuted}
+                keyboardType="number-pad"
+                maxLength={15}
+                style={[
+                  modalStyles.input,
+                  imei2.length > 0 && !isValidImei(imei2) && sectionStyles.inputError,
+                ]}
+                testID="product-imei-2"
+              />
+              {imei2.length > 0 ? (
+                <View style={sectionStyles.imeiHintRow}>
+                  {isValidImei(imei2) ? (
+                    <>
+                      <Feather name="check-circle" size={12} color="#0F9D58" />
+                      <Text style={[sectionStyles.imeiHintText, { color: "#0F9D58" }]}>Valid IMEI ({imei2.length}/15)</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Feather name="alert-triangle" size={12} color="#B3261E" />
+                      <Text style={[sectionStyles.imeiHintText, { color: "#B3261E" }]}>
+                        {imei2.length < 15 ? `${imei2.length}/15 digits` : "Failed Luhn checksum — please re-check"}
+                      </Text>
+                    </>
+                  )}
+                </View>
+              ) : null}
+
+              {imei1 && imei2 && imei1 === imei2 ? (
+                <View style={sectionStyles.imeiHintRow}>
+                  <Feather name="alert-triangle" size={12} color="#B3261E" />
+                  <Text style={[sectionStyles.imeiHintText, { color: "#B3261E" }]}>
+                    IMEI-1 and IMEI-2 cannot be identical.
+                  </Text>
+                </View>
+              ) : null}
             </Section>
 
             {/* ── Section 2: Brand & Sub-features ── */}
@@ -1531,6 +1692,13 @@ const sectionStyles = StyleSheet.create({
   },
   tplBtnGhost: { backgroundColor: colors.surface, borderColor: colors.border },
   tplBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary },
+  // Device Identity — inline validation styles
+  inputError: { borderColor: "#B3261E", backgroundColor: "#B3261E10" },
+  imeiHintRow: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    marginTop: 6, paddingHorizontal: 4,
+  },
+  imeiHintText: { fontSize: 11, fontWeight: "700" },
 
   // Clothes-only block
   clothesBlock: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: colors.primary + "08", borderWidth: 1, borderColor: colors.primary + "30" },

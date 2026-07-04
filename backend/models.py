@@ -87,6 +87,12 @@ class ProductCreate(BaseModel):
     # Clothes-specific (only meaningful when category == "Clothes")
     sub_category: Optional[str] = None      # male | female | boys | girls
     clothing_size: Optional[str] = None     # S | M | L | XL | XXL
+    # ── Device identity (July 2026) — for vendor stock tracking. ──
+    # Optional across ALL products (not just phones). IMEIs are stored as
+    # plain strings; frontend validates length + Luhn checksum before submit.
+    serial_number: Optional[str] = ""
+    imei_1: Optional[str] = ""
+    imei_2: Optional[str] = ""
 
 
 class ProductUpdate(BaseModel):
@@ -116,6 +122,10 @@ class ProductUpdate(BaseModel):
     whats_in_box: Optional[List[WhatsInBoxItem]] = None
     sub_category: Optional[str] = None
     clothing_size: Optional[str] = None
+    # Device identity (July 2026)
+    serial_number: Optional[str] = None
+    imei_1: Optional[str] = None
+    imei_2: Optional[str] = None
 
 
 class BrandingPayload(BaseModel):
