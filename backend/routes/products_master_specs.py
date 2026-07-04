@@ -310,6 +310,10 @@ def _pick_best_match(name: str, items: List[Dict[str, str]]) -> Optional[Dict[st
     # Tokens containing a digit must match — model numbers are decisive.
     numeric_tokens = {t for t in t_tokens if any(c.isdigit() for c in t)}
     significant = {t for t in t_tokens if len(t) >= 2}
+    # Variant-suffix words — when present in the query they MUST also appear
+    # in the candidate (prevents "POCO X6 Pro" → "POCO X6 Neo" mismatch).
+    _VARIANTS = {"pro", "ultra", "plus", "max", "neo", "lite", "mini", "se", "fe", "prime", "premium"}
+    variant_tokens = {t for t in t_tokens if t in _VARIANTS}
 
     scored: List[Tuple[float, Dict[str, str]]] = []
     for it in items:
@@ -320,6 +324,16 @@ def _pick_best_match(name: str, items: List[Dict[str, str]]) -> Optional[Dict[st
         # Strict gate — every numeric-bearing token must be present verbatim.
         if numeric_tokens and not numeric_tokens.issubset(c_tokens):
             continue
+        # Strict gate #2 — every variant word (Pro/Ultra/Plus/Max/…) in the
+        # query must also appear in the candidate.  This prevents
+        # "POCO X6 Pro" from matching "POCO X6 Neo".
+        if variant_tokens and not variant_tokens.issubset(c_tokens):
+            continue
+        # Reverse-direction check: if the CANDIDATE has a variant word that
+        # the query lacks, penalize (but don't hard-reject — "Vivo X100"
+        # might legitimately land on "Vivo X100 Pro" if that's all we have).
+        cand_variants = c_tokens & _VARIANTS
+        cand_variant_penalty = len(cand_variants - variant_tokens) * 0.15
         # Also require at least half of significant tokens to overlap.
         overlap_count = len(significant & c_tokens)
         if significant and overlap_count / len(significant) < 0.5:
@@ -329,6 +343,10 @@ def _pick_best_match(name: str, items: List[Dict[str, str]]) -> Optional[Dict[st
         score = 0.55 * overlap + 0.35 * ratio
         if target in cand or cand in target:
             score += 0.20
+        # Penalize candidates that carry EXTRA variant words the query lacks
+        # (e.g. asked for "Vivo X100", candidate "Vivo X100 Ultra" loses 0.15
+        # so the plain "Vivo X100" wins the tie).
+        score -= cand_variant_penalty
         # Prefer shorter candidate names (avoid "Ultra"/"Plus" variants when
         # the query is the base model).
         len_penalty = max(0, len(cand.split()) - len(t_tokens)) * 0.02
