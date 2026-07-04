@@ -236,6 +236,9 @@ export function RichProductEditor({
   const [masterOpen, setMasterOpen] = useState(false);
   const [masterBusy, setMasterBusy] = useState(false);
   const [masterExternalHint, setMasterExternalHint] = useState<string>("");
+  // UPDATE 2b — Source filter chips: "all" | "local" (Slangcart) | "91mobiles"
+  // Lets the vendor scope results to just our catalog or the external one.
+  const [masterSource, setMasterSource] = useState<"all" | "local" | "91mobiles">("all");
   const masterCacheRef = React.useRef<Map<string, { at: number; items: any[]; external: boolean }>>(new Map());
   const masterDebounceRef = React.useRef<any>(null);
 
@@ -366,6 +369,7 @@ export function RichProductEditor({
     setMasterOpen(false);
     setMasterBusy(false);
     setMasterExternalHint("");
+    setMasterSource("all");
     // If editing an existing product with a custom (non-preset) category,
     // open the free-text input automatically.
     setCustomCategory(!!e.category && !isPresetCat(e.category));
@@ -691,10 +695,42 @@ export function RichProductEditor({
                     ) : null}
                     {masterBusy ? <ActivityIndicator size="small" color={colors.primary} /> : null}
                   </View>
+
+                  {/* Source filter chips — All / Slangcart / 91mobiles */}
+                  {masterOpen && masterResults.length > 0 ? (
+                    <View style={sectionStyles.masterChipsRow}>
+                      {([
+                        { key: "all", label: "All", icon: "layers" as const, count: masterResults.length },
+                        { key: "local", label: "Slangcart", icon: "shopping-bag" as const, count: masterResults.filter((r: any) => r.source === "local").length },
+                        { key: "91mobiles", label: "91mobiles", icon: "globe" as const, count: masterResults.filter((r: any) => r.source === "91mobiles").length },
+                      ]).map((c) => {
+                        const active = masterSource === c.key;
+                        return (
+                          <TouchableOpacity
+                            key={c.key}
+                            onPress={() => setMasterSource(c.key as any)}
+                            style={[sectionStyles.masterChip, active && sectionStyles.masterChipActive]}
+                            testID={`master-source-${c.key}`}
+                          >
+                            <Feather name={c.icon} size={11} color={active ? "#fff" : colors.primary} />
+                            <Text style={[sectionStyles.masterChipText, active && sectionStyles.masterChipTextActive]}>{c.label}</Text>
+                            <View style={[sectionStyles.masterChipCount, active && sectionStyles.masterChipCountActive]}>
+                              <Text style={[sectionStyles.masterChipCountText, active && sectionStyles.masterChipCountTextActive]}>{c.count}</Text>
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  ) : null}
+
                   {masterOpen ? (
-                    masterResults.length > 0 ? (
+                    (() => {
+                      const filtered = masterSource === "all"
+                        ? masterResults
+                        : masterResults.filter((r: any) => r.source === masterSource);
+                      return filtered.length > 0 ? (
                       <View style={sectionStyles.masterDropdown}>
-                        {masterResults.map((row: any, i: number) => (
+                        {filtered.map((row: any, i: number) => (
                           <TouchableOpacity
                             key={`m-${row.id || i}`}
                             onPress={() => applyMasterMatch(row)}
@@ -735,12 +771,21 @@ export function RichProductEditor({
                           </TouchableOpacity>
                         ))}
                       </View>
-                    ) : masterExternalHint ? (
+                      ) : (
+                        <View style={sectionStyles.masterEmpty}>
+                          <Feather name="info" size={13} color={colors.textMuted} />
+                          <Text style={sectionStyles.masterEmptyText}>
+                            No {masterSource === "local" ? "Slangcart" : "91mobiles"} results for this query. Try another filter.
+                          </Text>
+                        </View>
+                      );
+                    })()
+                  ) : null}
+                  {masterOpen && masterResults.length === 0 && masterExternalHint ? (
                       <View style={sectionStyles.masterEmpty}>
                         <Feather name="info" size={13} color={colors.textMuted} />
                         <Text style={sectionStyles.masterEmptyText}>{masterExternalHint}</Text>
                       </View>
-                    ) : null
                   ) : null}
                 </View>
               ) : null}
@@ -1295,6 +1340,26 @@ const sectionStyles = StyleSheet.create({
     borderWidth: 1, borderColor: "#7C3AED30",
   },
   masterSrcBadgeText: { fontSize: 9, fontWeight: "800", color: "#7C3AED", letterSpacing: 0.3 },
+  masterChipsRow: {
+    flexDirection: "row", gap: 6, marginTop: 8, flexWrap: "wrap",
+  },
+  masterChip: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.primary + "40",
+    backgroundColor: colors.surface,
+  },
+  masterChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  masterChipText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
+  masterChipTextActive: { color: "#fff" },
+  masterChipCount: {
+    minWidth: 18, paddingHorizontal: 5,
+    borderRadius: 8, backgroundColor: colors.primary + "18",
+    alignItems: "center", justifyContent: "center",
+  },
+  masterChipCountActive: { backgroundColor: "rgba(255,255,255,0.28)" },
+  masterChipCountText: { fontSize: 9, fontWeight: "900", color: colors.primary },
+  masterChipCountTextActive: { color: "#fff" },
 
   // Clothes-only block
   clothesBlock: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: colors.primary + "08", borderWidth: 1, borderColor: colors.primary + "30" },
