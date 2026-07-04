@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="4" failures="0" skipped="0" tests="16" time="1.727" timestamp="2026-07-03T02:19:42.422256+00:00" hostname="agent-env-5620fa10-828d-4db7-8eeb-df99f54eceec"><testcase classname="tests.test_products_master_search.TestAuthGating" name="test_no_token_returns_401" time="0.306" /><testcase classname="tests.test_products_master_search.TestAuthGating" name="test_bad_token_returns_401" time="0.044" /><testcase classname="tests.test_products_master_search.TestAuthenticatedReturnsItems" name="test_returns_200_with_items_array" time="0.318" /><testcase classname="tests.test_products_master_search.TestQueryValidation" name="test_missing_q_returns_422" time="0.045" /><testcase classname="tests.test_products_master_search.TestQueryValidation" name="test_empty_q_returns_422" time="0.083" /><testcase classname="tests.test_products_master_search.TestQueryValidation" name="test_single_char_q_works" time="0.045" /><testcase classname="tests.test_products_master_search.TestEmptyResultSet" name="test_unlikely_query_returns_zero" time="0.044" /><testcase classname="tests.test_products_master_search.TestExternalAvailableField" name="test_field_present_and_false" time="0.048" /><testcase classname="tests.test_products_master_search.TestOwnProductsExcluded" name="test_alice_does_not_see_own_products" time="0.160" /><testcase classname="tests.test_products_master_search.TestOwnProductsExcluded" name="test_bob_sees_alices_product" time="0.351" /><testcase classname="tests.test_products_master_search.TestDeduplication" name="test_identical_name_brand_collapsed" time="0.049"><error message="failed on setup with &quot;AssertionError: {&quot;detail&quot;:&quot;Vendor access only — your account is not an approved vendor&quot;}&#10;assert 403 == 200&#10; +  where 403 = &lt;Response [403]&gt;.status_code&quot;">tests/test_products_master_search.py:154: in bob_products
+    prefix_id = _mk(f"{tag} PrefixItem")           # prefix match on tag
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_products_master_search.py:151: in _mk
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Vendor access only — your account is not an approved vendor"}
+E   assert 403 == 200
+E    +  where 403 = &lt;Response [403]&gt;.status_code</error></testcase><testcase classname="tests.test_products_master_search.TestRanking" name="test_prefix_match_ranks_above_substring" time="0.000"><error message="failed on setup with &quot;AssertionError: {&quot;detail&quot;:&quot;Vendor access only — your account is not an approved vendor&quot;}&#10;assert 403 == 200&#10; +  where 403 = &lt;Response [403]&gt;.status_code&quot;">tests/test_products_master_search.py:154: in bob_products
+    prefix_id = _mk(f"{tag} PrefixItem")           # prefix match on tag
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_products_master_search.py:151: in _mk
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Vendor access only — your account is not an approved vendor"}
+E   assert 403 == 200
+E    +  where 403 = &lt;Response [403]&gt;.status_code</error></testcase><testcase classname="tests.test_products_master_search.TestLimitParam" name="test_limit_3_returns_at_most_3" time="0.000"><error message="failed on setup with &quot;AssertionError: {&quot;detail&quot;:&quot;Vendor access only — your account is not an approved vendor&quot;}&#10;assert 403 == 200&#10; +  where 403 = &lt;Response [403]&gt;.status_code&quot;">tests/test_products_master_search.py:154: in bob_products
+    prefix_id = _mk(f"{tag} PrefixItem")           # prefix match on tag
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_products_master_search.py:151: in _mk
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Vendor access only — your account is not an approved vendor"}
+E   assert 403 == 200
+E    +  where 403 = &lt;Response [403]&gt;.status_code</error></testcase><testcase classname="tests.test_products_master_search.TestLimitClamp" name="test_limit_100_rejected_or_clamped" time="0.045" /><testcase classname="tests.test_products_master_search.TestLimitClamp" name="test_limit_0_rejected" time="0.046" /><testcase classname="tests.test_products_master_search.TestPayloadShape" name="test_item_has_expected_fields" time="0.051"><error message="failed on setup with &quot;AssertionError: {&quot;detail&quot;:&quot;Vendor access only — your account is not an approved vendor&quot;}&#10;assert 403 == 200&#10; +  where 403 = &lt;Response [403]&gt;.status_code&quot;">tests/test_products_master_search.py:154: in bob_products
+    prefix_id = _mk(f"{tag} PrefixItem")           # prefix match on tag
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_products_master_search.py:151: in _mk
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":"Vendor access only — your account is not an approved vendor"}
+E   assert 403 == 200
+E    +  where 403 = &lt;Response [403]&gt;.status_code</error></testcase></testsuite></testsuites>

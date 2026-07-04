@@ -214,6 +214,118 @@ export function RichProductEditor({
   const [picking, setPicking] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
 
+  // ── UPDATE 2 (June 2026) — Smart product-master autocomplete ──
+  //
+  // Vendors typing a product name here get a live typeahead of matching
+  // catalog entries. Tapping a match auto-fills EVERY field so a vendor can
+  // list a phone in ~10 seconds instead of 5 minutes.
+  //
+  // Behaviour:
+  //   • Only shown when `hidePublishedToggle` is true (i.e. the vendor
+  //     dashboard, not the admin one — admins build the master and don't
+  //     need to look it up).
+  //   • Debounced 300ms per keystroke.
+  //   • 60-second in-memory cache keyed by normalised query so re-typing
+  //     the same word doesn't re-hit the network.
+  //   • Suggestions dropdown appears BELOW the search input.
+  //   • Tapping a result runs `applyMasterMatch(row)` which patches every
+  //     downstream state field in one go.
+  const showMasterSearch = !!hidePublishedToggle;
+  const [masterQuery, setMasterQuery] = useState("");
+  const [masterResults, setMasterResults] = useState<any[]>([]);
+  const [masterOpen, setMasterOpen] = useState(false);
+  const [masterBusy, setMasterBusy] = useState(false);
+  const [masterExternalHint, setMasterExternalHint] = useState<string>("");
+  const masterCacheRef = React.useRef<Map<string, { at: number; items: any[]; external: boolean }>>(new Map());
+  const masterDebounceRef = React.useRef<any>(null);
+
+  // Debounced search. 300ms after the last keystroke we hit the backend
+  // (or the in-memory cache if the same query fired in the last 60s).
+  useEffect(() => {
+    if (!showMasterSearch) return;
+    if (masterDebounceRef.current) clearTimeout(masterDebounceRef.current);
+    const q = masterQuery.trim();
+    if (q.length < 2) {
+      setMasterResults([]);
+      setMasterOpen(false);
+      setMasterBusy(false);
+      return;
+    }
+    masterDebounceRef.current = setTimeout(async () => {
+      const key = q.toLowerCase();
+      const now = Date.now();
+      const cached = masterCacheRef.current.get(key);
+      if (cached && now - cached.at < 60_000) {
+        setMasterResults(cached.items);
+        setMasterOpen(true);
+        setMasterBusy(false);
+        setMasterExternalHint(cached.external ? "" : cached.items.length === 0 ? "No match found — you can enter this manually below." : "");
+        return;
+      }
+      setMasterBusy(true);
+      try {
+        const r = await api.get<any>("/products/master/search", { params: { q, limit: 10 } });
+        const items: any[] = r.data?.items || [];
+        const external: boolean = !!r.data?.external_available;
+        masterCacheRef.current.set(key, { at: now, items, external });
+        setMasterResults(items);
+        setMasterOpen(true);
+        setMasterExternalHint(items.length === 0 ? "No match found — you can enter this manually below." : "");
+      } catch {
+        setMasterResults([]);
+        setMasterExternalHint("Couldn't reach the catalog. Enter details manually below.");
+        setMasterOpen(true);
+      } finally { setMasterBusy(false); }
+    }, 300);
+    return () => { if (masterDebounceRef.current) clearTimeout(masterDebounceRef.current); };
+  }, [masterQuery, showMasterSearch]);
+
+  /**
+   * Apply a master-catalog match to the form. Only touches empty fields by
+   * default so partially-filled forms don't wipe the vendor's work — pass
+   * `overwrite=true` for a clean apply on brand-new products.
+   */
+  const applyMasterMatch = (row: any, overwrite: boolean = true) => {
+    const put = (setter: (v: any) => void, currentEmpty: boolean, next: any) => {
+      if (overwrite || currentEmpty) setter(next);
+    };
+    put(setName, !name.trim(), row.name || "");
+    put(setPrice, !price.trim(), row.price ? String(row.price) : "");
+    put(setImageUrl, !imageUrl, row.image_url || "");
+    put(setDescription, !description.trim(), row.description || "");
+    if (row.category) {
+      const preset = isPresetCat(row.category);
+      put(setCategory, !category.trim(), row.category);
+      setCustomCategory(!preset);
+    }
+    put(setBrand, !brand.trim(), row.brand || "");
+    put(setSubFeatures, subFeatures.length === 0, Array.isArray(row.sub_features) ? row.sub_features : []);
+    put(setGalleryImages, galleryImages.length === 0, Array.isArray(row.images) ? row.images.filter(Boolean) : []);
+    if (row.price_summary) put(setPriceSummary, !priceSummary.text, row.price_summary);
+    if (row.protection_summary) put(setProtectionSummary, !protectionSummary.text, row.protection_summary);
+    if (row.warranty_summary) put(setWarrantySummary, !warrantySummary.text, row.warranty_summary);
+    if (row.delivery_summary) put(setDeliverySummary, !deliverySummary.text, row.delivery_summary);
+    put(setAttrsBrand, !attrsBrand.trim(), row.attrs_brand || row.brand || "");
+    put(setAttrsOs, !attrsOs.trim(), row.attrs_os || "");
+    put(setAttrsRam, !attrsRam.trim(), row.attrs_ram || "");
+    put(setAttrsCpuModel, !attrsCpuModel.trim(), row.attrs_cpu_model || "");
+    put(setAttrsCpuSpeed, !attrsCpuSpeed.trim(), row.attrs_cpu_speed || "");
+    put(setAttrsStorage, !attrsStorage.trim(), row.attrs_storage || "");
+    const extras = row.extra_attrs || {};
+    if (extras && typeof extras === "object") {
+      put(setExtraAttrs, extraAttrs.length === 0, Object.entries(extras).map(([k, v]) => ({ key: k, value: String(v) })));
+    }
+    if (Array.isArray(row.spec_tabs) && row.spec_tabs.length) {
+      put(setSpecTabs, specTabs.length === 0, row.spec_tabs);
+    }
+    if (Array.isArray(row.whats_in_box) && row.whats_in_box.length) {
+      put(setWhatsInBox, whatsInBox.length === 0, row.whats_in_box);
+    }
+    // Collapse the dropdown but keep the query so the vendor sees what they picked.
+    setMasterOpen(false);
+    setMasterQuery(row.name || "");
+  };
+
   // Hydrate when modal opens (or when switching to a different product)
   useEffect(() => {
     if (!visible) return;
@@ -248,6 +360,12 @@ export function RichProductEditor({
     setAiReference("");
     setAiProduced(false);
     setAiStyles(["plain"]);
+    // UPDATE 2 — Reset smart-search state whenever the modal opens.
+    setMasterQuery("");
+    setMasterResults([]);
+    setMasterOpen(false);
+    setMasterBusy(false);
+    setMasterExternalHint("");
     // If editing an existing product with a custom (non-preset) category,
     // open the free-text input automatically.
     setCustomCategory(!!e.category && !isPresetCat(e.category));
@@ -546,6 +664,79 @@ export function RichProductEditor({
               summary={name ? `${name} · ${price ? `₹${price}` : "no price"}` : "Name, price, stock, category"}
               testID="section-basics"
             >
+              {/* UPDATE 2 — Smart product-master search. Only shown in the
+                  vendor form (admin authors the master and doesn't need it). */}
+              {showMasterSearch ? (
+                <View style={sectionStyles.masterWrap} testID="master-search-wrap">
+                  <View style={sectionStyles.masterHead}>
+                    <Feather name="zap" size={14} color={colors.primary} />
+                    <Text style={sectionStyles.masterTitle}>Smart search</Text>
+                    <Text style={sectionStyles.masterSub}>tap a match to auto-fill everything</Text>
+                  </View>
+                  <View style={sectionStyles.masterInputRow}>
+                    <Feather name="search" size={16} color={colors.textMuted} />
+                    <TextInput
+                      value={masterQuery}
+                      onChangeText={setMasterQuery}
+                      onFocus={() => { if (masterResults.length) setMasterOpen(true); }}
+                      placeholder="e.g. iPhone 15, Realme 12 Pro, Samsung S24"
+                      placeholderTextColor={colors.textMuted}
+                      style={sectionStyles.masterInput}
+                      testID="product-master-search"
+                    />
+                    {masterQuery.length > 0 ? (
+                      <TouchableOpacity onPress={() => { setMasterQuery(""); setMasterResults([]); setMasterOpen(false); }} testID="product-master-clear">
+                        <Feather name="x-circle" size={16} color={colors.textMuted} />
+                      </TouchableOpacity>
+                    ) : null}
+                    {masterBusy ? <ActivityIndicator size="small" color={colors.primary} /> : null}
+                  </View>
+                  {masterOpen ? (
+                    masterResults.length > 0 ? (
+                      <View style={sectionStyles.masterDropdown}>
+                        {masterResults.map((row: any, i: number) => (
+                          <TouchableOpacity
+                            key={`m-${row.id || i}`}
+                            onPress={() => applyMasterMatch(row)}
+                            style={sectionStyles.masterRow}
+                            activeOpacity={0.7}
+                            testID={`product-master-row-${i}`}
+                          >
+                            {row.image_url ? (
+                              <Image source={{ uri: row.image_url }} style={sectionStyles.masterImg} />
+                            ) : (
+                              <View style={[sectionStyles.masterImg, { backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" }]}>
+                                <Feather name="image" size={14} color={colors.textMuted} />
+                              </View>
+                            )}
+                            <View style={{ flex: 1 }}>
+                              <Text style={sectionStyles.masterName} numberOfLines={2}>{row.name}</Text>
+                              <Text style={sectionStyles.masterMeta} numberOfLines={1}>
+                                {[row.brand, row.category].filter(Boolean).join(" · ") || "—"}
+                              </Text>
+                              {Array.isArray(row.sub_features) && row.sub_features.length ? (
+                                <Text style={sectionStyles.masterSpecs} numberOfLines={1}>
+                                  {row.sub_features.slice(0, 3).join(" · ")}
+                                </Text>
+                              ) : null}
+                            </View>
+                            <View style={{ alignItems: "flex-end" }}>
+                              {row.price ? <Text style={sectionStyles.masterPrice}>₹{Math.round(row.price).toLocaleString("en-IN")}</Text> : null}
+                              <Feather name="chevron-right" size={14} color={colors.primary} />
+                            </View>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    ) : masterExternalHint ? (
+                      <View style={sectionStyles.masterEmpty}>
+                        <Feather name="info" size={13} color={colors.textMuted} />
+                        <Text style={sectionStyles.masterEmptyText}>{masterExternalHint}</Text>
+                      </View>
+                    ) : null
+                  ) : null}
+                </View>
+              ) : null}
+
               <TouchableOpacity onPress={onPickCover} style={modalStyles.imagePick} testID="product-image-pick">
                 {imageUrl ? <Image source={{ uri: imageUrl }} style={modalStyles.imagePickImg} /> : (
                   <View style={modalStyles.imagePickPlaceholder}>
@@ -1049,6 +1240,46 @@ const sectionStyles = StyleSheet.create({
   chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   chipText: { fontSize: 12, fontWeight: "700", color: colors.textMain },
   chipTextActive: { color: colors.primaryFg },
+
+  // UPDATE 2 — Smart product-master search UI
+  masterWrap: {
+    marginBottom: 12, padding: 12, borderRadius: 14,
+    borderWidth: 1, borderColor: colors.primary + "30",
+    backgroundColor: colors.primary + "08",
+  },
+  masterHead: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" },
+  masterTitle: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
+  masterSub: { fontSize: 10, color: colors.textMuted, fontWeight: "600" },
+  masterInputRow: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: 10, backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  masterInput: { flex: 1, fontSize: 13, color: colors.textMain, padding: 0 },
+  masterDropdown: {
+    marginTop: 8, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.surface,
+    overflow: "hidden",
+    maxHeight: 340,
+  },
+  masterRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingVertical: 10, paddingHorizontal: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  masterImg: { width: 44, height: 44, borderRadius: 8, backgroundColor: colors.surfaceMuted },
+  masterName: { fontSize: 13, fontWeight: "800", color: colors.textMain, lineHeight: 17 },
+  masterMeta: { fontSize: 10, color: colors.textMuted, marginTop: 2, fontWeight: "600" },
+  masterSpecs: { fontSize: 10, color: colors.primary, marginTop: 2, fontWeight: "600" },
+  masterPrice: { fontSize: 13, fontWeight: "800", color: colors.primary, marginBottom: 2 },
+  masterEmpty: {
+    marginTop: 8, padding: 10, borderRadius: 10,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    flexDirection: "row", alignItems: "center", gap: 8,
+  },
+  masterEmptyText: { flex: 1, fontSize: 11, color: colors.textMuted, fontWeight: "600" },
 
   // Clothes-only block
   clothesBlock: { marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: colors.primary + "08", borderWidth: 1, borderColor: colors.primary + "30" },

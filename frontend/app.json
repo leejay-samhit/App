@@ -26,7 +26,10 @@
         "NSLocationWhenInUseUsageDescription": "Show nearby providers and accurate delivery estimates.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Keep your map pin fresh so customers nearby can find you.",
         "NSLocationAlwaysUsageDescription": "Keep your map pin fresh so customers nearby can find you.",
-        "UIBackgroundModes": ["location", "fetch"],
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ],
         "NSFaceIDUsageDescription": "Sign in instantly with Face ID instead of typing your password.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": false,
@@ -44,7 +47,8 @@
             }
           }
         }
-      }
+      },
+      "bundleIdentifier": "app.emergent.networkpay16728573e"
     },
     "android": {
       "package": "com.slangcart.app",
