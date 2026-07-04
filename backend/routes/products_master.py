@@ -104,7 +104,7 @@ def _strip_html(s: Any) -> str:
 def _shape_master_row(p: Dict[str, Any], source: str = "local") -> Dict[str, Any]:
     """Return the payload the vendor form consumes to prefill fields."""
     return {
-        "source": source,  # "local" | "91mobiles"
+        "source": source,  # "local" | "91mobiles" | "deodap"
         "id": p.get("id"),
         "name": p.get("name") or "",
         "brand": p.get("brand") or p.get("attrs_brand") or "",
