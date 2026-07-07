@@ -159,7 +159,7 @@ def _shape_91_row(row: Dict[str, Any]) -> Dict[str, Any] | None:
     # Their CDN also serves a `-big-1.jpg` version at the same path;
     # rewrite when possible.  If the rewrite target 404s the client will
     # be replaced by the GSMArena HD hero from the specs endpoint anyway.
-    if thumb and "/thumb/" in thumb and "-thumb-" in thumb:
+    if thumb and ("/thumb/" in thumb or "-thumb-" in thumb):
         thumb = thumb.replace("/thumb/", "/big/").replace("-thumb-", "-big-")
 
     # Try to sniff storage/RAM out of the model name (e.g. "iPhone 15 256GB")
