@@ -98,6 +98,9 @@ export default function ShopScreen() {
   const [items, setItems] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Aug 2026 — Live-update tick bumped on pull-to-refresh so ShopLayoutRenderer
+  // re-fetches its admin-managed blocks without waiting for its own poll.
+  const [layoutRefreshTick, setLayoutRefreshTick] = useState(0);
   const [adding, setAdding] = useState<string | null>(null);
   const [cartCount, setCartCount] = useState(0);
   // New: search + category filter + remembered interest registrations
@@ -369,7 +372,7 @@ export default function ShopScreen() {
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={() => { setRefreshing(true); mode === "shop" ? loadShop() : loadServices(); }}
+            onRefresh={() => { setRefreshing(true); setLayoutRefreshTick(t => t + 1); mode === "shop" ? loadShop() : loadServices(); }}
           />
         }
         keyboardShouldPersistTaps="handled"
@@ -555,6 +558,7 @@ export default function ShopScreen() {
               {/* Admin-managed shop layout: 12 dynamic block types */}
               <ShopLayoutRenderer
                 scope="home"
+                refreshTick={layoutRefreshTick}
                 onProductPress={(productId) => router.push(`/product/${productId}` as any)}
                 onCategoryPress={(c) => router.push(`/shop-category/${encodeURIComponent(c)}` as any)}
                 onAddToCart={(productId) => {

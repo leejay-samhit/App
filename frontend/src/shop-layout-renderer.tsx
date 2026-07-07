@@ -11,7 +11,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, Image, TouchableOpacity, StyleSheet, ScrollView,
-  Dimensions, FlatList, Platform,
+  Dimensions, FlatList, Platform, AppState,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { api } from "./api";
@@ -96,6 +96,10 @@ type RendererProps = {
   onProductPress?: (productId: string) => void;
   onCategoryPress?: (category: string) => void;
   onAddToCart?: (productId: string) => void;
+  // Aug 2026 — parent bumps this counter to force a live re-fetch of admin
+  // blocks (e.g. on pull-to-refresh or after an admin publish). Included in
+  // the useEffect deps so the renderer re-runs its data load.
+  refreshTick?: number;
 };
 
 const SIZE_HEIGHT: Record<"small" | "medium" | "large", number> = {
@@ -703,11 +707,13 @@ function ContentBoxBlock({
 /* ─────────────────────────── Main Renderer ─────────────────────────── */
 
 export function ShopLayoutRenderer({
-  scope = "home", category, onProductPress, onCategoryPress, onAddToCart,
+  scope = "home", category, onProductPress, onCategoryPress, onAddToCart, refreshTick,
 }: RendererProps) {
   const [blocks, setBlocks] = useState<LayoutBlock[] | null>(null);
   const [productsById, setProductsById] = useState<Record<string, Product>>({});
   const [sourceCache, setSourceCache] = useState<Record<string, Product[]>>({});
+  // Aug 2026 — Auto-poll counter for live admin updates (30 s interval).
+  const [pollTick, setPollTick] = useState(0);
   // UPDATE 1 — Hide the current vendor's own products from all admin-managed
   // layout blocks so a vendor can't accidentally buy their own inventory.
   const { user } = useAuth();
@@ -780,7 +786,19 @@ export function ShopLayoutRenderer({
       }
     })();
     return () => { cancelled = true; };
-  }, [scope, category, currentUserId]);
+  }, [scope, category, currentUserId, refreshTick, pollTick]);
+
+  // Aug 2026 — Silent auto-poll every 30s while the app is foregrounded so
+  // admin publishes appear live without a manual pull-to-refresh.  Bumps
+  // `pollTick` which is in the deps array above, so the fetch re-runs.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (AppState.currentState === "active") {
+        setPollTick((n) => n + 1);
+      }
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, []);
 
   const visible = useMemo(
     () => (blocks || []).filter((b) => b.active).sort((a, b) => a.sort_order - b.sort_order),

@@ -25,6 +25,9 @@ export default function ShopCategoryScreen() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [addingId, setAddingId] = useState<string | null>(null);
+  // Aug 2026 — Bumped on every pull-to-refresh; passed down to
+  // ShopLayoutRenderer so it re-fetches its admin-managed blocks live.
+  const [refreshTick, setRefreshTick] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -89,21 +92,35 @@ export default function ShopCategoryScreen() {
       </View>
 
       <ScrollView
-        contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
+        contentContainerStyle={{ paddingBottom: 80 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setRefreshTick(t => t + 1); load(); }} tintColor={colors.primary} />}
       >
-        {/* Admin-managed dynamic layout for this category */}
+        {/* Admin-managed dynamic layout for this category.
+            Aug 2026 — Fixed padding parity: this ScrollView no longer applies
+            `padding: spacing.screen` around the ENTIRE content — the
+            ShopLayoutRenderer manages its own section-level padding just
+            like the Shop home screen does.  refreshTick propagates the
+            parent's pull-to-refresh into the renderer so admin changes
+            appear live without app close/reopen. */}
         <ShopLayoutRenderer
           scope="category"
           category={category}
+          refreshTick={refreshTick}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
           onCategoryPress={(c) => router.push(`/shop-category/${encodeURIComponent(c)}` as any)}
         />
 
-        {/* Fallback / supplementary product grid */}
-        {loadingProducts ? (
+        {/* Fallback / supplementary product grid — wrapped in horizontal
+            padding so it matches Shop-home's card sections. */}
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: spacing.screen }}>
+        {/* Aug 2026 — Flash-of-empty fix: only render the empty state
+            AFTER we've confirmed the admin has NO layout for this category
+            AND the product query has finished.  Previously the "No products"
+            card briefly flashed while ShopLayoutRenderer was still fetching
+            its blocks — hasLayout was still `null` and products was still `[]`. */}
+        {loadingProducts || hasLayout === null ? (
           <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
-        ) : products.length === 0 ? (
+        ) : hasLayout === false && products.length === 0 ? (
           <View style={styles.emptyCard}>
             <Feather name="shopping-bag" size={28} color={colors.textMuted} />
             <Text style={styles.emptyText}>No products in {category}</Text>
@@ -151,6 +168,7 @@ export default function ShopCategoryScreen() {
             })}
           </View>
         ) : null}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );

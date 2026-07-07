@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, TextInput,
   ActivityIndicator, FlatList, Platform, useWindowDimensions,
-  Modal, Pressable,
+  Modal, Pressable, RefreshControl,
 } from "react-native";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -140,6 +140,10 @@ export function ShopHome({
 
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  // Aug 2026 — pull-to-refresh & live-update state.  refreshTick propagates
+  // into ShopLayoutRenderer so admin publishes appear without app restart.
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
   const [search, setSearch] = useState("");
   const [searchSubmitted, setSearchSubmitted] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("all");
@@ -513,6 +517,21 @@ export function ShopHome({
       <ScrollView
         contentContainerStyle={{ paddingBottom: 32 }}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={async () => {
+              // Aug 2026 — pull-to-refresh triggers ALL data reloads:
+              //   • products list (live prices, new listings)
+              //   • shop layout blocks (admin publishes appear instantly)
+              //   • wallpapers / promos via ShopLayoutRenderer's refreshTick
+              setRefreshing(true);
+              setRefreshTick((n) => n + 1);
+              try { await load(); } finally { setRefreshing(false); }
+            }}
+            tintColor={colors.primary}
+          />
+        }
       >
         <LocationBanner />
         {searchSubmitted && search.trim() ? (
@@ -726,6 +745,7 @@ export function ShopHome({
         <ShopLayoutRenderer
           scope="home"
           category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
+          refreshTick={refreshTick}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
           onCategoryPress={(c) => {
             if (!c) router.push(`${categoryRoutePrefix}/shop` as any);

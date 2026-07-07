@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 36 — Backend-only verification of the shop-layout live-update contract that the frontend refreshTick / 30s auto-poll fix depends on. ALL 13/13 tests PASS in 5.09s. Verified: (1) GET /api/shop-layout returns 200 with {items, scope, category}, (2) ?scope=category&category=<name> correctly filters — only matching category blocks returned, no leakage across categories, (3) No server-side caching — a new block POSTed by admin is visible on the very next GET with no delay, (4) PATCH active=false immediately excludes the block from public /shop-layout, and toggling back to active=true reappears immediately, (5) PATCH title reflects on next GET, (6) GET /api/products returns 200 flat array with no _id leak, (7) GET /api/products/by-source?source=all&limit=20 returns 200 (source normalises to trending), (8) source=trending&limit=10 also works. Regressions PASS: shop-layout create/patch/reorder/delete, image_fit iter34/35 persistence still holds, vendor product CRUD with serial_number/imei_1/imei_2, /products/master/search still returns 200 with local_hits + m91_hits/deodap_hits. NOTE: The review request refers to '/api/shop-layout/blocks/active' but the actual backend endpoint is '/api/shop-layout' (returns active blocks by default via ?scope=home). The frontend renderer at /app/frontend/src/shop-layout-renderer.tsx:732 calls '/shop-layout' — this is the endpoint the refreshTick auto-poll actually hits, and it is confirmed live-consistent.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration36_shop_layout_live.py",
+    "/app/test_reports/pytest/iteration36.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Endpoint naming clarification: review spec mentions '/api/shop-layout/blocks/active' but the actual (and frontend-used) endpoint is '/api/shop-layout' which returns only active blocks by default. Main agent may want to standardise the naming in future docs to avoid confusion.",
+    "The /api/products/by-source endpoint silently normalises unknown source values (e.g. 'all') to 'trending' — this works but is undocumented. Consider either validating and 400-ing, or documenting 'all' as an alias."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (13/13)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "No seed data. All TEST_iter36_* blocks/products cleaned up via try/finally teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 36 verified. Test file test_iteration36_shop_layout_live.py covers live-consistency of /api/shop-layout under POST/PATCH (no server-side cache), category scope filtering, and full regression on shop-layout CRUD/reorder, image_fit (iter 34/35), vendor IMEI (iter 33), and master search. Reusable for future iterations touching /api/shop-layout, /api/products, or /api/products/by-source. Frontend refreshTick + 30s AppState auto-poll change was NOT UI-tested (backend-only scope) — main agent may want a manual mobile-web smoke test if concerned about React Native AppState listener behaviour on the web preview.",
+  "rca_of_issue": "Not applicable — no bugs found. The backend endpoints the refreshTick / auto-poll change depends on are already live-consistent (no server-side caching layer), so the frontend fix has a solid contract to rely on. Fresh reads after POST/PATCH are guaranteed by MongoDB's default read consistency plus the absence of any Cache-Control / in-memory cache in /app/backend/routes/shop_layout.py."
+}
