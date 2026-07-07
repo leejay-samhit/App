@@ -23,7 +23,8 @@ import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+// Aug 2026 — removed useSafeAreaInsets to prevent double-padding gap.
+// Parent screens already handle safe-area via <SafeAreaView edges={["top"]}>.
 import { api, formatApiError } from "./api";
 import { colors, spacing } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
@@ -128,7 +129,10 @@ export function ShopHome({
   categoryRoutePrefix?: string;
 }) {
   const router = useRouter();
-  const insets = useSafeAreaInsets();
+  // Aug 2026 — Removed `useSafeAreaInsets()` here.  The parent screens
+  // already wrap ShopHome in <SafeAreaView edges={["top"]}> which reserves
+  // the status-bar space; adding `insets.top` on top of that produced a
+  // visible empty gap.  Header now uses a tiny 4-pixel padding only.
   const { width } = useWindowDimensions();
   // UPDATE 1 (June 2026) — Hide the current vendor's own products.
   const { user } = useAuth();
@@ -408,7 +412,14 @@ export function ShopHome({
   return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
       {/* 1. TOP HEADER — delivery + wishlist + cart */}
-      <View style={[styles.headerWrap, { paddingTop: insets.top + 8 }]}>
+      {/* Aug 2026 — Removed the extra `insets.top` from paddingTop here.
+          The parent screens (app/(tabs)/shop.tsx and app/admin/shop.tsx) already
+          wrap this in <SafeAreaView edges={["top"]}> which reserves the
+          status-bar space, so adding another `insets.top + 8` here was
+          double-padding and produced a visible empty gap between the status
+          bar and the "Deliver to …" row. Now we only add a small 4-pixel
+          breathing room. */}
+      <View style={[styles.headerWrap, { paddingTop: 4 }]}>
         <View style={styles.headerRow}>
           <TouchableOpacity
             style={styles.deliveryBlock}
