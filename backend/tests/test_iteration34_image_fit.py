@@ -180,6 +180,44 @@ class TestImageFitBlockLevel:
             f"BUG: PATCH image_fit->cover did not persist. Got {r3.json().get('image_fit')!r}"
         )
 
+    def test_patch_unrelated_field_preserves_image_fit(self, api, auth):
+        """After POST with image_fit='contain', PATCH-ing an unrelated field
+        (title) must NOT overwrite image_fit. Ensures _serialize backfill
+        doesn't clobber the persisted value on subsequent reads."""
+        payload = {
+            "block_type": "background",
+            "title": "TEST_iter34_backfill_pre",
+            "sort_order": 9004,
+            "active": True,
+            "image_data_url": TINY_JPEG_DATA_URL,
+            "image_fit": "contain",
+        }
+        r = api.post(f"{BASE_URL}/api/admin/shop-layout", json=payload, headers=auth)
+        assert r.status_code == 200
+        block_id = r.json()["id"]
+        TestImageFitBlockLevel.created_ids.append(block_id)
+        assert r.json().get("image_fit") == "contain"
+
+        # PATCH only the title
+        rp = api.patch(f"{BASE_URL}/api/admin/shop-layout/{block_id}",
+                       json={"title": "TEST_iter34_backfill_post"}, headers=auth)
+        assert rp.status_code == 200
+        assert rp.json().get("title") == "TEST_iter34_backfill_post"
+        assert rp.json().get("image_fit") == "contain", (
+            f"BUG: PATCH title overwrote image_fit. Got "
+            f"{rp.json().get('image_fit')!r}, expected 'contain'"
+        )
+
+        # GET must still return contain
+        rg = api.get(f"{BASE_URL}/api/admin/shop-layout", headers=auth)
+        assert rg.status_code == 200
+        block = next((b for b in rg.json().get("items", []) if b["id"] == block_id), None)
+        assert block is not None
+        assert block.get("image_fit") == "contain", (
+            f"BUG: after unrelated PATCH, GET returns image_fit="
+            f"{block.get('image_fit')!r}. Backfill likely overwriting persisted value."
+        )
+
     @classmethod
     def teardown_class(cls):
         """Clean up all created blocks."""
@@ -412,6 +450,7 @@ class TestVendorProductImeiRegression:
             "name": f"TEST_iter34_imei_{uuid.uuid4().hex[:6]}",
             "price": 999.0,
             "stock": 1,
+            "image_url": "https://placehold.co/300x300",
             "serial_number": "SN-ITER34",
             "imei_1": "111111111111111",
             "imei_2": "222222222222222",
@@ -426,9 +465,13 @@ class TestVendorProductImeiRegression:
             # Verify via GET
             rg = api.get(f"{BASE_URL}/api/vendor/me/products", headers=hdr)
             assert rg.status_code == 200
-            items = rg.json().get("items") or rg.json()
-            if isinstance(items, dict):
-                items = items.get("items", [])
+            body = rg.json()
+            if isinstance(body, list):
+                items = body
+            elif isinstance(body, dict):
+                items = body.get("items", [])
+            else:
+                items = []
             found = next((p for p in items if p.get("id") == pid), None)
             assert found is not None, "created product not found in vendor list"
             assert found.get("serial_number") == "SN-ITER34"

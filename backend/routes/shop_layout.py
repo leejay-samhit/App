@@ -175,6 +175,11 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
     doc.setdefault("products_per_row", 2)
     doc.setdefault("show_view_all", False)
     doc.setdefault("view_all_link", "")
+    # Aug 2026 — image_fit + per-slide image_fit backfill for legacy docs.
+    doc.setdefault("image_fit", "cover")
+    for it in doc.get("items") or []:
+        if isinstance(it, dict):
+            it.setdefault("image_fit", "cover")
     return doc
 
 
@@ -219,6 +224,9 @@ def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
         "active": bool(body.active),
         "size": (body.size if body.size in ("small", "medium", "large") else "medium"),
         "image_data_url": body.image_data_url or "",
+        # Aug 2026 — persist the fit mode so the renderer knows whether to
+        # crop (`cover`) or letterbox (`contain`).
+        "image_fit": (body.image_fit if body.image_fit in ("cover", "contain") else "cover"),
         "product_id": (body.product_id or "").strip() or None,
         "text_color": (body.text_color or "").strip(),
         "bg_color": (body.bg_color or "").strip(),
@@ -258,6 +266,11 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
             updates[f] = str(payload[f]).strip()
     if "image_data_url" in payload and payload["image_data_url"] is not None:
         updates["image_data_url"] = payload["image_data_url"]
+    # Aug 2026 — Persist the block-level image_fit toggle on PATCH.
+    if "image_fit" in payload and payload["image_fit"] is not None:
+        v = str(payload["image_fit"]).strip().lower()
+        if v in ("cover", "contain"):
+            updates["image_fit"] = v
     if "product_id" in payload:
         v = payload["product_id"]
         updates["product_id"] = (str(v).strip() if v else None) or None
@@ -309,6 +322,12 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "link_type": (str(it.get("link_type") or "").strip() or None),
                     "link_value": str(it.get("link_value") or "").strip(),
                     "color": str(it.get("color") or "").strip(),
+                    # Aug 2026 — preserve per-slide image_fit through PATCH.
+                    "image_fit": (
+                        it.get("image_fit")
+                        if it.get("image_fit") in ("cover", "contain")
+                        else "cover"
+                    ),
                 })
         updates["items"] = cleaned
     if "products_per_row" in payload and payload["products_per_row"] is not None:

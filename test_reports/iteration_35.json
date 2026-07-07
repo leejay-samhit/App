@@ -1,0 +1,31 @@
+{
+  "summary": "RETEST of iteration 34 image_fit bug-fix — ALL 13 tests PASS. The 4 fixes applied by the main agent in /app/backend/routes/shop_layout.py (block-level POST write, block-level PATCH write, item-level items-loop preservation, and _serialize backfill) all work correctly. Block-level default 'cover' when omitted, POST with 'contain' persists, PATCH cover↔contain round-trip persists, item-level image_fit on all 3 slides of a banner_slider persists through POST/GET, and PATCH-ing items[] preserves per-slide image_fit. Added the requested extra assertion (test_patch_unrelated_field_preserves_image_fit) which POSTs image_fit='contain', PATCHes only the title, then GETs — image_fit remains 'contain' proving backfill does not overwrite persisted values. All three regression classes (ShopLayoutRegression, ProductsMasterSearchRegression, VendorProductImeiRegression) also PASS.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration34_image_fit.py",
+    "/app/test_reports/pytest/iteration_35_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [
+    "/app/backend/tests/test_iteration34_image_fit.py — added test_patch_unrelated_field_preserves_image_fit (new required assertion) and fixed 2 pre-existing test-only issues in TestVendorProductImeiRegression: (a) added required image_url to vendor product create payload, (b) handled list-shaped response from GET /api/vendor/me/products (was assuming dict)."
+  ],
+  "success_rate": {
+    "backend": "100% (13/13)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "No seed data created. All test data (TEST_iter34_*) auto-cleaned via teardown_class and try/finally blocks.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 34/35 image_fit bug is fully resolved. Test file /app/backend/tests/test_iteration34_image_fit.py has 13 tests covering block-level POST/PATCH/GET (admin + public), item-level POST/PATCH/GET on banner_slider, backfill non-clobber on unrelated PATCH, and 3 regression classes (shop-layout CRUD/reorder, products/master/search, vendor products with IMEI). All pass in ~3s.",
+  "rca_of_issue": "Iteration 34 RCA (already fixed): 4 locations in /app/backend/routes/shop_layout.py did not persist the newly-added image_fit Pydantic field to Mongo — _build_doc_from_in never wrote it on POST, _build_updates never wrote block-level image_fit on PATCH, the items-loop in _build_updates stripped per-slide image_fit when items[] was patched, and _serialize did not backfill for legacy docs. Main agent added the 4 writes/reads. Verified end-to-end: POST → Mongo → GET all preserve the value, and PATCH of an unrelated field does not overwrite it."
+}
