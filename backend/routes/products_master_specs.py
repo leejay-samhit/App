@@ -23,6 +23,7 @@ Flow
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 import re
@@ -585,6 +586,99 @@ async def gsmarena_specs(
         "spec_tabs": tabs,
         "specs_filled": filled_rows,
         "specs_total": total_rows,
+    }
+
+    try:
+        await db.products_master_cache.update_one(
+            {"key": cache_key},
+            {"$set": {"key": cache_key, "at": now_utc().isoformat(), "payload": payload}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+    return payload
+
+
+# ── Fast pre-fetch: hero + HD gallery only ───────────────────────────
+# Called by the frontend the instant a 91mobiles row is picked from
+# Smart Search — populates the product image + gallery ~800ms before the
+# full `/91mobiles-specs` scrape (which also runs the spec-tab mapping)
+# completes.  Both endpoints share the underlying GSMArena catalog cache
+# so identical brand-lookups aren't repeated.
+async def _fetch_hero_only(product_url: str) -> str:
+    """Fetch just the hero image URL from a GSMArena product page. Never raises."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+            r = await client.get(product_url, headers=_HEADERS)
+        if r.status_code != 200:
+            return ""
+        return _extract_hero_image(r.text)
+    except Exception as e:
+        log.info("GSMArena hero-only fetch failed: %s", e)
+        return ""
+
+
+@router.get("/products/master/91mobiles-detail")
+async def gsmarena_detail(
+    name: str = Query(..., min_length=2),
+    brand: str = Query("", description="Brand name for narrowing down"),
+    user: Dict[str, Any] = Depends(get_current_user),  # noqa: F841
+):
+    """Return { hero_image, gallery, matched_url, matched_name } — no spec_tabs.
+
+    Optimised fast-path used by the vendor Add-Product form the moment a
+    91mobiles row is picked from Smart Search.  Fires the product-page hero
+    fetch and the HD pictures-page gallery fetch in PARALLEL so total wall
+    time ≈ max(hero_fetch, gallery_fetch) instead of sum.
+
+    Cached in `products_master_cache` under key ``detail::{brand}::{norm}``
+    for 30 days (phone galleries never change).  If the `/91mobiles-specs`
+    endpoint later runs for the same query, it can piggyback on this cache
+    layer instead of hitting GSMArena again.
+    """
+    q_name = (name or "").strip()
+    q_brand = (brand or "").strip().lower()
+    if not q_brand:
+        q_brand = q_name.split()[0].lower() if q_name else ""
+
+    cache_key = f"detail::{q_brand}::{_norm_name(q_name)}"
+    cached = await db.products_master_cache.find_one({"key": cache_key}, {"_id": 0})
+    if cached:
+        from datetime import datetime
+        try:
+            at = cached.get("at")
+            if isinstance(at, str):
+                at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            if at and (now_utc() - at).total_seconds() < _SPEC_TTL_HOURS * 3600:
+                payload = cached.get("payload") or {}
+                if payload.get("hero_image") or payload.get("gallery"):
+                    return payload
+        except Exception:
+            pass
+
+    products = await _get_brand_products(q_brand)
+    if not products:
+        raise HTTPException(status_code=404, detail=f"No GSMArena catalog for brand '{q_brand}'")
+
+    match = _pick_best_match(q_name, products)
+    if not match:
+        raise HTTPException(status_code=404, detail="Could not confidently match product on GSMArena")
+
+    # Parallel: hero (from product page) + HD gallery (from pictures page).
+    hero, gallery = await asyncio.gather(
+        _fetch_hero_only(match["url"]),
+        _fetch_gallery_images(match["url"]),
+    )
+
+    if not hero and not gallery:
+        raise HTTPException(status_code=502, detail="GSMArena returned no images")
+
+    payload = {
+        "source": "gsmarena",
+        "matched_url": match["url"],
+        "matched_name": match["name"],
+        "hero_image": hero or match.get("thumb", ""),
+        "gallery": gallery,
     }
 
     try:

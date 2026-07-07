@@ -373,6 +373,39 @@ export function RichProductEditor({
       // giving loadM91Template the fresh brand/RAM/etc. values.
       setTimeout(() => loadM91Template("merge"), 0);
     }
+    // Aug 2026 v2 — Fast image pre-fetch.  In PARALLEL with the full spec
+    // scrape above, fire the lightweight `/91mobiles-detail` endpoint which
+    // returns just { hero_image, gallery } from GSMArena.  Because both
+    // requests share the brand-catalog cache, this typically resolves ~800ms
+    // before the full specs endpoint — so the vendor sees the HD product
+    // image populated immediately after picking, instead of staring at a
+    // low-res 91mobiles thumbnail while specs load.
+    if (row.source === "91mobiles") {
+      (async () => {
+        try {
+          const q = (row.name || "").trim();
+          const b = (row.brand || row.attrs_brand || "").trim();
+          if (q.length < 2) return;
+          const d = await api.get<any>("/products/master/91mobiles-detail", {
+            params: { name: q, ...(b ? { brand: b } : {}) },
+          });
+          const heroImg: string = d?.data?.hero_image || "";
+          const gal: string[] = Array.isArray(d?.data?.gallery) ? d.data.gallery : [];
+          // Only patch fields the user hasn't touched — respects any
+          // manual edits between pick and this async resolution.
+          if (heroImg) {
+            setImageUrl((cur) => cur || heroImg);
+          }
+          if (gal.length > 0) {
+            setGalleryImages((cur) => {
+              if (cur.length > 0) return cur;  // vendor already edited
+              const withHero = heroImg && !gal.includes(heroImg) ? [heroImg, ...gal] : gal;
+              return withHero.slice(0, 12);
+            });
+          }
+        } catch { /* silent — full spec scrape will populate images if this failed */ }
+      })();
+    }
     // Aug 2026 — Deodap enrichment: the autosuggest API only ships 1 tiny
     // thumbnail per product.  When the vendor actually PICKS the row we
     // fire /products/master/deodap-detail to pull the full HD gallery
