@@ -541,6 +541,10 @@ function BlockFormModal({
   const [body, setBody] = useState("");
   const [ctaLabel, setCtaLabel] = useState("");
   const [imageDataUrl, setImageDataUrl] = useState("");
+  // Aug 2026 — "cover" (crop-to-fill, default) OR "contain" (show full image,
+  // no crop, letterbox with bg_color). Toggle exposed in the form for
+  // banner-type blocks so admins choose per-banner.
+  const [imageFit, setImageFit] = useState<"cover" | "contain">("cover");
   const [productId, setProductId] = useState<string | null>(null);
   const [productIds, setProductIds] = useState<string[]>([]);
   const [sortOrder, setSortOrder] = useState("0");
@@ -580,6 +584,7 @@ function BlockFormModal({
     setBody(block?.body || "");
     setCtaLabel(block?.cta_label || "");
     setImageDataUrl(block?.image_data_url || "");
+    setImageFit(((block as any)?.image_fit === "contain" ? "contain" : "cover"));
     setProductId(block?.product_id || null);
     setProductIds(block?.product_ids || []);
     setSortOrder(String(block?.sort_order ?? 0));
@@ -606,11 +611,14 @@ function BlockFormModal({
   // aspect ratio. Pass the block_type so the right preset (banner 16:9,
   // category 1:1, brand 9:5, etc.) is used; falls back to a square crop
   // for blocks we haven't catalogued yet.
-  const pickImage = async (cb: (url: string) => void, target?: ImageTarget) => {
+  const pickImage = async (cb: (url: string) => void, target?: ImageTarget, forceFit?: "cover" | "contain") => {
     setPicking(true);
     try {
       const tgt: ImageTarget = target || (type as ImageTarget) || "banner_slider";
-      const dataUrl = await pickAndFitImage(IMAGE_SPECS[tgt] ? tgt : "banner_slider");
+      // Aug 2026 — honor per-block `imageFit`. When admin opts into
+      // "contain" we skip the centre-crop step in the fitter entirely.
+      const mode: "cover" | "contain" = forceFit || imageFit;
+      const dataUrl = await pickAndFitImage(IMAGE_SPECS[tgt] ? tgt : "banner_slider", mode);
       if (dataUrl) cb(dataUrl);
     } catch (e) { Alert.alert("Image pick failed", formatApiError(e)); }
     finally { setPicking(false); }
@@ -641,6 +649,7 @@ function BlockFormModal({
         title: title.trim(), subtitle: subtitle.trim(), body: body.trim(),
         cta_label: ctaLabel.trim(),
         image_data_url: imageDataUrl,
+        image_fit: imageFit,
         product_id: productId,
         product_ids: usesProducts && dataSource === "manual" ? productIds : [],
         sort_order: parseInt(sortOrder, 10) || 0,
@@ -786,10 +795,38 @@ function BlockFormModal({
             {usesImage ? (
               <>
                 <Text style={styles.label}>Image (required)</Text>
-                <Text style={styles.hint}>{pickerHintFor("background")} — any size you upload is auto-cropped to fit.</Text>
+                <Text style={styles.hint}>
+                  {pickerHintFor("background")}
+                  {imageFit === "cover"
+                    ? " — image will fill the block (edges may crop)."
+                    : " — full image will be shown (no crop). Set a background color below to fill any gaps."}
+                </Text>
+
+                {/* Aug 2026 — Fit-mode toggle. Lets admin choose full-image
+                    vs. crop-to-fill BEFORE picking the image so the fitter
+                    doesn't centre-crop when they want the whole photo. */}
+                <View style={styles.fitRow}>
+                  <TouchableOpacity
+                    onPress={() => setImageFit("cover")}
+                    style={[styles.fitBtn, imageFit === "cover" && styles.fitBtnActive]}
+                    testID="banner-fit-cover"
+                  >
+                    <Feather name="maximize-2" size={12} color={imageFit === "cover" ? "#fff" : colors.primary} />
+                    <Text style={[styles.fitBtnText, imageFit === "cover" && styles.fitBtnTextActive]}>Crop to fill</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => setImageFit("contain")}
+                    style={[styles.fitBtn, imageFit === "contain" && styles.fitBtnActive]}
+                    testID="banner-fit-contain"
+                  >
+                    <Feather name="image" size={12} color={imageFit === "contain" ? "#fff" : colors.primary} />
+                    <Text style={[styles.fitBtnText, imageFit === "contain" && styles.fitBtnTextActive]}>Show full image</Text>
+                  </TouchableOpacity>
+                </View>
+
                 <TouchableOpacity onPress={() => pickImage(setImageDataUrl, "background")} style={styles.imagePicker}>
                   {imageDataUrl ? (
-                    <Image source={{ uri: imageDataUrl }} style={styles.imagePreview} resizeMode="cover" />
+                    <Image source={{ uri: imageDataUrl }} style={styles.imagePreview} resizeMode={imageFit === "contain" ? "contain" : "cover"} />
                   ) : (
                     <View style={styles.imagePickerEmpty}>
                       {picking ? <ActivityIndicator color={colors.primary} /> : (
@@ -937,7 +974,9 @@ function BlockFormModal({
                 {items.length === 0 ? (
                   <Text style={styles.hint}>Tap + to add a {type === "banner_slider" ? "slide" : type === "category_circles" ? "category" : type === "brand_slider" ? "brand" : "offer"}. {pickerHintFor(type as ImageTarget)}</Text>
                 ) : (
-                  <Text style={styles.hint}>{pickerHintFor(type as ImageTarget)} — upload any size, we&apos;ll auto-crop to fit.</Text>
+                  <Text style={styles.hint}>
+                    {pickerHintFor(type as ImageTarget)} — {imageFit === "cover" ? "images auto-cropped to fit" : "full image shown (no crop)"}.
+                  </Text>
                 )}
                 {items.map((it, idx) => (
                   <View key={`item-${idx}`} style={styles.itemRow}>
@@ -1175,6 +1214,16 @@ const styles = StyleSheet.create({
   imagePicker: { width: "100%", aspectRatio: 16 / 9, borderRadius: 14, borderWidth: 1.5, borderColor: colors.border, borderStyle: "dashed", overflow: "hidden", backgroundColor: colors.surfaceMuted },
   imagePickerEmpty: { flex: 1, alignItems: "center", justifyContent: "center", gap: 4 },
   imagePickerHint: { fontSize: 13, color: colors.textMain, fontWeight: "700", marginTop: 4 },
+  fitRow: { flexDirection: "row", gap: 8, marginBottom: 10, marginTop: 4 },
+  fitBtn: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.primary + "50",
+    backgroundColor: colors.surface,
+  },
+  fitBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  fitBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary },
+  fitBtnTextActive: { color: "#fff" },
   imagePreview: { width: "100%", height: "100%" },
   typeChoice: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
   typeChoiceActive: { backgroundColor: colors.primary, borderColor: colors.primary },

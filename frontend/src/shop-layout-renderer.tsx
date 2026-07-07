@@ -34,6 +34,8 @@ export type LayoutItem = {
   link_type?: "product" | "category" | null;
   link_value?: string;
   color?: string;
+  // Aug 2026 — "cover" (default, may crop) or "contain" (show full image, no crop)
+  image_fit?: "cover" | "contain";
 };
 
 export type LayoutBlock = {
@@ -45,6 +47,8 @@ export type LayoutBlock = {
   subtitle?: string;
   body?: string;
   image_data_url?: string;
+  // Aug 2026 — controls resizeMode for the block's hero image
+  image_fit?: "cover" | "contain";
   product_id?: string | null;
   cta_label?: string;
   sort_order: number;
@@ -166,7 +170,13 @@ function BannerSliderBlock({
               }}
             >
               {item.image_data_url ? (
-                <Image source={{ uri: item.image_data_url }} style={StyleSheet.absoluteFill as any} resizeMode="cover" />
+                <Image
+                  source={{ uri: item.image_data_url }}
+                  style={StyleSheet.absoluteFill as any}
+                  resizeMode={
+                    (item.image_fit || block.image_fit) === "contain" ? "contain" : "cover"
+                  }
+                />
               ) : null}
               {(item.label || item.subtitle) ? (
                 <View style={[styles.slideOverlay, { alignItems: alignToTextAlign(block.text_align) === "center" ? "center" : "flex-start" }]}>
@@ -602,7 +612,11 @@ function BackgroundBlock({
   const inner = (
     <View style={[styles.bannerBox, { height, backgroundColor: block.bg_color || colors.brand100 }]}>
       {block.image_data_url ? (
-        <Image source={{ uri: block.image_data_url }} style={StyleSheet.absoluteFill as any} resizeMode="cover" />
+        <Image
+          source={{ uri: block.image_data_url }}
+          style={StyleSheet.absoluteFill as any}
+          resizeMode={block.image_fit === "contain" ? "contain" : "cover"}
+        />
       ) : null}
       {(block.title || block.subtitle) ? (
         <View style={[styles.bannerOverlay, { alignItems: alignToTextAlign(block.text_align) === "center" ? "center" : "flex-start" }]}>

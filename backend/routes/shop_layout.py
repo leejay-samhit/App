@@ -62,6 +62,10 @@ class LayoutItem(BaseModel):
     link_type: Optional[str] = None  # "product" | "category" | None
     link_value: Optional[str] = ""
     color: Optional[str] = ""
+    # August 2026 — how the renderer should fit the image inside the block:
+    #   "cover"   (default) — image fills the frame, may crop edges
+    #   "contain" — full image visible, letterboxed with `color` / bg_color
+    image_fit: Optional[str] = "cover"
 
 
 class ShopLayoutBlockIn(BaseModel):
@@ -78,6 +82,8 @@ class ShopLayoutBlockIn(BaseModel):
     active: bool = True
     size: Optional[str] = "medium"
     image_data_url: Optional[str] = Field(default="", max_length=4_000_000)
+    # August 2026 — see LayoutItem.image_fit docstring above.
+    image_fit: Optional[str] = "cover"
     product_id: Optional[str] = None
     # styling overrides
     text_color: Optional[str] = ""
@@ -113,6 +119,7 @@ class ShopLayoutBlockPatch(BaseModel):
     active: Optional[bool] = None
     size: Optional[str] = None
     image_data_url: Optional[str] = None
+    image_fit: Optional[str] = None
     product_id: Optional[str] = None
     text_color: Optional[str] = None
     bg_color: Optional[str] = None

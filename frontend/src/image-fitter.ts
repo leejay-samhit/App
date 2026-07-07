@@ -60,8 +60,21 @@ export function aspectFor(target: ImageTarget): number {
 /**
  * Pick + auto-fit an image for a given block / target. Never throws — on
  * permission denial / cancellation it returns null and surfaces an Alert.
+ *
+ * `fitMode` controls how we shape the picked image before compressing:
+ *   "cover"   (default) — CENTRE-CROP to the block's native aspect ratio
+ *                         then resize to the recommended pixel size.
+ *                         Result: image fills the block, edges may crop.
+ *   "contain" — NO CROP. Resize the source so its longest edge equals the
+ *                         corresponding spec side, preserving the source
+ *                         aspect ratio. Result: the whole image is
+ *                         visible; the block is letterboxed by the
+ *                         renderer's background color.
  */
-export async function pickAndFitImage(target: ImageTarget): Promise<string | null> {
+export async function pickAndFitImage(
+  target: ImageTarget,
+  fitMode: "cover" | "contain" = "cover",
+): Promise<string | null> {
   try {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
@@ -79,7 +92,7 @@ export async function pickAndFitImage(target: ImageTarget): Promise<string | nul
     });
     if (r.canceled || !r.assets?.[0]?.uri) return null;
     const asset = r.assets[0];
-    return await fitToTarget(asset.uri, target, asset.width, asset.height);
+    return await fitToTarget(asset.uri, target, asset.width, asset.height, fitMode);
   } catch (e: any) {
     Alert.alert("Couldn't load image", e?.message || "Try a different file.");
     return null;
@@ -102,6 +115,7 @@ export async function fitToTarget(
   target: ImageTarget,
   srcW?: number,
   srcH?: number,
+  fitMode: "cover" | "contain" = "cover",
 ): Promise<string> {
   const spec = IMAGE_SPECS[target];
   const targetAspect = spec.width / spec.height;
@@ -117,7 +131,30 @@ export async function fitToTarget(
   }
 
   const actions: ImageManipulator.Action[] = [];
-  if (w && h) {
+  if (fitMode === "contain") {
+    // NO CROP. Scale so the source fits INSIDE spec.width × spec.height
+    // keeping its own aspect ratio. Renderer must use resizeMode="contain"
+    // + a bg color so the frame doesn't leave a visible letterbox gap.
+    if (w && h) {
+      const srcAspect = w / h;
+      let outW: number; let outH: number;
+      if (srcAspect >= targetAspect) {
+        // Source wider than block — cap width.
+        outW = Math.min(spec.width, w);
+        outH = Math.round(outW / srcAspect);
+      } else {
+        // Source taller than block — cap height.
+        outH = Math.min(spec.height, h);
+        outW = Math.round(outH * srcAspect);
+      }
+      actions.push({ resize: { width: outW, height: outH } });
+    } else {
+      // Unknown dims — fall back to a width-only resize; renderer will still
+      // "contain" the source into the block so nothing gets cropped.
+      actions.push({ resize: { width: spec.width } });
+    }
+  } else if (w && h) {
+    // "cover" mode — centre-crop to target aspect then resize.
     const srcAspect = w / h;
     if (Math.abs(srcAspect - targetAspect) > 0.005) {
       // Need a centre crop.
@@ -134,8 +171,11 @@ export async function fitToTarget(
       const originY = Math.max(0, Math.round((h - cropH) / 2));
       actions.push({ crop: { originX, originY, width: cropW, height: cropH } });
     }
+    actions.push({ resize: { width: spec.width, height: spec.height } });
+  } else {
+    // "cover" fallback with unknown dims — width-only resize.
+    actions.push({ resize: { width: spec.width, height: spec.height } });
   }
-  actions.push({ resize: { width: spec.width, height: spec.height } });
 
   const out = await ImageManipulator.manipulateAsync(uri, actions, {
     compress: 0.75,
