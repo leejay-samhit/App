@@ -154,6 +154,13 @@ def _shape_91_row(row: Dict[str, Any]) -> Dict[str, Any] | None:
     slug = row.get("url") or ""
     external_url = f"https://www.91mobiles.com/{slug}" if slug else None
     thumb = row.get("thumbnail") or ""
+    # Aug 2026 — 91mobiles autosuggest ships a small `-thumb-1.jpg`
+    # variant which renders blurry when we use it as the product cover.
+    # Their CDN also serves a `-big-1.jpg` version at the same path;
+    # rewrite when possible.  If the rewrite target 404s the client will
+    # be replaced by the GSMArena HD hero from the specs endpoint anyway.
+    if thumb and "/thumb/" in thumb and "-thumb-" in thumb:
+        thumb = thumb.replace("/thumb/", "/big/").replace("-thumb-", "-big-")
 
     # Try to sniff storage/RAM out of the model name (e.g. "iPhone 15 256GB")
     storage_m = re.search(r"(\d+\s*(?:GB|TB))\b", name, re.I)
@@ -293,6 +300,11 @@ def _shape_deodap_row(row: Dict[str, Any]) -> Dict[str, Any] | None:
     # verify pricing / description / dimensions before publishing.
     url = row.get("url") or ""
     external_url = f"https://deodap.in{url}" if url and url.startswith("/") else url
+    # Aug 2026 — expose the Shopify `handle` so the frontend can call
+    # /products/master/deodap-detail on pick and pull the full HD gallery.
+    handle = ""
+    if url and "/products/" in url:
+        handle = url.split("/products/")[-1].split("?")[0].strip()
 
     return {
         "source": "deodap",
@@ -319,6 +331,7 @@ def _shape_deodap_row(row: Dict[str, Any]) -> Dict[str, Any] | None:
         "spec_tabs": [],
         "whats_in_box": [],
         "external_url": external_url,
+        "handle": handle,  # used for on-pick gallery enrichment
     }
 
 
@@ -350,6 +363,57 @@ async def _fetch_deodap(query: str) -> List[Dict[str, Any]]:
         if s:
             out.append(s)
     return out
+
+
+# ── Deodap detail enrichment ─────────────────────────────────────────
+# Deodap's /products/{handle}.json returns full Shopify Product records
+# with ~5-12 HD images. Called on-pick from the frontend so we only pay
+# the round-trip when the vendor actually selects a Deodap row.
+async def _fetch_deodap_detail(handle: str) -> Dict[str, Any]:
+    """Fetch full images + description for a Deodap product. Never raises."""
+    url = f"https://deodap.in/products/{handle}.json"
+    try:
+        async with httpx.AsyncClient(timeout=_DEODAP_TIMEOUT_SECS, follow_redirects=True) as client:
+            r = await client.get(url, headers=_DEODAP_HEADERS)
+        if r.status_code != 200:
+            return {}
+        p = (r.json() or {}).get("product") or {}
+    except Exception as e:
+        log.info("Deodap detail fetch failed: %s", e)
+        return {}
+    images: List[str] = []
+    for img in p.get("images") or []:
+        src = img.get("src") or ""
+        if not src:
+            continue
+        if src.startswith("//"):
+            src = f"https:{src}"
+        images.append(src)
+    return {
+        "handle": handle,
+        "title": _strip_html(p.get("title") or ""),
+        "description": _strip_html(p.get("body_html") or "")[:2000],
+        "images": images[:12],
+    }
+
+
+@router.get("/products/master/deodap-detail")
+async def deodap_detail(
+    handle: str = Query(..., min_length=1),
+    user: Dict[str, Any] = Depends(get_current_user),  # noqa: F841
+):
+    """Return the full image gallery + description for a Deodap product.
+
+    Called on-demand from the frontend when a vendor taps a Deodap row in
+    Smart Search — enriches the ~1 thumbnail we get from the autosuggest
+    API into the true 5-12 HD image gallery.
+    """
+    if len(handle) > 200:
+        raise HTTPException(status_code=400, detail="handle too long")
+    d = await _fetch_deodap_detail(handle)
+    if not d or not d.get("images"):
+        raise HTTPException(status_code=404, detail="Deodap product not found or no images")
+    return d
 
 
 @router.get("/products/master/search")

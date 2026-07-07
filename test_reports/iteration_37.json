@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 37 — Backend-only verification of (1) new GET /api/products/master/deodap-detail endpoint, (2) `handle` field on Deodap rows in /products/master/search, and (3) 91mobiles thumbnail→big URL rewrite. 10/11 tests PASS. FAIL: TestM91ThumbRewrite — the 91mobiles thumb→big rewrite guard in _shape_91_row uses AND when it should be OR. Actual 91mobiles autosuggest URLs look like `https://www.91-img.com/pictures/148763-v4-apple-iphone-15-mobile-phone-thumb-1.jpg` (contains `-thumb-` but does NOT contain `/thumb/`), so the current guard `if thumb and '/thumb/' in thumb and '-thumb-' in thumb:` never fires and no URLs are rewritten. All 9 iPhone-15 variants still ship the blurry `-thumb-1.jpg` variant to the client. Deodap-detail endpoint fully verified: 401 unauth, 200 with 5-12 HD https:// cdn.shopify.com images for valid handles (tested with wireless-over-ear-bluetooth-headphones-zw-053 + live-search-derived handles), 404 clean error for junk handle, 422 for missing param. Deodap rows in search now carry non-empty `handle` field usable end-to-end for the on-pick gallery enrichment. All regressions PASS: vendor POST /products with serial+imei_1+imei_2 persists, /shop-layout returns items, /products/master/91mobiles-specs works for iPhone 15, /products/master/search merges 3 sources (local + 91mobiles + deodap). NOTE: I cleared 10 stale entries from `products_master_cache` collection during testing — the previous cache contained pre-`handle`-field Deodap rows that would have masked the new field. Consider a one-shot cache purge on deploy.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/products/master/search (91mobiles rows in items[])",
+        "issue": "91mobiles thumb→big URL rewrite in _shape_91_row is broken. In /app/backend/routes/products_master.py:162 the guard is `if thumb and '/thumb/' in thumb and '-thumb-' in thumb:` — this uses AND, but real 91mobiles autosuggest URLs (e.g. `https://www.91-img.com/pictures/148763-v4-apple-iphone-15-mobile-phone-thumb-1.jpg`) contain `-thumb-` only, NOT `/thumb/`. The AND causes the rewrite to be skipped for every 91mobiles URL observed in production. Fix: change AND to OR: `if thumb and ('/thumb/' in thumb or '-thumb-' in thumb):`. The two .replace() calls below are already idempotent so no other change needed. All 9 iPhone-15 variant thumbnails ship as `-thumb-1.jpg` (blurry) instead of `-big-1.jpg` (HD).",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "products_master_cache collection",
+        "issue": "The Deodap autosuggest cache holds shaped rows for 24h. When the `handle` field was newly added to _shape_deodap_row, all pre-existing cache entries continued to serve rows WITHOUT `handle` until they expired. On the fresh preview DB this caused my first test run to show 'no handle' for every Deodap row. After a manual `products_master_cache.delete_many({})` the field appeared correctly. Consider adding a schema-version key or one-shot purge on deploy so shape changes take effect immediately."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration37_deodap_detail.py",
+    "/app/test_reports/pytest/iteration37.xml"
+  ],
+  "action_items": [
+    "Fix /app/backend/routes/products_master.py:162 — change `if thumb and '/thumb/' in thumb and '-thumb-' in thumb:` to `if thumb and ('/thumb/' in thumb or '-thumb-' in thumb):` so the 91mobiles thumb→big rewrite actually triggers for the real URL format (`.../148763-v4-apple-iphone-15-mobile-phone-thumb-1.jpg`).",
+    "After the fix, purge products_master_cache: `db.products_master_cache.delete_many({})` so the newly-rewritten -big-1.jpg URLs replace the cached -thumb-1.jpg URLs immediately (24h cache would otherwise mask the fix).",
+    "Re-run pytest /app/backend/tests/test_iteration37_deodap_detail.py — expected 11/11 after the AND→OR fix."
+  ],
+  "critical_code_review_comments": [
+    "products_master.py:162 — the AND guard on the thumb→big rewrite is the root cause of the reported blurry-image bug; OR is required because 91mobiles CDN uses `-thumb-`/`-big-` suffix variants without any `/thumb/` path segment.",
+    "products_master.py cache — cache stores fully-shaped rows so any change to _shape_deodap_row or _shape_91_row is invisible until the cache expires (24h). Consider caching raw upstream JSON instead and re-shaping on read, or adding a `_shape_version` key.",
+    "products_master.py:400-416 — deodap_detail handler is clean: 400 for oversized handle, 404 for empty result. Good.",
+    "The `user: Dict = Depends(get_current_user)` on deodap_detail is intentionally unused (# noqa: F841). Fine, though a shorter `_ = Depends(...)` would be cleaner."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "91% (10/11)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "No seed data created. TEST_iter37_* vendor product created and deleted in TestRegressionVendorImei via try/finally. products_master_cache was purged of 10 stale entries (safe, cache repopulates on next hit).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 37 covers the 3 backend changes in this PR (Deodap detail endpoint, `handle` field on Deodap rows, 91mobiles thumb→big rewrite). Test file test_iteration37_deodap_detail.py is reusable — 11 tests, module-scoped Alice login. The one failing test (TestM91ThumbRewrite::test_91m_image_urls_are_big_variant) is a live backend bug in _shape_91_row (AND→OR fix documented in action_items). After main agent fix + cache purge, re-run just that test to confirm. IMPORTANT: If you re-run this suite and see 'no handle' failures, purge products_master_cache first — shape changes are cached for 24h. Frontend delete-button-removal in admin/products.tsx and applyMasterMatch changes in rich-product-editor.tsx were NOT tested (explicit backend-only scope).",
+  "rca_of_issue": "ROOT CAUSE: /app/backend/routes/products_master.py:162 uses `if thumb and '/thumb/' in thumb and '-thumb-' in thumb:` (AND). Real 91mobiles autosuggest thumbnail URLs use only the `-thumb-N.jpg` suffix variant (no `/thumb/` path segment), e.g. `https://www.91-img.com/pictures/148763-v4-apple-iphone-15-mobile-phone-thumb-1.jpg`. The AND guard requires BOTH markers so the rewrite never runs and blurry thumbnails leak through. REPRO: `curl -H 'Authorization: Bearer <alice>' '<BASE>/api/products/master/search?q=iphone+15&limit=15'` — every 91mobiles item has `image_url` ending in `-thumb-1.jpg`. MITIGATION: change AND to OR (single-word fix). After code fix, purge products_master_cache so the 24h-cached -thumb- rows are re-fetched and re-shaped as -big-. Verified end-to-end: replacing the URL manually to -big-1.jpg (e.g. `https://www.91-img.com/pictures/148763-v4-apple-iphone-15-mobile-phone-big-1.jpg`) does return an HD image."
+}

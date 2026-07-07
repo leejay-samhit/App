@@ -373,6 +373,27 @@ export function RichProductEditor({
       // giving loadM91Template the fresh brand/RAM/etc. values.
       setTimeout(() => loadM91Template("merge"), 0);
     }
+    // Aug 2026 — Deodap enrichment: the autosuggest API only ships 1 tiny
+    // thumbnail per product.  When the vendor actually PICKS the row we
+    // fire /products/master/deodap-detail to pull the full HD gallery
+    // (typically 5-12 photos) and merge them into galleryImages.
+    if (row.source === "deodap" && row.handle) {
+      (async () => {
+        try {
+          const d = await api.get<any>("/products/master/deodap-detail", { params: { handle: row.handle } });
+          const imgs: string[] = (d?.data?.images || []).filter(Boolean);
+          if (imgs.length > 0) {
+            // Replace the low-res cover with the FIRST HD image so the
+            // "Main Display pic" the admin sees is sharp.
+            setImageUrl(imgs[0]);
+            setGalleryImages(imgs.slice(0, 12));
+          }
+          if (d?.data?.description && !description.trim()) {
+            setDescription(String(d.data.description).slice(0, 2000));
+          }
+        } catch { /* silent — vendor still has the thumbnail + can add images */ }
+      })();
+    }
     // Collapse the dropdown but keep the query so the vendor sees what they picked.
     setMasterOpen(false);
     setMasterQuery(row.name || "");

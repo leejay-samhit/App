@@ -249,9 +249,12 @@ export default function AdminProducts() {
                             <Feather name="edit-2" size={13} color={colors.primary} />
                             <Text style={styles.actionBtnText}>Edit</Text>
                           </TouchableOpacity>
-                          <TouchableOpacity onPress={() => onDelete(item)} style={[styles.actionBtn, styles.actionBtnDanger]} testID={`product-${item.id}-delete`}>
-                            <Feather name="trash-2" size={13} color="#B3261E" />
-                          </TouchableOpacity>
+                          {/* Aug 2026 — Delete button removed on purpose.
+                              Deleting a live product wiped it from vendor
+                              stock too, causing downstream cart/order
+                              damage.  Admins retain full EDIT rights and
+                              can also toggle "Published" off to hide the
+                              product without destroying vendor data. */}
                         </View>
                       </View>
                     </TouchableOpacity>
