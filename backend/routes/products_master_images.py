@@ -198,7 +198,7 @@ async def _fetch_openverse(client: httpx.AsyncClient, q: str, want: int) -> List
             "provider": "openverse",
             "width": row.get("width") or None,
             "height": row.get("height") or None,
-            "license": (row.get("license") or "").upper() + (" " + row.get("license_version") if row.get("license_version") else ""),
+            "license": (row.get("license") or "").upper() + (" " + str(row.get("license_version")) if row.get("license_version") else ""),
         })
     return out
 
@@ -310,15 +310,32 @@ async def search_free_images(
 
     resolved_query = query
     translation = _translate(query)
+    # Sept 2026 fix — For KNOWN vernacular keys we always translate.
+    # Previously we only translated when the raw query returned <3 hits,
+    # but Openverse sometimes returns partially-matching cruft (e.g.
+    # "Bellam Pulusu" for "Bellam") that fills the quota without actually
+    # showing jaggery. Better UX: translate up-front for terms we've
+    # explicitly mapped, and fall back to the raw query only if the
+    # translation itself comes up empty.
+    known_vernacular = bool(translation)
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-        # 1. Openverse with the raw query
-        primary = await _fetch_openverse(client, query, limit)
-
-        # 2. If thin, retry with English translation
-        if len(primary) < 3 and translation and translation != query.lower():
+        if known_vernacular and translation and translation.lower() != query.lower():
+            # Search with translation first
             resolved_query = translation
             primary = await _fetch_openverse(client, translation, limit)
+            # If translation gave nothing, fall back to the raw query
+            if not primary:
+                resolved_query = query
+                primary = await _fetch_openverse(client, query, limit)
+        else:
+            # 1. Openverse with the raw query
+            primary = await _fetch_openverse(client, query, limit)
+            # 2. If thin, retry with English translation (should be rare
+            #    now — most vernacular hits are handled above)
+            if len(primary) < 3 and translation and translation.lower() != query.lower():
+                resolved_query = translation
+                primary = await _fetch_openverse(client, translation, limit)
 
         # 3. If still thin, fall back to Wikimedia Commons on the resolved query
         wm: List[Dict[str, Any]] = []

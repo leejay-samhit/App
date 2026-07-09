@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 41 targeted retest of the Bellam→jaggery translation gate PASSED. All 7 spec cases from the review request pass. Bonus: full TestChange3_FreeImagePicker suite from iteration 40 (12 tests) now passes end-to-end — the previously-failing test_2_regional_translation[Bellam-jaggery] is fixed. Fix in /app/backend/routes/products_master_images.py correctly makes vernacular terms in _TRANSLATIONS always search the English translation first (Bellam→jaggery, Uddi/Minap pappu→urad dal, Kandi pappu→toor dal, Senaga pappu→chana dal). Non-vernacular 'Sugar' passes through unchanged with count=10. Gibberish 'nonexistgibberish123' correctly returns 404. Backend only — frontend skipped per request.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration41.py",
+    "/app/test_reports/pytest/iteration41.xml",
+    "/app/backend/tests/test_iteration40.py"
+  ],
+  "action_items": [
+    "Nothing further — translation gate fix verified. Iteration 40 minor issue is now RESOLVED."
+  ],
+  "critical_code_review_comments": [
+    "Fix approach (translate-first, raw-fallback on 0 hits) is correct and future-proof for other Openverse-indexed vernacular terms.",
+    "Cache-clearing of free_imgs::* keys was necessary and executed — retest hit fresh code path (verified by response containing resolved_query='jaggery' for q='Bellam')."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration41.py (new — targeted retest for translation gate)"
+  ],
+  "success_rate": {"backend": "100% (7/7 spec cases + 12/12 iter40 FreeImagePicker suite)", "frontend": "not tested (per request)"},
+  "seed_data_creation": "None — read-only search endpoint retest.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 40's outstanding minor issue is now fixed and covered by BOTH /app/backend/tests/test_iteration41.py (targeted) and /app/backend/tests/test_iteration40.py::TestChange3_FreeImagePicker::test_2_regional_translation. Verified spec responses via direct curl-equivalent Python script — Bellam→jaggery(count=10), Uddi/Minap pappu→urad dal(10), Kandi pappu→toor dal(10), Senaga pappu→chana dal(10), Sugar→Sugar(10), gibberish→404.",
+  "rca_of_issue": "Original bug (iter 40): translation was gated on `len(primary) < 3 and translation`, which never fired for 'Bellam' because Openverse returned 10 raw hits for the Telugu word. Fix in products_master_images.py inverted the gate for KNOWN _TRANSLATIONS keys: always search the English translation first, only fall back to raw if translation returns 0 hits. Verification: q='Bellam' now returns resolved_query='jaggery' count=10, matching spec."
+}
