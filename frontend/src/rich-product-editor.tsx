@@ -282,6 +282,21 @@ export function RichProductEditor({
   const masterCacheRef = React.useRef<Map<string, { at: number; items: any[]; external: boolean }>>(new Map());
   const masterDebounceRef = React.useRef<any>(null);
 
+  // Sept 2026 — Free image picker (DuckDuckGo→Openverse→Wikimedia
+  // fallback under the hood).  Owner asked for a "Google Images style"
+  // picker for grocery / regional-Indian products that have no
+  // 91mobiles or Deodap entry.  Opens as a bottom-sheet modal.
+  const [imgPickerOpen, setImgPickerOpen] = useState(false);
+  const [imgPickerQuery, setImgPickerQuery] = useState("");
+  const [imgPickerBusy, setImgPickerBusy] = useState(false);
+  const [imgPickerResults, setImgPickerResults] = useState<Array<{
+    image: string; thumbnail: string; title: string; source: string;
+    provider: string; width?: number | null; height?: number | null; license: string;
+  }>>([]);
+  const [imgPickerResolvedQuery, setImgPickerResolvedQuery] = useState("");
+  const [imgPickerErr, setImgPickerErr] = useState<string>("");
+  const [imgPickerSelected, setImgPickerSelected] = useState<Set<string>>(new Set());
+
   // Debounced search. 300ms after the last keystroke we hit the backend
   // (or the in-memory cache if the same query fired in the last 60s).
   useEffect(() => {
@@ -503,6 +518,76 @@ export function RichProductEditor({
       Alert.alert("Image pick failed", formatApiError(e));
     }
   };
+
+  // Sept 2026 — Free image picker.  Wraps the backend
+  // `/products/images/search` endpoint (Openverse + Wikimedia CC).
+  // Fetches on Enter / search-button tap only (not while typing) so we
+  // don't hammer the API when the vendor is mid-word.
+  const runFreeImageSearch = async (query?: string) => {
+    const q = (query ?? imgPickerQuery).trim();
+    if (q.length < 1) {
+      setImgPickerErr("Type a query first — e.g. sugar, jaggery, urad dal.");
+      return;
+    }
+    setImgPickerErr("");
+    setImgPickerBusy(true);
+    setImgPickerResults([]);
+    setImgPickerSelected(new Set());
+    try {
+      const r = await api.get<any>("/products/images/search", { params: { q, limit: 30 } });
+      const items = Array.isArray(r.data?.items) ? r.data.items : [];
+      setImgPickerResults(items);
+      setImgPickerResolvedQuery(r.data?.resolved_query || q);
+      if (items.length === 0) setImgPickerErr("No results — try a simpler English term.");
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setImgPickerErr(typeof detail === "string" ? detail : "Search failed. Try again.");
+    } finally { setImgPickerBusy(false); }
+  };
+
+  // Convert a remote image URL to a base64 data URL so we can store it
+  // in the product doc (same storage format as user-uploaded images).
+  // Uses the RN `fetch` bridge — works on iOS / Android / web.
+  const urlToDataUrl = async (url: string): Promise<string | null> => {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return null;
+      const blob = await resp.blob();
+      return await new Promise<string | null>((resolve) => {
+        const reader = new FileReader();
+        reader.onerror = () => resolve(null);
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+        reader.readAsDataURL(blob);
+      });
+    } catch { return null; }
+  };
+
+  // Apply the picker's selection to the product form: first picked item
+  // becomes the cover if empty, all picks get appended to the gallery
+  // (respecting the 10-image cap).
+  const applyImagePickerSelection = async () => {
+    const picks = imgPickerResults.filter((r) => imgPickerSelected.has(r.image));
+    if (picks.length === 0) return;
+    setImgPickerBusy(true);
+    try {
+      const dataUrls: string[] = [];
+      for (const p of picks) {
+        const d = await urlToDataUrl(p.image);
+        if (d) dataUrls.push(d);
+      }
+      if (dataUrls.length === 0) {
+        setImgPickerErr("Couldn't download the selected images. Try again.");
+        return;
+      }
+      if (!imageUrl) setImageUrl(dataUrls[0]);
+      const room = Math.max(0, 10 - galleryImages.length);
+      if (room > 0) setGalleryImages([...galleryImages, ...dataUrls.slice(0, room)]);
+      setImgPickerOpen(false);
+      setImgPickerSelected(new Set());
+    } finally { setImgPickerBusy(false); }
+  };
+
+
 
   const onAddSubFeature = () => {
     const t = newSubFeature.trim();
@@ -957,7 +1042,7 @@ export function RichProductEditor({
           .map((t) => ({ name: t.name.trim(), rows: t.rows.filter((r) => r.label.trim() || r.value.trim()) }))
           .filter((t) => t.name || t.rows.length),
         whats_in_box: whatsInBox.filter((b) => b.name.trim() || b.image_data_url),
-        sub_category: isClothes ? (subCategory || undefined) : undefined,
+        sub_category: (subCategory || "").trim() || undefined,
         clothing_size: isClothes ? (clothingSize || undefined) : undefined,
         // Device identity (July 2026) — trimmed, `undefined` when blank so
         // the backend keeps a null/empty value rather than a literal "".
@@ -1129,17 +1214,35 @@ export function RichProductEditor({
                 </View>
               ) : null}
 
-              <TouchableOpacity onPress={onPickCover} style={modalStyles.imagePick} testID="product-image-pick">
-                {imageUrl ? <Image source={{ uri: imageUrl }} style={modalStyles.imagePickImg} /> : (
-                  <View style={modalStyles.imagePickPlaceholder}>
-                    {picking ? <ActivityIndicator color={colors.primary} /> : (
-                      <>
-                        <Feather name="image" size={24} color={colors.textMuted} />
-                        <Text style={{ color: colors.textMuted, marginTop: 6, fontSize: 12 }}>Tap to pick cover image</Text>
-                      </>
-                    )}
-                  </View>
-                )}
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <TouchableOpacity onPress={onPickCover} style={[modalStyles.imagePick, { flex: 1 }]} testID="product-image-pick">
+                  {imageUrl ? <Image source={{ uri: imageUrl }} style={modalStyles.imagePickImg} /> : (
+                    <View style={modalStyles.imagePickPlaceholder}>
+                      {picking ? <ActivityIndicator color={colors.primary} /> : (
+                        <>
+                          <Feather name="image" size={24} color={colors.textMuted} />
+                          <Text style={{ color: colors.textMuted, marginTop: 6, fontSize: 12 }}>Tap to pick cover image</Text>
+                        </>
+                      )}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              </View>
+              {/* Sept 2026 — Free image picker (Openverse + Wikimedia CC). */}
+              <TouchableOpacity
+                onPress={() => {
+                  setImgPickerQuery(name || masterQuery || "");
+                  setImgPickerResults([]);
+                  setImgPickerErr("");
+                  setImgPickerSelected(new Set());
+                  setImgPickerOpen(true);
+                }}
+                style={sectionStyles.freeImgBtn}
+                testID="free-image-picker-btn"
+              >
+                <Feather name="search" size={14} color={colors.primary} />
+                <Text style={sectionStyles.freeImgBtnText}>Free image picker</Text>
+                <Text style={sectionStyles.freeImgBtnHint}>Non-e-commerce · Creative Commons</Text>
               </TouchableOpacity>
               <Text style={modalStyles.fieldLabel}>Name</Text>
               <TextInput value={name} onChangeText={setName} style={modalStyles.input} testID="product-name" />
@@ -1189,6 +1292,29 @@ export function RichProductEditor({
                 />
               ) : null}
 
+              {/* Sept 2026 — Generic sub-category field for non-Clothes.
+                  Powers the cascading sub-category chip strip on the
+                  customer category screen (Mobiles → Accessories /
+                  Chargers / Pendrive / Power bank etc.).  Clothes still
+                  uses its own gender chip picker below. */}
+              {!isClothes && category ? (
+                <>
+                  <Text style={modalStyles.fieldLabel}>Sub-category (optional)</Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>
+                    Groups products inside “{category}”. E.g. Accessories, Chargers, Pendrive, Power bank.
+                  </Text>
+                  <TextInput
+                    value={subCategory}
+                    onChangeText={setSubCategory}
+                    placeholder="e.g. Accessories"
+                    placeholderTextColor={colors.textMuted}
+                    style={modalStyles.input}
+                    testID="product-subcat-generic"
+                    maxLength={40}
+                  />
+                </>
+              ) : null}
+
               {/* Clothes-specific sub-category + size */}
               {isClothes ? (
                 <View style={sectionStyles.clothesBlock}>
@@ -1204,8 +1330,7 @@ export function RichProductEditor({
                         <Text style={[sectionStyles.chipText, subCategory === s.key && sectionStyles.chipTextActive]}>{s.label}</Text>
                       </TouchableOpacity>
                     ))}
-                  </View>
-                  <Text style={modalStyles.fieldLabel}>Size</Text>
+                  </View>                  <Text style={modalStyles.fieldLabel}>Size</Text>
                   <View style={sectionStyles.chipRow}>
                     {CLOTHES_SIZE_OPTIONS.map((sz) => (
                       <TouchableOpacity
@@ -1731,6 +1856,120 @@ export function RichProductEditor({
           setScannerTarget(null);
         }}
       />
+
+      {/* Sept 2026 — Free image picker modal (Openverse + Wikimedia CC).
+          Sibling to the main product Modal so it floats above it. */}
+      <Modal visible={imgPickerOpen} animationType="slide" onRequestClose={() => setImgPickerOpen(false)} transparent>
+        <View style={modalStyles.overlay}>
+          <View style={[modalStyles.sheet, { maxHeight: "92%", padding: 18 }]}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <Feather name="image" size={18} color={colors.primary} />
+              <Text style={[modalStyles.title, { marginBottom: 0, flex: 1 }]}>Free image picker</Text>
+              <TouchableOpacity onPress={() => setImgPickerOpen(false)} testID="free-img-close">
+                <Feather name="x" size={22} color={colors.textMain} />
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 8 }}>
+              Non-e-commerce, royalty-free (Creative Commons). Auto-translates Bellam→Jaggery, Uddi/Minap pappu→Urad dal, Kandi pappu→Toor dal, Senaga pappu→Chana dal, etc.
+            </Text>
+
+            <View style={{ flexDirection: "row", gap: 6 }}>
+              <TextInput
+                value={imgPickerQuery}
+                onChangeText={setImgPickerQuery}
+                onSubmitEditing={() => runFreeImageSearch()}
+                placeholder="e.g. sugar, jaggery, urad dal"
+                placeholderTextColor={colors.textMuted}
+                returnKeyType="search"
+                style={[modalStyles.input, { flex: 1 }]}
+                testID="free-img-query"
+              />
+              <TouchableOpacity
+                onPress={() => runFreeImageSearch()}
+                disabled={imgPickerBusy || !imgPickerQuery.trim()}
+                style={[sectionStyles.freeImgSearchBtn, (imgPickerBusy || !imgPickerQuery.trim()) && { opacity: 0.5 }]}
+                testID="free-img-search"
+              >
+                {imgPickerBusy
+                  ? <ActivityIndicator color="#fff" />
+                  : <Feather name="search" size={16} color="#fff" />}
+              </TouchableOpacity>
+            </View>
+
+            {imgPickerResolvedQuery && imgPickerResolvedQuery.toLowerCase() !== imgPickerQuery.trim().toLowerCase() ? (
+              <Text style={{ fontSize: 11, color: colors.primary, marginTop: 6, fontWeight: "700" }}>
+                Showing results for “{imgPickerResolvedQuery}” · translated from “{imgPickerQuery.trim()}”
+              </Text>
+            ) : null}
+            {imgPickerErr ? (
+              <View style={sectionStyles.freeImgError}>
+                <Feather name="alert-circle" size={13} color="#B91C1C" />
+                <Text style={{ fontSize: 12, color: "#B91C1C", flex: 1 }}>{imgPickerErr}</Text>
+              </View>
+            ) : null}
+
+            {imgPickerBusy && imgPickerResults.length === 0 ? (
+              <View style={{ padding: 30, alignItems: "center" }}>
+                <ActivityIndicator color={colors.primary} />
+                <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 6 }}>Searching Creative Commons…</Text>
+              </View>
+            ) : (
+              <ScrollView style={{ marginTop: 10, maxHeight: 480 }} contentContainerStyle={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                {imgPickerResults.map((row) => {
+                  const isSel = imgPickerSelected.has(row.image);
+                  return (
+                    <TouchableOpacity
+                      key={row.image}
+                      onPress={() => {
+                        setImgPickerSelected((prev) => {
+                          const nxt = new Set(prev);
+                          if (nxt.has(row.image)) nxt.delete(row.image); else nxt.add(row.image);
+                          return nxt;
+                        });
+                      }}
+                      style={[sectionStyles.freeImgCell, isSel && sectionStyles.freeImgCellSel]}
+                      testID={`free-img-cell-${row.image.slice(-20)}`}
+                    >
+                      <Image source={{ uri: row.thumbnail }} style={sectionStyles.freeImgCellImg} />
+                      {isSel ? (
+                        <View style={sectionStyles.freeImgCellCheck}>
+                          <Feather name="check" size={14} color="#fff" />
+                        </View>
+                      ) : null}
+                      <View style={sectionStyles.freeImgCellFooter}>
+                        <Text style={sectionStyles.freeImgCellSrc} numberOfLines={1}>{row.provider}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
+
+            {imgPickerResults.length > 0 ? (
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 12, alignItems: "center" }}>
+                <Text style={{ fontSize: 12, color: colors.textMuted, flex: 1 }}>
+                  {imgPickerSelected.size} of {imgPickerResults.length} selected
+                </Text>
+                <TouchableOpacity
+                  onPress={applyImagePickerSelection}
+                  disabled={imgPickerSelected.size === 0 || imgPickerBusy}
+                  style={[sectionStyles.freeImgApplyBtn, (imgPickerSelected.size === 0 || imgPickerBusy) && { opacity: 0.5 }]}
+                  testID="free-img-apply"
+                >
+                  {imgPickerBusy
+                    ? <ActivityIndicator size="small" color="#fff" />
+                    : (
+                      <>
+                        <Feather name="check" size={14} color="#fff" />
+                        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>Use selected</Text>
+                      </>
+                    )}
+                </TouchableOpacity>
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
     </Modal>
   );
 }
@@ -1764,6 +2003,20 @@ const sectionStyles = StyleSheet.create({
   headTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
   headSummary: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   body: { paddingHorizontal: 14, paddingBottom: 14, paddingTop: 4 },
+  // Sept 2026 — Free image picker (Openverse + Wikimedia CC).
+  freeImgBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.primary + "08" },
+  freeImgBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
+  freeImgBtnHint: { fontSize: 10, color: colors.textMuted, marginLeft: "auto" },
+  freeImgSearchBtn: { width: 48, borderRadius: 12, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
+  freeImgError: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: "#FEE2E2", borderWidth: 1, borderColor: "#FCA5A5" },
+  freeImgCell: { width: "31%", aspectRatio: 1, borderRadius: 10, overflow: "hidden", backgroundColor: colors.surfaceMuted, borderWidth: 2, borderColor: "transparent", position: "relative" },
+  freeImgCellSel: { borderColor: colors.primary },
+  freeImgCellImg: { width: "100%", height: "100%", resizeMode: "cover" },
+  freeImgCellCheck: { position: "absolute", top: 4, right: 4, width: 22, height: 22, borderRadius: 11, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
+  freeImgCellFooter: { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 6, paddingVertical: 3 },
+  freeImgCellSrc: { fontSize: 9, color: "#fff", fontWeight: "700", letterSpacing: 0.3, textTransform: "uppercase" },
+  freeImgApplyBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 999, backgroundColor: colors.primary },
+
 
   row: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8, paddingHorizontal: 10, backgroundColor: colors.surfaceMuted, borderRadius: 10, marginTop: 6 },
   rowText: { flex: 1, fontSize: 13, color: colors.textMain },

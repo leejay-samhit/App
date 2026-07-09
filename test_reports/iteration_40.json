@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 40 backend testing complete. 19/20 tests PASS. Change 1 (91mobiles image fix) verified — no '-big-' rewrite in image_url and all returned 91mobiles images are HTTP 200 reachable. Change 2 (shop_layout.category_ids) fully verified — create/patch/preserve/backfill on both public + admin GET endpoints. Change 3 (free image picker) works overall but has ONE spec deviation: for q='Bellam', resolved_query stays 'Bellam' (not translated to 'jaggery') because Openverse returns >=3 raw hits for the vernacular word, so the current fallback rule (`if len(primary) < 3 and translation ...`) never fires. All other regional terms (Uddi/Kandi/Senaga/Minap pappu) translate correctly. E-commerce blocklist, auth-required (401), empty/missing query (422), 404 for bogus term, cache-hit (<300ms), and count>=5 for 'sugar' all pass.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/products/images/search?q=Bellam",
+        "issue": "Spec requires `resolved_query=\"jaggery\"` for q=Bellam, but implementation only translates when raw Openverse returns <3 hits. Openverse returns 10 hits for 'Bellam' (matches things like 'Bellam Pulusu', 'Jeelakarra Bellam'), so translation is skipped and resolved_query stays 'Bellam'. Fix: for known vernacular terms in _TRANSLATIONS, always translate (or always run BOTH raw + translated and merge/prefer translated) rather than gating on primary-hit-count. See /app/backend/routes/products_master_images.py:319."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration40.py",
+    "/app/test_reports/pytest/iteration40.xml"
+  ],
+  "action_items": [
+    "Fix _translate gating in /app/backend/routes/products_master_images.py: for terms present in _TRANSLATIONS dict, always translate (or run translated query alongside and prefer it) — do not skip when raw hits >=3. Current spec expects q='Bellam' → resolved_query='jaggery'.",
+    "Consider also translating first and using vernacular as fallback so the frontend hint 'Showing results for jaggery' always shows for known vernacular terms."
+  ],
+  "critical_code_review_comments": [
+    "products_master_images.py:319 — translation gate `if len(primary) < 3 and translation` skips translation when Openverse happens to have vernacular indexed. Either always translate for known keys, or use a hit-quality (not hit-count) signal.",
+    "products_master_images.py:201 — license string concatenation `.upper() + ' ' + row.get('license_version')` will TypeError if license is empty but license_version present. Guard both.",
+    "products_master_images.py — good use of _CACHE_TTL_HOURS + graceful httpx exception handling. No blocking IO."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration40.py (new)"
+  ],
+  "success_rate": {"backend": "95%", "frontend": "not tested (per request)"},
+  "seed_data_creation": "One temporary category_circles block created in shop_layout_blocks during test_1 and deleted in test_9_cleanup. No residual test data.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Test file at /app/backend/tests/test_iteration40.py — reusable. Base URL comes from EXPO_PUBLIC_BACKEND_URL. Vendor + admin creds hardcoded from /app/memory/test_credentials.md. After main agent fixes the Bellam translation gate, re-run: `pytest /app/backend/tests/test_iteration40.py::TestChange3_FreeImagePicker::test_2_regional_translation -v`",
+  "rca_of_issue": "For q='Bellam': Openverse indexes vernacular Telugu food terms like 'Bellam Pulusu' / 'Jeelakarra Bellam' (10 raw hits). The code's gate `if len(primary) < 3 and translation` therefore never triggers translation, so resolved_query stays 'Bellam'. Spec expects 'jaggery'. Reproduction: `curl \"$BASE/api/products/images/search?q=Bellam&limit=10\" -H \"Authorization: Bearer <vendor>\"` → resolved_query='Bellam' count=10. Mitigation: translate FIRST when key is in _TRANSLATIONS dict, or lower the hit-count gate to something that still triggers for lexicon matches."
+}

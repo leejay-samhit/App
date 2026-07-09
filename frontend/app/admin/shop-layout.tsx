@@ -567,6 +567,16 @@ function BlockFormModal({
   const [productsPerRow, setProductsPerRow] = useState<string>("2");
   const [showViewAll, setShowViewAll] = useState<boolean>(false);
   const [viewAllLink, setViewAllLink] = useState<string>("");
+  // Sept 2026 — multi-select which categories appear in THIS
+  // category_circles block. Empty ⇒ auto-show every category not already
+  // pinned to another category_circles block on the same scope.
+  const [categoryIds, setCategoryIds] = useState<string[]>([]);
+  // API-loaded catalog of shop_categories (name, image, icon) so the
+  // multi-select can render pretty labels + previews.
+  const [shopCats, setShopCats] = useState<Array<{
+    id: string; name: string; image_url?: string | null;
+    color: string; icon_pack: string; icon_name: string; active: boolean;
+  }>>([]);
   // UI
   const [saving, setSaving] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -605,7 +615,28 @@ function BlockFormModal({
     setProductsPerRow(String((block as any)?.products_per_row || 2));
     setShowViewAll(Boolean((block as any)?.show_view_all));
     setViewAllLink((block as any)?.view_all_link || "");
+    setCategoryIds(Array.isArray((block as any)?.category_ids) ? (block as any).category_ids : []);
   }, [visible, block, defaultScope, defaultScopeCategory]);
+
+  // Load the shop_categories catalog once when the form opens — used to
+  // render the "which categories in this block" multi-select for
+  // category_circles blocks.
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get<{ items: any[] }>("/admin/shop-categories");
+        if (cancelled) return;
+        const items = (r.data?.items || []) as any[];
+        // Sort by sort_order then name so the picker matches the admin
+        // Shop Categories page.
+        items.sort((a, b) => (a.sort_order - b.sort_order) || (a.name || "").localeCompare(b.name || ""));
+        setShopCats(items);
+      } catch { /* silent — falls back to no picker */ }
+    })();
+    return () => { cancelled = true; };
+  }, [visible]);
 
   // Smart picker — auto-crops + resizes to the destination block's native
   // aspect ratio. Pass the block_type so the right preset (banner 16:9,
@@ -667,6 +698,10 @@ function BlockFormModal({
         products_per_row: type === "product_grid" ? Math.max(1, Math.min(4, parseInt(productsPerRow, 10) || 2)) : 2,
         show_view_all: type === "product_grid" ? showViewAll : false,
         view_all_link: type === "product_grid" ? viewAllLink.trim() : "",
+        // Sept 2026 — only meaningful for category_circles blocks; other
+        // block types persist an empty list so a follow-up type-switch
+        // doesn't inherit stale selection.
+        category_ids: type === "category_circles" ? categoryIds : [],
       };
       if (block) await api.patch(`/admin/shop-layout/${block.id}`, payload);
       else await api.post("/admin/shop-layout", payload);
@@ -750,20 +785,82 @@ function BlockFormModal({
               <View style={styles.dynamicCatInfo}>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6 }}>
                   <Feather name="link" size={14} color={colors.primary} />
-                  <Text style={styles.dynamicCatTitle}>Categories are interlinked</Text>
+                  <Text style={styles.dynamicCatTitle}>Which categories in this circle?</Text>
                 </View>
                 <Text style={styles.dynamicCatBody}>
-                  This block automatically shows ALL categories from{"\n"}
-                  <Text style={{ fontWeight: "800" }}>Admin → Shop Categories</Text>. Any rename, icon swap or image upload there reflects here, on the customer Shop, and on the admin Shop preview — instantly.
+                  Tap categories below to include them.{"\n"}
+                  <Text style={{ fontWeight: "800" }}>Leave empty</Text> to auto-show every category that isn&apos;t already used in another circle block on this scope.
                 </Text>
-                <TouchableOpacity
-                  onPress={() => { onClose(); router.push("/admin/shop-categories" as any); }}
-                  style={styles.dynamicCatBtn}
-                  testID="manage-shop-categories"
-                >
-                  <Feather name="grid" size={14} color={colors.primaryFg} />
-                  <Text style={styles.dynamicCatBtnText}>Manage categories</Text>
-                </TouchableOpacity>
+
+                {/* Multi-select grid of active shop_categories */}
+                {shopCats.length === 0 ? (
+                  <Text style={[styles.hint, { marginTop: 8 }]}>Loading categories…</Text>
+                ) : (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                    {shopCats.map((c) => {
+                      const isSelected = categoryIds.includes(c.id);
+                      const isInactive = !c.active;
+                      return (
+                        <TouchableOpacity
+                          key={c.id}
+                          disabled={isInactive}
+                          onPress={() => {
+                            setCategoryIds((prev) => isSelected
+                              ? prev.filter((x) => x !== c.id)
+                              : [...prev, c.id]);
+                          }}
+                          style={[
+                            styles.catChip,
+                            isSelected && styles.catChipActive,
+                            isInactive && { opacity: 0.45 },
+                          ]}
+                          testID={`circle-cat-${c.id}`}
+                        >
+                          <View style={[styles.catChipDot, { backgroundColor: c.color || "#E5F2EC" }]}>
+                            {c.image_url ? (
+                              <Image source={{ uri: c.image_url }} style={{ width: 20, height: 20, borderRadius: 10 }} />
+                            ) : (
+                              <Feather name={isSelected ? "check" : "grid"} size={11} color={isSelected ? colors.primaryFg : colors.textMain} />
+                            )}
+                          </View>
+                          <Text style={[styles.catChipText, isSelected && styles.catChipTextActive]} numberOfLines={1}>
+                            {c.name}{isInactive ? " (off)" : ""}
+                          </Text>
+                          {isSelected ? (
+                            <Feather name="check" size={12} color={colors.primaryFg} />
+                          ) : null}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+
+                {/* Summary + shortcuts */}
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                  <Text style={[styles.hint, { flex: 1, minWidth: 120 }]}>
+                    {categoryIds.length === 0
+                      ? "0 selected · auto mode (fills gaps)"
+                      : `${categoryIds.length} selected`}
+                  </Text>
+                  {categoryIds.length > 0 ? (
+                    <TouchableOpacity onPress={() => setCategoryIds([])} style={styles.dynamicCatBtnGhost} testID="circle-clear-all">
+                      <Feather name="x" size={12} color={colors.primary} />
+                      <Text style={styles.dynamicCatBtnGhostText}>Clear</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                  <TouchableOpacity onPress={() => setCategoryIds(shopCats.filter((c) => c.active).map((c) => c.id))} style={styles.dynamicCatBtnGhost} testID="circle-select-all">
+                    <Feather name="check-square" size={12} color={colors.primary} />
+                    <Text style={styles.dynamicCatBtnGhostText}>Select all</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => { onClose(); router.push("/admin/shop-categories" as any); }}
+                    style={styles.dynamicCatBtn}
+                    testID="manage-shop-categories"
+                  >
+                    <Feather name="grid" size={12} color={colors.primaryFg} />
+                    <Text style={styles.dynamicCatBtnText}>Manage</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             ) : null}
 
@@ -1250,8 +1347,15 @@ const styles = StyleSheet.create({
   dynamicCatInfo: { marginTop: 14, padding: 12, borderRadius: 14, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.brand100, gap: 4 },
   dynamicCatTitle: { fontSize: 13, fontWeight: "900", color: colors.primary },
   dynamicCatBody: { fontSize: 12, color: colors.textMain, lineHeight: 18 },
-  dynamicCatBtn: { marginTop: 8, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, backgroundColor: colors.primary },
+  dynamicCatBtn: { marginTop: 0, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, backgroundColor: colors.primary },
   dynamicCatBtnText: { fontSize: 12, fontWeight: "900", color: colors.primaryFg, letterSpacing: 0.2 },
+  dynamicCatBtnGhost: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  dynamicCatBtnGhostText: { fontSize: 11, fontWeight: "700", color: colors.primary, letterSpacing: 0.2 },
+  catChip: { flexDirection: "row", alignItems: "center", gap: 6, paddingLeft: 4, paddingRight: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, maxWidth: 180 },
+  catChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  catChipDot: { width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center", overflow: "hidden" },
+  catChipText: { fontSize: 11, fontWeight: "700", color: colors.textMain, letterSpacing: 0.2 },
+  catChipTextActive: { color: colors.primaryFg },
   // Products per row chip (1..4) — square, large, easy to tap.
   perRowChip: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 12, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, gap: 2 },
   perRowChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },

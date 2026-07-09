@@ -11,7 +11,7 @@ import { colors, radii, spacing, formatINR } from "../../../src/theme";
 import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
 import { useAuth } from "../../../src/auth";
 
-type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; vendor_id?: string | null };
+type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; sub_category?: string; vendor_id?: string | null };
 
 export default function ShopCategoryScreen() {
   const router = useRouter();
@@ -28,6 +28,11 @@ export default function ShopCategoryScreen() {
   // Aug 2026 — Bumped on every pull-to-refresh; passed down to
   // ShopLayoutRenderer so it re-fetches its admin-managed blocks live.
   const [refreshTick, setRefreshTick] = useState(0);
+  // Sept 2026 — Cascading sub-category filter.  When the user taps a
+  // sub-category chip at the top of the category screen, we filter the
+  // product grid to only products that carry that sub_category value.
+  // "" means "show everything in this category".
+  const [selectedSub, setSelectedSub] = useState<string>("");
 
   const load = useCallback(async () => {
     try {
@@ -95,6 +100,55 @@ export default function ShopCategoryScreen() {
         contentContainerStyle={{ paddingBottom: 80 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setRefreshTick(t => t + 1); load(); }} tintColor={colors.primary} />}
       >
+        {/* Sept 2026 — Cascading sub-category chip strip.  Auto-computed
+            from `sub_category` values of products in this category.  When
+            a chip is selected we filter the fallback product grid, and
+            for admin-layout blocks the ShopLayoutRenderer still shows the
+            merchandised layout above (unaffected by sub-filter — layout
+            targets the parent category, not sub-cats).  Tapping "All"
+            clears the filter. */}
+        {(() => {
+          const subs = Array.from(new Set(products.map((p) => (p.sub_category || "").trim()).filter(Boolean)))
+            .sort((a, b) => a.localeCompare(b));
+          if (subs.length === 0) return null;
+          return (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: spacing.screen, paddingVertical: 6, gap: 6 }}
+              testID="sub-category-strip"
+            >
+              <TouchableOpacity
+                onPress={() => setSelectedSub("")}
+                style={[styles.subChip, selectedSub === "" && styles.subChipActive]}
+                testID="sub-chip-all"
+              >
+                <Text style={[styles.subChipText, selectedSub === "" && styles.subChipTextActive]}>All</Text>
+                <View style={[styles.subChipCount, selectedSub === "" && styles.subChipCountActive]}>
+                  <Text style={[styles.subChipCountText, selectedSub === "" && styles.subChipCountTextActive]}>{products.length}</Text>
+                </View>
+              </TouchableOpacity>
+              {subs.map((s) => {
+                const count = products.filter((p) => (p.sub_category || "").trim() === s).length;
+                const isActive = selectedSub === s;
+                return (
+                  <TouchableOpacity
+                    key={s}
+                    onPress={() => setSelectedSub(isActive ? "" : s)}
+                    style={[styles.subChip, isActive && styles.subChipActive]}
+                    testID={`sub-chip-${s}`}
+                  >
+                    <Text style={[styles.subChipText, isActive && styles.subChipTextActive]} numberOfLines={1}>{s}</Text>
+                    <View style={[styles.subChipCount, isActive && styles.subChipCountActive]}>
+                      <Text style={[styles.subChipCountText, isActive && styles.subChipCountTextActive]}>{count}</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          );
+        })()}
+
         {/* Admin-managed dynamic layout for this category.
             Aug 2026 — Fixed padding parity: this ScrollView no longer applies
             `padding: spacing.screen` around the ENTIRE content — the
@@ -126,8 +180,24 @@ export default function ShopCategoryScreen() {
             <Text style={styles.emptyText}>No products in {category}</Text>
           </View>
         ) : hasLayout === false ? (
-          <View style={styles.gridWrap}>
-            {products.map((p) => {
+          (() => {
+            const filtered = selectedSub
+              ? products.filter((p) => (p.sub_category || "").trim() === selectedSub)
+              : products;
+            if (filtered.length === 0) {
+              return (
+                <View style={styles.emptyCard}>
+                  <Feather name="filter" size={24} color={colors.textMuted} />
+                  <Text style={styles.emptyText}>No products in “{selectedSub}”</Text>
+                  <TouchableOpacity onPress={() => setSelectedSub("")} style={{ marginTop: 4 }}>
+                    <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700" }}>Clear filter</Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            }
+            return (
+              <View style={styles.gridWrap}>
+                {filtered.map((p) => {
               const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
               return (
                 <View key={p.id} style={[styles.gridCard, !inStock && { opacity: 0.55 }]}>
@@ -166,7 +236,9 @@ export default function ShopCategoryScreen() {
                 </View>
               );
             })}
-          </View>
+              </View>
+            );
+          })()
         ) : null}
         </View>
       </ScrollView>
@@ -192,4 +264,13 @@ const styles = StyleSheet.create({
   gridFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary, minHeight: 28 },
   addBtnText: { fontSize: 11, fontWeight: "800", color: "#fff", letterSpacing: 0.3 },
+  // Sept 2026 — Sub-category chip strip at top of the category screen.
+  subChip: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, minHeight: 34 },
+  subChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  subChipText: { fontSize: 12, fontWeight: "700", color: colors.textMain, letterSpacing: 0.2, maxWidth: 140 },
+  subChipTextActive: { color: colors.primaryFg },
+  subChipCount: { backgroundColor: colors.surfaceMuted, minWidth: 20, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 999, alignItems: "center" },
+  subChipCountActive: { backgroundColor: "rgba(255,255,255,0.25)" },
+  subChipCountText: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.2 },
+  subChipCountTextActive: { color: colors.primaryFg },
 });

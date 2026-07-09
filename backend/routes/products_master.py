@@ -154,13 +154,12 @@ def _shape_91_row(row: Dict[str, Any]) -> Dict[str, Any] | None:
     slug = row.get("url") or ""
     external_url = f"https://www.91mobiles.com/{slug}" if slug else None
     thumb = row.get("thumbnail") or ""
-    # Aug 2026 — 91mobiles autosuggest ships a small `-thumb-1.jpg`
-    # variant which renders blurry when we use it as the product cover.
-    # Their CDN also serves a `-big-1.jpg` version at the same path;
-    # rewrite when possible.  If the rewrite target 404s the client will
-    # be replaced by the GSMArena HD hero from the specs endpoint anyway.
-    if thumb and ("/thumb/" in thumb or "-thumb-" in thumb):
-        thumb = thumb.replace("/thumb/", "/big/").replace("-thumb-", "-big-")
+    # July 2026 note — we USED to rewrite `-thumb-` → `-big-` here to get a
+    # higher-res cover, but the CDN 404s on that variant so every 91mobiles
+    # thumbnail broke on the client.  We now keep the original low-res
+    # thumbnail (still ~200px, fine for the dropdown), and the frontend
+    # fires `/products/master/91mobiles-detail` on pick to fetch the HD
+    # hero + gallery from GSMArena.  Best of both worlds.
 
     # Try to sniff storage/RAM out of the model name (e.g. "iPhone 15 256GB")
     storage_m = re.search(r"(\d+\s*(?:GB|TB))\b", name, re.I)

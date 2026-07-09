@@ -167,6 +167,7 @@ from routes import notifications as notifications_router  # noqa: E402
 from routes import products_public as products_public_router  # noqa: E402
 from routes import products_master as products_master_router  # noqa: E402
 from routes import products_master_specs as products_master_specs_router  # noqa: E402
+from routes import products_master_images as products_master_images_router  # noqa: E402
 from routes import promo_banners as promo_banners_router  # noqa: E402
 from routes import shop_layout as shop_layout_router  # noqa: E402
 from routes import shop_layout_analytics as shop_layout_analytics_router  # noqa: E402
@@ -9005,6 +9006,7 @@ app.include_router(notifications_router.router, prefix="/api")
 app.include_router(products_public_router.router, prefix="/api")
 app.include_router(products_master_router.router, prefix="/api")
 app.include_router(products_master_specs_router.router, prefix="/api")
+app.include_router(products_master_images_router.router, prefix="/api")
 app.include_router(promo_banners_router.router, prefix="/api")
 app.include_router(shop_layout_router.router, prefix="/api")
 app.include_router(shop_layout_analytics_router.router, prefix="/api")

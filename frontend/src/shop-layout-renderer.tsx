@@ -74,6 +74,10 @@ export type LayoutBlock = {
   products_per_row?: number;       // 1..4
   show_view_all?: boolean;
   view_all_link?: string;          // category name (empty = /shop)
+  // Sept 2026 — For `category_circles` only.  Explicit shop_category ids
+  // to render.  Empty ⇒ "auto-mode" (fill with every category NOT already
+  // rendered by an earlier category_circles block on the same scope).
+  category_ids?: string[];
 };
 
 export type Product = {
@@ -235,8 +239,14 @@ type ApiCategory = {
 };
 
 function CategoryCirclesBlock({
-  block, onCategoryPress,
-}: { block: LayoutBlock; onCategoryPress?: (c: string) => void }) {
+  block, onCategoryPress, excludeCategoryIds,
+}: {
+  block: LayoutBlock;
+  onCategoryPress?: (c: string) => void;
+  // IDs that should NOT appear in this block because they've been pinned
+  // to an earlier category_circles block on the same scope (auto-dedupe).
+  excludeCategoryIds?: Set<string>;
+}) {
   // INTERLINKED: Always source categories from the admin-managed
   // /api/shop-categories DB so a single edit in /admin/shop-categories
   // (icon, image, color, name) reflects on every category_circles block
@@ -260,8 +270,22 @@ function CategoryCirclesBlock({
     return () => { cancelled = true; };
   }, []);
 
+  // Sept 2026 — Two selection modes:
+  //   1. Explicit — block.category_ids has entries ⇒ show exactly those.
+  //   2. Auto — empty list ⇒ show every category NOT already used in an
+  //      earlier category_circles block on this scope (excludeCategoryIds).
+  //      This is the "auto-dedupe" behaviour so an admin can have one
+  //      block for "featured" categories and another block that fills
+  //      with "everything else" without repeating.
+  const explicit = Array.isArray(block.category_ids) && block.category_ids.length > 0;
+  const filteredCats = (apiCats || []).filter((c) => {
+    if (explicit) return (block.category_ids as string[]).includes(c.id);
+    if (excludeCategoryIds && excludeCategoryIds.has(c.id)) return false;
+    return true;
+  });
+
   // Build a unified items list: prefer API categories.
-  const apiItems = (apiCats || []).map<LayoutItem & { _pack?: string; _icon?: string }>((c) => ({
+  const apiItems = filteredCats.map<LayoutItem & { _pack?: string; _icon?: string }>((c) => ({
     label: c.name,
     image_data_url: c.image_url || "",
     color: c.color,
@@ -271,7 +295,7 @@ function CategoryCirclesBlock({
     _icon: c.icon_name,
   }));
   const fallbackItems = block.items || [];
-  const items = apiItems.length > 0 ? apiItems : fallbackItems;
+  const items = apiItems.length > 0 ? apiItems : (explicit ? [] : fallbackItems);
 
   if (apiCats === null) return <SkeletonBlock height={100} />;
   if (items.length === 0) return null;
@@ -868,6 +892,23 @@ export function ShopLayoutRenderer({
   }
   if (visible.length === 0) return null;
 
+  // Sept 2026 — Compute an accumulated "already-used category ids" map so
+  // each CategoryCirclesBlock in auto-mode (empty category_ids) can skip
+  // categories that appeared in an earlier circle block on this scope.
+  // Explicit-mode blocks (non-empty category_ids) ALSO contribute their
+  // IDs to the "consumed" set so subsequent auto blocks fill the gap.
+  const consumedByEarlierCircles: Map<string, Set<string>> = new Map();
+  {
+    const running = new Set<string>();
+    for (const b of visible) {
+      // Snapshot BEFORE mutating so this block sees what earlier blocks used.
+      consumedByEarlierCircles.set(b.id, new Set(running));
+      if (b.block_type === "category_circles" && Array.isArray(b.category_ids)) {
+        for (const cid of b.category_ids) running.add(cid);
+      }
+    }
+  }
+
   return (
     <View>
       {visible.map((b) => {
@@ -888,7 +929,7 @@ export function ShopLayoutRenderer({
           case "banner_slider":
             node = <BannerSliderBlock block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />; break;
           case "category_circles":
-            node = <CategoryCirclesBlock block={b} onCategoryPress={wrapCategoryPress(b.id)} />; break;
+            node = <CategoryCirclesBlock block={b} onCategoryPress={wrapCategoryPress(b.id)} excludeCategoryIds={consumedByEarlierCircles.get(b.id)} />; break;
           case "brand_slider":
             node = <BrandSliderBlock block={b} />; break;
           case "offer_cards":

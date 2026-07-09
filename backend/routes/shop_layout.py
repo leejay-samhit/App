@@ -105,6 +105,11 @@ class ShopLayoutBlockIn(BaseModel):
     products_per_row: Optional[int] = 2          # 1..4 (product_grid only)
     show_view_all: Optional[bool] = False        # show top-right "View More" link
     view_all_link: Optional[str] = ""            # category name or "" for /shop
+    # Sept 2026 — For `category_circles` blocks only.  Explicit list of
+    # `shop_categories.id` values to show in this block.  Empty list means
+    # "auto-show every category not already used in ANOTHER category_circles
+    # block on this scope" (see renderer for the auto-dedupe logic).
+    category_ids: Optional[List[str]] = None
 
 
 class ShopLayoutBlockPatch(BaseModel):
@@ -138,6 +143,7 @@ class ShopLayoutBlockPatch(BaseModel):
     products_per_row: Optional[int] = None
     show_view_all: Optional[bool] = None
     view_all_link: Optional[str] = None
+    category_ids: Optional[List[str]] = None
 
 
 class ReorderItem(BaseModel):
@@ -175,6 +181,7 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
     doc.setdefault("products_per_row", 2)
     doc.setdefault("show_view_all", False)
     doc.setdefault("view_all_link", "")
+    doc.setdefault("category_ids", [])
     # Aug 2026 — image_fit + per-slide image_fit backfill for legacy docs.
     doc.setdefault("image_fit", "cover")
     for it in doc.get("items") or []:
@@ -245,6 +252,7 @@ def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
         "products_per_row": max(1, min(4, int(body.products_per_row or 2))),
         "show_view_all": bool(body.show_view_all),
         "view_all_link": (body.view_all_link or "").strip(),
+        "category_ids": [str(cid) for cid in (body.category_ids or [])][:50],
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -339,6 +347,8 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
         updates["show_view_all"] = bool(payload["show_view_all"])
     if "view_all_link" in payload and payload["view_all_link"] is not None:
         updates["view_all_link"] = str(payload["view_all_link"]).strip()
+    if "category_ids" in payload and payload["category_ids"] is not None:
+        updates["category_ids"] = [str(c) for c in payload["category_ids"]][:50]
     return updates
 
 
