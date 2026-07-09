@@ -1,0 +1,48 @@
+{
+  "summary": "Backend-only retest of the new free-image proxy + batch base64 endpoints added to fix the vendor Free Image Picker 'blank thumbnails + can't download' bug. 18/18 pytest cases pass end-to-end. All 15 spec test cases (proxy happy path/allow-list/scheme/missing-url/cache/CORS/no-auth, batch happy/multi/mixed/all-invalid/empty/max/auth, and the search->proxy + search->fetch integration chain) verify the fix works. Wikimedia thumbnails now stream through the origin proxy (200, image/jpeg, ~64 KB body) using the SlangcartBot UA that Wikimedia's CDN accepts, and vendors can convert URLs to inline data URLs successfully.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/products/images/proxy",
+        "issue": "The app sets 'Cache-Control: public, max-age=86400, immutable' correctly (verified against origin :8001), but Cloudflare in front of the preview URL rewrites it to 'no-store, no-cache, must-revalidate'. Not a code bug, but through the preview/production edge the intended long-lived caching will not apply. If long-cache behaviour matters for perf, the CF page rule / origin cache-control forwarding needs to be reviewed at infra layer."
+      },
+      {
+        "endpoint": "POST /api/products/images/fetch-to-data",
+        "issue": "When all upstream fetches fail the app returns 502 with JSON detail 'Every upstream image fetch failed' (verified against origin :8001). Cloudflare intercepts any 5xx from origin and replaces the body with its own 'Bad gateway' HTML page (status is preserved). Frontend consumers hitting the public URL will only see the CF HTML on 502, not the JSON detail. Consider returning 200 with per-item ok flags instead of 502 (already the design for partial-failure), OR returning a 4xx (e.g. 422) when every URL is invalid so CF does not swap the body."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_image_proxy_iter42.py",
+    "/app/test_reports/pytest/iteration42.xml"
+  ],
+  "action_items": [
+    "None required for the fix itself — the endpoints work as specified and the vendor Free Image Picker download path is now functional server-side.",
+    "OPTIONAL infra: Verify the Cloudflare page rule on preview.emergentagent.com does not need to be updated to honour origin Cache-Control for /api/products/images/proxy responses if long-lived thumbnail caching is desired.",
+    "OPTIONAL API-design: Consider using status 422 (or 200 with all ok:false) instead of 502 for the 'every URL is on an invalid host' case, so Cloudflare doesn't hide the JSON detail behind its own HTML error page."
+  ],
+  "critical_code_review_comments": [
+    "products_master_images.py is 555 lines — approaching the 700-line split threshold but still coherent as a single feature module; monitor if more image-source integrations are added.",
+    "_PROXY_ALLOWED_HOSTS is a good SSRF guard. Consider extracting to config or env if the allow-list grows / needs per-env variance.",
+    "batch fetch creates a fresh httpx.AsyncClient per URL inside _one(). At concurrency of 5 that's fine, but a single shared client with a connection pool would be more efficient for larger batches — minor perf note, not blocking."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_image_proxy_iter42.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (18/18 pytest cases)",
+    "frontend": "N/A (frontend testing explicitly out of scope for this iteration)"
+  },
+  "seed_data_creation": "No new seed data; used the existing seeded vendor account test_alice_73dc7f@test.com / Passw0rd! and the public Wikimedia thumbnail URL from the review request.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The image proxy + batch base64 endpoints are stable and functionally complete. Two test cases (test_06 Cache-Control header, test_12 502 body) intentionally hit http://localhost:8001 directly instead of the public URL to bypass Cloudflare's edge, which (a) rewrites Cache-Control and (b) swaps 5xx bodies with an HTML error page. This is documented inline in the test. If the CF behaviour changes, prefer testing exclusively against the public URL. To exercise this feature again, log in as the vendor Alice, then call GET /api/products/images/search?q=<term> for fresh thumbnail URLs (they rotate as Openverse/Wikimedia refresh their indices) before passing them to /proxy and /fetch-to-data.",
+  "rca_of_issue": "Original bug: Wikimedia's upload.wikimedia.org CDN returned HTTP 403 for the app's default Mozilla/5.0 UA, and browser CORS blocked RN Web fetch()->blob() from localhost:3000. Fix: (1) new GET /api/products/images/proxy proxies image bytes server-side with SlangcartBot UA + wikimedia Referer, unblocking Wikimedia; and (2) new POST /api/products/images/fetch-to-data converts picked URLs to inline base64 data URLs entirely server-side so the RN app never has to fetch cross-origin blobs. Both endpoints allow only known CC image CDNs (SSRF guard). Verified: WIKIMEDIA thumbnail streams as 64 KB image/jpeg through the proxy; batch converts to 'data:image/jpeg;base64,...' payloads correctly."
+}

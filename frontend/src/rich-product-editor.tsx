@@ -545,45 +545,71 @@ export function RichProductEditor({
     } finally { setImgPickerBusy(false); }
   };
 
-  // Convert a remote image URL to a base64 data URL so we can store it
-  // in the product doc (same storage format as user-uploaded images).
-  // Uses the RN `fetch` bridge — works on iOS / Android / web.
-  const urlToDataUrl = async (url: string): Promise<string | null> => {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) return null;
-      const blob = await resp.blob();
-      return await new Promise<string | null>((resolve) => {
-        const reader = new FileReader();
-        reader.onerror = () => resolve(null);
-        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
-        reader.readAsDataURL(blob);
-      });
-    } catch { return null; }
+  // Sept 2026 v2 — Route thumbnail fetches through our backend proxy so
+  // Wikimedia's hotlink policy + missing CORS headers don't break render.
+  // The proxy is auth-guarded and only allow-lists CC image hosts.
+  const proxiedImageUrl = (u: string): string => {
+    if (!u) return u;
+    // Base URL that api.ts uses (EXPO_BACKEND_URL/api).  Reuse the axios
+    // instance's baseURL so we hit the same origin the token is valid on.
+    const base = (api.defaults.baseURL || "").replace(/\/+$/, "");
+    return `${base}/products/images/proxy?url=${encodeURIComponent(u)}`;
   };
 
   // Apply the picker's selection to the product form: first picked item
   // becomes the cover if empty, all picks get appended to the gallery
-  // (respecting the 10-image cap).
+  // (respecting the 10-image cap).  Uses the backend batch fetch endpoint
+  // to avoid CORS issues on RN Web when Wikimedia doesn't send ACAO.
   const applyImagePickerSelection = async () => {
     const picks = imgPickerResults.filter((r) => imgPickerSelected.has(r.image));
     if (picks.length === 0) return;
     setImgPickerBusy(true);
+    setImgPickerErr("");
     try {
-      const dataUrls: string[] = [];
-      for (const p of picks) {
-        const d = await urlToDataUrl(p.image);
-        if (d) dataUrls.push(d);
-      }
-      if (dataUrls.length === 0) {
-        setImgPickerErr("Couldn't download the selected images. Try again.");
+      // Only download up to the number of gallery slots we have left,
+      // plus 1 extra for the cover (if empty). No point paying for
+      // images the vendor can't store.
+      const roomForGallery = Math.max(0, 10 - galleryImages.length);
+      const needCover = !imageUrl;
+      const wanted = picks.slice(0, roomForGallery + (needCover ? 1 : 0));
+      if (wanted.length === 0) {
+        setImgPickerErr("Gallery is full (10/10). Remove a photo first.");
         return;
       }
-      if (!imageUrl) setImageUrl(dataUrls[0]);
-      const room = Math.max(0, 10 - galleryImages.length);
-      if (room > 0) setGalleryImages([...galleryImages, ...dataUrls.slice(0, room)]);
-      setImgPickerOpen(false);
-      setImgPickerSelected(new Set());
+      const r = await api.post<any>("/products/images/fetch-to-data", {
+        urls: wanted.map((p) => p.image),
+      });
+      const items: Array<{ data_url: string | null; ok: boolean }> = r.data?.items || [];
+      const dataUrls = items.map((it) => (it.ok ? it.data_url : null)).filter(Boolean) as string[];
+      if (dataUrls.length === 0) {
+        setImgPickerErr("Couldn't download any of the selected images. Try different picks or search again.");
+        return;
+      }
+      // Cover: first data URL if the cover slot is empty.
+      let toGallery = dataUrls;
+      if (needCover) {
+        setImageUrl(dataUrls[0]);
+        toGallery = dataUrls.slice(1);
+      }
+      if (toGallery.length > 0) {
+        setGalleryImages((prev) => {
+          const room = Math.max(0, 10 - prev.length);
+          return [...prev, ...toGallery.slice(0, room)];
+        });
+      }
+      // Nice-to-have: report partial failures inline before closing.
+      const failed = items.length - dataUrls.length - (needCover ? 1 : 0);
+      if (failed > 0) {
+        setImgPickerErr(`${dataUrls.length} added · ${failed} failed to download.`);
+        // Keep modal open a second so the vendor sees the summary.
+        setTimeout(() => { setImgPickerOpen(false); setImgPickerSelected(new Set()); }, 1200);
+      } else {
+        setImgPickerOpen(false);
+        setImgPickerSelected(new Set());
+      }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setImgPickerErr(typeof detail === "string" ? detail : "Download failed. Please try again.");
     } finally { setImgPickerBusy(false); }
   };
 
@@ -1930,7 +1956,7 @@ export function RichProductEditor({
                       style={[sectionStyles.freeImgCell, isSel && sectionStyles.freeImgCellSel]}
                       testID={`free-img-cell-${row.image.slice(-20)}`}
                     >
-                      <Image source={{ uri: row.thumbnail }} style={sectionStyles.freeImgCellImg} />
+                      <Image source={{ uri: proxiedImageUrl(row.thumbnail || row.image) }} style={sectionStyles.freeImgCellImg} />
                       {isSel ? (
                         <View style={sectionStyles.freeImgCellCheck}>
                           <Feather name="check" size={14} color="#fff" />

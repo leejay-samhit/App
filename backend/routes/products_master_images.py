@@ -381,3 +381,175 @@ async def search_free_images(
         "count": len(merged[:limit]),
         "items": merged[:limit],
     }
+
+
+# ── Server-side proxy + base64 fetch ─────────────────────────────────
+# Sept 2026 — Rationale.
+#   The RN app running on `localhost:3000` (Metro dev) or `slangcart.com`
+#   (production) hits Wikimedia's CDN with a `Referer` header that
+#   Wikimedia's hotlink policy sometimes rejects, and Wikimedia does not
+#   send `Access-Control-Allow-Origin: *` so JS `fetch()` → `blob()`
+#   fails with a CORS error even when `<img>` succeeds.  Both symptoms
+#   were visible in the vendor screenshot: blank thumbnail cells + a
+#   "Couldn't download the selected images" toast when tapping Use.
+#
+#   Fix: do EVERY image fetch server-side.
+#     * `GET  /products/images/proxy?url=…`  → streams the bytes with a
+#       browser UA + explicit `Referer` header so the mobile app can
+#       render Wikimedia thumbnails as regular images.
+#     * `POST /products/images/fetch-to-data` → accepts a list of URLs,
+#       returns a matching list of base64 `data:image/…` strings ready
+#       to drop straight into the product doc's `image_url`/`images`.
+from urllib.parse import urlparse
+
+from fastapi.responses import Response
+from pydantic import BaseModel
+
+_PROXY_ALLOWED_HOSTS = {
+    # Openverse serves via api.openverse.org (redirect) + these upstreams:
+    "api.openverse.org", "upload.wikimedia.org", "commons.wikimedia.org",
+    "live.staticflickr.com", "farm1.staticflickr.com", "farm2.staticflickr.com",
+    "farm3.staticflickr.com", "farm4.staticflickr.com", "farm5.staticflickr.com",
+    "farm6.staticflickr.com", "farm7.staticflickr.com", "farm8.staticflickr.com",
+    "farm9.staticflickr.com", "cdn.stocksnap.io", "images.nappy.co",
+    "stocksnap.io", "images.pexels.com", "images.unsplash.com",
+    "burst.shopifycdn.com", "www.pxfuel.com", "get.pxhere.com",
+    "cdn.pixabay.com", "cdn0.pixabay.com", "cdn1.pixabay.com",
+    "cdn2.pixabay.com", "cdn3.pixabay.com",
+}
+
+
+def _proxy_headers_for(host: str) -> Dict[str, str]:
+    """Return headers with a UA + Referer the upstream trusts.
+
+    Wikimedia's `upload.wikimedia.org` CDN enforces their bot-agent policy:
+    generic `Mozilla/5.0` UAs are HTTP 403, but identifiable UAs (with a
+    contact URL) get 200.  Every other allow-listed CDN behaves like a
+    regular browser CDN and expects a browser UA.
+    """
+    is_wikimedia = "wikimedia" in host
+    ua = (
+        "SlangcartBot/1.0 (https://slangcart.com; ops@slangcart.com)"
+        if is_wikimedia
+        else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+    referer = "https://commons.wikimedia.org/" if is_wikimedia else f"https://{host}/"
+    return {
+        "User-Agent": ua,
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer,
+    }
+
+
+@router.get("/products/images/proxy")
+async def proxy_image(
+    url: str = Query(..., min_length=8, max_length=2000),
+    # Intentionally PUBLIC — RN `<Image>` cannot pass Bearer tokens.
+    # Security is bound by the `_PROXY_ALLOWED_HOSTS` allow-list which
+    # only permits well-known Creative-Commons image CDNs, so there is
+    # no SSRF or private-network exfiltration surface here.
+):
+    """Stream an image from an allow-listed public CDN through our origin.
+
+    Frontend uses this for thumbnail rendering (avoids Wikimedia hotlink
+    quirks + CORS on RN Web).  Only allow-listed hosts are proxied — no
+    open SSRF vector.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host or host not in _PROXY_ALLOWED_HOSTS:
+        raise HTTPException(status_code=400, detail=f"Host '{host}' not allow-listed for image proxying")
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs are supported")
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+            r = await client.get(url, headers=_proxy_headers_for(host))
+    except Exception as e:
+        log.info("Image proxy fetch failed for %s: %s", url, e)
+        raise HTTPException(status_code=502, detail="Upstream image fetch failed")
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=f"Upstream returned {r.status_code}")
+    content_type = r.headers.get("content-type", "image/jpeg")
+    if not content_type.startswith("image/"):
+        # Some sites 200 an HTML "please turn on JS" page — reject to
+        # avoid poisoning the frontend cache with non-image bytes.
+        raise HTTPException(status_code=502, detail="Upstream returned non-image content")
+    return Response(
+        content=r.content,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+            # Explicit CORS so RN Web fetch() consumers also work if they
+            # bypass our proxy later.
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+class BatchFetchIn(BaseModel):
+    urls: List[str]
+
+
+@router.post("/products/images/fetch-to-data")
+async def batch_fetch_to_data_urls(
+    body: BatchFetchIn,
+    user: Dict[str, Any] = Depends(get_current_user),  # noqa: F841
+):
+    """Convert a list of remote image URLs into base64 `data:image/…`
+    strings ready to persist as `image_url` / `images[]` on a product.
+
+    Runs the fetches in parallel with a small concurrency cap so a
+    5-image pick completes in one round-trip.  Silently skips URLs whose
+    host isn't on `_PROXY_ALLOWED_HOSTS`, whose upstream errored, or
+    whose byte size exceeds 2 MB (keeps Mongo docs sane).
+    """
+    urls = list(body.urls or [])
+    if not urls:
+        raise HTTPException(status_code=400, detail="urls is required")
+    if len(urls) > 20:
+        raise HTTPException(status_code=400, detail="Max 20 URLs per request")
+
+    MAX_BYTES = 2 * 1024 * 1024  # 2 MB per image
+
+    async def _one(url: str) -> Optional[str]:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if not host or host not in _PROXY_ALLOWED_HOSTS:
+            return None
+        if parsed.scheme not in ("http", "https"):
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+                r = await client.get(url, headers=_proxy_headers_for(host))
+        except Exception as e:
+            log.info("batch fetch failed for %s: %s", url, e)
+            return None
+        if r.status_code != 200:
+            return None
+        ct = r.headers.get("content-type", "image/jpeg")
+        if not ct.startswith("image/"):
+            return None
+        if len(r.content) > MAX_BYTES:
+            return None
+        import base64
+        b64 = base64.b64encode(r.content).decode("ascii")
+        return f"data:{ct};base64,{b64}"
+
+    # Concurrency cap of 5 — plenty for a picker, keeps memory bounded.
+    sem = asyncio.Semaphore(5)
+
+    async def _with_sem(u: str) -> Optional[str]:
+        async with sem:
+            return await _one(u)
+
+    results = await asyncio.gather(*(_with_sem(u) for u in urls))
+
+    out: List[Dict[str, Any]] = []
+    for u, d in zip(urls, results):
+        out.append({"url": u, "data_url": d, "ok": d is not None})
+    ok_count = sum(1 for r in out if r["ok"])
+    if ok_count == 0:
+        raise HTTPException(status_code=502, detail="Every upstream image fetch failed")
+    return {"count": len(out), "ok_count": ok_count, "items": out}
