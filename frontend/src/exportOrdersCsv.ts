@@ -132,11 +132,24 @@ export async function downloadOrdersCsv(
   }
 
   // Native path — require the expo bridges lazily so metro doesn't ship
-  // them to the web bundle.
-  const FileSystem = await import("expo-file-system");
+  // them to the web bundle.  Try the legacy shim first (SDK 54+ moved
+  // `writeAsStringAsync` + `cacheDirectory` to /legacy while migration
+  // continues); fall back to the root import on older SDKs.
+  let FileSystem: any;
+  try {
+    FileSystem = await import("expo-file-system/legacy");
+  } catch {
+    FileSystem = await import("expo-file-system");
+  }
   const Sharing = await import("expo-sharing");
-  const fileUri = `${FileSystem.cacheDirectory}${fname}`;
-  await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+  const cacheDir = FileSystem.cacheDirectory || FileSystem.Paths?.cache?.uri || "";
+  if (!cacheDir || typeof FileSystem.writeAsStringAsync !== "function") {
+    throw new Error("expo-file-system API mismatch — cannot write CSV to cache.");
+  }
+  const fileUri = `${cacheDir}${fname}`;
+  await FileSystem.writeAsStringAsync(fileUri, csv, {
+    encoding: FileSystem.EncodingType?.UTF8 || "utf8",
+  });
   if (await Sharing.isAvailableAsync()) {
     await Sharing.shareAsync(fileUri, {
       mimeType: "text/csv",

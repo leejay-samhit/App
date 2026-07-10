@@ -51,20 +51,31 @@ const STATUS_COLORS: Record<string, string> = {
   cancelled: "#B3261E",
 };
 
-/** Normalise the two possible shapes into a single {items:[], total, ...}. */
-function normaliseSale(s: VendorSale): VendorSale & { items: NonNullable<VendorSale["items"]>; total: number } {
-  if (Array.isArray(s.items) && s.items.length > 0) {
-    return { ...s, items: s.items, total: s.total ?? s.items.reduce((a, i) => a + (i.price || 0) * (i.qty || 1), 0) };
-  }
+/** Normalise the two possible shapes into a single {items:[], total, ...}. Never throws. */
+function normaliseSale(s: any): VendorSale & { items: NonNullable<VendorSale["items"]>; total: number } {
+  const safe = s || {};
+  const rawItems = Array.isArray(safe.items) ? safe.items : null;
+  const items = (rawItems && rawItems.length > 0)
+    ? rawItems.map((it: any) => ({
+        name: String(it?.name || it?.product_name || safe.product_name || "Product"),
+        price: Number(it?.price ?? it?.unit_price ?? 0) || 0,
+        image_url: it?.image_url || it?.product_image_url || undefined,
+        qty: Number(it?.qty ?? 1) || 1,
+      }))
+    : [{
+        name: String(safe.product_name || "Product"),
+        price: Number(safe.unit_price ?? 0) || 0,
+        image_url: safe.product_image_url || undefined,
+        qty: Number(safe.qty ?? 1) || 1,
+      }];
+  const total = Number(safe.total ?? items.reduce((a: number, i: any) => a + (i.price * i.qty), 0)) || 0;
   return {
-    ...s,
-    items: [{
-      name: s.product_name || "Product",
-      price: s.unit_price ?? 0,
-      image_url: s.product_image_url,
-      qty: s.qty ?? 1,
-    }],
-    total: s.total ?? (s.unit_price ?? 0) * (s.qty ?? 1),
+    ...safe,
+    id: String(safe.id || safe.order_id || Math.random().toString(36).slice(2)),
+    status: String(safe.status || "placed"),
+    created_at: String(safe.created_at || new Date().toISOString()),
+    items,
+    total,
   };
 }
 
@@ -82,8 +93,13 @@ export default function VendorOrders() {
       const { data } = await api.get<{ items: VendorSale[]; total?: number } | VendorSale[]>(
         filter === "all" ? "/vendor/me/sales" : `/vendor/me/sales?status=${filter}`,
       );
-      const raw = Array.isArray(data) ? data : (data.items || []);
-      setItems(raw.map(normaliseSale));
+      const raw = Array.isArray(data) ? data : (data?.items || []);
+      // Defensive normalise + never let one bad row kill the list.
+      const shaped: any[] = [];
+      for (const r of raw) {
+        try { shaped.push(normaliseSale(r)); } catch { /* skip malformed row */ }
+      }
+      setItems(shaped);
     } catch (e) {
       // Silent: empty list is a valid empty state.
       setItems([]);
@@ -93,7 +109,13 @@ export default function VendorOrders() {
     }
   }, [filter]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => {
+    // Important: useFocusEffect expects the callback to return either
+    // a cleanup fn or undefined.  If we naively return `load()` React
+    // thinks the Promise IS the cleanup and crashes on unmount.
+    load();
+    return undefined;
+  }, [load]));
 
   const setStatus = async (orderId: string, status: string) => {
     setBusy(orderId);
@@ -163,7 +185,7 @@ export default function VendorOrders() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} testID="vorders-back">
+        <TouchableOpacity onPress={() => { try { router.back(); } catch { router.replace("/vendor/dashboard" as any); } }} style={styles.backBtn} testID="vorders-back">
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <Text style={styles.title}>My Orders</Text>
@@ -189,9 +211,10 @@ export default function VendorOrders() {
           contentContainerStyle={{ padding: spacing.screen, paddingTop: 8 }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
           data={items}
-          keyExtractor={(i) => i.id}
+          keyExtractor={(i, idx) => String(i?.id || idx)}
           renderItem={({ item }) => {
             const orderId = item.order_id || item.id;
+            const safeItems = Array.isArray(item.items) ? item.items : [];
             return (
               <View style={styles.card} testID={`vorder-${orderId}`}>
                 <View style={styles.cardTop}>
@@ -210,9 +233,9 @@ export default function VendorOrders() {
                   </View>
                 </View>
                 <View style={styles.divider} />
-                {(item.items || []).map((it, idx) => (
+                {safeItems.map((it, idx) => (
                   <View key={idx} style={styles.itemRow}>
-                    {it.image_url ? (
+                    {it && it.image_url ? (
                       <Image source={{ uri: it.image_url }} style={styles.itemImage} />
                     ) : (
                       <View style={[styles.itemImage, { alignItems: "center", justifyContent: "center" }]}>
@@ -220,10 +243,10 @@ export default function VendorOrders() {
                       </View>
                     )}
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.itemName} numberOfLines={1}>{it.name}</Text>
-                      <Text style={styles.itemQty}>{formatINR(it.price)} × {it.qty}</Text>
+                      <Text style={styles.itemName} numberOfLines={1}>{(it && it.name) || "Product"}</Text>
+                      <Text style={styles.itemQty}>{formatINR(it?.price || 0)} × {it?.qty || 1}</Text>
                     </View>
-                    <Text style={styles.lineTotal}>{formatINR((it.price || 0) * (it.qty || 1))}</Text>
+                    <Text style={styles.lineTotal}>{formatINR((it?.price || 0) * (it?.qty || 1))}</Text>
                   </View>
                 ))}
                 <View style={styles.divider} />
