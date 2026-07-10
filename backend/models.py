@@ -282,6 +282,11 @@ class SettingsUpdate(BaseModel):
     # regardless.  Kept in the model for schema back-compat and so the
     # admin UI can round-trip the toggle without a 400.
     shop_margin_enabled: Optional[bool] = None
+    # Sept 2026 — CMS-editable onboarding T&C blocks for the /vendor/apply
+    # and /service/apply gates.  Mirrors the web SettingsUpdate shape.
+    # Kept as a free-form dict so we don't tightly couple to
+    # AcceptedTermsBlock and the two flows can evolve independently.
+    onboarding_terms: Optional[Dict[str, Any]] = None
 
 
 class CartItem(BaseModel):
