@@ -577,7 +577,12 @@ export function RichProductEditor({
         return;
       }
       const r = await api.post<any>("/products/images/fetch-to-data", {
-        urls: wanted.map((p) => p.image),
+        // Sept 2026 fix — send each pick's thumbnail as a fallback so a
+        // dead upstream Flickr photo (which happens surprisingly often in
+        // Openverse's index) doesn't cause the whole download to fail.
+        // The thumbnail is served from Openverse's own CDN so it's stable
+        // even when the source disappears.
+        urls: wanted.map((p) => ({ url: p.image, fallback_url: p.thumbnail })),
       });
       const items: Array<{ data_url: string | null; ok: boolean }> = r.data?.items || [];
       const dataUrls = items.map((it) => (it.ok ? it.data_url : null)).filter(Boolean) as string[];

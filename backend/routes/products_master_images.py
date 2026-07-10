@@ -488,8 +488,19 @@ async def proxy_image(
     )
 
 
+class BatchFetchItem(BaseModel):
+    url: str
+    # Sept 2026 fix — Openverse's index sometimes points to Flickr photos
+    # that have since been deleted (upstream returns 502).  We accept a
+    # `fallback_url` (usually the thumbnail from api.openverse.org/v1/…/thumb/,
+    # which IS still cached on Openverse's own CDN) so a dead full-size
+    # URL doesn't kill the download.  Optional and safely ignored if the
+    # primary succeeds.
+    fallback_url: Optional[str] = None
+
+
 class BatchFetchIn(BaseModel):
-    urls: List[str]
+    urls: List[Any]  # accepts List[str] (legacy) or List[BatchFetchItem]
 
 
 @router.post("/products/images/fetch-to-data")
@@ -500,20 +511,35 @@ async def batch_fetch_to_data_urls(
     """Convert a list of remote image URLs into base64 `data:image/…`
     strings ready to persist as `image_url` / `images[]` on a product.
 
-    Runs the fetches in parallel with a small concurrency cap so a
-    5-image pick completes in one round-trip.  Silently skips URLs whose
-    host isn't on `_PROXY_ALLOWED_HOSTS`, whose upstream errored, or
-    whose byte size exceeds 2 MB (keeps Mongo docs sane).
+    Accepts two shapes:
+      * legacy — a list of URL strings
+      * new    — a list of `{ url, fallback_url? }` objects
+
+    When `fallback_url` is provided and the primary URL fetch fails or
+    returns a non-image response, we retry once against the fallback
+    (typically the Openverse thumbnail, which is CDN-cached and stable
+    even when the upstream Flickr photo has been deleted).
     """
-    urls = list(body.urls or [])
-    if not urls:
+    raw = list(body.urls or [])
+    if not raw:
         raise HTTPException(status_code=400, detail="urls is required")
-    if len(urls) > 20:
+    if len(raw) > 20:
         raise HTTPException(status_code=400, detail="Max 20 URLs per request")
+
+    # Normalise into {url, fallback_url} pairs so downstream code is uniform.
+    pairs: List[Dict[str, Optional[str]]] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            pairs.append({"url": entry, "fallback_url": None})
+        elif isinstance(entry, dict):
+            u = entry.get("url")
+            if isinstance(u, str):
+                pairs.append({"url": u, "fallback_url": entry.get("fallback_url")})
 
     MAX_BYTES = 2 * 1024 * 1024  # 2 MB per image
 
-    async def _one(url: str) -> Optional[str]:
+    async def _fetch_one(url: str) -> Optional[bytes]:
+        """Return raw image bytes or None. Never raises."""
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         if not host or host not in _PROXY_ALLOWED_HOSTS:
@@ -533,22 +559,31 @@ async def batch_fetch_to_data_urls(
             return None
         if len(r.content) > MAX_BYTES:
             return None
+        return r.content, ct  # type: ignore[return-value]
+
+    async def _one(pair: Dict[str, Optional[str]]) -> Optional[str]:
+        got = await _fetch_one(pair["url"] or "")
+        if got is None and pair.get("fallback_url"):
+            got = await _fetch_one(pair["fallback_url"] or "")
+        if got is None:
+            return None
+        content, ct = got
         import base64
-        b64 = base64.b64encode(r.content).decode("ascii")
+        b64 = base64.b64encode(content).decode("ascii")
         return f"data:{ct};base64,{b64}"
 
     # Concurrency cap of 5 — plenty for a picker, keeps memory bounded.
     sem = asyncio.Semaphore(5)
 
-    async def _with_sem(u: str) -> Optional[str]:
+    async def _with_sem(p: Dict[str, Optional[str]]) -> Optional[str]:
         async with sem:
-            return await _one(u)
+            return await _one(p)
 
-    results = await asyncio.gather(*(_with_sem(u) for u in urls))
+    results = await asyncio.gather(*(_with_sem(p) for p in pairs))
 
     out: List[Dict[str, Any]] = []
-    for u, d in zip(urls, results):
-        out.append({"url": u, "data_url": d, "ok": d is not None})
+    for p, d in zip(pairs, results):
+        out.append({"url": p["url"], "data_url": d, "ok": d is not None})
     ok_count = sum(1 for r in out if r["ok"])
     if ok_count == 0:
         raise HTTPException(status_code=502, detail="Every upstream image fetch failed")
