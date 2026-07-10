@@ -16,6 +16,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { api } from "../../src/api";
+import { cachedGet } from "../../src/cachedGet";
 import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
 import { colors, formatINR, radii, spacing } from "../../src/theme";
@@ -79,6 +80,9 @@ export default function DashboardScreen() {
     products_count: number; published_count: number;
   } | null>(null);
   const [pendingQA, setPendingQA] = useState<number>(0);
+  // Sept 2026 — My-orders inline hero (owner ask). Top ~3 orders shown
+  // right on dashboard so users don't have to drill into a subpage.
+  const [myOrders, setMyOrders] = useState<any[] | null>(null);
   // ─── Service Provider availability quick-toggle (June 2026) ───
   // When the logged-in user is an approved Service Provider we show a
   // prominent Available / Busy / Offline strip on the Dashboard so they
@@ -156,6 +160,18 @@ export default function DashboardScreen() {
       // not an approved vendor — hide the card entirely
       setVendorStats(null);
       setPendingQA(0);
+    }
+    // Sept 2026 — Recent orders for the inline hero card. Uses the
+    // stale-while-revalidate cache so the card paints instantly on
+    // repeat mounts and self-updates when the network responds.
+    try {
+      const cached = await cachedGet<any[]>("/orders/me", {
+        ttlMs: 30_000,
+        onFresh: (fresh) => setMyOrders(Array.isArray(fresh) ? fresh.slice(0, 3) : []),
+      });
+      if (Array.isArray(cached)) setMyOrders(cached.slice(0, 3));
+    } catch {
+      setMyOrders([]);
     }
   }, []);
 
@@ -548,6 +564,62 @@ export default function DashboardScreen() {
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
           </TouchableOpacity>
 
+          {/* Sept 2026 — Inline recent-orders hero. Shows the top 3
+              orders with product image + status pill directly on the
+              dashboard, per owner request. */}
+          {myOrders && myOrders.length > 0 ? (
+            <View style={styles.orderHeroBox}>
+              <View style={styles.orderHeroHeader}>
+                <Text style={styles.sectionLabel}>MY ORDERS</Text>
+                <TouchableOpacity onPress={() => router.push("/orders")} testID="dashboard-orders-viewall">
+                  <Text style={styles.viewAll}>View all</Text>
+                </TouchableOpacity>
+              </View>
+              {myOrders.slice(0, 3).map((o: any) => {
+                const items: any[] = Array.isArray(o.items) ? o.items : [];
+                const first = items[0] || {};
+                const more = Math.max(0, items.length - 1);
+                const status = String(o.status || "placed");
+                const statusColors: Record<string, string> = {
+                  placed: colors.warning || "#F59E0B",
+                  shipped: colors.brand500 || colors.primary,
+                  delivered: colors.success || "#16A34A",
+                  cancelled: "#B91C1C",
+                };
+                return (
+                  <TouchableOpacity
+                    key={o.id}
+                    style={styles.orderHeroCard}
+                    onPress={() => router.push({ pathname: "/orders", params: { highlight: o.id } } as any)}
+                    testID={`order-hero-${o.id}`}
+                  >
+                    {first.image_url ? (
+                      <Image source={{ uri: first.image_url }} style={styles.orderHeroThumb} />
+                    ) : (
+                      <View style={[styles.orderHeroThumb, { alignItems: "center", justifyContent: "center" }]}>
+                        <Feather name="image" size={16} color={colors.textMuted} />
+                      </View>
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.orderHeroName} numberOfLines={1}>{first.name || "Order"}</Text>
+                      {more > 0 ? (
+                        <Text style={styles.orderHeroMore}>+ {more} more item{more > 1 ? "s" : ""} — tap for details</Text>
+                      ) : (
+                        <Text style={styles.orderHeroMore}>{first.qty || 1} × {formatINR(first.price || 0)}</Text>
+                      )}
+                      <View style={styles.orderHeroBottom}>
+                        <View style={[styles.orderHeroPill, { backgroundColor: statusColors[status] || colors.textMuted }]}>
+                          <Text style={styles.orderHeroPillText}>{status.toUpperCase()}</Text>
+                        </View>
+                        <Text style={styles.orderHeroTotal}>{formatINR(o.total || 0)}</Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          ) : null}
+
           <TouchableOpacity style={styles.quickRow} onPress={() => router.push("/wishlist" as any)} testID="dashboard-wishlist">
             <View style={styles.quickIcon}><Feather name="heart" size={16} color={colors.primary} /></View>
             <Text style={styles.quickText}>My wishlist</Text>
@@ -716,6 +788,17 @@ const styles = StyleSheet.create({
   quickText: { flex: 1, color: colors.textMain, fontSize: 14, fontWeight: "600" },
   feedHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 12 },
   viewAll: { color: colors.primary, fontSize: 12, fontWeight: "700", marginBottom: 12 },
+  // Sept 2026 — Inline "My orders" hero card cluster.
+  orderHeroBox: { marginTop: 10 },
+  orderHeroHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  orderHeroCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  orderHeroThumb: { width: 56, height: 56, borderRadius: 10, backgroundColor: colors.surfaceMuted },
+  orderHeroName: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  orderHeroMore: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  orderHeroBottom: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 6 },
+  orderHeroPill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
+  orderHeroPillText: { color: "#fff", fontSize: 9, fontWeight: "800", letterSpacing: 0.6 },
+  orderHeroTotal: { fontSize: 14, fontWeight: "900", color: colors.primary },
   feedItem: { flexDirection: "row", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 14, marginBottom: 8, gap: 10, alignItems: "flex-start" },
   feedDot: { width: 8, height: 8, borderRadius: 4, marginTop: 6 },
   feedTitle: { fontSize: 13, fontWeight: "700", color: colors.textMain },
