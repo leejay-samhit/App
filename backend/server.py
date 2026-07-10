@@ -3761,7 +3761,13 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             "created_at": now_utc().isoformat(),
         })
     for vid, amount in vendor_payouts.items():
-        await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": amount}})
+        # Sept 2026 (Slangcart · Bank tally = referral money only) —
+        # Owner asked to stop mixing vendor-shop earnings into the
+        # `wallet_balance` field (which represents referral money).
+        # Vendor shop earnings still live in `db.vendor_sales` + a new
+        # `vendor_earnings` bucket on the user doc so the Vendor Panel
+        # dashboards continue to work.
+        await db.users.update_one({"id": vid}, {"$inc": {"vendor_earnings": amount}})
         try:
             await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
@@ -3772,6 +3778,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 "description": f"Vendor share credited from order #{order_id[:8]}",
                 "order_id": order_id,
                 "created_at": now_utc().isoformat(),
+                "wallet_impact": "vendor_earnings_only",  # tag for auditors
             })
         except DuplicateKeyError:
             pass
@@ -5358,7 +5365,9 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                 vendor_payouts[vid] = vendor_payouts.get(vid, 0) + vshare
         for vid, amt in vendor_payouts.items():
             amt = round(amt, 2)
-            await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": amt}})
+            # Sept 2026 — same treatment as checkout site above; keep
+            # shop earnings off `wallet_balance` (which is referral-only).
+            await db.users.update_one({"id": vid}, {"$inc": {"vendor_earnings": amt}})
             await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": vid,
@@ -5368,6 +5377,7 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                 "description": f"Vendor share — COD order #{order_id[:8]} delivered",
                 "order_id": order_id,
                 "created_at": now_utc().isoformat(),
+                "wallet_impact": "vendor_earnings_only",
             })
 
     if payload.status == "cancelled" and prev_status != "cancelled":
@@ -5528,7 +5538,9 @@ async def admin_cleanup_legacy_refunds(
             })
             if had_vendor_credit:
                 amt = round(amt, 2)
-                await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": -amt}})
+                # Sept 2026 — mirror the credit sites: debit vendor_earnings,
+                # not wallet_balance.
+                await db.users.update_one({"id": vid}, {"$inc": {"vendor_earnings": -amt}})
                 await db.transactions.insert_one({
                     "id": str(uuid.uuid4()),
                     "user_id": vid,
@@ -5538,6 +5550,7 @@ async def admin_cleanup_legacy_refunds(
                     "description": f"Legacy cleanup — reversal for cancelled order #{order_id[:8]}",
                     "order_id": order_id,
                     "created_at": now_utc().isoformat(),
+                    "wallet_impact": "vendor_earnings_only",
                 })
                 actions.append(f"vendor {vid[:8]} -{amt}")
 
@@ -6089,6 +6102,14 @@ async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: 
     if bucket not in SYSTEM_WALLET_BUCKETS:
         raise ValueError(f"Unknown bucket: {bucket}")
     if amount == 0:
+        return
+    # Sept 2026 (Slangcart · Bank tally = referral money only) — Owner
+    # requested that shop/service cashflows STOP contributing to the
+    # system-wallet Treasury.  Silently no-op every credit into these
+    # buckets; the money is instead accounted for in the per-vendor
+    # Sales dashboard (independent of the referral treasury).
+    if bucket in ("shopping_margin", "service_margin"):
+        logger.info("credit_admin_bucket: skipping %s +%s (owner-locked)", bucket, amount)
         return
     admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not admin:
