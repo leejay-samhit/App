@@ -155,8 +155,9 @@ export default function CheckoutScreen() {
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={20}>
         <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 130 }} keyboardShouldPersistTaps="handled">
-          {/* Order summary */}
-          <Text style={styles.sectionLabel}>ORDER SUMMARY</Text>
+          {/* Order summary — Sept 2026 refresh: bigger thumbnails,
+              clearer qty × unit-price arithmetic, sticky spacing. */}
+          <Text style={styles.sectionLabel}>ORDER SUMMARY ({items.length} {items.length === 1 ? "item" : "items"})</Text>
           {items.map((it) => {
             const p = it.product || {} as any;
             const img = p.image_url;
@@ -165,12 +166,25 @@ export default function CheckoutScreen() {
             const line = it.line_total || price * (it.qty || 1);
             return (
               <View key={it.id} style={styles.lineItem}>
-                {img ? <Image source={{ uri: img }} style={styles.thumb} resizeMode="cover" /> : <View style={[styles.thumb, { alignItems: "center", justifyContent: "center" }]}><Feather name="image" size={16} color={colors.textMuted} /></View>}
+                {img ? (
+                  <Image source={{ uri: img }} style={styles.thumb} resizeMode="cover" />
+                ) : (
+                  <View style={[styles.thumb, styles.thumbEmpty]}>
+                    <Feather name="image" size={20} color={colors.textMuted} />
+                  </View>
+                )}
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.lineName} numberOfLines={1}>{nm}</Text>
-                  <Text style={styles.lineQty}>{it.qty} × {formatINR(price)}</Text>
+                  <Text style={styles.lineName} numberOfLines={2}>{nm}</Text>
+                  <View style={styles.lineMetaRow}>
+                    <View style={styles.qtyBadge}>
+                      <Text style={styles.qtyBadgeText}>× {it.qty}</Text>
+                    </View>
+                    <Text style={styles.lineUnit}>{formatINR(price)} each</Text>
+                  </View>
                 </View>
-                <Text style={styles.lineTotal}>{formatINR(line)}</Text>
+                <View style={{ alignItems: "flex-end" }}>
+                  <Text style={styles.lineTotal}>{formatINR(line)}</Text>
+                </View>
               </View>
             );
           })}
@@ -270,11 +284,16 @@ const styles = StyleSheet.create({
   title: { fontSize: 17, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
   sectionLabel: { fontSize: 11, fontWeight: "800", letterSpacing: 1.4, color: colors.textMuted, marginTop: 18, marginBottom: 8 },
   // Line items
-  lineItem: { flexDirection: "row", alignItems: "center", gap: 10, padding: 10, backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, marginBottom: 6 },
-  thumb: { width: 44, height: 44, borderRadius: 10, backgroundColor: colors.surfaceMuted },
-  lineName: { fontSize: 13, fontWeight: "700", color: colors.textMain },
+  lineItem: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  thumb: { width: 68, height: 68, borderRadius: 12, backgroundColor: colors.surfaceMuted },
+  thumbEmpty: { alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderStyle: "dashed" },
+  lineName: { fontSize: 14, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
+  lineMetaRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6 },
+  qtyBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: colors.primary + "1A" },
+  qtyBadgeText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
+  lineUnit: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
   lineQty: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-  lineTotal: { fontSize: 14, fontWeight: "900", color: colors.primary },
+  lineTotal: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
   totalRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, backgroundColor: colors.brand100, borderRadius: 12, marginTop: 4 },
   totalLabel: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
   totalAmount: { fontSize: 19, fontWeight: "900", color: colors.primary, letterSpacing: -0.4 },

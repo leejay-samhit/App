@@ -5,6 +5,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { downloadOrdersCsv } from "../../src/exportOrdersCsv";
 
 type AdminOrder = {
   id: string;
@@ -13,6 +14,9 @@ type AdminOrder = {
   status: string;
   created_at: string;
   items: { name: string; price: number; image_url: string; qty: number }[];
+  // Optional buyer/vendor fields the backend may include for admin views.
+  buyer_name?: string; buyer_email?: string; buyer_phone?: string;
+  vendor_id?: string; vendor_name?: string; vendor_email?: string; vendor_phone?: string;
 };
 
 const STATUSES = ["placed", "shipped", "delivered", "cancelled"] as const;
@@ -46,6 +50,30 @@ export default function AdminOrders() {
       Alert.alert("Error", formatApiError(e));
     } finally { setBusy(null); }
   };
+  const [exporting, setExporting] = useState(false);
+
+  // Sept 2026 — Excel-style download.  Owner asked for the same export
+  // on both admin + vendor order screens with these exact columns:
+  //   User Name · Mobile · Product Name · Amount · Stage · Vendor Name
+  //   · Vendor Mail · Vendor Mobile.
+  // We generate CSV client-side (opens in Excel/Numbers/Sheets natively)
+  // instead of a heavyweight XLSX lib.  Web dev's export endpoint returns
+  // the same schema so admin + vendor stay in sync.
+  const onExport = async () => {
+    if (items.length === 0) {
+      Alert.alert("Nothing to export", "The current filter has no orders.");
+      return;
+    }
+    setExporting(true);
+    try {
+      await downloadOrdersCsv(items, {
+        title: `slangcart-admin-orders-${filter}`,
+        scope: "admin",
+      });
+    } catch (e) {
+      Alert.alert("Export failed", formatApiError(e));
+    } finally { setExporting(false); }
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -54,7 +82,11 @@ export default function AdminOrders() {
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <Text style={styles.title}>Orders</Text>
-        <View style={{ width: 40 }} />
+        <TouchableOpacity onPress={onExport} disabled={exporting || items.length === 0} style={[styles.exportBtn, (exporting || items.length === 0) && { opacity: 0.5 }]} testID="orders-export">
+          {exporting
+            ? <ActivityIndicator color={colors.primary} size="small" />
+            : <><Feather name="download" size={14} color={colors.primary} /><Text style={styles.exportBtnText}>CSV</Text></>}
+        </TouchableOpacity>
       </View>
 
       <View style={styles.tabs}>
@@ -101,24 +133,26 @@ export default function AdminOrders() {
               </View>
 
               <View style={styles.actions}>
-                {item.status === "placed" && (
-                  <TouchableOpacity onPress={() => setStatus(item.id, "shipped")} disabled={busy === item.id} style={styles.smallBtn} testID={`order-ship-${item.id}`}>
-                    <Feather name="truck" size={14} color={colors.primary} />
-                    <Text style={styles.smallBtnText}>Mark shipped</Text>
-                  </TouchableOpacity>
-                )}
-                {item.status === "shipped" && (
-                  <TouchableOpacity onPress={() => setStatus(item.id, "delivered")} disabled={busy === item.id} style={styles.smallBtn} testID={`order-deliver-${item.id}`}>
-                    <Feather name="check-circle" size={14} color={colors.primary} />
-                    <Text style={styles.smallBtnText}>Mark delivered</Text>
-                  </TouchableOpacity>
-                )}
-                {(item.status === "placed" || item.status === "shipped") && (
-                  <TouchableOpacity onPress={() => setStatus(item.id, "cancelled")} disabled={busy === item.id} style={[styles.smallBtn, { borderColor: "#B3261E" }]} testID={`order-cancel-${item.id}`}>
-                    <Feather name="x-circle" size={14} color="#B3261E" />
-                    <Text style={[styles.smallBtnText, { color: "#B3261E" }]}>Cancel & refund</Text>
-                  </TouchableOpacity>
-                )}
+                {/* Sept 2026 — Admin is now READONLY on status. Vendors
+                    control the fulfilment lifecycle from their own Orders
+                    screen. This block just shows the current stage in a
+                    non-interactive tracker. */}
+                <View style={styles.stageTracker} testID={`order-stage-${item.id}`}>
+                  {STATUSES.map((s, i) => {
+                    const activeIdx = STATUSES.indexOf(item.status as any);
+                    const done = activeIdx >= 0 && i <= activeIdx && item.status !== "cancelled";
+                    const isCancelled = item.status === "cancelled" && s === "cancelled";
+                    return (
+                      <View key={s} style={styles.stageStep}>
+                        <View style={[styles.stageDot, (done || isCancelled) && { backgroundColor: STATUS_COLORS[s] || colors.primary, borderColor: STATUS_COLORS[s] || colors.primary }]}>
+                          {(done || isCancelled) ? <Feather name={s === "cancelled" ? "x" : "check"} size={9} color="#fff" /> : null}
+                        </View>
+                        <Text style={[styles.stageLabel, (done || isCancelled) && { color: STATUS_COLORS[s], fontWeight: "800" }]}>{s}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+                {busy === item.id ? <ActivityIndicator size="small" color={colors.primary} /> : null}
               </View>
             </View>
           )}
@@ -158,4 +192,11 @@ const styles = StyleSheet.create({
   smallBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 99, borderWidth: 1, borderColor: colors.primary },
   smallBtnText: { fontSize: 11, fontWeight: "700", color: colors.primary },
   empty: { padding: 40, textAlign: "center", color: colors.textMuted },
+  // Sept 2026 — Readonly stage-tracker for admin.
+  exportBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 99, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.surface },
+  exportBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
+  stageTracker: { flexDirection: "row", justifyContent: "space-between", flex: 1, gap: 4 },
+  stageStep: { flex: 1, alignItems: "center", gap: 4 },
+  stageDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
+  stageLabel: { fontSize: 9, color: colors.textMuted, letterSpacing: 0.3, textTransform: "uppercase", fontWeight: "700" },
 });

@@ -138,8 +138,9 @@ export default function VendorDashboard() {
             <Text style={{ fontSize: 11, fontWeight: "800", color: colors.textMuted, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 8 }}>Cloud POS</Text>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
               {[
-                { key: "pos", label: "New sale", icon: "shopping-cart", path: "/vendor/pos", primary: true },
-                { key: "sales", label: "Sales", icon: "list", path: "/vendor/sales" },
+                { key: "orders", label: "Shop orders", icon: "package", path: "/vendor/orders", primary: true },
+                { key: "pos", label: "New sale", icon: "shopping-cart", path: "/vendor/pos" },
+                { key: "sales", label: "POS sales", icon: "list", path: "/vendor/sales" },
                 { key: "invoices", label: "Invoices", icon: "file-text", path: "/vendor/invoices" },
                 { key: "cash", label: "Cash", icon: "dollar-sign", path: "/vendor/cash" },
                 { key: "analytics", label: "Analytics", icon: "bar-chart-2", path: "/vendor/analytics" },
