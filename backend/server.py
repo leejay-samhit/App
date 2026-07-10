@@ -7529,6 +7529,8 @@ async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depen
         "bank_account": (payload.bank_account or "").strip(),
         "bank_ifsc": (payload.bank_ifsc or "").strip(),
         "description": (payload.description or "").strip(),
+        # Sept 2026 — Persist the consent audit block for legal review.
+        "accepted_terms": (payload.accepted_terms.model_dump() if payload.accepted_terms else None),
         "status": "pending",
         "created_at": ts,
         "updated_at": ts,
@@ -7832,6 +7834,8 @@ async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Dep
         "pincode": payload.pincode,
         "charge": float(payload.charge),
         "description": (payload.description or "").strip() or None,
+        # Sept 2026 — Persist the consent audit block for legal review.
+        "accepted_terms": (payload.accepted_terms.model_dump() if payload.accepted_terms else None),
         "status": "pending",
         "created_at": ts,
         "reviewed_at": None,

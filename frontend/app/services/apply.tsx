@@ -16,6 +16,11 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
+import { TermsAcceptancePanel } from "../../src/TermsAcceptancePanel";
+import {
+  fetchOnboardingTerms, buildAcceptedTerms,
+  PROVIDER_TERMS_FALLBACK, OnboardingTermsBlock,
+} from "../../src/onboardingTerms";
 
 type Category = {
   id: string;
@@ -48,6 +53,10 @@ export default function ServiceApply() {
   const [description, setDescription] = useState("");
   const [languages, setLanguages] = useState<string[]>([]);
   const [acceptTerms, setAcceptTerms] = useState(false);
+  // Sept 2026 — Full T&C acceptance panel (mirror of web /become-provider).
+  // Only enforced on FIRST-TIME apply — editing an existing service skips it.
+  const [termsBlock, setTermsBlock] = useState<OnboardingTermsBlock>(PROVIDER_TERMS_FALLBACK);
+  const [termsError, setTermsError] = useState<string | null>(null);
   const [revealCfg, setRevealCfg] = useState<{ fee: number; total: number; gst_pct: number } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [existing, setExisting] = useState<any | null>(null);
@@ -83,6 +92,11 @@ export default function ServiceApply() {
         try {
           const rc = await api.get("/services/reveal-config");
           setRevealCfg({ fee: rc.data.fee, total: rc.data.total, gst_pct: rc.data.gst_pct });
+        } catch {}
+        // Sept 2026 — Onboarding T&C (mirror of web /become-provider).
+        try {
+          const t = await fetchOnboardingTerms();
+          setTermsBlock(t.service_provider);
         } catch {}
         // also check registration / approval status — apply requires both
         const me = await api.get<any>("/auth/me");
@@ -187,8 +201,11 @@ export default function ServiceApply() {
     }
 
     // ── First-time apply path: POST /service/apply ──
-    if (!acceptTerms)
-      return showError("Please tick the terms & conditions checkbox to continue.");
+    if (!acceptTerms) {
+      setTermsError("Scroll to bottom and tick 'I Agree' to continue.");
+      return showError("Please accept the Service Provider T&C above to continue.");
+    }
+    setTermsError(null);
     setSubmitting(true);
     try {
       await api.post("/service/apply", {
@@ -203,6 +220,8 @@ export default function ServiceApply() {
         charge: 1,
         description: description.trim() || null,
         languages,
+        // Sept 2026 — Audit-log block (mirrors web payload).
+        accepted_terms: buildAcceptedTerms(termsBlock),
       });
       Alert.alert("Submitted", "Your service application is under review.", [
         { text: "OK", onPress: () => router.back() },
@@ -443,21 +462,30 @@ export default function ServiceApply() {
               you charge the customer directly after that. There's no booking fee or commission
               on your earnings.
             </Text>
-            <TouchableOpacity
-              onPress={() => setAcceptTerms((v) => !v)}
-              style={styles.tncCheckRow}
-              testID="apply-tnc-checkbox"
-              disabled={locked}
-            >
-              <View style={[styles.tncCheckBox, acceptTerms && styles.tncCheckBoxOn]}>
-                {acceptTerms ? <Feather name="check" size={13} color="#fff" /> : null}
-              </View>
-              <Text style={styles.tncCheckText}>
-                I agree to the{" "}
-                <Text style={{ fontWeight: "800", color: colors.primary }}>terms & conditions</Text>
-                : customer pays ₹1 to my profile to reveal my number; I provide my service privately.
-              </Text>
-            </TouchableOpacity>
+            {/* Sept 2026 — Full T&C panel for FIRST-TIME apply. Approved
+                providers editing existing details are exempt (mirrors web). */}
+            {(!isApproved || !existing) ? (
+              <TermsAcceptancePanel
+                block={termsBlock}
+                accepted={acceptTerms}
+                onChange={(v) => { setAcceptTerms(v); if (v) setTermsError(null); }}
+                errorHint={termsError}
+              />
+            ) : (
+              <TouchableOpacity
+                onPress={() => setAcceptTerms((v) => !v)}
+                style={styles.tncCheckRow}
+                testID="apply-tnc-checkbox"
+                disabled={locked}
+              >
+                <View style={[styles.tncCheckBox, acceptTerms && styles.tncCheckBoxOn]}>
+                  {acceptTerms ? <Feather name="check" size={13} color="#fff" /> : null}
+                </View>
+                <Text style={styles.tncCheckText}>
+                  I agree to the reveal-fee terms: customer pays ₹1 to my profile to reveal my number; I provide my service privately.
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <Text style={styles.label}>Description (optional)</Text>
@@ -473,10 +501,11 @@ export default function ServiceApply() {
           />
 
           {!locked && (
+            <>
             <TouchableOpacity
-              style={[styles.submitBtn, submitting && { opacity: 0.6 }]}
+              style={[styles.submitBtn, (submitting || (!isApproved && !acceptTerms)) && { opacity: 0.55 }]}
               onPress={submit}
-              disabled={submitting}
+              disabled={submitting || (!isApproved && !acceptTerms)}
               testID="service-apply-submit"
             >
               {submitting ? (
@@ -487,6 +516,12 @@ export default function ServiceApply() {
                 </Text>
               )}
             </TouchableOpacity>
+            {!isApproved && !acceptTerms ? (
+              <Text style={{ fontSize: 11, color: "#B91C1C", fontWeight: "700", textAlign: "center", marginTop: 8 }}>
+                Accept the Service Provider T&amp;C above to enable Apply.
+              </Text>
+            ) : null}
+            </>
           )}
 
           {isApproved ? (

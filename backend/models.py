@@ -506,6 +506,16 @@ class PaymentGatewayPayload(BaseModel):
     key_secret: str
 
 
+class AcceptedTermsBlock(BaseModel):
+    """Audit-log payload the client attaches on first-time onboarding
+    (mirrors the web /become-vendor and /become-provider gate). See
+    /app/frontend/src/onboardingTerms.ts for the client shape."""
+    role: str = Field(pattern=r"^(vendor|service_provider)$")
+    version: str = Field(min_length=1, max_length=32)
+    accepted_at: str = Field(min_length=8, max_length=40)
+    title: Optional[str] = Field(default=None, max_length=200)
+
+
 class VendorApplyRequest(BaseModel):
     shop_name: str
     gst_number: Optional[str] = ""
@@ -514,6 +524,8 @@ class VendorApplyRequest(BaseModel):
     bank_account: Optional[str] = ""
     bank_ifsc: Optional[str] = ""
     description: Optional[str] = ""
+    # Sept 2026 — Consent audit block (nullable so legacy clients still work).
+    accepted_terms: Optional[AcceptedTermsBlock] = None
 
 
 class VendorRejectRequest(BaseModel):
@@ -529,6 +541,8 @@ class ServiceApplyRequest(BaseModel):
     charge: float = Field(ge=0, le=1_000_000)
     description: Optional[str] = Field(default=None, max_length=500)
     languages: Optional[List[str]] = None  # subset of {"en","te","hi","ta"}
+    # Sept 2026 — Consent audit block.
+    accepted_terms: Optional[AcceptedTermsBlock] = None
 
 
 class ServiceCategoryCreate(BaseModel):

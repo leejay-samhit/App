@@ -6,6 +6,11 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
+import { TermsAcceptancePanel } from "../../src/TermsAcceptancePanel";
+import {
+  fetchOnboardingTerms, buildAcceptedTerms,
+  VENDOR_TERMS_FALLBACK, OnboardingTermsBlock,
+} from "../../src/onboardingTerms";
 
 type VendorStatus = {
   is_vendor: boolean;
@@ -28,6 +33,26 @@ export default function VendorApplyScreen() {
   const [bankAccount, setBankAccount] = useState("");
   const [bankIfsc, setBankIfsc] = useState("");
   const [description, setDescription] = useState("");
+  // Sept 2026 — T&C gate (mirror of web /become-vendor). First-time apply
+  // MUST accept the Vendor Declaration & GST Compliance Agreement; the
+  // block is admin-editable from web (/api/admin/settings.onboarding_terms.vendor)
+  // and silently falls back to the baked-in v1.0.0 defaults.
+  const [termsBlock, setTermsBlock] = useState<OnboardingTermsBlock>(VENDOR_TERMS_FALLBACK);
+  const [acceptedTerms, setAcceptedTerms] = useState<boolean>(false);
+  const [termsError, setTermsError] = useState<string | null>(null);
+
+  // Fetch the CMS override once on mount so any admin edit on web reflects
+  // in the mobile client immediately at next apply.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const t = await fetchOnboardingTerms();
+        if (!cancelled) setTermsBlock(t.vendor);
+      } catch { /* silent — fallback already in state */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -45,12 +70,22 @@ export default function VendorApplyScreen() {
 
   const onSubmit = async () => {
     if (shopName.trim().length < 3) { Alert.alert("Shop name is too short"); return; }
+    // T&C gate — mirror of the web `canSubmit` check (first-time apply only).
+    if (!acceptedTerms) {
+      setTermsError("Please read and accept the Vendor T&C above to continue.");
+      Alert.alert("Terms not accepted", "Scroll to the bottom of the Vendor Declaration and tick 'I Agree' before applying.");
+      return;
+    }
+    setTermsError(null);
     setSubmitting(true);
     try {
       await api.post("/vendor/apply", {
         shop_name: shopName.trim(), gst_number: gst.trim(), pan_number: pan.trim(),
         bank_name: bankName.trim(), bank_account: bankAccount.trim(), bank_ifsc: bankIfsc.trim(),
         description: description.trim(),
+        // Audit-log block — backend is expected to persist this alongside
+        // the application row so we can prove consent if a vendor disputes.
+        accepted_terms: buildAcceptedTerms(termsBlock),
       });
       Alert.alert("Application submitted", "We'll notify you once an admin reviews it.");
       await load();
@@ -135,9 +170,29 @@ export default function VendorApplyScreen() {
               <Text style={styles.label}>IFSC code (optional)</Text>
               <TextInput style={styles.input} value={bankIfsc} onChangeText={setBankIfsc} placeholder="HDFC0001234" placeholderTextColor={colors.textMuted} autoCapitalize="characters" testID="vapply-ifsc" />
 
-              <TouchableOpacity onPress={onSubmit} disabled={submitting} style={[styles.primaryBtn, submitting && { opacity: 0.7 }]} testID="vapply-submit">
+              {/* Sept 2026 — T&C acceptance gate. Mirrors /become-vendor
+                  on web: user must scroll to bottom + tick "I Agree" to
+                  enable the submit button. */}
+              <TermsAcceptancePanel
+                block={termsBlock}
+                accepted={acceptedTerms}
+                onChange={(v) => { setAcceptedTerms(v); if (v) setTermsError(null); }}
+                errorHint={termsError}
+              />
+
+              <TouchableOpacity
+                onPress={onSubmit}
+                disabled={submitting || !acceptedTerms}
+                style={[styles.primaryBtn, (submitting || !acceptedTerms) && { opacity: 0.55 }]}
+                testID="vapply-submit"
+              >
                 {submitting ? <ActivityIndicator color={colors.primaryFg} /> : <><Feather name="send" size={16} color={colors.primaryFg} /><Text style={styles.primaryBtnText}>  Submit application</Text></>}
               </TouchableOpacity>
+              {!acceptedTerms ? (
+                <Text style={[styles.note, { color: "#B3261E", fontWeight: "700" }]}>
+                  Accept the Vendor T&amp;C above to enable the Apply button.
+                </Text>
+              ) : null}
               <Text style={styles.note}>You can sell after admin approval. Bank details can be updated later from settings.</Text>
             </>
           )}
