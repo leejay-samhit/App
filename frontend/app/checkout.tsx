@@ -15,7 +15,7 @@ import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
-type CartItem = { id: string; product_id: string; name: string; price: number; qty: number; image_url?: string; stock?: number };
+type CartItem = { id: string; product_id: string; qty: number; product: { name: string; price: number; image_url: string }; line_total: number };
 
 const ADDRESS_KEY = "@checkout-address-v1";
 
@@ -73,7 +73,7 @@ export default function CheckoutScreen() {
     })();
   }, [load, user]);
 
-  const total = items.reduce((s, i) => s + (i.price || 0) * (i.qty || 1), 0);
+  const total = items.reduce((s, i) => s + ((i.line_total) || (i.product?.price || 0) * (i.qty || 1)), 0);
   const canAffordWallet = walletBalance >= total;
 
   const onPlaceOrder = async () => {
@@ -157,16 +157,23 @@ export default function CheckoutScreen() {
         <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 130 }} keyboardShouldPersistTaps="handled">
           {/* Order summary */}
           <Text style={styles.sectionLabel}>ORDER SUMMARY</Text>
-          {items.map((it) => (
-            <View key={it.id} style={styles.lineItem}>
-              {it.image_url ? <Image source={{ uri: it.image_url }} style={styles.thumb} resizeMode="cover" /> : <View style={[styles.thumb, { alignItems: "center", justifyContent: "center" }]}><Feather name="image" size={16} color={colors.textMuted} /></View>}
-              <View style={{ flex: 1 }}>
-                <Text style={styles.lineName} numberOfLines={1}>{it.name}</Text>
-                <Text style={styles.lineQty}>{it.qty} × {formatINR(it.price)}</Text>
+          {items.map((it) => {
+            const p = it.product || {} as any;
+            const img = p.image_url;
+            const nm = p.name || "Product";
+            const price = p.price || 0;
+            const line = it.line_total || price * (it.qty || 1);
+            return (
+              <View key={it.id} style={styles.lineItem}>
+                {img ? <Image source={{ uri: img }} style={styles.thumb} resizeMode="cover" /> : <View style={[styles.thumb, { alignItems: "center", justifyContent: "center" }]}><Feather name="image" size={16} color={colors.textMuted} /></View>}
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.lineName} numberOfLines={1}>{nm}</Text>
+                  <Text style={styles.lineQty}>{it.qty} × {formatINR(price)}</Text>
+                </View>
+                <Text style={styles.lineTotal}>{formatINR(line)}</Text>
               </View>
-              <Text style={styles.lineTotal}>{formatINR((it.price || 0) * (it.qty || 1))}</Text>
-            </View>
-          ))}
+            );
+          })}
           <View style={styles.totalRow}>
             <Text style={styles.totalLabel}>Total</Text>
             <Text style={styles.totalAmount}>{formatINR(total)}</Text>

@@ -37,8 +37,11 @@ const BUCKETS: { key: BucketKey; label: string; icon: any; color: string; desc: 
   { key: "referral_commission", label: "Admin Wallet (cascade + GST)", icon: "credit-card",      color: "#7C3AED", desc: "Direct joins + Residual + Referral + GST",  cta: "View ledger" },
   { key: "gst_collected",       label: "GST Collected (info)",         icon: "percent",          color: "#B3261E", desc: "Already part of Admin Wallet (compliance)", cta: "View GST txns" },
   { key: "direct_added",        label: "Direct-Added (UTR)",           icon: "arrow-down-circle", color: "#0B66C2", desc: "Manual UTR-verified bank deposits",         cta: "View UTR deposits" },
-  { key: "service_margin",      label: "Service Margin",               icon: "briefcase",        color: "#E57A44", desc: "Platform fee from service bookings",        cta: "View service txns" },
-  { key: "shopping_margin",     label: "Sales Margin (Shop)",          icon: "shopping-bag",     color: "#1E40AF", desc: "Commission from shop orders",               cta: "View shop txns" },
+  // Sept 2026 — Removed "Service Margin" and "Sales Margin (Shop)" KPI
+  // cards on owner's request. Vendor + service cashflows are now tracked
+  // separately in the Vendor Panel Sales dashboard and are NOT synced
+  // into the Treasury system-wallet aggregate. Referral / signup /
+  // UTR-deposit money-flows remain the sole Treasury inputs.
   { key: "user_payouts",        label: "Total Paid to Users",          icon: "users",            color: "#2E7D52", desc: "Referral payouts + settled withdrawals (with UTR)", cta: "View payouts & withdrawals" },
   { key: "admin_wallet",        label: "Admin Wallet · full ledger",   icon: "credit-card",      color: "#7C3AED", desc: "Direct joins + Residual + Referral + GST + L1 fundings", cta: "View ledger" },
 ];
@@ -586,9 +589,11 @@ export default function AdminSystemWallet() {
               {(netWorth.group_1_revenue.reversed || 0) > 0 ? (
                 <NwRow label="↳ Reversed (subtracted)" value={-(netWorth.group_1_revenue.reversed || 0)} />
               ) : null}
-              <NwRow label="Service revenue"        value={netWorth.group_1_revenue.service} />
+              {/* Sept 2026 — Owner requested removal of Service + Shop
+                  revenue rows from Treasury.  Cashflow now lives inside
+                  the Vendor Panel Sales dashboard and is intentionally
+                  NOT aggregated into system-wallet gross-revenue. */}
               <NwRow label="Platform fee revenue"   value={netWorth.group_1_revenue.platform_fee} />
-              <NwRow label="Shop revenue"           value={netWorth.group_1_revenue.shop} />
               <NwRow label="Gross revenue"          value={netWorth.group_1_revenue.gross} bold />
             </NwGroup>
 
