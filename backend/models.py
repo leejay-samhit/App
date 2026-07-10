@@ -274,6 +274,14 @@ class SettingsUpdate(BaseModel):
     # so adding them here is enough to make GET/PATCH/PUT round-trip them.
     phone_reveal_fee: Optional[float] = Field(default=None, ge=0)
     phone_reveal_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    # ── Shop margin toggle (Sept 2026) ──
+    # When True, admin gets `shopping_margin` on wallet-paid shop orders.
+    # When False (default), 100% of the sale value stays with the vendor.
+    # Now with the "referral money only" lockdown this setting is a NO-OP —
+    # `credit_admin_bucket` short-circuits `shopping_margin`/`service_margin`
+    # regardless.  Kept in the model for schema back-compat and so the
+    # admin UI can round-trip the toggle without a 400.
+    shop_margin_enabled: Optional[bool] = None
 
 
 class CartItem(BaseModel):

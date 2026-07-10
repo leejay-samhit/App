@@ -3760,7 +3760,13 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             "commission_pct": vendor_pct,
             "created_at": now_utc().isoformat(),
         })
-    for vid, amount in vendor_payouts.items():
+    # Sept 2026 — Wallet-only immediate credit; COD orders defer this
+    # until the delivery handler (`_settle_order_commission`) so the
+    # vendor doesn't get paid before cash actually arrives.  Previously
+    # the loop always ran, causing a double-credit + 500 on COD delivery
+    # (duplicate key `uniq_user_type_order`).
+    if payment_method == "wallet":
+      for vid, amount in vendor_payouts.items():
         # Sept 2026 (Slangcart · Bank tally = referral money only) —
         # Owner asked to stop mixing vendor-shop earnings into the
         # `wallet_balance` field (which represents referral money).
@@ -5367,8 +5373,17 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
             amt = round(amt, 2)
             # Sept 2026 — same treatment as checkout site above; keep
             # shop earnings off `wallet_balance` (which is referral-only).
+            # Belt-and-braces: if a legacy `vendor_sale` row for this
+            # order already exists (double-fire from an old buggy build),
+            # skip the increment + insert instead of 500-ing.
+            existing_credit = await db.transactions.find_one({
+                "user_id": vid, "type": "vendor_sale", "order_id": order_id,
+            })
+            if existing_credit:
+                continue
             await db.users.update_one({"id": vid}, {"$inc": {"vendor_earnings": amt}})
-            await db.transactions.insert_one({
+            try:
+              await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": vid,
                 "type": "vendor_sale",
@@ -5379,6 +5394,10 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                 "created_at": now_utc().isoformat(),
                 "wallet_impact": "vendor_earnings_only",
             })
+            except DuplicateKeyError:
+              # Idempotent — another concurrent delivery-status update
+              # already recorded the vendor_sale. Skip silently.
+              pass
 
     if payload.status == "cancelled" and prev_status != "cancelled":
         order_total = float(order.get("total") or 0)

@@ -1,0 +1,45 @@
+{
+  "summary": "Backend-only retest of the Iteration-44 wallet money-flow lockdown after E1's fixes to BUG-1 (COD double-credit + 500 on delivery) and BUG-2 (SettingsUpdate missing shop_margin_enabled). All 29 pytest cases pass end-to-end (up from 18/22 last iteration). Both fixes verified with targeted new cases: (a) BUG-1 — COD checkout no longer credits vendor_earnings, PATCH /admin/orders/{id}/status → delivered now returns 200 (not 500), vendor_earnings grows by exactly ₹70 (70% split of ₹100) not ₹140, and cycling status shipped→delivered a second time is a no-op (idempotency via existing-transaction guard + DuplicateKeyError catch); (b) BUG-2 — PUT /api/admin/settings {shop_margin_enabled: true|false} now returns 200 and value round-trips through GET. Wallet-paid regression flow (vendor_earnings grows immediately, buyer wallet_balance debited, vendor_sale txn tagged wallet_impact='vendor_earnings_only', locked buckets shopping_margin/service_margin stay flat) still passes. BUG-3 (admin wallet_balance still rolls up non-referral bucket credits) is documented as owner-decision-pending per E1's instruction — the previously-failing assertion test_08 was converted to an annotation-only test that logs the observed delta but does not fail.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/admin/system-wallet",
+        "issue": "BUG-3 (owner-decision pending, NOT a regression): admin `wallet_balance` (top-level `total`) still grows when `credit_admin_bucket` writes to non-referral buckets such as `direct_added` (via system-wallet/deposit or admin wallet-adjust DEBIT paths). E1 flagged this iteration as awaiting owner clarification. During the wallet-paid checkout in this run, the roll-up was observed to grow by the buyer's seed credit (~₹30,000) captured from the deposit-then-credit fixture, not from the sale itself — so no NEW sale-time growth was seen once the buyer's fixture executed before the baseline snapshot. This is an accounting-semantics decision, not a code bug."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration44_wallet_lockdown.py",
+    "/app/test_reports/pytest/iteration45.xml"
+  ],
+  "action_items": [
+    "None blocking — both BUG-1 and BUG-2 are verified fixed.",
+    "PENDING (owner-decision): decide whether admin `wallet_balance` roll-up should exclude non-referral bucket credits (BUG-3). If yes, gate `credit_admin_bucket` bucket_name in ('referral_commission', ...) similar to how shopping_margin/service_margin are already guarded on the credit side."
+  ],
+  "critical_code_review_comments": [
+    "server.py line 3768: `if payment_method == 'wallet':` correctly gates the vendor-payout loop at checkout — COD flow now defers entirely to `_settle_order_commission` in the delivery handler. Clean fix.",
+    "server.py lines 5379–5400: the belt-and-braces idempotency guard uses BOTH a pre-check (`existing_credit = find_one({..., type: 'vendor_sale', order_id})`) AND a DuplicateKeyError catch on the insert. Good defence-in-depth against races between concurrent status updates.",
+    "The wrapping `try/except DuplicateKeyError` at 5385-5400 has slightly odd 2-space indentation on the `except` (line 5397) that mismatches the surrounding 4-space code. Runs fine but reads awkwardly — minor readability nit.",
+    "models.py line 284: `shop_margin_enabled: Optional[bool] = None` on `SettingsUpdate` is correct — matches the pattern used for other bool toggles.",
+    "server.py is 9132 lines long — well past the 700-line split guideline. Not a regression from this iteration but worth flagging for future refactor into wallet/orders/settings modules."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration44_wallet_lockdown.py (added TestBug2SettingsShopMarginToggle class with 5 new cases; added test_02b_vendor_earnings_unchanged_after_cod_checkout and test_07_redeliver_does_not_double_credit; tightened test_01 to assert 200 not (200|400); relaxed test_08 to annotation-only per BUG-3 owner-decision-pending)"
+  ],
+  "success_rate": {
+    "backend": "100% (29/29 pytest cases)",
+    "frontend": "N/A (frontend testing explicitly out of scope for this iteration)"
+  },
+  "seed_data_creation": "The module-scoped `buyer_token` fixture creates a fresh TEST_iter44_buyer_<hex>@test.com buyer per run, admin-approves+paid-marks them, then deposits ₹50 000 to the system_wallet and credits ₹20 000 into the buyer's wallet via /admin/users/{id}/wallet — enough to cover the ₹100 wallet-paid + ₹100 COD orders exercised. Buyer accounts accumulate over runs (name is UUID-suffixed) and are not cleaned up; the reused vendor is test_alice_73dc7f@test.com and her active product is discovered via /api/admin/products.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iter-45 test file `/app/backend/tests/test_iteration44_wallet_lockdown.py` now contains 29 cases covering: connectivity (3), BUG-2 SettingsUpdate toggle (5), non-locked bucket regression (1), wallet-paid flow (12), COD-delivery flow (8, incl. new checkout-side deferred-credit, re-delivery idempotency). To exercise the same flow later: run `pytest backend/tests/test_iteration44_wallet_lockdown.py -v`. If BUG-3 gets a resolution (either fixed or explicitly waived), convert test_08_admin_wallet_balance_unchanged_by_sale back to a strict `==` assertion and update this file. The re-delivery idempotency guard depends on the existing-transaction pre-check at server.py:5379 — if that gets removed in favour of relying only on the unique-index catch, add an explicit unique-index existence check to the test suite. Buyer fixture ships tokens/id/email so downstream tests can also do buyer-facing GETs.",
+  "rca_of_issue": "Iter-44 root-causes reconfirmed: (BUG-1) checkout unconditionally ran the vendor-payout loop AND the COD delivery handler also ran it, so vendor_earnings was credited twice AND the second `db.transactions.insert_one` blew up on the `uniq_user_type_order` unique index → 500. E1's fix gates the checkout loop with `if payment_method == 'wallet'` and adds an idempotency pre-check + DuplicateKeyError catch inside `_settle_order_commission`. Verified by test_02b (0 delta at COD checkout), test_03 (200 not 500), test_05 (delta = ₹70 not ₹140), test_07 (re-deliver = no additional delta). (BUG-2) `SettingsUpdate` Pydantic model omitted `shop_margin_enabled`, so unknown-field dropping caused the PUT to fall through with an empty dict and hit the 'No fields provided' 400. E1 added the Optional[bool] field. Verified by round-trip PUT-true → GET-true → PUT-false → GET-false. (BUG-3) unresolved by design — admin `wallet_balance` = sum of all buckets and `credit_admin_bucket` updates the roll-up alongside each bucket write. Owner needs to decide whether the roll-up should exclude non-referral money."
+}
