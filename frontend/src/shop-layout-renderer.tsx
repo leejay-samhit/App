@@ -15,6 +15,7 @@ import {
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { api } from "./api";
+import { cachedGet } from "./cachedGet";
 import { colors, radii, formatINR } from "./theme";
 import { ContentContainer, SHOP_CARD_RADIUS, SHOP_BANNER_RADIUS, SHOP_SECTION_GAP, SHOP_TYPO } from "./content-container";
 import { useAuth } from "./auth";
