@@ -256,13 +256,21 @@ function CategoryCirclesBlock({
   const [apiCats, setApiCats] = useState<ApiCategory[] | null>(null);
   useEffect(() => {
     let cancelled = false;
+    const apply = (data: { items?: ApiCategory[] } | null) => {
+      if (cancelled) return;
+      const items = (data?.items || []).filter((c) => c.active !== false);
+      items.sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+      setApiCats(items);
+    };
     (async () => {
       try {
-        const r = await api.get<{ items: ApiCategory[] }>("/shop-categories");
-        if (cancelled) return;
-        const items = (r.data?.items || []).filter((c) => c.active !== false);
-        items.sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
-        setApiCats(items);
+        // Sept 2026 — cachedGet paints instantly from a prior mount + AsyncStorage.
+        const cached = await cachedGet<{ items: ApiCategory[] }>("/shop-categories", {
+          ttlMs: 120_000,
+          onFresh: (fresh) => apply(fresh),
+        });
+        if (cached) apply(cached);
+        else apply(null);  // first-ever mount — background fetch will fire onFresh
       } catch {
         if (!cancelled) setApiCats([]);
       }
@@ -752,12 +760,25 @@ export function ShopLayoutRenderer({
       try {
         const params: any = { scope };
         if (category) params.category = category;
+        // Sept 2026 — layout is admin-config and rarely changes → 2 min
+        // cache TTL. Paints instantly on repeat visits.
+        const applyLayout = (bData: { items?: LayoutBlock[] } | null) => {
+          if (cancelled) return null;
+          return bData?.items || [];
+        };
         const [bRes, pRes] = await Promise.all([
-          api.get<{ items: LayoutBlock[] }>("/shop-layout", { params }),
+          cachedGet<{ items: LayoutBlock[] }>("/shop-layout", {
+            ttlMs: 120_000,
+            params,
+            onFresh: (fresh) => {
+              const items = applyLayout(fresh);
+              if (items) setBlocks(items);
+            },
+          }),
           api.get<any>("/products"),
         ]);
         if (cancelled) return;
-        const blocks: LayoutBlock[] = bRes.data?.items || [];
+        const blocks: LayoutBlock[] = bRes?.items || [];
         const pData = pRes.data;
         const pListRaw: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
         // UPDATE 1 — Drop the current vendor's own products before caching.
