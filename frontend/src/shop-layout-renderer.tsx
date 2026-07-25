@@ -486,15 +486,31 @@ function ProductGridBlock({
 }: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void; onViewAll?: (target: string) => void }) {
   if (products.length === 0) return <SkeletonBlock height={160} />;
   const perRow = Math.max(1, Math.min(4, block.products_per_row || 2));
-  // flexBasis percent per card so columns wrap cleanly. Subtract a tiny
-  // amount per column to account for the 8px gap between cards.
-  const basisPct = `${Math.floor(100 / perRow) - (perRow > 1 ? 2 : 0)}%`;
+  // ── Nov 2026 — Responsive card sizing that respects the 4-column
+  // request from the admin without wrapping into a single column.
+  //
+  // Previous version used `flexBasis: 47.5%` (from gridCard) combined
+  // with a percent basisPct override AND a 16dp gap, which pushed the
+  // total row width over 100% at perRow ≥ 3 and forced each card onto
+  // its own row (the "going down by down" bug the user reported).
+  //
+  // We now compute the exact card width in points against the visible
+  // ContentContainer inner width and use a tighter gap (10dp) for
+  // dense layouts so the cards align edge-to-edge cleanly. This also
+  // means the image aspect ratio and price look identical across
+  // all four column configurations.
+  const PADDING = 16; // ContentContainer horizontal padding (each side)
+  const gap = perRow >= 3 ? 10 : perRow === 2 ? 12 : 0;
+  const availableWidth = screenWidth - PADDING * 2;
+  const cardWidth = Math.floor((availableWidth - gap * (perRow - 1)) / perRow);
   const size = block.size || "medium";
-  // Aspect ratio of the image varies with card size — smaller cards get a
-  // slightly taller-than-square image, larger cards get square.
-  const aspect = size === "small" ? 1 : size === "large" ? 0.95 : 1.1;
+  // Aspect ratio of the image varies with card size — smaller cards get
+  // a slightly taller-than-square image, larger cards get square.
+  const aspect = size === "small" ? 1 : size === "large" ? 0.95 : 1.05;
   const nameLines = perRow >= 3 ? 1 : 2;
-  const fontMul = perRow >= 4 ? 0.85 : perRow >= 3 ? 0.92 : 1;
+  const fontMul = perRow >= 4 ? 0.82 : perRow >= 3 ? 0.9 : 1;
+  const cardPadding = perRow >= 4 ? 5 : perRow >= 3 ? 6 : 8;
+  const innerPadding = perRow >= 3 ? 6 : 10;
   return (
     <View>
       {(block.title || block.show_view_all) ? (
@@ -515,13 +531,17 @@ function ProductGridBlock({
           ) : null}
         </View>
       ) : null}
-      <View style={styles.gridWrap}>
-        {products.slice(0, block.product_count || 10).map((p) => {
+      <View style={[styles.gridWrap, { gap }]}>
+        {products.slice(0, block.product_count || 12).map((p) => {
           const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
           return (
             <TouchableOpacity
               key={p.id}
-              style={[styles.gridCard, { flexBasis: basisPct as any }, !inStock && { opacity: 0.55 }]}
+              style={[
+                styles.gridCard,
+                { width: cardWidth, padding: cardPadding, flexBasis: undefined as any },
+                !inStock && { opacity: 0.55 },
+              ]}
               activeOpacity={0.85}
               onPress={() => onProductPress?.(p.id)}
             >
@@ -537,13 +557,21 @@ function ProductGridBlock({
                   <View style={styles.gridOOSBadge}><Text style={styles.gridOOSText}>SOLD OUT</Text></View>
                 ) : null}
               </View>
-              <View style={{ padding: perRow >= 3 ? 6 : 10 }}>
+              <View style={{ paddingHorizontal: innerPadding - cardPadding, paddingTop: innerPadding - cardPadding + 6, paddingBottom: 2 }}>
                 <Text
-                  style={[styles.gridName, { fontSize: 12 * fontMul, minHeight: nameLines === 1 ? 16 : 30 }]}
+                  style={[styles.gridName, {
+                    fontSize: 12.5 * fontMul,
+                    minHeight: nameLines === 1 ? 16 : 32,
+                    marginTop: 0,
+                    lineHeight: 16 * (perRow >= 3 ? 0.9 : 1),
+                  }]}
                   numberOfLines={nameLines}
                 >{p.name}</Text>
-                <View style={styles.gridFooter}>
-                  <Text style={[styles.gridPrice, { fontSize: 14 * fontMul }]}>{formatINR(p.price)}</Text>
+                <View style={[styles.gridFooter, { marginTop: perRow >= 3 ? 3 : 6 }]}>
+                  <Text
+                    style={[styles.gridPrice, { fontSize: 14 * fontMul }]}
+                    numberOfLines={1}
+                  >{formatINR(p.price)}</Text>
                 </View>
               </View>
             </TouchableOpacity>
@@ -1122,9 +1150,11 @@ const styles = StyleSheet.create({
   gridViewAllBtn: { flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.brand100 },
   gridViewAllText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
   // gap:16 → matches the global 16 dp inter-card gap requested in the spec.
-  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 16 },
+  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   gridCard: {
-    flexBasis: "47.5%", flexGrow: 0,
+    // Width is set inline by ProductGridBlock (based on perRow + gap +
+    // screen width) so removing flexBasis here prevents the double-
+    // definition that pushed 3/4-column grids into single-column mode.
     backgroundColor: "#FFFFFF",
     borderRadius: SHOP_CARD_RADIUS,
     borderWidth: 1, borderColor: colors.border,
@@ -1133,9 +1163,9 @@ const styles = StyleSheet.create({
     // Soft shadow (iOS) + elevation (Android) per spec.
     ...Platform.select({
       ios: {
-        shadowColor: "#000", shadowOpacity: 0.05, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
+        shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
       },
-      android: { elevation: 1 },
+      android: { elevation: 2 },
     }),
   },
   gridImgWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative", borderRadius: 8, overflow: "hidden" },
