@@ -8491,3 +8491,103 @@ agent_communication:
       Vendor invoices (with print), and Broadcast removed from bottom nav. Awaiting
       user visual verification before Razorpay integration.
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# ITERATION 48 — Nov 2026: Shop Layout & Categories Overhaul
+# ═══════════════════════════════════════════════════════════════════════
+backend:
+  - task: "Nested categories with unlimited depth (parent_id + tree + cascade)"
+    implemented: true
+    working: true
+    file: "backend/routes/shop_categories.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Added parent_id + depth fields; new endpoints /tree, /{id}/subcategories, /{id}/descendants; cycle protection on re-parent; orphan re-parenting on delete; MongoDB indexes."
+      - working: true
+        agent: "testing"
+        comment: "13/13 pytest passed. Cycle protection, depth cascade, and orphan re-parenting all verified."
+  - task: "Cascading /api/products?category= + pagination"
+    implemented: true
+    working: true
+    file: "backend/routes/products_public.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "/products now cascades parent → descendants, supports ?subcategory, ?limit, ?offset, ?sort. Envelope response with has_more; keeps flat-array backward compat when no params."
+      - working: true
+        agent: "testing"
+        comment: "Verified parent-name/id lookup returns descendant products; leaf lookup narrows; envelope+has_more work."
+
+frontend:
+  - task: "Shop Layout auto-injects product grid between banners"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/shop-layout-renderer.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Every visible banner (banner_slider, background, offer_cards, brand_slider, announcement_strip, section_header, text, category_circles, content_box) auto-injects a synthetic product_grid below it (unless an explicit product block already follows). Products come from the already-fetched catalogue filtered by current category, so no extra network round-trip."
+  - task: "Customer category screen — server-side cascade + admin subcategory chips"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/(tabs)/shop-category/[name].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "load() now uses /products?category=&subcategory= for server-side cascade. Sub-chip strip prefers admin-managed subcategories from /shop-categories/tree, falling back to distinct product.sub_category values."
+  - task: "Admin Shop Categories — tree UI with parent picker"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/admin/shop-categories.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Tree list with depth-indented rows; '+' button next to each row spawns 'New subcategory' form under that parent; new Parent picker modal in the create/edit form; screenshot confirms tree renders correctly."
+  - task: "Vendor product editor — subcategory chips from admin tree"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/rich-product-editor.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Fetches /shop-categories/tree on modal open. Category chip picker shows admin roots; when a parent is picked, its admin-managed subcategories appear as chips (falls back to free-text if none exist)."
+
+test_plan:
+  current_focus:
+    - "Auto product grid injection between banners"
+    - "Customer category page cascade + admin subcategory chips"
+    - "Admin category tree UI"
+    - "Vendor product form category tree cascade"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Iteration 48 (Shop Layout + Categories overhaul):
+      Backend 13/13 pytest passed — nested tree, cascade filter, pagination, indexes.
+      Frontend rewrites landed: renderer auto-injects product grids, customer category
+      page uses server-side cascade + admin subcategory chips, admin tree UI, vendor
+      product editor now cascades sub-categories from admin tree. Awaiting user
+      visual verification.
+
