@@ -134,9 +134,20 @@ export default function ProductDetailScreen() {
     const t = askText.trim();
     if (!t) return;
     try {
-      await api.post(`/products/${product.id}/questions`, { text: t });
-      Alert.alert("Question posted", "Other customers can see this Q&A. Vendor will be notified.");
+      const resp = await api.post<{ thread_id?: string }>(`/products/${product.id}/questions`, { text: t });
+      const threadId = resp.data?.thread_id;
       setAskText(""); setAskOpen(false);
+      if (threadId) {
+        // Route straight into the chat so the customer can continue
+        // the conversation and see the vendor's reply (June 2026 fix
+        // — previously the message vanished into public Q&A only).
+        router.push(`/chat/${threadId}` as any);
+      } else {
+        Alert.alert(
+          "Question posted",
+          "The vendor has been notified. Their reply will appear in your Chat inbox.",
+        );
+      }
     } catch (e) { Alert.alert("Failed", formatApiError(e)); }
   };
 

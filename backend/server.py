@@ -7652,9 +7652,107 @@ async def vendor_delete_product(product_id: str, vendor: Dict[str, Any] = Depend
 
 
 @api_router.get("/vendor/me/sales")
-async def vendor_my_sales(vendor: Dict[str, Any] = Depends(require_vendor)):
-    items = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    return {"items": items, "total": len(items)}
+async def vendor_my_sales(
+    status: Optional[str] = None,
+    vendor: Dict[str, Any] = Depends(require_vendor),
+):
+    """Return vendor sales enriched with the parent order's status and buyer
+    info, so the mobile Vendor Orders screen can filter by
+    placed/shipped/delivered/cancelled and display buyer + line-item totals.
+
+    Also aggregates sales by order_id so each order shows once with all its
+    items (not once per line).  This matches the web dashboard.
+    """
+    q: Dict[str, Any] = {"vendor_id": vendor["id"]}
+    sales = await db.vendor_sales.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+
+    # Bulk fetch parent orders in one shot
+    order_ids = list({s.get("order_id") for s in sales if s.get("order_id")})
+    orders_by_id: Dict[str, Any] = {}
+    if order_ids:
+        async for o in db.orders.find({"id": {"$in": order_ids}}, {"_id": 0}):
+            orders_by_id[o["id"]] = o
+
+    # Bulk fetch buyer users
+    buyer_ids = list({s.get("buyer_id") for s in sales if s.get("buyer_id")})
+    buyers_by_id: Dict[str, Any] = {}
+    if buyer_ids:
+        async for u in db.users.find(
+            {"id": {"$in": buyer_ids}},
+            {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1},
+        ):
+            buyers_by_id[u["id"]] = u
+
+    # Group by order_id so the vendor sees one card per order
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for s in sales:
+        oid = s.get("order_id") or s.get("id")
+        line_total = float(s.get("line_total") or 0)
+        qty = int(s.get("qty") or 1) or 1
+        unit_price = round(line_total / qty, 2) if qty else line_total
+        item = {
+            "name": s.get("product_name") or "Product",
+            "price": unit_price,
+            "qty": qty,
+            "image_url": s.get("product_image_url") or "",
+            "line_total": line_total,
+        }
+        if oid not in grouped:
+            parent = orders_by_id.get(oid) or {}
+            buyer = buyers_by_id.get(s.get("buyer_id") or "") or {}
+            # Pull address details if present on the parent order
+            addr = parent.get("shipping_address") or {}
+            grouped[oid] = {
+                "id": s.get("id"),
+                "order_id": oid,
+                "user_id": s.get("buyer_id"),
+                "created_at": s.get("created_at") or parent.get("created_at"),
+                "status": parent.get("status") or "placed",
+                "items": [],
+                "total": 0.0,
+                "buyer_name": buyer.get("name") or s.get("buyer_email") or "Customer",
+                "buyer_email": buyer.get("email") or s.get("buyer_email"),
+                "buyer_phone": buyer.get("phone"),
+                "shipping_address": addr,
+                "paid_via": parent.get("paid_via") or "wallet",
+                "payment_status": parent.get("payment_status"),
+            }
+        grouped[oid]["items"].append(item)
+        grouped[oid]["total"] = round(float(grouped[oid]["total"]) + line_total, 2)
+
+    out = list(grouped.values())
+    # Filter by status if requested
+    if status and status != "all":
+        out = [o for o in out if o.get("status") == status]
+    # Sort newest first
+    out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return {"items": out, "total": len(out)}
+
+
+# ---- Vendor-scoped order status update (mirrors admin endpoint) ----
+class VendorOrderStatusUpdate(BaseModel):
+    status: str
+
+
+@api_router.patch("/vendor/orders/{order_id}/status")
+async def vendor_update_order_status(
+    order_id: str,
+    payload: VendorOrderStatusUpdate,
+    vendor: Dict[str, Any] = Depends(require_vendor),
+):
+    if payload.status not in ("placed", "shipped", "delivered", "cancelled"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    # Ensure the order has at least one line for this vendor.
+    owns = await db.vendor_sales.find_one({"order_id": order_id, "vendor_id": vendor["id"]})
+    if not owns:
+        raise HTTPException(status_code=403, detail="Not your order")
+    # Delegate to the admin handler so the commission-settle side-effects
+    # (COD delivery credit, refunds on cancel) fire identically.
+    return await admin_update_order_status(
+        order_id=order_id,
+        payload=OrderStatusUpdate(status=payload.status),  # type: ignore
+        admin=vendor,  # vendor doc is user-shaped, downstream only reads id/email
+    )
 
 
 # ---------------- ADMIN endpoints ----------------

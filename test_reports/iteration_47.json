@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 47 — June 2026 backend regression for Slangcart issues #3, #6, #7, #10: 14/14 pytest cases pass. Verified: (a) GET /api/vendor/me/sales groups 3 line-items into 1 order card, exposes buyer_name/buyer_email/shipping_address/paid_via/total/status, and correctly filters by status=placed|shipped|delivered|all; buyer JWT is rejected with 403 by require_vendor. (b) PATCH /api/vendor/orders/{id}/status persists status change (verified via Mongo re-read), returns 400 for invalid status, 403 for non-vendor users, and 403 for a second vendor who does not own the order. (c) POST /api/products/{pid}/questions returns thread_id, creates a chat_thread with participants=sorted([buyer, vendor]) and kind='product_qa' + product_ref, posts an initial chat_message prefixed with '[About: <product_name>]', and reuses the SAME thread when the same customer asks a second question (deduped by sorted participants). 404 when product not found. (d) GET /api/shop-categories returns 200 with items[] and correctly surfaces a fresh admin-created category. Note: provided credentials `support@slangcart.com` and `nkirankumarjo@gmail.com` do NOT exist in this DB — the sole admin is `support@networkrupay.com / Nlee@1115` (per /app/memory/test_credentials.md). Tests self-seed a fresh vendor + buyer + product + orders + vendor_sales via /auth/register + direct Mongo promotion, so they are independent of the missing accounts.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_june2026_vendor_sales_qa.py",
+    "/app/test_reports/pytest/iteration_june2026.xml"
+  ],
+  "action_items": [
+    "Update /app/memory/test_credentials.md — the credentials cited in the review request (support@slangcart.com / 3)Ywxtic and nkirankumarjo@gmail.com / Just@4me) are NOT present in this preview DB. Only support@networkrupay.com / Nlee@1115 (admin) exists. Either seed those accounts on backend boot OR update the request template. This is a doc-hygiene issue, not a backend bug.",
+    "Optional hardening in /app/backend/server.py:vendor_update_order_status (~L7737): the endpoint currently accepts an order_id that exists in vendor_sales but was later deleted from db.orders — admin_update_order_status will 404 in that case. Consider a dedicated 404 pre-check for clarity, but not required."
+  ],
+  "critical_code_review_comments": [
+    "server.py vendor_my_sales (L7654) — clean bulk-fetch pattern: single $in over orders and users prevents N+1 queries. Grouping by order_id via dict is O(n) and correct.",
+    "server.py vendor_update_order_status (L7737) — delegating to admin_update_order_status is the right pattern; it reuses COD-delivery commission-settle logic. Ownership check `vendor_sales.find_one({order_id, vendor_id})` is correct.",
+    "products_extended.py ask_question (L114) — the chat mirror is wrapped in try/except so a chat collection error never breaks the Q&A insert. participants=sorted([user, vendor]) guarantees dedupe. product_ref snapshot on the thread is a nice touch. `if vendor_id and vendor_id != user['id']` correctly avoids creating a self-thread if a vendor asks a question on their own product.",
+    "One nit: the chat_thread stores `created_at`/`last_message_at` as `datetime` objects while other Slangcart chat code paths persist ISO strings — likely fine because Motor serialises datetimes to BSON dates, but worth checking downstream chat_list endpoints treat both formats consistently.",
+    "shop_categories.py list_public_categories (L173) correctly filters by active=True; the one-time seed marker (`app_state.shop_categories_seeded`) means an empty response is legitimate on this DB, not a bug."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_june2026_vendor_sales_qa.py (NEW)",
+    "/app/test_reports/pytest/iteration_june2026.xml (NEW)"
+  ],
+  "success_rate": {
+    "backend": "100% (14/14)",
+    "frontend": "n/a (backend-only per request)"
+  },
+  "seed_data_creation": "Test self-seeds a fresh vendor + buyer + a second vendor (all TAG=TEST_I26J_<uuid8>_*) via /api/auth/register, promotes to vendor via direct Mongo update (role=vendor, is_vendor=True, vendor_status=approved, registration_paid=True, approval_status=approved). Also inserts 1 product, 2 orders (placed + shipped), 4 vendor_sales rows. Full teardown deletes users by email regex, product by name prefix, both orders by id, vendor_sales by vendor_id, plus product_questions/chat_threads/chat_messages tied to the pair. Zero residue after run.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Reusable — /app/backend/tests/test_iteration_june2026_vendor_sales_qa.py self-seeds, self-cleans. Uses EXPO_PUBLIC_BACKEND_URL from frontend/.env (falls back to http://localhost:8001). If ADMIN credentials change, set ADMIN_EMAIL / ADMIN_PASSWORD env vars (defaults to support@networkrupay.com / Nlee@1115).",
+  "rca_of_issue": "N/A — no bugs found. All 4 backend changes match spec exactly."
+}

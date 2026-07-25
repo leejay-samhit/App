@@ -126,7 +126,71 @@ async def ask_question(pid: str, body: QuestionIn, user: Dict[str, Any] = Depend
         "created_at": _now(),
     }
     await db.product_questions.insert_one(doc.copy())
-    return _strip_id(doc)
+
+    # ── June 2026 upgrade — Also mirror the question into a private
+    # 1:1 chat thread between the customer and the vendor so the vendor
+    # sees it in their inbox and can reply directly (fixing the bug
+    # where Q&A messages were invisible in the chat box).  Auto-created
+    # thread bypasses the request-handshake step.
+    vendor_id = p.get("vendor_id")
+    thread_id: Optional[str] = None
+    if vendor_id and vendor_id != user["id"]:
+        try:
+            parts = sorted([user["id"], vendor_id])
+            thread = await db.chat_threads.find_one({"participants": parts})
+            if not thread:
+                thread = {
+                    "id": str(uuid.uuid4()),
+                    "participants": parts,
+                    "created_at": datetime.now(timezone.utc),
+                    "last_message_at": datetime.now(timezone.utc),
+                    # Mark as auto-created from product Q&A so client can style it
+                    "kind": "product_qa",
+                    "product_ref": {
+                        "id": pid,
+                        "name": p.get("name") or "",
+                        "image_url": p.get("image_url") or "",
+                        "price": p.get("price") or 0,
+                    },
+                }
+                await db.chat_threads.insert_one(thread.copy())
+            thread_id = thread["id"]
+
+            # Post initial message (prefixed with product context)
+            prefix = f"[About: {(p.get('name') or 'this product')[:80]}]\n"
+            msg = {
+                "id": str(uuid.uuid4()),
+                "thread_id": thread_id,
+                "sender_id": user["id"],
+                "text": prefix + body.text.strip(),
+                "image_data_url": "",
+                "deleted": False,
+                "deleted_for_everyone": False,
+                "edited": False,
+                "read_by": [user["id"]],
+                "delivered_to": [user["id"]],
+                "reply_to": None,
+                "reactions": {},
+                "starred_by": [],
+                "client_dedupe_key": None,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+            await db.chat_messages.insert_one(msg.copy())
+            await db.chat_threads.update_one(
+                {"id": thread_id},
+                {"$set": {"last_message_at": datetime.now(timezone.utc)}},
+            )
+        except Exception:
+            # Best-effort — Q&A row already saved so the chat mirror is
+            # non-fatal.  Log-and-continue keeps the customer experience
+            # smooth even if the chat collection has an issue.
+            thread_id = None
+
+    result = _strip_id(doc)
+    if thread_id:
+        result["thread_id"] = thread_id
+    return result
 
 
 @router.get("/products/{pid}/questions")

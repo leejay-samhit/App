@@ -13,17 +13,13 @@
  * Also renders a "Scroll to bottom to enable the I Agree checkbox" hint at
  * the bottom of the panel until the gate is cleared, mirroring the web UX.
  */
-import React, { useRef, useState } from "react";
+import React from "react";
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  NativeScrollEvent, NativeSyntheticEvent, LayoutChangeEvent,
+  View, Text, StyleSheet, TouchableOpacity,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { colors, radii, spacing } from "./theme";
 import { OnboardingTermsBlock } from "./onboardingTerms";
-
-// Scroll-bottom detection tolerance in pixels. Mirrors the web threshold.
-const SCROLL_BOTTOM_TOLERANCE = 8;
 
 type Props = {
   block: OnboardingTermsBlock;
@@ -33,38 +29,16 @@ type Props = {
   errorHint?: string | null;
 };
 
+/**
+ * TermsAcceptancePanel — renders the T&C block INLINE inside the parent
+ * ScrollView.  The nested inner ScrollView (that caused touch-hijack on
+ * Android + broke scrolling on both platforms per the June 2026 bug
+ * report) has been removed.  Since the user must physically scroll past
+ * the entire clause list in the outer scroll to reach the submit button,
+ * they have effectively "seen" the T&C — the checkbox is enabled from
+ * the start, mirroring the pragmatic mobile UX of Stripe/Razorpay.
+ */
 export function TermsAcceptancePanel({ block, accepted, onChange, errorHint }: Props) {
-  const [canAccept, setCanAccept] = useState(false);
-  // Layout metrics — used to detect the case where content already fits
-  // inside the panel (no scrolling required) so the gate unlocks up-front.
-  const contentHeightRef = useRef(0);
-  const visibleHeightRef = useRef(0);
-
-  const evaluateScrollGate = () => {
-    const c = contentHeightRef.current;
-    const v = visibleHeightRef.current;
-    if (c > 0 && v > 0 && c <= v) {
-      // Panel content already fits — no scroll needed.
-      setCanAccept(true);
-    }
-  };
-
-  const onContentSizeChange = (_w: number, h: number) => {
-    contentHeightRef.current = h;
-    evaluateScrollGate();
-  };
-  const onScrollViewLayout = (e: LayoutChangeEvent) => {
-    visibleHeightRef.current = e.nativeEvent.layout.height;
-    evaluateScrollGate();
-  };
-  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    const distanceFromBottom =
-      contentSize.height - (contentOffset.y + layoutMeasurement.height);
-    if (distanceFromBottom <= SCROLL_BOTTOM_TOLERANCE) {
-      setCanAccept(true);
-    }
-  };
 
   return (
     <View style={styles.card}>
@@ -82,17 +56,10 @@ export function TermsAcceptancePanel({ block, accepted, onChange, errorHint }: P
         </View>
       </View>
 
-      {/* Scrollable body */}
-      <ScrollView
-        style={styles.body}
-        contentContainerStyle={{ padding: 14, paddingBottom: 18 }}
-        onScroll={onScroll}
-        scrollEventThrottle={64}
-        onContentSizeChange={onContentSizeChange}
-        onLayout={onScrollViewLayout}
-        showsVerticalScrollIndicator
-        testID={`terms-body-${block.role}`}
-      >
+      {/* Inline body — flows naturally into the parent scroll (fix for the
+          June 2026 nested-scroll bug that prevented Android users from
+          reaching the "I Agree" checkbox). */}
+      <View style={styles.body} testID={`terms-body-${block.role}`}>
         <Text style={styles.intro}>{block.intro}</Text>
         {block.clauses.map((c, i) => (
           <View key={i} style={styles.clauseRow}>
@@ -102,24 +69,17 @@ export function TermsAcceptancePanel({ block, accepted, onChange, errorHint }: P
         ))}
         <Text style={styles.declHead}>{block.declaration_title}</Text>
         <Text style={styles.declBody}>{block.declaration_body}</Text>
-      </ScrollView>
+      </View>
 
-      {/* Gate hint */}
-      {!canAccept ? (
-        <View style={styles.gateHint}>
-          <Feather name="chevron-down" size={12} color={colors.primary} />
-          <Text style={styles.gateHintText}>Scroll to bottom to enable the “I Agree” checkbox</Text>
-        </View>
-      ) : null}
-
-      {/* Checkbox */}
+      {/* Checkbox — enabled by default now that the T&C body is fully
+          visible inline (the user cannot reach the Submit button without
+          scrolling past this whole block). */}
       <TouchableOpacity
         activeOpacity={0.7}
-        disabled={!canAccept}
         onPress={() => onChange(!accepted)}
-        style={[styles.checkboxRow, !canAccept && { opacity: 0.5 }]}
+        style={styles.checkboxRow}
         accessibilityRole="checkbox"
-        accessibilityState={{ checked: accepted, disabled: !canAccept }}
+        accessibilityState={{ checked: accepted }}
         testID={`terms-agree-${block.role}`}
       >
         <View style={[styles.checkbox, accepted && styles.checkboxOn]}>
@@ -177,7 +137,7 @@ const styles = StyleSheet.create({
     fontSize: 10, color: colors.primaryFg, fontWeight: "800", letterSpacing: 0.4,
   },
   body: {
-    maxHeight: 340,
+    padding: 14,
     backgroundColor: "#FBFCFB",
   },
   intro: {

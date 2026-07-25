@@ -34,6 +34,49 @@ export default function CheckoutScreen() {
   const [city, setCity] = useState("");
   const [stateName, setStateName] = useState("");
   const [pincode, setPincode] = useState("");
+  // Sept 2026 — Geospatial GPS capture for delivery-radius verification.
+  const [gpsLat, setGpsLat] = useState<number | null>(null);
+  const [gpsLng, setGpsLng] = useState<number | null>(null);
+  const [gpsDistrict, setGpsDistrict] = useState<string>("");
+  const [gpsBusy, setGpsBusy] = useState(false);
+
+  const captureAddressGps = async () => {
+    setGpsBusy(true);
+    try {
+      const Location = await import("expo-location");
+      const perm = await Location.requestForegroundPermissionsAsync();
+      if (perm.status !== "granted") {
+        Alert.alert(
+          "Location required",
+          perm.canAskAgain
+            ? "Grant location permission to auto-fill your address."
+            : "Location is blocked. Open Settings to enable it for this app.",
+        );
+        return;
+      }
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const { latitude, longitude } = pos.coords;
+      setGpsLat(latitude);
+      setGpsLng(longitude);
+      try {
+        const rev = await Location.reverseGeocodeAsync({ latitude, longitude });
+        if (rev && rev.length > 0) {
+          const r0 = rev[0];
+          if (r0.postalCode && !pincode) setPincode(r0.postalCode);
+          if (r0.region && !stateName) setStateName(r0.region);
+          if (r0.city && !city) setCity(r0.city);
+          setGpsDistrict((r0.subregion || r0.district || ""));
+          // If line1 is empty, auto-fill a short address hint.
+          if (!line1) {
+            const parts = [r0.name, r0.street].filter(Boolean);
+            if (parts.length > 0) setLine1(parts.join(", "));
+          }
+        }
+      } catch { /* reverse geocode best-effort */ }
+    } catch (e: any) {
+      Alert.alert("Couldn't capture location", e?.message || "Try again in a moment.");
+    } finally { setGpsBusy(false); }
+  };
   // Payment method
   const [paymentMethod, setPaymentMethod] = useState<"wallet" | "cod">("wallet");
 
@@ -65,6 +108,11 @@ export default function CheckoutScreen() {
           setCity(a.city || "");
           setStateName(a.state || "");
           setPincode(a.pincode || "");
+          // Sept 2026 — Hydrate previously-captured GPS so a repeat
+          // buyer doesn't have to re-grant permission.
+          if (typeof a.latitude === "number") setGpsLat(a.latitude);
+          if (typeof a.longitude === "number") setGpsLng(a.longitude);
+          if (a.district) setGpsDistrict(a.district);
         } else {
           setName(user?.name || "");
           setPhone(user?.phone || "");
@@ -98,13 +146,20 @@ export default function CheckoutScreen() {
     }
     setPlacing(true);
     try {
+      // Sept 2026 — Geospatial extras.  If the user captured GPS via the
+      // "Use current location" flow, forward lat/lng + district to the
+      // backend so `/orders/checkout` can run the second delivery-radius
+      // verification.  Missing coords are OK — backend falls back to
+      // pincode-exact matching.
       const shipping_address = {
         name: name.trim(), phone: phone.trim(),
         line1: line1.trim(), line2: line2.trim(),
         city: city.trim(), state: stateName.trim(),
         pincode: pincode.trim(),
+        latitude: gpsLat, longitude: gpsLng,
+        district: gpsDistrict || undefined,
       };
-      // Persist address for next time
+      // Persist address (with GPS) for next time
       try { await AsyncStorage.setItem(ADDRESS_KEY, JSON.stringify(shipping_address)); } catch { /* ignore */ }
       const r = await api.post<any>("/orders/checkout", { payment_method: paymentMethod, shipping_address });
       Alert.alert(
@@ -194,7 +249,23 @@ export default function CheckoutScreen() {
           </View>
 
           {/* Shipping address */}
-          <Text style={styles.sectionLabel}>SHIPPING ADDRESS</Text>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <Text style={styles.sectionLabel}>SHIPPING ADDRESS</Text>
+            <TouchableOpacity onPress={captureAddressGps} disabled={gpsBusy} style={styles.gpsBtn} testID="checkout-gps">
+              {gpsBusy
+                ? <ActivityIndicator color={colors.primary} size="small" />
+                : <><Feather name="crosshair" size={12} color={colors.primary} /><Text style={styles.gpsBtnText}>Use current</Text></>}
+            </TouchableOpacity>
+          </View>
+          {gpsLat !== null && gpsLng !== null ? (
+            <View style={styles.gpsCoordChip} testID="checkout-gps-chip">
+              <Feather name="check" size={11} color={colors.success || "#16A34A"} />
+              <Text style={styles.gpsCoordText}>
+                GPS · {gpsLat.toFixed(5)}, {gpsLng.toFixed(5)}
+                {gpsDistrict ? ` · ${gpsDistrict}` : ""}
+              </Text>
+            </View>
+          ) : null}
           <Text style={styles.sublabel}>Full name *</Text>
           <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="John Doe" placeholderTextColor={colors.textMuted} testID="addr-name" />
           <Text style={styles.sublabel}>Phone number *</Text>
@@ -294,6 +365,11 @@ const styles = StyleSheet.create({
   lineUnit: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
   lineQty: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   lineTotal: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
+  // Sept 2026 — GPS capture chip on the checkout address form.
+  gpsBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.surface, minHeight: 30 },
+  gpsBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
+  gpsCoordChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: (colors.success || "#16A34A") + "1A", paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6, alignSelf: "flex-start", marginTop: 4, marginBottom: 4 },
+  gpsCoordText: { fontSize: 10, color: colors.success || "#16A34A", fontWeight: "800", letterSpacing: 0.3 },
   totalRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, backgroundColor: colors.brand100, borderRadius: 12, marginTop: 4 },
   totalLabel: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
   totalAmount: { fontSize: 19, fontWeight: "900", color: colors.primary, letterSpacing: -0.4 },

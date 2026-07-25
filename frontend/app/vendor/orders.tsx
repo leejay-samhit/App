@@ -51,24 +51,44 @@ const STATUS_COLORS: Record<string, string> = {
   cancelled: "#B3261E",
 };
 
-/** Normalise the two possible shapes into a single {items:[], total, ...}. Never throws. */
+/** Normalise the backend row.  Post-June-2026 the /vendor/me/sales
+ *  endpoint returns fully-shaped orders (items array, total, status,
+ *  buyer info).  We only need light defensive defaults here for older
+ *  clients that hit the legacy flat shape. */
 function normaliseSale(s: any): VendorSale & { items: NonNullable<VendorSale["items"]>; total: number } {
   const safe = s || {};
   const rawItems = Array.isArray(safe.items) ? safe.items : null;
   const items = (rawItems && rawItems.length > 0)
-    ? rawItems.map((it: any) => ({
-        name: String(it?.name || it?.product_name || safe.product_name || "Product"),
-        price: Number(it?.price ?? it?.unit_price ?? 0) || 0,
-        image_url: it?.image_url || it?.product_image_url || undefined,
-        qty: Number(it?.qty ?? 1) || 1,
-      }))
-    : [{
-        name: String(safe.product_name || "Product"),
-        price: Number(safe.unit_price ?? 0) || 0,
-        image_url: safe.product_image_url || undefined,
-        qty: Number(safe.qty ?? 1) || 1,
-      }];
-  const total = Number(safe.total ?? items.reduce((a: number, i: any) => a + (i.price * i.qty), 0)) || 0;
+    ? rawItems.map((it: any) => {
+        const qty = Number(it?.qty ?? 1) || 1;
+        const lineTotal = Number(it?.line_total ?? 0) || 0;
+        // Prefer explicit unit price; else derive from line_total / qty.
+        let price = Number(it?.price ?? it?.unit_price ?? 0) || 0;
+        if (!price && lineTotal && qty) price = Math.round((lineTotal / qty) * 100) / 100;
+        return {
+          name: String(it?.name || it?.product_name || safe.product_name || "Product"),
+          price,
+          image_url: it?.image_url || it?.product_image_url || undefined,
+          qty,
+        };
+      })
+    : (() => {
+        // Legacy flat shape — derive unit price from line_total / qty.
+        const qty = Number(safe.qty ?? 1) || 1;
+        const lineTotal = Number(safe.line_total ?? 0) || 0;
+        const price = qty ? Math.round((lineTotal / qty) * 100) / 100 : lineTotal;
+        return [{
+          name: String(safe.product_name || "Product"),
+          price,
+          image_url: safe.product_image_url || undefined,
+          qty,
+        }];
+      })();
+  // Total = full order amount (no platform margin deduction — vendors
+  // see the FULL sale value per user directive June 2026).
+  const total = Number(
+    safe.total ?? items.reduce((a: number, i: any) => a + (i.price * i.qty), 0),
+  ) || 0;
   return {
     ...safe,
     id: String(safe.id || safe.order_id || Math.random().toString(36).slice(2)),

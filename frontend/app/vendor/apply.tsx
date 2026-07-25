@@ -7,6 +7,7 @@ import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 import { TermsAcceptancePanel } from "../../src/TermsAcceptancePanel";
+import { LocationPicker, LocationValue, EMPTY_LOCATION } from "../../src/LocationPicker";
 import {
   fetchOnboardingTerms, buildAcceptedTerms,
   VENDOR_TERMS_FALLBACK, OnboardingTermsBlock,
@@ -33,6 +34,12 @@ export default function VendorApplyScreen() {
   const [bankAccount, setBankAccount] = useState("");
   const [bankIfsc, setBankIfsc] = useState("");
   const [description, setDescription] = useState("");
+  // Sept 2026 — Shop location for geospatial marketplace filter.  GPS +
+  // reverse-geocode auto-fills pincode/state/district/city.  Delivery
+  // radius picker is rendered inside the LocationPicker's extraSlot.
+  const [shopLocation, setShopLocation] = useState<LocationValue>(EMPTY_LOCATION);
+  const [deliveryRadiusKm, setDeliveryRadiusKm] = useState<number | "pincode">(5);
+  const [deliveryAvailable, setDeliveryAvailable] = useState<boolean>(true);
   // Sept 2026 — T&C gate (mirror of web /become-vendor). First-time apply
   // MUST accept the Vendor Declaration & GST Compliance Agreement; the
   // block is admin-editable from web (/api/admin/settings.onboarding_terms.vendor)
@@ -83,6 +90,23 @@ export default function VendorApplyScreen() {
         shop_name: shopName.trim(), gst_number: gst.trim(), pan_number: pan.trim(),
         bank_name: bankName.trim(), bank_account: bankAccount.trim(), bank_ifsc: bankIfsc.trim(),
         description: description.trim(),
+        // Sept 2026 — Shop location + geospatial delivery config. The
+        // production backend consumes these to (a) build a 2dsphere
+        // index on `vendors.location`, (b) filter shop listings to only
+        // those within `delivery_radius_km` of the customer, (c) block
+        // orders at checkout when the customer address is outside the
+        // radius.  Coords are null if the vendor skipped GPS capture.
+        location: (shopLocation.latitude !== null && shopLocation.longitude !== null)
+          ? { type: "Point", coordinates: [shopLocation.longitude, shopLocation.latitude] }
+          : null,
+        pincode: shopLocation.pincode || null,
+        state: shopLocation.state || null,
+        district: shopLocation.district || null,
+        city: shopLocation.city || null,
+        store_address: shopLocation.address || null,
+        delivery_radius_km: deliveryRadiusKm === "pincode" ? null : deliveryRadiusKm,
+        delivery_radius_mode: deliveryRadiusKm === "pincode" ? "pincode" : "radius",
+        delivery_available: deliveryAvailable,
         // Audit-log block — backend is expected to persist this alongside
         // the application row so we can prove consent if a vendor disputes.
         accepted_terms: buildAcceptedTerms(termsBlock),
@@ -170,6 +194,51 @@ export default function VendorApplyScreen() {
               <Text style={styles.label}>IFSC code (optional)</Text>
               <TextInput style={styles.input} value={bankIfsc} onChangeText={setBankIfsc} placeholder="HDFC0001234" placeholderTextColor={colors.textMuted} autoCapitalize="characters" testID="vapply-ifsc" />
 
+              {/* Sept 2026 — Shop location + delivery-radius picker. */}
+              <LocationPicker
+                value={shopLocation}
+                onChange={setShopLocation}
+                title="Shop location"
+                hint="Tap 'Use current' to capture GPS + auto-fill pincode/state/district. Editable if auto-detect misses."
+                extraSlot={
+                  <View style={{ gap: 8 }}>
+                    <Text style={styles.label}>Delivery radius *</Text>
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                      {([2, 5, 10, 20, 50, "pincode"] as const).map((r) => {
+                        const active = deliveryRadiusKm === r;
+                        const label = r === "pincode" ? "Entire pincode" : `${r} km`;
+                        return (
+                          <TouchableOpacity
+                            key={String(r)}
+                            onPress={() => setDeliveryRadiusKm(r)}
+                            style={[styles.radiusChip, active && styles.radiusChipActive]}
+                            testID={`vapply-radius-${r}`}
+                          >
+                            <Text style={[styles.radiusChipText, active && styles.radiusChipTextActive]}>{label}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+
+                    <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                      {[true, false].map((v) => (
+                        <TouchableOpacity
+                          key={String(v)}
+                          onPress={() => setDeliveryAvailable(v)}
+                          style={[styles.radiusChip, deliveryAvailable === v && styles.radiusChipActive, { flex: 1 }]}
+                          testID={`vapply-delivery-${v}`}
+                        >
+                          <Feather name={v ? "truck" : "x-circle"} size={12} color={deliveryAvailable === v ? colors.primaryFg : colors.textMain} />
+                          <Text style={[styles.radiusChipText, deliveryAvailable === v && styles.radiusChipTextActive, { marginLeft: 4 }]}>
+                            {v ? "Delivery available" : "Pickup only"}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                }
+              />
+
               {/* Sept 2026 — T&C acceptance gate. Mirrors /become-vendor
                   on web: user must scroll to bottom + tick "I Agree" to
                   enable the submit button. */}
@@ -218,4 +287,8 @@ const styles = StyleSheet.create({
   primaryBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 15, marginTop: 24 },
   primaryBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
   note: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 12 },
+  radiusChip: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  radiusChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  radiusChipText: { fontSize: 11, fontWeight: "700", color: colors.textMain, letterSpacing: 0.2 },
+  radiusChipTextActive: { color: colors.primaryFg },
 });

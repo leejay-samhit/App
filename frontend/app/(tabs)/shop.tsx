@@ -661,22 +661,11 @@ export default function ShopScreen() {
                 />
               </View>
             </View>
-            <TouchableOpacity
-              onPress={useMyLocation}
-              disabled={locating}
-              style={[styles.locBtn, myCoords && styles.locBtnActive]}
-              testID="services-use-location"
-            >
-              {locating ? (
-                <ActivityIndicator size="small" color={myCoords ? colors.primaryFg : colors.primary} />
-              ) : (
-                <Feather name={myCoords ? "navigation" : "navigation-2"} size={14} color={myCoords ? colors.primaryFg : colors.primary} />
-              )}
-              <Text style={[styles.locBtnText, myCoords && styles.locBtnTextActive]}>
-                {myCoords ? "  Showing nearby workers (tap to clear)" : "  Use my location for nearby-first results"}
-              </Text>
-            </TouchableOpacity>
 
+            {/* June 2026 — Categories shown FIRST per user request.  The
+                "Use my location" nearby-first CTA now lives below the
+                grid so browsing categories is the primary flow (not the
+                GPS opt-in). */}
             {categories.length > 0 && (
               <View style={styles.categoryGridSection}>
                 <View style={styles.sectionHeaderRow}>
@@ -718,6 +707,24 @@ export default function ShopScreen() {
                     (since the modal opens immediately when a category is tapped). */}
               </View>
             )}
+
+            {/* Secondary CTA — nearby workers via GPS, moved BELOW the
+                category grid so it doesn't overshadow the browse flow. */}
+            <TouchableOpacity
+              onPress={useMyLocation}
+              disabled={locating}
+              style={[styles.locBtn, myCoords && styles.locBtnActive, { marginTop: 8 }]}
+              testID="services-use-location"
+            >
+              {locating ? (
+                <ActivityIndicator size="small" color={myCoords ? colors.primaryFg : colors.primary} />
+              ) : (
+                <Feather name={myCoords ? "navigation" : "navigation-2"} size={14} color={myCoords ? colors.primaryFg : colors.primary} />
+              )}
+              <Text style={[styles.locBtnText, myCoords && styles.locBtnTextActive]}>
+                {myCoords ? "  Showing nearby workers (tap to clear)" : "  Use my location for nearby-first results"}
+              </Text>
+            </TouchableOpacity>
 
             {/* Language picker modal sheet (opens from Browse-by-category Language tile) */}
             <Modal visible={langModalOpen} transparent animationType="slide" onRequestClose={() => setLangModalOpen(false)}>

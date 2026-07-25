@@ -246,12 +246,62 @@ export function RichProductEditor({
   // When true we show the "Regenerate" CTA.
   const [aiProduced, setAiProduced] = useState<boolean>(false);
   // Track whether the user picked a preset category or chose "Other"
-  const isPresetCat = (c: string) => (CATEGORY_OPTIONS as readonly string[]).includes(c) && c !== "Other";
+  // Now uses admin-managed categories (falls back to bootstrapped list).
+  const isPresetCat = (c: string) => {
+    const cl = (c || "").trim().toLowerCase();
+    if (!cl || cl === "other") return false;
+    return adminCategories.some((x) => x.toLowerCase() === cl)
+        || (CATEGORY_OPTIONS as readonly string[]).some((x) => x.toLowerCase() === cl);
+  };
   const [customCategory, setCustomCategory] = useState<boolean>(false);
 
   const [saving, setSaving] = useState(false);
   const [picking, setPicking] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
+
+  // ── June 2026 — Dynamic category sync from Admin ──
+  // Previously the vendor category chips were hardcoded (Electronics /
+  // Mobiles / Laptop / Clothes / Shoes / Accessories / Other).  Per
+  // user directive the mobile app now pulls the admin-managed shop
+  // categories list at runtime so add/delete on the admin side is
+  // instantly reflected in the vendor product form.
+  const [adminCategories, setAdminCategories] = useState<string[]>([]);
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get<{ items: { name: string; active: boolean }[] }>(
+          "/shop-categories",
+        );
+        if (cancelled) return;
+        const list = (r.data?.items || [])
+          .filter((c) => c && c.active !== false && c.name)
+          .map((c) => c.name);
+        setAdminCategories(list);
+      } catch {
+        if (!cancelled) setAdminCategories([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [visible]);
+  // Merged category list: admin-managed first, always fall back to the
+  // baked-in defaults so the picker is never empty on a fresh install
+  // or offline load.
+  const categoryChips: string[] = React.useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of adminCategories) {
+      const key = c.trim();
+      if (key && !seen.has(key.toLowerCase())) {
+        out.push(key); seen.add(key.toLowerCase());
+      }
+    }
+    // Ensure "Other" is always the last option so the vendor can type a
+    // custom category if the admin catalog doesn't cover it yet.
+    if (!seen.has("other")) out.push("Other");
+    return out;
+  }, [adminCategories]);
 
   // ── UPDATE 2 (June 2026) — Smart product-master autocomplete ──
   //
@@ -497,13 +547,69 @@ export function RichProductEditor({
   }, [visible, existing?.id]);
 
   const onPickCover = async () => {
-    setPicking(true);
-    try {
-      const data = await pickAndCompressImage({ aspect: [4, 3], width: 900 });
-      if (data) setImageUrl(data);
-    } catch (e) {
-      Alert.alert("Image pick failed", formatApiError(e));
-    } finally { setPicking(false); }
+    // June 2026 — allow the vendor to either take a fresh photo with the
+    // camera OR pick one from the gallery.  Previously only gallery was
+    // supported.  Camera is the natural choice for many small-shop
+    // vendors who don't keep a stock photo library.
+    if (Platform.OS === "web") {
+      // Web has no reliable camera capture — go straight to gallery.
+      setPicking(true);
+      try {
+        const data = await pickAndCompressImage({ aspect: [4, 3], width: 900 });
+        if (data) setImageUrl(data);
+      } catch (e) {
+        Alert.alert("Image pick failed", formatApiError(e));
+      } finally { setPicking(false); }
+      return;
+    }
+    Alert.alert(
+      "Add cover image",
+      "Take a fresh photo or pick one from your gallery.",
+      [
+        {
+          text: "Take photo",
+          onPress: async () => {
+            setPicking(true);
+            try {
+              const perm = await ImagePicker.requestCameraPermissionsAsync();
+              if (!perm.granted) {
+                Alert.alert("Camera needed", "Please allow camera access to take a photo.");
+                return;
+              }
+              const r = await ImagePicker.launchCameraAsync({
+                mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                quality: 0.9,
+                allowsEditing: false,
+                exif: false,
+              });
+              if (r.canceled || !r.assets?.[0]?.uri) return;
+              const asset = r.assets[0];
+              const { fitToTarget } = await import("./image-fitter");
+              const fitted = await fitToTarget(
+                asset.uri, "product_image",
+                asset.width, asset.height, "cover",
+              );
+              if (fitted) setImageUrl(fitted);
+            } catch (e) {
+              Alert.alert("Camera failed", formatApiError(e));
+            } finally { setPicking(false); }
+          },
+        },
+        {
+          text: "Choose from gallery",
+          onPress: async () => {
+            setPicking(true);
+            try {
+              const data = await pickAndCompressImage({ aspect: [4, 3], width: 900 });
+              if (data) setImageUrl(data);
+            } catch (e) {
+              Alert.alert("Image pick failed", formatApiError(e));
+            } finally { setPicking(false); }
+          },
+        },
+        { text: "Cancel", style: "cancel" },
+      ],
+    );
   };
 
   const onAddGalleryImage = async () => {
@@ -1283,7 +1389,7 @@ export function RichProductEditor({
               <TextInput value={stock} onChangeText={setStock} keyboardType="number-pad" style={modalStyles.input} testID="product-stock" />
               <Text style={modalStyles.fieldLabel}>Category</Text>
               <View style={sectionStyles.chipRow}>
-                {CATEGORY_OPTIONS.map((opt) => {
+                {categoryChips.map((opt) => {
                   const selected = opt === "Other"
                     ? customCategory
                     : !customCategory && category === opt;
@@ -1298,7 +1404,7 @@ export function RichProductEditor({
                           setCustomCategory(false);
                           setCategory(opt);
                           // Reset clothes-only fields when switching away
-                          if (opt !== "Clothes") {
+                          if (opt.toLowerCase() !== "clothes") {
                             setSubCategory("");
                             setClothingSize("");
                           }

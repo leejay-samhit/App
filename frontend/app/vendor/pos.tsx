@@ -143,18 +143,67 @@ export default function VendorPOS() {
             {cart.length === 0 ? <Text style={styles.emptyHint}>Tap a product above to start ringing up.</Text> : cart.map((it, i) => (
               <View key={i} style={styles.cartRow}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.cartName} numberOfLines={1}>{it.name}</Text>
-                  <View style={styles.qtyRow}>
-                    <TouchableOpacity onPress={() => updateLine(i, { qty: Math.max(1, it.qty - 1) })} style={styles.qtyBtn}><Feather name="minus" size={12} color={colors.textMain} /></TouchableOpacity>
-                    <TextInput value={String(it.qty)} onChangeText={(v) => updateLine(i, { qty: Math.max(0, parseFloat(v || "0")) })} keyboardType="numeric" style={styles.qtyInput} />
-                    <TouchableOpacity onPress={() => updateLine(i, { qty: it.qty + 1 })} style={styles.qtyBtn}><Feather name="plus" size={12} color={colors.textMain} /></TouchableOpacity>
-                    <TextInput value={String(it.price)} onChangeText={(v) => updateLine(i, { price: parseFloat(v || "0") })} keyboardType="numeric" style={styles.priceInput} placeholder="₹" />
-                    <TextInput value={it.discount || ""} onChangeText={(v) => updateLine(i, { discount: v })} style={styles.discInput} placeholder="disc" />
-                    <TextInput value={String(it.gst_pct ?? 0)} onChangeText={(v) => updateLine(i, { gst_pct: parseFloat(v || "0") })} keyboardType="numeric" style={styles.gstInput} placeholder="GST%" />
+                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                    <Text style={styles.cartName} numberOfLines={2}>{it.name}</Text>
+                    <TouchableOpacity onPress={() => removeLine(i)} style={styles.removeBtn}>
+                      <Feather name="x" size={14} color="#B91C1C" />
+                    </TouchableOpacity>
                   </View>
-                  <Text style={styles.lineTotal}>{formatINR(it.line_total || 0)}</Text>
+
+                  {/* Row 1 — Qty stepper + line total */}
+                  <View style={styles.rowMain}>
+                    <View style={styles.qtyStepper}>
+                      <TouchableOpacity onPress={() => updateLine(i, { qty: Math.max(1, it.qty - 1) })} style={styles.qtyBtn}>
+                        <Feather name="minus" size={12} color={colors.textMain} />
+                      </TouchableOpacity>
+                      <TextInput
+                        value={String(it.qty)}
+                        onChangeText={(v) => updateLine(i, { qty: Math.max(0, parseFloat(v || "0")) })}
+                        keyboardType="numeric"
+                        style={styles.qtyInput}
+                        selectTextOnFocus
+                      />
+                      <TouchableOpacity onPress={() => updateLine(i, { qty: it.qty + 1 })} style={styles.qtyBtn}>
+                        <Feather name="plus" size={12} color={colors.textMain} />
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={styles.lineTotalBig}>{formatINR(it.line_total || 0)}</Text>
+                  </View>
+
+                  {/* Row 2 — Price / Disc / GST — labelled + roomy */}
+                  <View style={styles.fieldRow}>
+                    <View style={styles.field}>
+                      <Text style={styles.fieldLabelSm}>Price ₹</Text>
+                      <TextInput
+                        value={String(it.price)}
+                        onChangeText={(v) => updateLine(i, { price: parseFloat(v || "0") })}
+                        keyboardType="numeric"
+                        style={styles.fieldInput}
+                        selectTextOnFocus
+                      />
+                    </View>
+                    <View style={styles.field}>
+                      <Text style={styles.fieldLabelSm}>Disc</Text>
+                      <TextInput
+                        value={it.discount || ""}
+                        onChangeText={(v) => updateLine(i, { discount: v })}
+                        style={styles.fieldInput}
+                        placeholder="0"
+                        placeholderTextColor={colors.textMuted}
+                      />
+                    </View>
+                    <View style={styles.field}>
+                      <Text style={styles.fieldLabelSm}>GST %</Text>
+                      <TextInput
+                        value={String(it.gst_pct ?? 0)}
+                        onChangeText={(v) => updateLine(i, { gst_pct: parseFloat(v || "0") })}
+                        keyboardType="numeric"
+                        style={styles.fieldInput}
+                        selectTextOnFocus
+                      />
+                    </View>
+                  </View>
                 </View>
-                <TouchableOpacity onPress={() => removeLine(i)} style={styles.iconBtn}><Feather name="x" size={16} color="#B91C1C" /></TouchableOpacity>
               </View>
             ))}
           </View>
@@ -259,11 +308,19 @@ const styles = StyleSheet.create({
   prodMeta: { fontSize: 11, color: colors.textMuted, marginTop: 3 },
   section: { fontSize: 15, fontWeight: "800", color: colors.textMain, marginBottom: 8 },
   emptyHint: { color: colors.textMuted, fontSize: 12 },
-  cartRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, padding: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, marginBottom: 6 },
-  cartName: { fontSize: 14, fontWeight: "700", color: colors.textMain },
+  cartRow: { padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, marginBottom: 8 },
+  cartName: { fontSize: 14, fontWeight: "700", color: colors.textMain, flex: 1, paddingRight: 6 },
+  removeBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: "#FEE2E2", alignItems: "center", justifyContent: "center" },
   qtyRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6, flexWrap: "wrap" },
-  qtyBtn: { width: 26, height: 26, borderRadius: 6, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
-  qtyInput: { width: 40, height: 30, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 6, textAlign: "center", color: colors.textMain },
+  qtyBtn: { width: 30, height: 30, borderRadius: 6, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
+  qtyInput: { width: 48, height: 34, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 6, textAlign: "center", color: colors.textMain, fontWeight: "700" },
+  qtyStepper: { flexDirection: "row", alignItems: "center", gap: 4 },
+  rowMain: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 10 },
+  lineTotalBig: { fontSize: 16, fontWeight: "900", color: colors.primary },
+  fieldRow: { flexDirection: "row", gap: 8, marginTop: 10 },
+  field: { flex: 1 },
+  fieldLabelSm: { fontSize: 10, color: colors.textMuted, fontWeight: "700", letterSpacing: 0.5, marginBottom: 4 },
+  fieldInput: { height: 38, borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, color: colors.textMain, fontWeight: "600", backgroundColor: colors.surface },
   priceInput: { width: 66, height: 30, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 6, color: colors.textMain },
   discInput: { width: 56, height: 30, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 6, color: colors.textMain },
   gstInput: { width: 50, height: 30, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 6, color: colors.textMain },
