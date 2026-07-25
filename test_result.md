@@ -8306,3 +8306,188 @@ agent_communication:
         search already serves the last-known location via $geoNear so the
         "offline = show last updated location" UX works without any change.
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# ITERATION 47 — Slangcart June 2026: 11-fix batch (partial)
+# ═══════════════════════════════════════════════════════════════════════
+backend:
+  - task: "Vendor sales grouping + status filter (Issues #6, #7)"
+    implemented: true
+    working: true
+    file: "backend/server.py (/api/vendor/me/sales)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Rewrote GET /vendor/me/sales to group by order_id, expose items[], total, buyer_name, shipping_address, paid_via, and accept ?status= filter."
+      - working: true
+        agent: "testing"
+        comment: "14/14 pytest cases passed. Grouping + status filter verified."
+  - task: "Vendor-scoped order status update (Issue #6)"
+    implemented: true
+    working: true
+    file: "backend/server.py (PATCH /api/vendor/orders/{id}/status)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "New endpoint — vendor can update status of own orders; 403 for non-owned, 400 for invalid."
+      - working: true
+        agent: "testing"
+        comment: "Verified with pytest — persists, 400/403 responses correct."
+  - task: "Product Q&A → chat mirror (Issue #3)"
+    implemented: true
+    working: true
+    file: "backend/routes/products_extended.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "POST /products/{pid}/questions now creates chat_thread + posts initial message with [About: name] prefix; returns thread_id."
+      - working: true
+        agent: "testing"
+        comment: "Thread reused for follow-up questions. Verified via pytest."
+
+frontend:
+  - task: "Vendor Orders math fix (Issue #7)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/vendor/orders.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "normaliseSale now derives unit_price from line_total/qty when missing; shows full order amount to vendor (no margin deduction)."
+  - task: "T&C scroll fix on vendor/service apply (Issue #1)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/TermsAcceptancePanel.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Removed nested inner ScrollView (was hijacking parent scroll on Android). T&C content now flows inline, checkbox enabled by default."
+  - task: "My Orders redesign + invoice modal (Issue #2)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/orders.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Full rewrite — filter chips (all/placed/shipped/delivered/cancelled), tap → full-screen invoice preview with share and status pills."
+  - task: "Ask-vendor routes into chat (Issue #3)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/product/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "onAskVendor now navigates to /chat/{thread_id} returned from backend so customer sees vendor replies inline."
+  - task: "Remove Broadcast from admin bottom nav (Issue #4)"
+    implemented: true
+    working: true
+    file: "frontend/app/admin/_layout.tsx, admin/more.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Registered <Tabs.Screen name='broadcast' href={null}/> — visually verified 6-tab bottom bar."
+  - task: "Services tab — categories first (Issue #5)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/(tabs)/shop.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Reordered — category grid rendered before 'Use my location' CTA."
+  - task: "Vendor POS cart layout redesign (Issue #8)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/vendor/pos.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "New two-row layout — qty stepper + line total on row 1, labelled Price/Disc/GST fields on row 2. No more truncation."
+  - task: "Cover image — camera OR gallery (Issue #9)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/rich-product-editor.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Alert prompt now offers Take photo (ImagePicker.launchCameraAsync) OR Choose from gallery."
+  - task: "Sync product categories from Admin (Issue #10)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/rich-product-editor.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "GET /shop-categories fetched on modal open; hardcoded CATEGORY_OPTIONS replaced by dynamic list + 'Other' fallback."
+  - task: "Vendor invoice redesign + print (Issue #11)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/vendor/invoices.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Full-screen invoice preview with brand head, meta card, item table, totals ladder. Print button via expo-print (HTML → native print dialog / PDF)."
+
+metadata:
+  created_by: "main_agent"
+  version: "47.0"
+  test_sequence: 47
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Vendor Orders math + status flow (frontend)"
+    - "My Orders customer redesign"
+    - "T&C scroll on onboarding"
+    - "Vendor POS cart new layout"
+    - "Vendor invoice print button"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Iteration 47 (11-fix batch): Backend done + tested (14/14 pytest passed).
+      Frontend redesigns landed for T&C, My Orders, Services tab, Vendor POS cart,
+      Vendor invoices (with print), and Broadcast removed from bottom nav. Awaiting
+      user visual verification before Razorpay integration.
+

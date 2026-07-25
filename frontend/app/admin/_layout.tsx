@@ -93,6 +93,10 @@ export default function AdminLayout() {
          file still exists as a redirect for old bookmarks — keep it hidden
          from the locked 6-tab bottom nav. */}
       <Tabs.Screen name="finance-dashboard" options={{ href: null }} />
+      {/* June 2026 — user requested Broadcast be removed from the bottom
+         tab strip; keep it reachable only via /admin/broadcast direct
+         URL if needed. */}
+      <Tabs.Screen name="broadcast" options={{ href: null }} />
     </Tabs>
   );
 }
