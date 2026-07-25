@@ -265,22 +265,31 @@ export function RichProductEditor({
   // user directive the mobile app now pulls the admin-managed shop
   // categories list at runtime so add/delete on the admin side is
   // instantly reflected in the vendor product form.
+  //
+  // Nov 2026 upgrade — categories are now a NESTED tree.  We fetch the
+  // full tree so the vendor can pick a parent category first and then
+  // a subcategory (if any exist).
+  type CatNode = {
+    id: string;
+    name: string;
+    parent_id?: string | null;
+    children?: CatNode[];
+  };
+  const [categoryTree, setCategoryTree] = useState<CatNode[]>([]);
   const [adminCategories, setAdminCategories] = useState<string[]>([]);
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
     (async () => {
       try {
-        const r = await api.get<{ items: { name: string; active: boolean }[] }>(
-          "/shop-categories",
-        );
+        const r = await api.get<{ items: CatNode[] }>("/shop-categories/tree");
         if (cancelled) return;
-        const list = (r.data?.items || [])
-          .filter((c) => c && c.active !== false && c.name)
-          .map((c) => c.name);
-        setAdminCategories(list);
+        setCategoryTree(r.data?.items || []);
+        // Flatten root names for the chip picker (parents only — subs
+        // are picked in a second dropdown below).
+        setAdminCategories((r.data?.items || []).map((c) => c.name));
       } catch {
-        if (!cancelled) setAdminCategories([]);
+        if (!cancelled) { setAdminCategories([]); setCategoryTree([]); }
       }
     })();
     return () => { cancelled = true; };
@@ -302,6 +311,23 @@ export function RichProductEditor({
     if (!seen.has("other")) out.push("Other");
     return out;
   }, [adminCategories]);
+  // Nov 2026 — Subcategory chips derived from the picked parent.
+  const subcategoryChips: string[] = React.useMemo(() => {
+    if (!category || customCategory) return [];
+    const target = category.trim().toLowerCase();
+    const walk = (nodes: CatNode[]): CatNode | null => {
+      for (const n of nodes) {
+        if ((n.name || "").trim().toLowerCase() === target) return n;
+        if (n.children && n.children.length) {
+          const inner = walk(n.children);
+          if (inner) return inner;
+        }
+      }
+      return null;
+    };
+    const found = walk(categoryTree);
+    return (found?.children || []).map((c) => c.name);
+  }, [category, categoryTree, customCategory]);
 
   // ── UPDATE 2 (June 2026) — Smart product-master autocomplete ──
   //
@@ -1433,19 +1459,41 @@ export function RichProductEditor({
                   Powers the cascading sub-category chip strip on the
                   customer category screen (Mobiles → Accessories /
                   Chargers / Pendrive / Power bank etc.).  Clothes still
-                  uses its own gender chip picker below. */}
+                  uses its own gender chip picker below.
+
+                  Nov 2026 — When the picked parent category has admin-
+                  managed subcategories, we render them as chips (source
+                  of truth). Free-form text is still allowed for cases
+                  where the admin tree isn't populated yet. */}
               {!isClothes && category ? (
                 <>
                   <Text style={modalStyles.fieldLabel}>Sub-category (optional)</Text>
                   <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>
-                    Groups products inside “{category}”. E.g. Accessories, Chargers, Pendrive, Power bank.
+                    Groups products inside “{category}”.
                   </Text>
+                  {subcategoryChips.length > 0 ? (
+                    <View style={sectionStyles.chipRow}>
+                      {subcategoryChips.map((sc) => {
+                        const active = subCategory.trim().toLowerCase() === sc.toLowerCase();
+                        return (
+                          <TouchableOpacity
+                            key={sc}
+                            onPress={() => setSubCategory(active ? "" : sc)}
+                            style={[sectionStyles.chip, active && sectionStyles.chipActive]}
+                            testID={`product-subcat-${sc.toLowerCase()}`}
+                          >
+                            <Text style={[sectionStyles.chipText, active && sectionStyles.chipTextActive]}>{sc}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  ) : null}
                   <TextInput
                     value={subCategory}
                     onChangeText={setSubCategory}
-                    placeholder="e.g. Accessories"
+                    placeholder={subcategoryChips.length > 0 ? "Or type your own" : "e.g. Accessories"}
                     placeholderTextColor={colors.textMuted}
-                    style={modalStyles.input}
+                    style={[modalStyles.input, subcategoryChips.length > 0 && { marginTop: 6 }]}
                     testID="product-subcat-generic"
                     maxLength={40}
                   />

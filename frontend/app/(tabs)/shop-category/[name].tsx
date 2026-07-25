@@ -33,6 +33,10 @@ export default function ShopCategoryScreen() {
   // product grid to only products that carry that sub_category value.
   // "" means "show everything in this category".
   const [selectedSub, setSelectedSub] = useState<string>("");
+  // Nov 2026 — admin-managed subcategories (from `/shop-categories/{id}/subcategories`
+  // once we've resolved the parent by name).  Falls back to the distinct
+  // `product.sub_category` values if the admin hasn't split the tree yet.
+  const [adminSubs, setAdminSubs] = useState<{ id: string; name: string }[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -42,29 +46,56 @@ export default function ShopCategoryScreen() {
       setHasLayout(blocks.length > 0);
     } catch { setHasLayout(false); }
     try {
-      // Always preload products for the fallback grid.
-      // Bug-fix · 2026-05-31: Compare case-insensitively AND fall back to
-      // category_id match so products stored as ids ("uuid-xx") OR as
-      // name strings with differing capitalization ("Electronics" vs
-      // "electronics") still surface in the category view.
-      const r = await api.get<any>("/products");
+      // ── Nov 2026 — Server-side cascade filter ──
+      // Passing `?category=<name>` triggers the backend to walk the
+      // category tree (parent + all descendants) and return every
+      // matching product in a single query — instant compared to
+      // downloading the full catalogue and filtering client-side.
+      // When a sub-category chip is selected, further narrow by that
+      // slug on the backend as well.
+      const params: Record<string, any> = { category, limit: 120 };
+      if (selectedSub) params.subcategory = selectedSub;
+      const r = await api.get<any>("/products", { params });
       const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
-      const norm = (s: any) => String(s || "").trim().toLowerCase();
-      const target = norm(category);
       setProducts(
         list.filter((p: any) => {
-          const cat = norm(p.category);
-          const cid = norm(p.category_id);
-          const cname = norm(p.category_name);
-          const catMatch = cat === target || cid === target || cname === target;
-          // UPDATE 1 — Hide the current vendor's own products from themselves.
+          // Belt-and-braces: still hide the vendor's own products from
+          // themselves even though the server cascade already did the
+          // category work.
           if (currentUserId && p.vendor_id && p.vendor_id === currentUserId) return false;
-          return catMatch;
+          return true;
         }),
       );
     } catch (e) { /* silent */ }
     finally { setLoadingProducts(false); setRefreshing(false); }
-  }, [category, currentUserId]);
+  }, [category, currentUserId, selectedSub]);
+
+  // Nov 2026 — resolve the parent category by name and fetch its admin-
+  // managed subcategories so we can show REAL nested chips.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const tree = await api.get<{ items: any[] }>("/shop-categories/tree");
+        if (cancelled) return;
+        const walk = (nodes: any[], target: string): any | null => {
+          const t = target.trim().toLowerCase();
+          for (const n of nodes) {
+            if ((n.name || "").trim().toLowerCase() === t) return n;
+            const inner = walk(n.children || [], target);
+            if (inner) return inner;
+          }
+          return null;
+        };
+        const node = walk(tree.data?.items || [], category);
+        const subs = (node?.children || []).map((c: any) => ({ id: c.id, name: c.name }));
+        setAdminSubs(subs);
+      } catch {
+        setAdminSubs([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [category]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -108,8 +139,13 @@ export default function ShopCategoryScreen() {
             targets the parent category, not sub-cats).  Tapping "All"
             clears the filter. */}
         {(() => {
-          const subs = Array.from(new Set(products.map((p) => (p.sub_category || "").trim()).filter(Boolean)))
-            .sort((a, b) => a.localeCompare(b));
+          // Nov 2026 — Prefer admin-managed subcategory list (real tree).
+          // Fall back to distinct product.sub_category values if the
+          // admin hasn't structured the tree yet.
+          const subs: string[] = adminSubs.length > 0
+            ? adminSubs.map((s) => s.name)
+            : Array.from(new Set(products.map((p) => (p.sub_category || "").trim()).filter(Boolean)))
+                .sort((a, b) => a.localeCompare(b));
           if (subs.length === 0) return null;
           return (
             <ScrollView
@@ -129,8 +165,10 @@ export default function ShopCategoryScreen() {
                 </View>
               </TouchableOpacity>
               {subs.map((s) => {
-                const count = products.filter((p) => (p.sub_category || "").trim() === s).length;
                 const isActive = selectedSub === s;
+                // Count based on current in-memory products (approximate
+                // because server-side filter reloads on chip tap).
+                const count = products.filter((p) => (p.sub_category || "").trim().toLowerCase() === s.toLowerCase()).length;
                 return (
                   <TouchableOpacity
                     key={s}
@@ -139,9 +177,11 @@ export default function ShopCategoryScreen() {
                     testID={`sub-chip-${s}`}
                   >
                     <Text style={[styles.subChipText, isActive && styles.subChipTextActive]} numberOfLines={1}>{s}</Text>
-                    <View style={[styles.subChipCount, isActive && styles.subChipCountActive]}>
-                      <Text style={[styles.subChipCountText, isActive && styles.subChipCountTextActive]}>{count}</Text>
-                    </View>
+                    {count > 0 ? (
+                      <View style={[styles.subChipCount, isActive && styles.subChipCountActive]}>
+                        <Text style={[styles.subChipCountText, isActive && styles.subChipCountTextActive]}>{count}</Text>
+                      </View>
+                    ) : null}
                   </TouchableOpacity>
                 );
               })}
@@ -181,17 +221,21 @@ export default function ShopCategoryScreen() {
           </View>
         ) : hasLayout === false ? (
           (() => {
-            const filtered = selectedSub
-              ? products.filter((p) => (p.sub_category || "").trim() === selectedSub)
-              : products;
+            // Nov 2026 — server already filtered by subcategory when
+            // `selectedSub` is set (see load()).  Show products as-is.
+            const filtered = products;
             if (filtered.length === 0) {
               return (
                 <View style={styles.emptyCard}>
                   <Feather name="filter" size={24} color={colors.textMuted} />
-                  <Text style={styles.emptyText}>No products in “{selectedSub}”</Text>
-                  <TouchableOpacity onPress={() => setSelectedSub("")} style={{ marginTop: 4 }}>
-                    <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700" }}>Clear filter</Text>
-                  </TouchableOpacity>
+                  <Text style={styles.emptyText}>
+                    {selectedSub ? `No products in "${selectedSub}"` : `No products in ${category}`}
+                  </Text>
+                  {selectedSub ? (
+                    <TouchableOpacity onPress={() => setSelectedSub("")} style={{ marginTop: 4 }}>
+                      <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700" }}>Clear filter</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
               );
             }

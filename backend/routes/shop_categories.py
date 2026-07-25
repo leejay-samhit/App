@@ -5,22 +5,27 @@ admins can rename, re-icon, re-image, or delete the customer-facing
 category strip without redeploying.
 
 Endpoints (mounted at /api by server.py):
-  GET    /shop-categories             — public, returns ACTIVE categories sorted
+  GET    /shop-categories             — public, returns ACTIVE root categories
+  GET    /shop-categories/tree        — public, returns nested tree
+  GET    /shop-categories/{id}/subcategories — public, direct children
+  GET    /shop-categories/{id}/descendants   — public, ALL descendant ids
   GET    /admin/shop-categories       — admin, returns ALL incl. inactive
-  POST   /admin/shop-categories       — admin, create
-  PUT    /admin/shop-categories/{id}  — admin, partial update
-  DELETE /admin/shop-categories/{id}  — admin, soft delete (active=False)
+  POST   /admin/shop-categories       — admin, create (optional parent_id → subcategory)
+  PUT    /admin/shop-categories/{id}  — admin, partial update (parent_id supported)
+  DELETE /admin/shop-categories/{id}  — admin, hard delete + orphaned children re-parented
   POST   /admin/shop-categories/seed  — admin, idempotent seed of defaults
 
 Data model (collection: `shop_categories`):
   {
     id: str (uuid),
-    name: str,                    # display label, e.g. "Sarees"
-    slug: str,                    # url-safe key, e.g. "sarees"
-    icon_pack: str,               # "mci" | "feather" | "mat"
-    icon_name: str,               # e.g. "hanger" / "user" / "grid-view"
-    image_url: str | None,        # data URL (base64) — when set takes precedence
-    color: str,                   # bg color hex e.g. "#FCE7F3"
+    name: str,                    # display label
+    slug: str,                    # url-safe key
+    parent_id: str | None,        # ← Nov 2026: unlimited nesting
+    depth: int,                   # ← denormalised — 0 = root, 1 = child, …
+    icon_pack: str,
+    icon_name: str,
+    image_url: str | None,
+    color: str,
     sort_order: int,
     active: bool,
     created_at: datetime,
@@ -57,6 +62,9 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
         "id": doc.get("id"),
         "name": doc.get("name") or "",
         "slug": doc.get("slug") or "",
+        # ── Nov 2026: hierarchy fields ──
+        "parent_id": doc.get("parent_id") or None,
+        "depth": int(doc.get("depth") or 0),
         "icon_pack": doc.get("icon_pack") or "feather",
         "icon_name": doc.get("icon_name") or "shopping-bag",
         "image_url": doc.get("image_url") or None,
@@ -66,6 +74,46 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": (doc.get("created_at") or datetime.utcnow()).isoformat() if isinstance(doc.get("created_at"), datetime) else doc.get("created_at"),
         "updated_at": (doc.get("updated_at") or datetime.utcnow()).isoformat() if isinstance(doc.get("updated_at"), datetime) else doc.get("updated_at"),
     }
+
+
+async def _compute_depth(parent_id: Optional[str]) -> int:
+    if not parent_id:
+        return 0
+    parent = await db.shop_categories.find_one({"id": parent_id}, {"depth": 1})
+    if not parent:
+        return 0
+    return int(parent.get("depth") or 0) + 1
+
+
+async def _collect_descendants(cat_id: str) -> List[str]:
+    """Return the ids of every descendant of `cat_id` (excluding itself).
+    Walks the tree breadth-first — safe for unlimited nesting."""
+    out: List[str] = []
+    frontier = [cat_id]
+    seen = {cat_id}
+    while frontier:
+        cursor = db.shop_categories.find({"parent_id": {"$in": frontier}}, {"id": 1})
+        next_layer: List[str] = []
+        async for c in cursor:
+            cid = c.get("id")
+            if cid and cid not in seen:
+                seen.add(cid); out.append(cid); next_layer.append(cid)
+        frontier = next_layer
+    return out
+
+
+async def _collect_names_in_subtree(cat_id: str) -> List[str]:
+    """Return the display names of `cat_id` and all its descendants — used
+    to cascade product filtering (a product tagged with a leaf category
+    still shows up when the customer taps its ancestor)."""
+    ids = [cat_id] + await _collect_descendants(cat_id)
+    if not ids:
+        return []
+    names: List[str] = []
+    async for c in db.shop_categories.find({"id": {"$in": ids}}, {"name": 1, "slug": 1}):
+        n = (c.get("name") or "").strip()
+        if n and n not in names: names.append(n)
+    return names
 
 
 # ── Default seed list (mirrors shop-home.tsx ALL_CATEGORIES) ─────────
@@ -91,57 +139,69 @@ DEFAULT_CATEGORIES: List[Dict[str, Any]] = [
 ]
 
 
+async def _ensure_indexes() -> None:
+    """Create indexes required for the hierarchy + fast product lookups.
+
+    Cheap to call on every seed — MongoDB de-dupes."""
+    try:
+        await db.shop_categories.create_index("parent_id")
+        await db.shop_categories.create_index("slug", unique=False)
+        await db.shop_categories.create_index([("active", 1), ("sort_order", 1)])
+        # Product-side helpers used by cascading filter
+        await db.products.create_index("category")
+        await db.products.create_index("subcategory")
+        await db.products.create_index("is_published")
+    except Exception:
+        pass
+
+
 async def _ensure_seeded() -> None:
     """Insert default categories ONCE on first ever boot.
 
-    Previous behaviour: seed whenever the collection is empty. Side-effect —
-    admins who deleted every category from the admin Shop Categories screen
-    saw them magically reappear on the next page load, because the next GET
-    request would re-run the seed (count == 0 again).
-
-    New behaviour: a one-time marker in the `app_state` collection records
-    that the seed has already happened. Once the marker is set, we NEVER
-    re-seed — even if the categories collection becomes empty later. This
-    respects the admin's intent to delete categories permanently.
+    Also backfills the `parent_id` / `depth` fields introduced in Nov 2026
+    on legacy documents so `_serialize` never returns `None` for depth.
     """
     try:
+        await _ensure_indexes()
         marker = await db.app_state.find_one({"_id": "shop_categories_seeded"})
-        if marker:
-            return  # already seeded once — never auto-recreate, even if empty.
-        count = await db.shop_categories.count_documents({})
-        if count > 0:
-            # Categories already exist (e.g. migrated data) — mark as seeded
-            # and exit so we don't double-insert on the next call.
-            await db.app_state.update_one(
-                {"_id": "shop_categories_seeded"},
-                {"$set": {"at": datetime.utcnow(), "reason": "preexisting_data"}},
-                upsert=True,
-            )
-            return
-        now = datetime.utcnow()
-        docs = []
-        for i, c in enumerate(DEFAULT_CATEGORIES):
-            docs.append({
-                "id": str(uuid.uuid4()),
-                "name": c["name"],
-                "slug": _slugify(c["name"]),
-                "icon_pack": c["icon_pack"],
-                "icon_name": c["icon_name"],
-                "image_url": None,
-                "color": c["color"],
-                "sort_order": i,
-                "active": True,
-                "created_at": now,
-                "updated_at": now,
-            })
-        if docs:
-            await db.shop_categories.insert_many(docs)
-        # Set the one-time marker so subsequent calls skip this branch
-        # for good, even if the admin later deletes every category.
-        await db.app_state.update_one(
-            {"_id": "shop_categories_seeded"},
-            {"$set": {"at": now, "reason": "first_boot_seed", "count": len(docs)}},
-            upsert=True,
+        if not marker:
+            count = await db.shop_categories.count_documents({})
+            if count > 0:
+                await db.app_state.update_one(
+                    {"_id": "shop_categories_seeded"},
+                    {"$set": {"at": datetime.utcnow(), "reason": "preexisting_data"}},
+                    upsert=True,
+                )
+            else:
+                now = datetime.utcnow()
+                docs = []
+                for i, c in enumerate(DEFAULT_CATEGORIES):
+                    docs.append({
+                        "id": str(uuid.uuid4()),
+                        "name": c["name"],
+                        "slug": _slugify(c["name"]),
+                        "parent_id": None,
+                        "depth": 0,
+                        "icon_pack": c["icon_pack"],
+                        "icon_name": c["icon_name"],
+                        "image_url": None,
+                        "color": c["color"],
+                        "sort_order": i,
+                        "active": True,
+                        "created_at": now,
+                        "updated_at": now,
+                    })
+                if docs:
+                    await db.shop_categories.insert_many(docs)
+                await db.app_state.update_one(
+                    {"_id": "shop_categories_seeded"},
+                    {"$set": {"at": now, "reason": "first_boot_seed", "count": len(docs)}},
+                    upsert=True,
+                )
+        # ── One-shot backfill of hierarchy fields on legacy docs ──
+        await db.shop_categories.update_many(
+            {"parent_id": {"$exists": False}},
+            {"$set": {"parent_id": None, "depth": 0}},
         )
     except Exception:
         # Best-effort: never let seeding break startup or requests.
@@ -151,6 +211,7 @@ async def _ensure_seeded() -> None:
 # ── Schemas ──────────────────────────────────────────────────────────
 class CategoryCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
+    parent_id: Optional[str] = None
     icon_pack: Optional[str] = Field(default="feather")
     icon_name: Optional[str] = Field(default="shopping-bag")
     image_url: Optional[str] = None
@@ -161,6 +222,7 @@ class CategoryCreate(BaseModel):
 
 class CategoryUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=64)
+    parent_id: Optional[str] = None  # empty string / null = move to root
     icon_pack: Optional[str] = None
     icon_name: Optional[str] = None
     image_url: Optional[str] = None
@@ -171,12 +233,60 @@ class CategoryUpdate(BaseModel):
 
 # ── Public ───────────────────────────────────────────────────────────
 @router.get("/shop-categories")
-async def list_public_categories():
-    """PUBLIC — returns ACTIVE categories ordered by sort_order then name."""
+async def list_public_categories(root_only: bool = True):
+    """PUBLIC — returns ACTIVE categories.
+
+    Default: only ROOT (top-level) categories so the customer Shop tab
+    stays clean.  Pass `?root_only=false` to include children (flat
+    list, still ordered by `sort_order → name`).
+    """
     await _ensure_seeded()
-    cursor = db.shop_categories.find({"active": True}).sort([("sort_order", 1), ("name", 1)])
+    q: Dict[str, Any] = {"active": True}
+    if root_only:
+        # Match both explicit None and legacy docs missing the field.
+        q["$or"] = [{"parent_id": None}, {"parent_id": {"$exists": False}}]
+    cursor = db.shop_categories.find(q).sort([("sort_order", 1), ("name", 1)])
     docs = await cursor.to_list(length=500)
     return {"items": [_serialize(d) for d in docs]}
+
+
+@router.get("/shop-categories/tree")
+async def list_category_tree():
+    """PUBLIC — full nested category tree.  Response shape:
+    [{ ...category, children: [{ ...category, children: [...] }] }]"""
+    await _ensure_seeded()
+    docs = await db.shop_categories.find({"active": True}).sort([("sort_order", 1), ("name", 1)]).to_list(2000)
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for d in docs:
+        node = _serialize(d)
+        node["children"] = []
+        by_id[node["id"]] = node
+    roots: List[Dict[str, Any]] = []
+    for node in by_id.values():
+        pid = node.get("parent_id")
+        if pid and pid in by_id:
+            by_id[pid]["children"].append(node)
+        else:
+            roots.append(node)
+    return {"items": roots}
+
+
+@router.get("/shop-categories/{cat_id}/subcategories")
+async def list_subcategories(cat_id: str):
+    """PUBLIC — direct children of a given category (one level)."""
+    docs = await db.shop_categories.find(
+        {"parent_id": cat_id, "active": True},
+    ).sort([("sort_order", 1), ("name", 1)]).to_list(500)
+    return {"items": [_serialize(d) for d in docs]}
+
+
+@router.get("/shop-categories/{cat_id}/descendants")
+async def list_descendants(cat_id: str):
+    """PUBLIC — ids + names of ALL descendants (any depth).  Used by the
+    customer app to cascade filter products under a parent category."""
+    ids = await _collect_descendants(cat_id)
+    names = await _collect_names_in_subtree(cat_id)
+    return {"ids": ids, "names": names}
 
 
 # ── Admin ────────────────────────────────────────────────────────────
@@ -196,15 +306,27 @@ async def admin_create_category(
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Name required")
+    # Optional parent — used for nested subcategories.
+    parent_id: Optional[str] = None
+    depth = 0
+    if payload.parent_id:
+        parent = await db.shop_categories.find_one({"id": payload.parent_id})
+        if not parent:
+            raise HTTPException(400, "Parent category not found")
+        parent_id = parent["id"]
+        depth = int(parent.get("depth") or 0) + 1
     slug = _slugify(name)
-    # Reject duplicates by slug
-    if await db.shop_categories.find_one({"slug": slug}):
-        raise HTTPException(409, f"Category '{name}' already exists")
+    # Reject duplicate slug WITHIN the same parent — different parents can
+    # share a slug ("Electronics/Chargers" vs "Automotive/Chargers").
+    if await db.shop_categories.find_one({"slug": slug, "parent_id": parent_id}):
+        raise HTTPException(409, f"Category '{name}' already exists at this level")
     now = datetime.utcnow()
     doc = {
         "id": str(uuid.uuid4()),
         "name": name,
         "slug": slug,
+        "parent_id": parent_id,
+        "depth": depth,
         "icon_pack": (payload.icon_pack or "feather").lower(),
         "icon_name": payload.icon_name or "shopping-bag",
         "image_url": payload.image_url or None,
@@ -215,7 +337,7 @@ async def admin_create_category(
         "updated_at": now,
     }
     await db.shop_categories.insert_one(doc)
-    await audit_log(admin, "shop_categories.create", {"id": doc["id"], "name": name})
+    await audit_log(admin, "shop_categories.create", {"id": doc["id"], "name": name, "parent_id": parent_id})
     return _serialize(doc)
 
 
@@ -235,18 +357,35 @@ async def admin_update_category(
             raise HTTPException(400, "Name cannot be empty")
         update["name"] = new_name
         new_slug = _slugify(new_name)
-        # If slug changes, ensure no other doc owns it
+        parent_id = doc.get("parent_id")
         if new_slug != doc.get("slug"):
-            clash = await db.shop_categories.find_one({"slug": new_slug, "id": {"$ne": cat_id}})
+            clash = await db.shop_categories.find_one({"slug": new_slug, "parent_id": parent_id, "id": {"$ne": cat_id}})
             if clash:
-                raise HTTPException(409, f"Category '{new_name}' already exists")
+                raise HTTPException(409, f"Category '{new_name}' already exists at this level")
             update["slug"] = new_slug
+    # ── Re-parenting (with cycle protection & depth cascade) ──
+    if payload.parent_id is not None:
+        new_parent = (payload.parent_id or "").strip() or None
+        if new_parent == cat_id:
+            raise HTTPException(400, "A category cannot be its own parent")
+        if new_parent:
+            # Prevent moving under one of its own descendants.
+            forbidden = set(await _collect_descendants(cat_id))
+            if new_parent in forbidden:
+                raise HTTPException(400, "Cannot re-parent under a descendant (would create a cycle)")
+            parent_doc = await db.shop_categories.find_one({"id": new_parent})
+            if not parent_doc:
+                raise HTTPException(400, "Parent category not found")
+            update["parent_id"] = new_parent
+            update["depth"] = int(parent_doc.get("depth") or 0) + 1
+        else:
+            update["parent_id"] = None
+            update["depth"] = 0
     if payload.icon_pack is not None:
         update["icon_pack"] = payload.icon_pack.lower()
     if payload.icon_name is not None:
         update["icon_name"] = payload.icon_name
     if payload.image_url is not None:
-        # Treat empty string as clear
         update["image_url"] = payload.image_url or None
     if payload.color is not None:
         update["color"] = payload.color
@@ -255,9 +394,32 @@ async def admin_update_category(
     if payload.active is not None:
         update["active"] = bool(payload.active)
     await db.shop_categories.update_one({"id": cat_id}, {"$set": update})
+    # If we changed depth, cascade the change to every descendant.
+    if "depth" in update:
+        await _recompute_subtree_depth(cat_id)
     fresh = await db.shop_categories.find_one({"id": cat_id})
     await audit_log(admin, "shop_categories.update", {"id": cat_id, "changes": {k: v for k, v in update.items() if k != "updated_at"}})
     return _serialize(fresh) if fresh else {"id": cat_id}
+
+
+async def _recompute_subtree_depth(root_id: str) -> None:
+    """Walk `root_id`'s subtree BFS and rewrite the `depth` field so it
+    reflects the current parent chain.  Called after re-parenting."""
+    root = await db.shop_categories.find_one({"id": root_id}, {"depth": 1})
+    if not root:
+        return
+    base_depth = int(root.get("depth") or 0)
+    # (id, expected_depth) frontier
+    frontier: List[tuple] = [(root_id, base_depth)]
+    while frontier:
+        next_frontier: List[tuple] = []
+        parent_ids = [p[0] for p in frontier]
+        depth_map = {p[0]: p[1] for p in frontier}
+        async for c in db.shop_categories.find({"parent_id": {"$in": parent_ids}}, {"id": 1, "parent_id": 1}):
+            new_d = depth_map[c["parent_id"]] + 1
+            await db.shop_categories.update_one({"id": c["id"]}, {"$set": {"depth": new_d}})
+            next_frontier.append((c["id"], new_d))
+        frontier = next_frontier
 
 
 @router.delete("/admin/shop-categories/{cat_id}")
@@ -268,9 +430,23 @@ async def admin_delete_category(
     doc = await db.shop_categories.find_one({"id": cat_id})
     if not doc:
         raise HTTPException(404, "Category not found")
+    # Re-parent direct children to the deleted node's parent so they
+    # aren't orphaned (and don't disappear from the tree).
+    new_parent = doc.get("parent_id") or None
+    await db.shop_categories.update_many(
+        {"parent_id": cat_id},
+        {"$set": {"parent_id": new_parent, "updated_at": datetime.utcnow()}},
+    )
+    # After moving them up, their `depth` needs to be recomputed.
+    if new_parent:
+        await _recompute_subtree_depth(new_parent)
+    else:
+        # Children promoted to root — depth = 0 and cascade further.
+        async for child in db.shop_categories.find({"parent_id": None}, {"id": 1}):
+            await db.shop_categories.update_one({"id": child["id"]}, {"$set": {"depth": 0}})
     await db.shop_categories.delete_one({"id": cat_id})
     await audit_log(admin, "shop_categories.delete", {"id": cat_id, "name": doc.get("name")})
-    return {"ok": True, "id": cat_id}
+    return {"ok": True, "id": cat_id, "children_re_parented_to": new_parent}
 
 
 @router.post("/admin/shop-categories/seed")

@@ -14,7 +14,7 @@
  *
  * Backend: /api/admin/shop-categories (CRUD)
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, FlatList, TouchableOpacity,
   Modal, TextInput, ActivityIndicator, Alert, Image, Platform,
@@ -33,6 +33,8 @@ type Cat = {
   id: string;
   name: string;
   slug: string;
+  parent_id?: string | null;
+  depth?: number;
   icon_pack: Pack;
   icon_name: string;
   image_url: string | null;
@@ -111,6 +113,9 @@ export default function AdminShopCategories() {
   const [fColor, setFColor] = useState("#E5F2EC");
   const [fSortOrder, setFSortOrder] = useState<string>("999");
   const [fActive, setFActive] = useState(true);
+  // Nov 2026 — parent picker for nested subcategory support.
+  const [fParentId, setFParentId] = useState<string | null>(null);
+  const [parentPickerOpen, setParentPickerOpen] = useState(false);
 
   // icon picker modal
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
@@ -129,7 +134,7 @@ export default function AdminShopCategories() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const openCreate = () => {
+  const openCreate = (parentId?: string | null) => {
     setEditing(null);
     setCreating(true);
     setFName("");
@@ -139,6 +144,7 @@ export default function AdminShopCategories() {
     setFColor("#E5F2EC");
     setFSortOrder(String(items.length));
     setFActive(true);
+    setFParentId(parentId || null);
   };
 
   const openEdit = (c: Cat) => {
@@ -151,6 +157,7 @@ export default function AdminShopCategories() {
     setFColor(c.color || "#E5F2EC");
     setFSortOrder(String(c.sort_order));
     setFActive(c.active);
+    setFParentId(c.parent_id || null);
   };
 
   const closeForm = () => {
@@ -194,7 +201,7 @@ export default function AdminShopCategories() {
     }
     setBusy(true);
     try {
-      const body = {
+      const body: Record<string, any> = {
         name,
         icon_pack: fIconPack,
         icon_name: fIconName,
@@ -203,6 +210,10 @@ export default function AdminShopCategories() {
         sort_order: parseInt(fSortOrder || "0", 10) || 0,
         active: fActive,
       };
+      // Only include parent_id when explicitly set — the backend
+      // treats "field missing" as "keep current parent", and empty
+      // string as "move to root".
+      body.parent_id = fParentId || "";
       if (editing) {
         await api.put(`/admin/shop-categories/${editing.id}`, body);
       } else {
@@ -241,6 +252,38 @@ export default function AdminShopCategories() {
 
   const formOpen = creating || !!editing;
 
+  // ── Nov 2026 — Build a flat, depth-annotated list from the parent
+  // graph so children render indented under their parents.  We keep the
+  // FlatList (fast + native scroll) rather than a nested SectionList.
+  const treeList = useMemo<Cat[]>(() => {
+    const byParent = new Map<string, Cat[]>();
+    for (const c of items) {
+      const key = c.parent_id || "__root__";
+      const arr = byParent.get(key) || [];
+      arr.push(c);
+      byParent.set(key, arr);
+    }
+    const walk = (parentKey: string, depth: number, out: Cat[]) => {
+      const kids = (byParent.get(parentKey) || [])
+        .slice()
+        .sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+      for (const k of kids) {
+        out.push({ ...k, depth });
+        walk(k.id, depth + 1, out);
+      }
+    };
+    const out: Cat[] = [];
+    walk("__root__", 0, out);
+    return out;
+  }, [items]);
+
+  // Root categories only — used to populate the parent picker.
+  // (Parent picker walks treeList directly; kept as inline eslint stub.)
+
+  const parentName = fParentId
+    ? (items.find((c) => c.id === fParentId)?.name || "Unknown")
+    : "None (top level)";
+
   // ── Render ──────────────────────────────────────────────────────────
   if (loading && items.length === 0) {
     return (
@@ -261,18 +304,19 @@ export default function AdminShopCategories() {
           <Text style={styles.overline}>ADMIN</Text>
           <Text style={styles.h1}>Shop categories</Text>
         </View>
-        <TouchableOpacity onPress={openCreate} style={styles.addBtn} testID="add-cat-btn">
+        <TouchableOpacity onPress={() => openCreate(null)} style={styles.addBtn} testID="add-cat-btn">
           <Feather name="plus" size={20} color={colors.primaryFg} />
         </TouchableOpacity>
       </View>
 
       <Text style={styles.helper}>
-        Categories shown in the customer Shop "More" grid and used in the product form. Admin
-        can rename, change icons or upload an image, reorder, hide or delete them.
+        Categories shown in the customer Shop &ldquo;More&rdquo; grid and used in the product form. Admin
+        can rename, change icons or upload an image, reorder, hide or delete them. Tap the
+        {" + "}button next to a category to add a subcategory under it.
       </Text>
 
       <FlatList
-        data={items}
+        data={treeList}
         keyExtractor={(c) => c.id}
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
         refreshControl={
@@ -283,34 +327,54 @@ export default function AdminShopCategories() {
             tintColor={colors.primary}
           />
         }
-        renderItem={({ item: c }) => (
-          <View style={styles.row}>
-            <View style={[styles.iconCircle, { backgroundColor: c.color }]}>
-              {c.image_url ? (
-                <Image source={{ uri: c.image_url }} style={styles.iconImg} />
-              ) : (
-                <CatIcon pack={c.icon_pack as Pack} name={c.icon_name} size={26} color={colors.textMain} />
-              )}
-            </View>
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <Text style={styles.rowTitle} numberOfLines={1}>{c.name}</Text>
-                {!c.active && (
-                  <View style={styles.hiddenPill}><Text style={styles.hiddenPillText}>HIDDEN</Text></View>
+        renderItem={({ item: c }) => {
+          const depth = c.depth || 0;
+          // Nov 2026 — indent children to visually communicate nesting.
+          const indentPx = Math.min(depth, 4) * 20;
+          return (
+            <View style={[styles.row, { marginLeft: indentPx }]}>
+              {depth > 0 ? (
+                <View style={styles.threadLine} />
+              ) : null}
+              <View style={[styles.iconCircle, { backgroundColor: c.color }, depth > 0 && { width: 36, height: 36, borderRadius: 18 }]}>
+                {c.image_url ? (
+                  <Image source={{ uri: c.image_url }} style={styles.iconImg} />
+                ) : (
+                  <CatIcon pack={c.icon_pack as Pack} name={c.icon_name} size={depth > 0 ? 20 : 26} color={colors.textMain} />
                 )}
               </View>
-              <Text style={styles.rowSub} numberOfLines={1}>
-                {c.image_url ? "Custom image" : `${c.icon_pack}:${c.icon_name}`} · order {c.sort_order}
-              </Text>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Text style={styles.rowTitle} numberOfLines={1}>{c.name}</Text>
+                  {!c.active && (
+                    <View style={styles.hiddenPill}><Text style={styles.hiddenPillText}>HIDDEN</Text></View>
+                  )}
+                  {depth === 0 ? null : (
+                    <View style={styles.subPill}><Text style={styles.subPillText}>SUB · L{depth}</Text></View>
+                  )}
+                </View>
+                <Text style={styles.rowSub} numberOfLines={1}>
+                  {c.image_url ? "Custom image" : `${c.icon_pack}:${c.icon_name}`} · order {c.sort_order}
+                </Text>
+              </View>
+              {/* + Add subcategory — quick action to nest under this row */}
+              <TouchableOpacity
+                onPress={() => openCreate(c.id)}
+                style={styles.rowAction}
+                testID={`add-sub-${c.slug}`}
+                accessibilityLabel="Add subcategory"
+              >
+                <Feather name="plus" size={16} color={colors.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => openEdit(c)} style={styles.rowAction} testID={`edit-${c.slug}`}>
+                <Feather name="edit-2" size={16} color={colors.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => onDelete(c)} style={styles.rowAction} testID={`delete-${c.slug}`}>
+                <Feather name="trash-2" size={16} color="#EF4444" />
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity onPress={() => openEdit(c)} style={styles.rowAction} testID={`edit-${c.slug}`}>
-              <Feather name="edit-2" size={16} color={colors.primary} />
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => onDelete(c)} style={styles.rowAction} testID={`delete-${c.slug}`}>
-              <Feather name="trash-2" size={16} color="#EF4444" />
-            </TouchableOpacity>
-          </View>
-        )}
+          );
+        }}
         ListEmptyComponent={(
           <View style={styles.emptyWrap}>
             <Feather name="grid" size={40} color={colors.textMuted} />
@@ -362,6 +426,18 @@ export default function AdminShopCategories() {
                 style={styles.input}
                 testID="cat-name"
               />
+
+              {/* Nov 2026 — Parent picker for nested subcategories */}
+              <Text style={styles.label}>Parent category</Text>
+              <TouchableOpacity
+                onPress={() => setParentPickerOpen(true)}
+                style={styles.parentPicker}
+                testID="cat-parent-picker"
+              >
+                <Feather name={fParentId ? "corner-down-right" : "grid"} size={16} color={colors.textMain} />
+                <Text style={styles.parentPickerText} numberOfLines={1}>{parentName}</Text>
+                <Feather name="chevron-down" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
 
               {/* Icon source toggle */}
               <Text style={styles.label}>Icon</Text>
@@ -518,6 +594,57 @@ export default function AdminShopCategories() {
                   </TouchableOpacity>
                 );
               })}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      {/* ── Nov 2026 — Parent category picker ─────────────────────── */}
+      <Modal
+        visible={parentPickerOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setParentPickerOpen(false)}
+      >
+        <View style={styles.modalScrim}>
+          <View style={[styles.modalSheet, { maxHeight: "72%" }]}>
+            <View style={styles.modalGrabber} />
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Pick a parent</Text>
+              <TouchableOpacity onPress={() => setParentPickerOpen(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Feather name="x" size={20} color={colors.textMain} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 16 }}>
+              <TouchableOpacity
+                onPress={() => { setFParentId(null); setParentPickerOpen(false); }}
+                style={[styles.parentOption, !fParentId && styles.parentOptionActive]}
+              >
+                <Feather name="grid" size={16} color={colors.primary} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.parentOptionText}>None — top-level category</Text>
+                  <Text style={styles.parentOptionSub}>Shows in the customer Shop main strip</Text>
+                </View>
+                {!fParentId ? <Feather name="check" size={16} color={colors.primary} /> : null}
+              </TouchableOpacity>
+              {treeList
+                .filter((c) => c.id !== editing?.id) // can't be your own parent
+                .map((c) => {
+                  const depth = c.depth || 0;
+                  const active = fParentId === c.id;
+                  return (
+                    <TouchableOpacity
+                      key={c.id}
+                      onPress={() => { setFParentId(c.id); setParentPickerOpen(false); }}
+                      style={[styles.parentOption, active && styles.parentOptionActive, { marginLeft: Math.min(depth, 4) * 16 }]}
+                    >
+                      <View style={[styles.parentDot, { backgroundColor: c.color }]}>
+                        <CatIcon pack={c.icon_pack as Pack} name={c.icon_name} size={14} color={colors.textMain} />
+                      </View>
+                      <Text style={styles.parentOptionText} numberOfLines={1}>{c.name}</Text>
+                      {active ? <Feather name="check" size={16} color={colors.primary} /> : null}
+                    </TouchableOpacity>
+                  );
+                })}
             </ScrollView>
           </View>
         </View>
@@ -703,4 +830,34 @@ const styles = StyleSheet.create({
     alignItems: "center", justifyContent: "center",
   },
   iconCellLabel: { fontSize: 10, fontWeight: "700", color: colors.textMain, textAlign: "center" },
+  // ── Nov 2026 — parent picker + tree-indent styles ─────────────
+  parentPicker: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: 12, paddingVertical: 12,
+    borderWidth: 1, borderColor: colors.border, borderRadius: 12,
+    backgroundColor: colors.surface,
+  },
+  parentPickerText: { flex: 1, fontSize: 13, fontWeight: "700", color: colors.textMain },
+  parentOption: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: 10,
+    marginBottom: 4,
+  },
+  parentOptionActive: { backgroundColor: colors.brand100 },
+  parentOptionText: { flex: 1, fontSize: 13, fontWeight: "700", color: colors.textMain },
+  parentOptionSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  parentDot: {
+    width: 28, height: 28, borderRadius: 14,
+    alignItems: "center", justifyContent: "center",
+  },
+  threadLine: {
+    position: "absolute", left: -12, top: 0, bottom: 0, width: 2,
+    backgroundColor: colors.border,
+  },
+  subPill: {
+    paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: 4, backgroundColor: colors.brand100,
+  },
+  subPillText: { fontSize: 9, fontWeight: "900", color: colors.primary, letterSpacing: 0.5 },
 });

@@ -12,9 +12,9 @@ Endpoints (mounted at /api by server.py):
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.db import db
 from core.notifications import create_notification
@@ -36,13 +36,119 @@ def _shape_product(p: Dict[str, Any]) -> Dict[str, Any]:
     return p
 
 
+async def _collect_cascade_names(root_ident: str) -> List[str]:
+    """Given a category name OR id, return the set of category names to
+    match against products (root + every descendant).  Supports both
+    lookups because vendors historically wrote free-form names into
+    `product.category` while the new tree stores UUIDs."""
+    # Locate the root by id, then fall back to name / slug
+    root = await db.shop_categories.find_one({"id": root_ident})
+    if not root:
+        root = await db.shop_categories.find_one({"name": root_ident})
+    if not root:
+        root = await db.shop_categories.find_one({"slug": root_ident.lower()})
+    if not root:
+        return [root_ident]  # fall back to literal text match
+
+    # BFS to collect all descendants
+    names: List[str] = [(root.get("name") or "").strip()]
+    frontier = [root["id"]]
+    seen = set(frontier)
+    while frontier:
+        next_layer: List[str] = []
+        async for c in db.shop_categories.find({"parent_id": {"$in": frontier}}, {"id": 1, "name": 1}):
+            cid = c.get("id")
+            if cid and cid not in seen:
+                seen.add(cid); next_layer.append(cid)
+                n = (c.get("name") or "").strip()
+                if n and n not in names: names.append(n)
+        frontier = next_layer
+    return [n for n in names if n]
+
+
+def _build_category_filter(names: List[str]) -> Dict[str, Any]:
+    """Match any product whose `category` OR `subcategory` matches one
+    of the given names (case-insensitive)."""
+    if not names:
+        return {}
+    # Escape and build a case-insensitive OR
+    import re as _re
+    regexes = [{"$regex": f"^{_re.escape(n)}$", "$options": "i"} for n in names]
+    return {"$or": [
+        {"category": {"$in": names}},
+        {"subcategory": {"$in": names}},
+        # Legacy free-form vendors may have written the name in different
+        # casing — a case-insensitive regex catches those too.
+        *[{"category": r} for r in regexes],
+        *[{"subcategory": r} for r in regexes],
+    ]}
+
+
 @router.get("/products")
-async def list_products():
-    items = await db.products.find(
-        {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]},
-        {"_id": 0},
-    ).sort("created_at", -1).to_list(2000)
-    return [_shape_product(p) for p in items]
+async def list_products(
+    category: Optional[str] = Query(None, description="Filter by category name/id — cascades to all descendants when it matches a category tree node"),
+    subcategory: Optional[str] = Query(None, description="Filter by subcategory name — ignored when `category` is a leaf"),
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    sort: str = Query("newest", description="newest | popular | price_asc | price_desc"),
+):
+    """PUBLIC — paginated + category-cascading product list.
+
+    Nov 2026 upgrade:
+      • Supports `?category=` (id / name / slug) with automatic descendant
+        cascade — tapping "Electronics" returns Electronics + Mobiles +
+        Laptops + Chargers products in one call.
+      • `?subcategory=` narrows further to just that leaf.
+      • `?limit` + `?offset` paginate.  Also returns a `total` count.
+      • `?sort=` supports newest / popular / price_asc / price_desc.
+    """
+    q: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
+
+    if category:
+        names = await _collect_cascade_names(category)
+        cat_filter = _build_category_filter(names)
+        if cat_filter:
+            q = {"$and": [q, cat_filter]}
+
+    if subcategory:
+        sub_names = await _collect_cascade_names(subcategory)
+        sub_filter = _build_category_filter(sub_names)
+        if sub_filter:
+            q = {"$and": [q, sub_filter]} if "$and" not in q else {"$and": q["$and"] + [sub_filter]}
+
+    # Sort mapping
+    sort_spec: List[tuple] = [("created_at", -1)]
+    s = (sort or "newest").lower()
+    if s == "price_asc":
+        sort_spec = [("price", 1), ("created_at", -1)]
+    elif s == "price_desc":
+        sort_spec = [("price", -1), ("created_at", -1)]
+    elif s == "popular":
+        # popular by sales_count then interested_count
+        sort_spec = [("sales_count", -1), ("created_at", -1)]
+
+    # Total count (parallel to the paginated fetch) — kept cheap by
+    # relying on the newly-added compound indexes.
+    total = await db.products.count_documents(q)
+
+    cursor = db.products.find(q, {"_id": 0}).sort(sort_spec).skip(offset).limit(limit)
+    items = await cursor.to_list(limit)
+    shaped = [_shape_product(p) for p in items]
+
+    # Historically the endpoint returned a bare array.  To keep back-compat
+    # for older builds, ALWAYS include an array response when no pagination
+    # or category param is used AND no explicit envelope is needed. When
+    # any query parameter is present, return a rich envelope with
+    # `items` / `total` / `offset` / `limit`.
+    if category or subcategory or offset > 0 or limit != 60 or sort != "newest":
+        return {
+            "items": shaped,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(shaped)) < total,
+        }
+    return shaped
 
 
 # IMPORTANT: this route MUST be declared BEFORE `/products/{product_id}` or

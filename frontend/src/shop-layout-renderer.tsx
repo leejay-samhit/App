@@ -776,7 +776,13 @@ export function ShopLayoutRenderer({
               if (items) setBlocks(items);
             },
           }),
-          api.get<any>("/products"),
+          // Nov 2026 — pass cascading category filter so /products
+          // returns Electronics + Mobiles + Chargers when the customer
+          // taps "Electronics".  Falls back to the whole catalog on the
+          // home scope.
+          api.get<any>("/products", {
+            params: category ? { category, limit: 120 } : {},
+          }),
         ]);
         if (cancelled) return;
         const blocks: LayoutBlock[] = bRes?.items || [];
@@ -851,6 +857,57 @@ export function ShopLayoutRenderer({
     [blocks],
   );
 
+  // Nov 2026 — Auto-inject Product Grid blocks between banners so
+  // customers never see an "empty" shop layout when the admin drops a
+  // banner without a manual product_grid below it.  Rule set:
+  //   • A "banner" is any purely-visual block: banner_slider, background,
+  //     offer_cards, brand_slider, announcement_strip, section_header,
+  //     text, category_circles, content_box.
+  //   • After each banner we walk forward — if we do NOT hit a product-
+  //     bearing block (product_grid / horizontal_slider / flash_sale)
+  //     before the next banner, we insert a synthetic product_grid.
+  //   • The synthetic grid's data source cascades the current customer
+  //     context: `category` when we're inside a category screen (scope
+  //     === "category"), otherwise "new" (latest arrivals).
+  //   • Injected grids are keyed with a stable `__auto:{parentId}` id so
+  //     React remounts don't thrash.
+  const augmented = useMemo<LayoutBlock[]>(() => {
+    if (visible.length === 0) return visible;
+    const PRODUCT_TYPES = new Set(["product_grid", "horizontal_slider", "flash_sale"]);
+    const BANNER_TYPES = new Set([
+      "banner_slider", "background", "offer_cards", "brand_slider",
+      "announcement_strip", "section_header", "text",
+      "category_circles", "content_box",
+    ]);
+    const out: LayoutBlock[] = [];
+    for (let i = 0; i < visible.length; i++) {
+      const b = visible[i];
+      out.push(b);
+      if (!BANNER_TYPES.has(b.block_type)) continue;
+      // Peek forward — do we already have a product block right after?
+      const next = visible[i + 1];
+      if (next && PRODUCT_TYPES.has(next.block_type)) continue;
+      // Skip auto-inject if the very next block is another banner-of-
+      // same-type (e.g. two announcement strips) to keep the layout tidy.
+      const autoId = `__auto:${b.id}`;
+      out.push({
+        id: autoId,
+        block_type: "product_grid",
+        scope: b.scope,
+        scope_category: b.scope_category,
+        active: true,
+        sort_order: (b.sort_order ?? 0) + 0.5,
+        title: "",           // no heading — visual continuity
+        data_source: (category ? "category" : "new") as any,
+        category_filter: category || "",
+        product_count: 8,
+        layout_style: "grid" as any,
+        product_ids: [] as string[],
+      } as LayoutBlock);
+    }
+    return out;
+  }, [visible, category]);
+
   // Analytics: batch impressions + clicks and flush every 5s / on unmount
   const eventQueueRef = useRef<{ block_id: string; event: "impression" | "click"; scope: string }[]>([]);
   const lastFlushRef = useRef<number>(Date.now());
@@ -865,7 +922,7 @@ export function ShopLayoutRenderer({
   }, []);
 
   useEffect(() => {
-    if (visible.length === 0) return;
+    if (augmented.length === 0) return;
     // Log impression for each visible block once per renderer mount
     const seen = new Set<string>();
     visible.forEach((b) => {
@@ -900,6 +957,26 @@ export function ShopLayoutRenderer({
     onAddToCart?.(productId);
   };
 
+  // Nov 2026 — When the app auto-injects a synthetic product_grid, we
+  // need a product list for it too.  Rather than firing another N
+  // /products/by-source requests, we reuse the top-of-catalogue list
+  // (`productsById` — already fetched) filtered by the current
+  // `category` prop (if any).  This is completely client-side so it
+  // renders instantly and doesn't extend the loading state.
+  const autoBlockProducts = useMemo<Product[]>(() => {
+    const all = Object.values(productsById);
+    if (!category) return all.slice(0, 20);
+    const lc = category.toLowerCase();
+    const filtered = all.filter((p: any) => {
+      const c = String(p?.category || "").toLowerCase();
+      const s = String(p?.subcategory || "").toLowerCase();
+      return c === lc || s === lc;
+    });
+    // Fallback — if nothing matches (vendor tagged with a different
+    // free-form label), show newest anything so the block never blanks.
+    return (filtered.length > 0 ? filtered : all).slice(0, 20);
+  }, [productsById, category]);
+
   if (blocks === null) {
     // Loading skeletons
     return (
@@ -912,7 +989,7 @@ export function ShopLayoutRenderer({
       </View>
     );
   }
-  if (visible.length === 0) return null;
+  if (augmented.length === 0) return null;
 
   // Sept 2026 — Compute an accumulated "already-used category ids" map so
   // each CategoryCirclesBlock in auto-mode (empty category_ids) can skip
@@ -933,11 +1010,16 @@ export function ShopLayoutRenderer({
 
   return (
     <View>
-      {visible.map((b) => {
+      {augmented.map((b) => {
         // Resolve products for product-driven blocks
         let prods: Product[] = [];
         if (["product_grid", "horizontal_slider", "flash_sale"].includes(b.block_type)) {
-          prods = sourceCache[b.id] || [];
+          // Auto-injected synthetic blocks have ids prefixed with __auto:
+          // and their product list comes from the client-side filter
+          // (no extra network round-trip).
+          prods = b.id.startsWith("__auto:")
+            ? autoBlockProducts
+            : (sourceCache[b.id] || []);
         }
         // June 2026 Shop redesign — every block (admin-created or hardcoded)
         // is wrapped in <ContentContainer> so they all align on the same
