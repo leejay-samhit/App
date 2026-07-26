@@ -164,6 +164,50 @@ export default function VendorApplyScreen() {
             </View>
           )}
 
+          {/* Nov 2026 — Approved vendors see a read-only profile summary
+              and a "Request Edit" CTA that routes to the approval-gated
+              edit form.  Direct editing is disabled per policy. */}
+          {status === "approved" && info ? (
+            <>
+              <View style={[styles.statusCard, { backgroundColor: "#E7F6EC" }]}>
+                <Feather name="check-circle" size={28} color="#0F7A3C" />
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={[styles.statusTitle, { color: "#0F7A3C" }]}>You&apos;re an approved vendor</Text>
+                  <Text style={styles.statusBody}>
+                    Profile fields are locked to protect trust.  Tap &ldquo;Request Edit&rdquo; to submit changes for admin approval.
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.section}>CURRENT PROFILE</Text>
+              {[
+                ["Shop name", info.shop_name || info.application?.shop_name],
+                ["Pincode", info.pincode || info.application?.pincode],
+                ["City", info.city || info.application?.city],
+                ["State", info.state || info.application?.state],
+                ["Delivery radius", (info.delivery_radius_km ?? info.application?.delivery_radius_km) != null ? `${info.delivery_radius_km ?? info.application?.delivery_radius_km} km` : (info.delivery_radius_mode || info.application?.delivery_radius_mode) === "pincode" ? "Entire pincode" : "—"],
+                ["Store address", info.store_address || info.application?.store_address],
+                ["GST", info.gst_number || info.application?.gst_number],
+                ["Bank", info.bank_name || info.application?.bank_name],
+                ["Account", info.bank_account || info.application?.bank_account],
+                ["IFSC", info.bank_ifsc || info.application?.bank_ifsc],
+              ].map(([label, val]) => (
+                <View key={String(label)} style={styles.roCell}>
+                  <Text style={styles.roLabel}>{label}</Text>
+                  <Text style={styles.roValue}>{val ? String(val) : "—"}</Text>
+                </View>
+              ))}
+              <TouchableOpacity
+                onPress={() => router.push("/vendor/request-edit" as any)}
+                style={[styles.primaryBtn, { marginTop: 20 }]}
+                testID="vapply-request-edit"
+              >
+                <Feather name="edit-3" size={16} color={colors.primaryFg} />
+                <Text style={styles.primaryBtnText}>  Request an edit</Text>
+              </TouchableOpacity>
+              <Text style={styles.note}>Every change is reviewed by admin — expect 1&ndash;2 business days.</Text>
+            </>
+          ) : null}
+
           {showForm && (
             <>
               <View style={[styles.statusCard, { backgroundColor: "#E6F1FB" }]}>
@@ -291,4 +335,8 @@ const styles = StyleSheet.create({
   radiusChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   radiusChipText: { fontSize: 11, fontWeight: "700", color: colors.textMain, letterSpacing: 0.2 },
   radiusChipTextActive: { color: colors.primaryFg },
+  // Nov 2026 — read-only profile cell for approved vendors
+  roCell: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 14, paddingVertical: 10, marginBottom: 8 },
+  roLabel: { fontSize: 10, letterSpacing: 1, fontWeight: "800", color: colors.textMuted },
+  roValue: { fontSize: 14, fontWeight: "700", color: colors.textMain, marginTop: 4 },
 });

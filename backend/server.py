@@ -3603,6 +3603,36 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
     if not items:
         raise HTTPException(status_code=400, detail="Cart is empty")
+
+    # ── Nov 2026 — Delivery-zone guard.  Reject the order if ANY cart
+    # item's vendor cannot deliver to the customer's pincode.  Products
+    # created BEFORE the migration have no `store_pincode` — they are
+    # treated as globally deliverable so we don't break legacy carts.
+    zone_conflicts: List[str] = []
+    for it in items:
+        prod = await db.products.find_one(
+            {"id": it["product_id"]},
+            {"_id": 0, "name": 1, "store_pincode": 1, "delivery_available": 1},
+        )
+        if not prod:
+            continue
+        if prod.get("delivery_available") is False:
+            zone_conflicts.append(f"{prod.get('name', 'A product')} is not available for delivery.")
+            continue
+        sp = str(prod.get("store_pincode") or "").strip()
+        if sp and sp != shipping_address["pincode"]:
+            zone_conflicts.append(
+                f"{prod.get('name', 'A product')} is not deliverable to pincode {shipping_address['pincode']} (vendor pincode: {sp}).",
+            )
+    if zone_conflicts:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "out_of_delivery_zone",
+                "message": "Some cart items are outside the delivery zone for your shipping pincode.",
+                "conflicts": zone_conflicts,
+            },
+        )
     enriched = []
     total = 0.0
     settings = await get_settings()
@@ -7529,6 +7559,17 @@ async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depen
         "bank_account": (payload.bank_account or "").strip(),
         "bank_ifsc": (payload.bank_ifsc or "").strip(),
         "description": (payload.description or "").strip(),
+        # Nov 2026 — persist location / delivery details on the application row
+        # so the admin can see what was submitted for approval.
+        "location": payload.location,
+        "pincode": (payload.pincode or "").strip() or None,
+        "state": (payload.state or "").strip() or None,
+        "district": (payload.district or "").strip() or None,
+        "city": (payload.city or "").strip() or None,
+        "store_address": (payload.store_address or "").strip() or None,
+        "delivery_radius_km": payload.delivery_radius_km,
+        "delivery_radius_mode": payload.delivery_radius_mode,
+        "delivery_available": payload.delivery_available if payload.delivery_available is not None else True,
         # Sept 2026 — Persist the consent audit block for legal review.
         "accepted_terms": (payload.accepted_terms.model_dump() if payload.accepted_terms else None),
         "status": "pending",
@@ -7536,11 +7577,22 @@ async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depen
         "updated_at": ts,
     }
     await db.vendor_applications.insert_one(doc)
-    # Mark user with vendor_status pending
-    await db.users.update_one({"id": user["id"]}, {"$set": {
+    # Mark user with vendor_status pending + snapshot the shop location so we
+    # can fall back on it before admin approval too.
+    user_update: Dict[str, Any] = {
         "vendor_status": "pending",
         "shop_name": shop,
-    }})
+    }
+    if payload.pincode: user_update["pincode"] = payload.pincode
+    if payload.state: user_update["state"] = payload.state
+    if payload.district: user_update["district"] = payload.district
+    if payload.city: user_update["city"] = payload.city
+    if payload.store_address: user_update["store_address"] = payload.store_address
+    if payload.location: user_update["location"] = payload.location
+    if payload.delivery_radius_km is not None: user_update["delivery_radius_km"] = payload.delivery_radius_km
+    if payload.delivery_radius_mode: user_update["delivery_radius_mode"] = payload.delivery_radius_mode
+    if payload.delivery_available is not None: user_update["delivery_available"] = payload.delivery_available
+    await db.users.update_one({"id": user["id"]}, {"$set": user_update})
     # Notify admins
     async for a in db.users.find({"role": "admin", "admin_role": {"$in": ["super_admin", "support", "finance"]}}, {"id": 1, "_id": 0}):
         try:
@@ -7606,6 +7658,17 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
         **{k: v for k, v in p.dict().items() if k != "vendor_id"},
         "vendor_id": vendor["id"],          # force-stamp
         "vendor_email": vendor.get("email"),
+        # ── Nov 2026 — Denormalise shop location onto the product so
+        # the customer-facing pincode / delivery-zone filter can query
+        # `products` directly (avoids a per-product join to `users`). ──
+        "store_pincode": vendor.get("pincode") or None,
+        "store_location": vendor.get("location") or None,
+        "store_city": vendor.get("city") or None,
+        "store_state": vendor.get("state") or None,
+        "store_district": vendor.get("district") or None,
+        "delivery_radius_km": vendor.get("delivery_radius_km"),
+        "delivery_radius_mode": vendor.get("delivery_radius_mode") or "pincode",
+        "delivery_available": vendor.get("delivery_available", True),
         "created_at": now_utc().isoformat(),
         # UPDATE 1 (June 2026) — Publish is admin-only. Vendors create their
         # products in a HIDDEN state; only an admin can flip is_published=True
@@ -9156,6 +9219,11 @@ app.include_router(chat_router.router, prefix="/api")
 app.include_router(products_extended_router.router, prefix="/api")
 app.include_router(products_ai_router.router, prefix="/api")
 app.include_router(shop_categories_router.router, prefix="/api")
+# Nov 2026 — vendor edit-request approval flow + OSM geo endpoints
+from routes import vendor_edit_requests as vendor_edit_requests_router  # noqa: E402
+from routes import geo as geo_router  # noqa: E402
+app.include_router(vendor_edit_requests_router.router, prefix="/api")
+app.include_router(geo_router.router, prefix="/api")
 app.include_router(tickets_router.router, prefix="/api")
 app.include_router(pincodes_router.router, prefix="/api")
 app.include_router(legal_pages_router.router, prefix="/api")

@@ -156,12 +156,17 @@ export function ShopHome({
 
   // ── Delivery address (live reverse-geocoded from user coords) ─────────
   const [deliveryAddress, setDeliveryAddress] = useState<string>(defaultAddress);
+  const [deliveryPincode, setDeliveryPincode] = useState<string>("");
   const [locModalOpen, setLocModalOpen] = useState(false);
   const [locBusy, setLocBusy] = useState(false);
   const [manualAddress, setManualAddress] = useState<string>("");
+  // Nov 2026 — Nominatim search results within the location modal.
+  const [locSearchResults, setLocSearchResults] = useState<any[]>([]);
+  const [locSearching, setLocSearching] = useState(false);
 
   // Persisted cache key — survives reloads / logout-login on the same device.
   const ADDR_KEY = "@app/deliveryAddress";
+  const PIN_KEY  = "@app/deliveryPincode";
 
   // Hydrate cached address on mount, then try to refresh from current GPS.
   useEffect(() => {
@@ -169,7 +174,9 @@ export function ShopHome({
     (async () => {
       try {
         const cached = await AsyncStorage.getItem(ADDR_KEY);
+        const cachedPin = await AsyncStorage.getItem(PIN_KEY);
         if (cached && !cancelled) setDeliveryAddress(cached);
+        if (cachedPin && !cancelled) setDeliveryPincode(cachedPin);
       } catch { /* ignore */ }
       // Fire-and-forget refresh from current location.
       refreshLocation(false);
@@ -178,8 +185,11 @@ export function ShopHome({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const persistAddress = useCallback(async (a: string) => {
-    try { await AsyncStorage.setItem(ADDR_KEY, a); } catch { /* ignore */ }
+  const persistAddress = useCallback(async (a: string, pin?: string) => {
+    try {
+      await AsyncStorage.setItem(ADDR_KEY, a);
+      if (pin !== undefined) await AsyncStorage.setItem(PIN_KEY, pin);
+    } catch { /* ignore */ }
   }, []);
 
   /**
@@ -187,6 +197,10 @@ export function ShopHome({
    * `silent=true` means "don't show errors — use cache if anything fails".
    * On web, `Location.reverseGeocodeAsync` isn't supported so we fall back
    * to plain "City near {lat},{lng}".
+   *
+   * Nov 2026 — Also POSTs the coords to `/api/geo/reverse` so we get the
+   * server-authoritative pincode (Nominatim), which the shop uses to
+   * filter products by vendor delivery zone.
    */
   const refreshLocation = useCallback(async (interactive: boolean) => {
     setLocBusy(true);
@@ -197,7 +211,17 @@ export function ShopHome({
         return;
       }
       let nice = "";
-      if (Platform.OS !== "web") {
+      let pin = "";
+      // Prefer our own /geo/reverse — returns pincode consistently
+      // whereas expo-location's device-side reverse geocode does not.
+      try {
+        const r = await api.get<any>("/geo/reverse", { params: { lat: c.lat, lng: c.lng } });
+        const d = r.data || {};
+        const parts = [d.area || d.city, d.state].filter(Boolean);
+        nice = parts.join(", ");
+        pin = d.pincode || "";
+      } catch { /* fall back to expo-location */ }
+      if (!nice && Platform.OS !== "web") {
         try {
           const places = await Location.reverseGeocodeAsync({ latitude: c.lat, longitude: c.lng });
           if (places && places[0]) {
@@ -205,12 +229,15 @@ export function ShopHome({
             const city = p.city || p.subregion || p.district || "";
             const region = p.region || p.country || "";
             nice = [city, region].filter(Boolean).join(", ");
+            pin = (p as any).postalCode || pin;
           }
         } catch { /* fall through */ }
       }
       if (!nice) nice = `Near ${c.lat.toFixed(2)}, ${c.lng.toFixed(2)}`;
-      setDeliveryAddress(nice);
-      persistAddress(nice);
+      const display = pin ? `${nice} · ${pin}` : nice;
+      setDeliveryAddress(display);
+      setDeliveryPincode(pin);
+      persistAddress(display, pin);
     } finally { setLocBusy(false); }
   }, [persistAddress]);
 
@@ -218,16 +245,56 @@ export function ShopHome({
     const v = manualAddress.trim();
     if (!v) return;
     setDeliveryAddress(v);
-    persistAddress(v);
+    persistAddress(v, "");
+    setDeliveryPincode("");
     setLocModalOpen(false);
     setManualAddress("");
+    setLocSearchResults([]);
   }, [manualAddress, persistAddress]);
+
+  // Nov 2026 — Search by place name via OSM Nominatim proxy.  Kicks off
+  // when the user types 3+ characters into the manual box.  Debounced
+  // via setTimeout to respect Nominatim's 1 rps policy.
+  useEffect(() => {
+    const q = manualAddress.trim();
+    if (q.length < 3) { setLocSearchResults([]); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setLocSearching(true);
+      try {
+        const r = await api.get<{ items: any[] }>("/geo/search", { params: { q, limit: 6 } });
+        if (!cancelled) setLocSearchResults(r.data?.items || []);
+      } catch {
+        if (!cancelled) setLocSearchResults([]);
+      } finally {
+        if (!cancelled) setLocSearching(false);
+      }
+    }, 450);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [manualAddress]);
+
+  const onPickSearchResult = useCallback((item: any) => {
+    const parts = [item.area || item.city, item.state].filter(Boolean);
+    const nice = parts.join(", ");
+    const display = item.pincode ? `${nice} · ${item.pincode}` : nice;
+    setDeliveryAddress(display);
+    setDeliveryPincode(item.pincode || "");
+    persistAddress(display, item.pincode || "");
+    setLocModalOpen(false);
+    setManualAddress("");
+    setLocSearchResults([]);
+  }, [persistAddress]);
 
   // ── Data ───────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await api.get<any>("/products");
+      // Nov 2026 — Pass the delivery pincode so the backend filters
+      // products to vendors who deliver to the customer's area.  When
+      // there's no pincode yet, the query is unfiltered (default UX).
+      const params: Record<string, any> = {};
+      if (deliveryPincode) params.pincode = deliveryPincode;
+      const r = await api.get<any>("/products", { params });
       const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
       const inStock = list.filter((p) => p && p.is_in_stock !== false);
       // UPDATE 1 — Hide the current vendor's own products from themselves.
@@ -239,7 +306,7 @@ export function ShopHome({
       // eslint-disable-next-line no-console
       console.warn("ShopHome /products failed:", formatApiError(e));
     } finally { setLoading(false); }
-  }, [currentUserId]);
+  }, [currentUserId, deliveryPincode]);
 
   // Admin-managed categories — fetched in parallel with products.
   //
@@ -811,7 +878,7 @@ export function ShopHome({
               <TextInput
                 value={manualAddress}
                 onChangeText={setManualAddress}
-                placeholder="e.g. Andheri West, Mumbai"
+                placeholder="e.g. Srikalahasti, Andheri West, 517644…"
                 placeholderTextColor={colors.textMuted}
                 style={styles.modalInput}
                 returnKeyType="done"
@@ -827,6 +894,49 @@ export function ShopHome({
                 <Feather name="check" size={16} color={colors.primaryFg} />
               </TouchableOpacity>
             </View>
+
+            {/* Nov 2026 — Nominatim search suggestions.  Appears as the
+                user types 3+ characters into the manual box.  Tapping a
+                suggestion sets the delivery address + pincode instantly
+                so the shop can filter to that vendor coverage area. */}
+            {(manualAddress.trim().length >= 3) ? (
+              <View style={{ marginTop: 8, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
+                {locSearching ? (
+                  <View style={{ padding: 12, flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={{ fontSize: 12, color: colors.textMuted }}>Searching…</Text>
+                  </View>
+                ) : locSearchResults.length === 0 ? (
+                  <Text style={{ padding: 12, fontSize: 12, color: colors.textMuted }}>
+                    No matches. Tap ✓ to save as-is.
+                  </Text>
+                ) : (
+                  locSearchResults.map((it, i) => (
+                    <TouchableOpacity
+                      key={`${it.lat}-${it.lng}-${i}`}
+                      onPress={() => onPickSearchResult(it)}
+                      style={{
+                        flexDirection: "row", alignItems: "center", gap: 10,
+                        paddingHorizontal: 12, paddingVertical: 10,
+                        borderTopWidth: i === 0 ? 0 : 1, borderTopColor: colors.border,
+                      }}
+                      testID={`home-loc-suggestion-${i}`}
+                    >
+                      <Feather name="map-pin" size={14} color={colors.primary} />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }} numberOfLines={1}>
+                          {[it.area || it.city, it.state].filter(Boolean).join(", ") || it.display_name}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }} numberOfLines={1}>
+                          {it.pincode ? `Pincode ${it.pincode} · ` : ""}{it.display_name}
+                        </Text>
+                      </View>
+                      <Feather name="chevron-right" size={14} color={colors.textMuted} />
+                    </TouchableOpacity>
+                  ))
+                )}
+              </View>
+            ) : null}
 
             <TouchableOpacity
               onPress={() => setLocModalOpen(false)}

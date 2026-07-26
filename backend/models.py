@@ -529,8 +529,43 @@ class VendorApplyRequest(BaseModel):
     bank_account: Optional[str] = ""
     bank_ifsc: Optional[str] = ""
     description: Optional[str] = ""
+    # Nov 2026 — Delivery / location capture (all optional so legacy clients still work).
+    location: Optional[Dict[str, Any]] = None  # GeoJSON Point {type, coordinates:[lng,lat]}
+    pincode: Optional[str] = None
+    state: Optional[str] = None
+    district: Optional[str] = None
+    city: Optional[str] = None
+    store_address: Optional[str] = None
+    delivery_radius_km: Optional[float] = None
+    delivery_radius_mode: Optional[str] = None  # "pincode" | "radius"
+    delivery_available: Optional[bool] = None
     # Sept 2026 — Consent audit block (nullable so legacy clients still work).
     accepted_terms: Optional[AcceptedTermsBlock] = None
+
+
+class VendorEditRequestPayload(BaseModel):
+    """Nov 2026 — Vendor requests an edit to their own profile.  Every
+    field is optional — vendor submits ONLY what they want changed. The
+    request lands in `vendor_edit_requests` for admin review."""
+    shop_name: Optional[str] = None
+    gst_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account: Optional[str] = None
+    bank_ifsc: Optional[str] = None
+    description: Optional[str] = None
+    phone: Optional[str] = None
+    location: Optional[Dict[str, Any]] = None
+    pincode: Optional[str] = None
+    state: Optional[str] = None
+    district: Optional[str] = None
+    city: Optional[str] = None
+    store_address: Optional[str] = None
+    delivery_radius_km: Optional[float] = None
+    delivery_radius_mode: Optional[str] = None
+    delivery_available: Optional[bool] = None
+    # Vendor-facing note explaining WHY the change is requested (helps admin).
+    note: Optional[str] = None
 
 
 class VendorRejectRequest(BaseModel):

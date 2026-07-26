@@ -88,6 +88,7 @@ def _build_category_filter(names: List[str]) -> Dict[str, Any]:
 async def list_products(
     category: Optional[str] = Query(None, description="Filter by category name/id — cascades to all descendants when it matches a category tree node"),
     subcategory: Optional[str] = Query(None, description="Filter by subcategory name — ignored when `category` is a leaf"),
+    pincode: Optional[str] = Query(None, description="Nov 2026 — filter products to vendors whose store_pincode matches (delivery zone)"),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
     sort: str = Query("newest", description="newest | popular | price_asc | price_desc"),
@@ -99,6 +100,9 @@ async def list_products(
         cascade — tapping "Electronics" returns Electronics + Mobiles +
         Laptops + Chargers products in one call.
       • `?subcategory=` narrows further to just that leaf.
+      • `?pincode=` filters to vendors whose `store_pincode` equals the
+        customer's delivery pincode (pincode-based match).  Empty /
+        missing pincode → show all (default behaviour).
       • `?limit` + `?offset` paginate.  Also returns a `total` count.
       • `?sort=` supports newest / popular / price_asc / price_desc.
     """
@@ -115,6 +119,18 @@ async def list_products(
         sub_filter = _build_category_filter(sub_names)
         if sub_filter:
             q = {"$and": [q, sub_filter]} if "$and" not in q else {"$and": q["$and"] + [sub_filter]}
+
+    # Nov 2026 — Pincode delivery filter.  Only products whose vendor
+    # stamped `store_pincode` matches the customer are shown.  Products
+    # created BEFORE this migration have no `store_pincode` — we treat
+    # them as globally deliverable (i.e. don't exclude them).
+    if pincode:
+        pin_filter = {"$or": [
+            {"store_pincode": pincode},
+            {"store_pincode": None},
+            {"store_pincode": {"$exists": False}},
+        ]}
+        q = {"$and": [q, pin_filter]} if "$and" not in q else {"$and": q["$and"] + [pin_filter]}
 
     # Sort mapping
     sort_spec: List[tuple] = [("created_at", -1)]
@@ -140,7 +156,7 @@ async def list_products(
     # or category param is used AND no explicit envelope is needed. When
     # any query parameter is present, return a rich envelope with
     # `items` / `total` / `offset` / `limit`.
-    if category or subcategory or offset > 0 or limit != 60 or sort != "newest":
+    if category or subcategory or pincode or offset > 0 or limit != 60 or sort != "newest":
         return {
             "items": shaped,
             "total": total,

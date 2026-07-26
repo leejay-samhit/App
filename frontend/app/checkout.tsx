@@ -169,7 +169,21 @@ export default function CheckoutScreen() {
           : `₹${total.toFixed(0)} debited from your wallet.`,
         [{ text: "View orders", onPress: () => router.replace("/orders" as any) }],
       );
-    } catch (e) { Alert.alert("Checkout failed", formatApiError(e)); }
+    } catch (e: any) {
+      // Nov 2026 — Out-of-delivery-zone handling.  Server returns detail={
+      //   code: "out_of_delivery_zone", message: "...", conflicts: [...] }
+      const detail = e?.response?.data?.detail;
+      if (detail && typeof detail === "object" && detail.code === "out_of_delivery_zone") {
+        const list = Array.isArray(detail.conflicts) ? detail.conflicts.join("\n\n") : "";
+        Alert.alert(
+          "Out of delivery zone",
+          `${detail.message}\n\n${list}\n\nPlease remove these items or change your shipping pincode.`,
+          [{ text: "OK" }],
+        );
+      } else {
+        Alert.alert("Checkout failed", formatApiError(e));
+      }
+    }
     finally { setPlacing(false); }
   };
 
