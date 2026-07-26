@@ -5,45 +5,32 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
-import json
 import logging
 import asyncio
 import re
 import secrets
-import string
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 
-import bcrypt
 import httpx
 import jwt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query, Body
-from fastapi.responses import Response, HTMLResponse, StreamingResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import Response
+from fastapi.security import HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
-from invoices import (
-    invoice_html as _build_invoice_html,
-    invoice_pdf as _build_invoice_pdf,
-    invoice_number_for as _invoice_number_for,
-    is_invoiceable as _is_invoiceable,
-)
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from models import (
     RegisterRequest,
     LoginRequest,
     BankUpdate,
-    WithdrawalRequest,
     ProductCreate,
     ProductUpdate,
-    BrandingPayload,
     GoogleExchange,
     CreateOrderResponse,
     VerifyPaymentRequest,
     PaymentFailureRequest,
-    WalletTransfer,
     WithdrawalCompleteRequest,
     WithdrawalRejectRequest,
     WithdrawalBatchRequest,
@@ -57,8 +44,6 @@ from models import (
     WipeUsersRequest,
     WipeAllRequest,
     SettingsUpdate,
-    CartItem,
-    CartRemove,
     KYCSubmit,
     KYCReject,
     ApprovalReject,
@@ -77,21 +62,12 @@ from models import (
     ServiceApplyRequest,
     ServiceRejectRequest,
     ServiceBookRequest,
-    ServiceCategoryCreate,
-    ServiceCategoryUpdate,
     ProviderLocationUpdate,
     DistributorAreaAssign,
     DistributorPromote,
     AdminTallyWithdrawRequest,
     RevealPhoneRequest,
     AddressUpdateRequest,
-    ProviderAvailabilityRequest,
-    UserLocationUpdate,
-    ServiceSubcategoryCreate,
-    ServiceSubcategoryUpdate,
-    CategoryReorderRequest,
-    AITextRequest,
-    AIImageRequest,
 )
 
 
@@ -99,26 +75,14 @@ from models import (
 # Phase 2A refactor: shared utilities live in /app/backend/core/.
 # server.py keeps its existing variable names by re-binding the imports below
 # so the route handlers further down DO NOT need to change.
-from core.db import client, db, MONGO_URL, DB_NAME  # noqa: E402
+from core.db import client, db  # noqa: E402
 from core.config import (  # noqa: E402
     JWT_SECRET,
     JWT_ALGORITHM,
     ADMIN_EMAIL,
     ADMIN_PASSWORD,
-    REGISTRATION_FEE,
-    PAYOUT_PER_LEVEL,
-    LEVEL_2_PAYOUT,
-    LEVEL_3_PAYOUT,
-    DIRECTS_REQUIRED,
-    DEFAULT_LEVEL_PAYOUTS,
-    DEFAULT_SETTINGS,
     REFERRAL_GST_PCT,
-    TIERS,
     get_tier,
-    ADMIN_ROLES_NON_FINANCE,
-    DEFAULT_BRANDING,
-    ALLOWED_FONTS,
-    ALLOWED_TAB_KEYS,
 )
 from core.security import (  # noqa: E402
     security,
@@ -135,7 +99,6 @@ from core.security import (  # noqa: E402
     require_admin,
     require_admin_role,
     require_admin_not_finance,
-    require_clean_device,
 )
 from core.utils import (  # noqa: E402
     now_utc,
@@ -146,7 +109,6 @@ from core.utils import (  # noqa: E402
     security_event as _security_event,
 )
 from core.danger import (  # noqa: E402
-    SUPER_PWD_SYMBOLS,
     SUPER_PWD_FORMAT_DESC,
     validate_super_password_format,
     get_super_password_hash,
@@ -156,12 +118,9 @@ from core.danger import (  # noqa: E402
     get_danger_pin_hash,
     verify_danger_pin,
 )
-# Phase 2B: shared notification + branding helpers + routers
+# Phase 2B: shared notification helper (also re-exported for legacy
+# `from server import _create_notification` call-sites in routes/*.py).
 from core.notifications import create_notification as _create_notification  # noqa: E402,F401
-from core.branding import (  # noqa: E402
-    get_branding_doc as _get_branding_doc,
-    merge_branding as _merge_branding,
-)
 from routes import branding as branding_router  # noqa: E402
 from routes import notifications as notifications_router  # noqa: E402
 from routes import products_public as products_public_router  # noqa: E402
@@ -1740,7 +1699,7 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
                 pass
         await _create_notification(
             user["id"], "approval", "Account approved automatically",
-            (f"Welcome aboard! Your payment was verified" + (f" (UTR {utr})" if utr else "") +
+            ("Welcome aboard! Your payment was verified" + (f" (UTR {utr})" if utr else "") +
              ". You're now approved and can start earning."),
         )
     else:
@@ -2029,76 +1988,8 @@ async def remove_profile_image(user: Dict[str, Any] = Depends(get_current_user))
 
 
 # ------------------ Withdrawals ------------------
-# 5 withdrawal requests per hour per user — generous for legitimate users
-# but tight enough to deter wallet-drain abuse scripts.
-@api_router.post("/withdrawals")
-@_rl.limit("5/hour")
-async def request_withdrawal(request: Request, payload: WithdrawalRequest, user: Dict[str, Any] = Depends(require_clean_device)):
-    # Minimum withdrawal floor (2026-06-01): ₹100. Anything below is rejected
-    # at the API layer with a friendly message that includes the floor.
-    MIN_WITHDRAWAL_AMOUNT = 100.0
-    if float(payload.amount) < MIN_WITHDRAWAL_AMOUNT:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Minimum withdrawal amount is ₹{int(MIN_WITHDRAWAL_AMOUNT)}. Please enter an amount of ₹{int(MIN_WITHDRAWAL_AMOUNT)} or more.",
-        )
-    if not user.get("registration_paid"):
-        raise HTTPException(status_code=400, detail="Complete registration payment first")
-    if user.get("approval_status", "approved") != "approved":
-        raise HTTPException(status_code=403, detail="Account is awaiting admin approval. Withdrawals are disabled until approved.")
-    if user.get("wallet_frozen"):
-        raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
-    # ── L1 completion gate (2026-05-31) ─────────────────────────────────
-    # Users who only have spillover / auto-aligned downline (i.e. NO real
-    # direct referrals using their own code) CANNOT withdraw. They must
-    # bring in `directs_required` true directs first to unlock L1, which
-    # also unlocks withdrawals. Cascade L2-L10 earnings still accumulate
-    # in their wallet — they just can't cash out until L1 is completed.
-    settings = await get_settings()
-    dr_required = int(settings.get("directs_required") or 5)
-    # Skip the gate for admin / system accounts.
-    if user.get("email", "").lower() != ADMIN_EMAIL.lower() and user.get("role") != "admin":
-        true_directs = int(user.get("true_direct_count") or 0)
-        if true_directs < dr_required:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Unable to withdraw due to direct {dr_required} referral "
-                    f"not joined. Please complete Level 1 then raise withdrawal "
-                    f"request. (You have {true_directs}/{dr_required} direct "
-                    f"referrals — bring in {dr_required - true_directs} more "
-                    f"using your own referral code.)"
-                ),
-            )
-    if user.get("wallet_balance", 0) < payload.amount:
-        raise HTTPException(status_code=400, detail="Insufficient balance")
-    if not (user.get("upi_id") or user.get("bank_account")):
-        raise HTTPException(status_code=400, detail="Add UPI or bank details first")
-
-    wid = str(uuid.uuid4())
-    doc = {
-        "id": wid,
-        "user_id": user["id"],
-        "user_name": user["name"],
-        "user_email": user["email"],
-        "amount": payload.amount,
-        "status": "pending",
-        "upi_id": user.get("upi_id"),
-        "bank_account": user.get("bank_account"),
-        "ifsc": user.get("ifsc"),
-        "account_holder": user.get("account_holder"),
-        "created_at": now_utc().isoformat(),
-        "processed_at": None,
-    }
-    await db.withdrawals.insert_one(doc)
-    # Lock the requested amount from wallet
-    await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -payload.amount}})
-    await _create_notification(user["id"], "withdrawal", "Withdrawal requested", f"₹{int(payload.amount)} withdrawal is pending admin approval.")
-    doc.pop("_id", None)
-    return doc
-
-
-# /withdrawals/me — moved to routes/withdrawals.py (Phase 2B Iter 4)
+# POST /withdrawals — moved to routes/withdrawals.py (2026-06-04, commission
+# engine extraction wave). GET /withdrawals/me was already in the router file.
 
 
 # /transactions/me — moved to routes/wallet.py (Phase 2B Iter 4)
@@ -2110,77 +2001,9 @@ async def request_withdrawal(request: Request, payload: WithdrawalRequest, user:
 
 
 # ------------------ Wallet-to-wallet transfer ------------------
-
-
-@api_router.post("/wallet/transfer")
-async def wallet_transfer(payload: WalletTransfer, user: Dict[str, Any] = Depends(get_current_user)):
-    """Transfer funds from this user's wallet to another user's wallet."""
-    if user.get("wallet_frozen"):
-        raise HTTPException(status_code=403, detail="Your wallet is frozen. Contact support.")
-    if user.get("approval_status", "approved") != "approved":
-        raise HTTPException(status_code=403, detail="Account is awaiting admin approval.")
-    if (user.get("wallet_balance") or 0) < payload.amount:
-        raise HTTPException(status_code=400, detail="Insufficient balance")
-    rec_query = payload.recipient.strip()
-    if "@" in rec_query:
-        recipient = await db.users.find_one({"email": rec_query.lower()})
-    else:
-        recipient = await db.users.find_one({"referral_code": rec_query.upper()})
-    if not recipient:
-        raise HTTPException(status_code=404, detail="Recipient not found")
-    if recipient["id"] == user["id"]:
-        raise HTTPException(status_code=400, detail="Cannot transfer to yourself")
-    if recipient.get("is_blocked"):
-        raise HTTPException(status_code=400, detail="Recipient account is blocked")
-    if recipient.get("approval_status", "approved") != "approved":
-        raise HTTPException(status_code=400, detail="Recipient is not approved yet")
-
-    # Atomic-ish transfer (Mongo without transactions on standalone — best effort).
-    # Atomic balance check on debit; only proceed if the user has sufficient funds at this exact moment.
-    debit_res = await db.users.update_one(
-        {"id": user["id"], "wallet_balance": {"$gte": payload.amount}},
-        {"$inc": {"wallet_balance": -payload.amount}},
-    )
-    if debit_res.modified_count == 0:
-        raise HTTPException(status_code=400, detail="Insufficient balance")
-    await db.users.update_one({"id": recipient["id"]}, {"$inc": {"wallet_balance": payload.amount}})
-
-    ts = now_utc().isoformat()
-    transfer_id = str(uuid.uuid4())
-    try:
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": user["id"],
-            "type": "transfer_out",
-            "amount": -payload.amount,
-            "status": "success",
-            "description": f"Transferred ₹{int(payload.amount)} to {recipient.get('name')} ({recipient.get('email')})" + (f" — {payload.note}" if payload.note else ""),
-            "transfer_id": transfer_id,
-            "counterparty_id": recipient["id"],
-            "created_at": ts,
-        })
-    except DuplicateKeyError:
-        pass
-    try:
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": recipient["id"],
-            "type": "transfer_in",
-            "amount": payload.amount,
-            "status": "success",
-            "description": f"Received ₹{int(payload.amount)} from {user.get('name')} ({user.get('email')})" + (f" — {payload.note}" if payload.note else ""),
-            "transfer_id": transfer_id,
-            "counterparty_id": user["id"],
-            "created_at": ts,
-        })
-    except DuplicateKeyError:
-        pass
-    await _create_notification(
-        recipient["id"], "transfer",
-        f"₹{int(payload.amount)} received",
-        f"{user.get('name')} sent you ₹{int(payload.amount)}" + (f" — {payload.note}" if payload.note else ""),
-    )
-    return {"ok": True, "transfer_id": transfer_id, "amount": payload.amount}
+# POST /wallet/transfer — moved to routes/wallet.py (2026-06-04, commission
+# engine extraction wave). The endpoint never touched _trigger_referral_commissions
+# so the migration was zero-risk.
 
 
 # ------------------ Products (E-commerce placeholder) ------------------
@@ -6519,7 +6342,9 @@ async def _compute_money_flow_snapshot() -> Dict[str, Any]:
                      stays inside wallets and is therefore part of HELD)
     """
     settings = await get_settings()
-    fee = float(settings.get("registration_fee") or 0)  # noqa: F841 (kept for response context)
+    _ = settings  # get_settings() is called for its DB-init side effect; the
+    #             registration_fee value is derived downstream from actual
+    #             transaction rows (not user count × fee) — see _sum() below.
 
     async def _sum(query):
         agg = await db.transactions.aggregate([

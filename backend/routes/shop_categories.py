@@ -43,7 +43,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.db import db
-from core.security import require_admin, get_current_user
+from core.security import require_admin
 from core.utils import audit_log
 
 router = APIRouter(tags=["shop-categories"])

@@ -14,8 +14,6 @@ Key strategy:
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import Request
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded

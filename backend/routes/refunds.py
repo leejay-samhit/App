@@ -40,7 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from core.db import db
-from core.security import require_admin, require_admin_role
+from core.security import require_admin
 from core.utils import now_utc
 
 router = APIRouter()

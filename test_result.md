@@ -8707,3 +8707,172 @@ agent_communication:
       (with Nominatim search), checkout out-of-zone alert, and vendor
       read-only profile + Request Edit form. Awaiting visual verification.
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# ITERATION 50 — Nov 2026: Production Hardening (Pincode Layout + GST + Indexes)
+# ═══════════════════════════════════════════════════════════════════════
+backend:
+  - task: "Pincode-scoped Shop Layout"
+    implemented: true
+    working: true
+    file: "backend/routes/shop_layout.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "New scope_pincode field on shop_layout_blocks. GET /shop-layout accepts ?pincode= to return matching-pincode + global blocks."
+      - working: true
+        agent: "testing"
+        comment: "6/6 pytest passed. Admin editor UI updated with 6-digit pincode input."
+  - task: "GST bucket in Admin System Wallet"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/routes/vendor_pos.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "POS complete_sale writes system_wallet_deposits{bucket:'gst',source:'gst_pos'}. Admin /system-wallet endpoint now returns gst_bucket{total,invoice_count}."
+      - working: true
+        agent: "testing"
+        comment: "2/2 pytest passed — ₹18 GST on ₹100 sale correctly credited to gst_bucket."
+  - task: "Delivery-radius mode (union model)"
+    implemented: true
+    working: true
+    file: "backend/routes/products_public.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "New modes: both, radius, pincode, none. Product filter respects mode when matching store_pincode."
+      - working: true
+        agent: "testing"
+        comment: "7/7 pytest passed — union semantics correct across all modes."
+  - task: "MongoDB hot-path indexes"
+    implemented: true
+    working: true
+    file: "backend/server.py (startup indexes block)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Added 8 named indexes: ix_prod_store_pin, ix_prod_del_pins, ix_prod_vendor, ix_ver_user_status, ix_ver_status_created, ix_sl_scope_active, ix_sl_scope_pin, ix_swd_bucket."
+      - working: true
+        agent: "testing"
+        comment: "4/4 pytest passed — all 8 indexes present after startup."
+
+frontend:
+  - task: "Admin Shop Layout — scope_pincode input"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/admin/shop-layout.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added 'Show only in pincode' 6-digit input on the create/edit block modal. Empty = global."
+  - task: "Shop layout renderer forwards pincode"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/shop-layout-renderer.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "GET /shop-layout call now includes ?pincode= when customer's delivery pincode is known so pincode-scoped campaigns kick in."
+
+test_plan:
+  current_focus:
+    - "Admin scope_pincode UI"
+    - "Renderer pincode forwarding"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Iteration 50 (production hardening): 20/20 pytest passed. Pincode-scoped
+      shop layout live end-to-end; GST bucket flows into System Wallet; 8 new
+      hot-path indexes; strict pincode filter honours vendor mode. Awaiting
+      user visual verification.
+
+
+
+backend:
+  - task: "Extract POST /wallet/transfer to routes/wallet.py"
+    implemented: true
+    working: "NA"
+    file: "routes/wallet.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Migrated the wallet-to-wallet transfer endpoint out of the 9k-line server.py monolith into the dedicated wallet router. Behaviour and status codes are unchanged."
+
+  - task: "Extract POST /withdrawals to routes/withdrawals.py"
+    implemented: true
+    working: "NA"
+    file: "routes/withdrawals.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Migrated the user-facing withdrawal-request endpoint (rate-limited 5/hr, L1 gate, ₹100 floor) out of server.py. GET /withdrawals/me was already in this file."
+
+frontend:
+  - task: "Shop tab dead-code removal"
+    implemented: true
+    working: "NA"
+    file: "app/(tabs)/shop.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "app/(tabs)/shop.tsx was 1455 lines but contained ~700 lines of unreachable shop-grid JSX (short-circuited at line 356 to render <ShopHome/>). Rewrote to 792 lines, keeping only the ShopHome delegation for shop mode + the full services-mode implementation. Manual screenshot confirms /shop still renders departments, product grid, and delivery banner."
+
+agent_communication:
+  - agent: "main"
+    message: |
+      P1 Production Audit — Chunks Ⓐ (code cleanup), Ⓑ (server.py modularization),
+      Ⓒ/Ⓓ (perf/bundle: shop screens already memoized, no low-hanging fruit).
+
+      Backend changes:
+        • server.py: 9337 → 9161 lines. All unused imports removed (34 pyflakes
+          warnings → 0). Only google.auth remains, and that's intentional (feature
+          detection in play_integrity.py).
+        • POST /wallet/transfer  → routes/wallet.py (had a stale comment claiming
+          it depended on _trigger_referral_commissions — that was wrong).
+        • POST /withdrawals      → routes/withdrawals.py (rate-limited via
+          core.rate_limit.limiter).
+        • Batch removed unused imports across 10 route/core files.
+
+      Frontend changes:
+        • app/(tabs)/shop.tsx: 1455 → 792 lines. 663 lines of dead shop-mode JSX
+          / helpers deleted (they were unreachable behind the ShopHome short-circuit).
+
+      Please run the testing_agent against:
+        - Shop tab renders (products, categories, banner) — verified via screenshot
+        - Services tab renders + filters still work
+        - Login flow
+        - Wallet transfer flow (POST /wallet/transfer)
+        - Withdrawal request flow (POST /withdrawals)
+        - Any regression on Admin flows (system wallet, layout, categories)

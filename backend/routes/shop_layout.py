@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from core.db import db
-from core.security import require_admin, get_current_user
+from core.security import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

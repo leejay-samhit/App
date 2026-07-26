@@ -1,0 +1,42 @@
+{
+  "summary": "P1 Production Audit backend regression — 18/18 tests PASSED (100%). Verified the two write endpoints migrated during Phase 2B chunk Ⓑ (POST /api/wallet/transfer → routes/wallet.py, POST /api/withdrawals → routes/withdrawals.py) plus 8 general regression endpoints. Wallet transfer end-to-end: admin (support@networkrupay.com) → raju@gmail.com (₹1) — sender debited exactly ₹1, recipient credited exactly ₹1, two mirrored txn rows written (transfer_out + transfer_in with same transfer_id), notification created for recipient with kind='transfer'. Also validated 401 (no auth), 400 (self-transfer), 404 (unknown recipient). Withdrawals: 401 (no auth), 400 with '₹100' floor message for amount=50, L1 direct-referral gate rejects non-admin raju (0/5 directs), rate-limit 5/hour visibly returns 429 within 7 requests. Regression endpoints healthy: /api/auth/login, /api/products, /api/shop-categories, /api/shop-layout, /api/admin/system-wallet, /api/admin/system-wallet/source-breakdown, /api/geo/search, /api/vendor/edit-requests (401 unauth as expected), /api/transactions/me, /api/withdrawals/me. Test-credential mismatch flagged (see action_items).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "test-credentials",
+        "issue": "Main-agent review request mentioned Admin=support@slangcart.com / 3)Ywxtic and User=brightkittu@gmail.com / Just@4me — neither user exists in the current DB. Test was executed against actual credentials from /app/memory/test_credentials.md (support@networkrupay.com / Nlee@1115) and raju@gmail.com / Demo@2026. Please update review-request credentials or seed the referenced users if they are required."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_p1_shop_audit.py",
+    "/app/test_reports/pytest/iteration50_p1_audit.xml"
+  ],
+  "action_items": [
+    "Nothing to fix on the backend — the Phase 2B migration of POST /wallet/transfer and POST /withdrawals is behaviourally identical to the pre-refactor server.py implementation.",
+    "Update /app/memory/test_credentials.md OR the review-request credentials so the two match. Current review request lists Slangcart-branded credentials that no longer exist in Mongo.",
+    "Consider also migrating a self-transfer-note-cleanup pattern: my test made a ₹1 admin→raju transfer for validation; I also fired a best-effort reverse transfer (raju→admin) to net-zero drift, but if raju is not fully eligible the reversal silently fails. Not a bug, just noting the admin wallet may be ₹1 lower than pre-test in that edge case."
+  ],
+  "critical_code_review_comments": [
+    "routes/wallet.py:238-244 — atomic debit uses conditional $inc + $gte on wallet_balance to prevent double-spend race. Good. Two separate insert_one() calls for transfer_out/transfer_in are wrapped in try/except DuplicateKeyError (defensive), but if one insert fails and the other succeeds you'd have half-mirrored ledger. Consider one-shot insert_many with ordered=False; not blocking.",
+    "routes/withdrawals.py:33 — @_rate_limiter.limit('5/hour') keyed by IP by default via slowapi. Behind an ingress the X-Forwarded-For chain should be honoured (verify SlowAPI is reading remote_address from the correct header via key_func). Rate-limit fires correctly under the test — 429 observed at request #6.",
+    "routes/withdrawals.py:64-77 — L1 gate exempts admins by matching lowercased ADMIN_EMAIL AND user.role=='admin'. Ordering: min-floor check (line 39) runs BEFORE L1 gate; that means a non-admin user with 0 directs who requests ₹50 gets the friendly 'minimum ₹100' message, and only when they retry ≥₹100 do they see the L1 message. That's the intended UX.",
+    "server.py:141-142 — routes/wallet + routes/withdrawals correctly imported; include_router calls at lines 9093-9094 mount them under /api prefix. Both endpoints are now single-source-of-truth in their router files. Old server.py stubs at lines 1991-2004 are comment-only sentinels, no dead code."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_p1_shop_audit.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "skipped-per-request"},
+  "seed_data_creation": "Ephemeral only — one ₹1 wallet transfer from admin→raju was performed as part of the happy-path test, with a best-effort ₹1 reverse transfer at the end (may silently fail if raju is not eligible). Two transaction rows and one notification remain in the DB from the successful forward transfer (marked in description with 'TEST_p1_audit_<8hex>'). No new users/products/categories were seeded.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "P1 production audit regression suite lives at /app/backend/tests/test_iteration_p1_shop_audit.py (18 tests, 100% pass). Uses conftest-less BASE_URL from EXPO_PUBLIC_BACKEND_URL, direct Mongo access via MONGO_URL/DB_NAME for balance/txn/notification verification. Two important gotchas for future runs: (1) NOTIFICATIONS SCHEMA — the field is `kind` (not `type`). Any test filtering by type will miss all rows. (2) SHOP-CATEGORIES + SHOP-LAYOUT now return a wrapper dict `{items: [...]}` (with extra pincode/category/scope keys on shop-layout) instead of a raw list — clients expecting a bare list should be checked. (3) WITHDRAWAL RATE LIMIT is 5/hour per IP; consecutive suite runs within the same hour will see 429s early. To bypass for debugging, restart backend to reset in-memory slowapi state, or bump the limit temporarily.",
+  "rca_of_issue": "N/A — refactor is behaviourally identical to pre-migration code. All financial invariants (debit-then-credit atomicity, mirrored ledger rows sharing transfer_id, recipient notification, L1 direct-referral gate for withdrawals, ₹100 minimum floor, 5/hour rate limit) preserved."
+}

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.db import db
-from core.security import get_current_user, require_admin_role, require_admin  # noqa: F401
+from core.security import require_admin  # noqa: F401
 from core.utils import now_utc
 
 

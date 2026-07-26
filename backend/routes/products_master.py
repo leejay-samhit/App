@@ -206,7 +206,7 @@ async def _cache_get(query_norm: str) -> List[Dict[str, Any]] | None:
     if not doc:
         return None
     try:
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime
         at = doc.get("at")
         if isinstance(at, str):
             at = datetime.fromisoformat(at.replace("Z", "+00:00"))

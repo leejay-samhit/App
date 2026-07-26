@@ -14,7 +14,7 @@ both here so we don't get banned.
 from __future__ import annotations
 import time
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query

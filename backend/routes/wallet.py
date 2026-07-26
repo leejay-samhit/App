@@ -1,29 +1,30 @@
-"""User wallet endpoints — transaction history + transaction detail + GST invoices.
+"""User wallet endpoints — transaction history, GST invoices, and the
+peer-to-peer /wallet/transfer write endpoint.
 
 Carved out of server.py during the Phase 2B modular refactor (2026-05-27).
-Behaviour is identical to the previous in-server.py definitions; only the
-file location changed. See server.py git history for the full evolution.
+The write endpoint POST /wallet/transfer was migrated here on 2026-06-04
+(commission engine extraction wave) — it does not touch the referral engine
+so the migration was safe.
 
-WHY THESE ENDPOINTS ARE TOGETHER
---------------------------------
-They share the same "read a user's financial history" surface area:
-  • /transactions/me               — paginated list
-  • /transactions/{id}              — single row with counter-party enrichment
-  • /transactions/{id}/invoice      — GST invoice HTML
-  • /transactions/{id}/invoice.pdf  — GST invoice PDF
-
-The WRITE endpoint /wallet/transfer is deliberately NOT moved here — it
-touches _trigger_referral_commissions which still lives in server.py
-(see TODO at the top of server.py — commission engine extraction is the
-next refactor wave).
+Endpoints:
+  • GET  /transactions/me           — paginated list
+  • GET  /transactions/{id}          — single row with counter-party enrichment
+  • GET  /transactions/{id}/invoice  — GST invoice HTML
+  • GET  /transactions/{id}/invoice.pdf — GST invoice PDF
+  • POST /wallet/transfer            — user-to-user wallet transfer
 """
+import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
+from pymongo.errors import DuplicateKeyError
 
 from core.db import db
 from core.security import get_current_user
+from core.utils import now_utc
+from core.notifications import create_notification as _create_notification
+from models import WalletTransfer
 from invoices import (
     invoice_html as _build_invoice_html,
     invoice_pdf as _build_invoice_pdf,
@@ -199,3 +200,92 @@ async def transaction_invoice_pdf(txn_id: str, user: Dict[str, Any] = Depends(ge
             "Cache-Control": "no-store",
         },
     )
+
+
+
+# ────────────────── /wallet/transfer ──────────────────
+@router.post("/wallet/transfer")
+async def wallet_transfer(payload: WalletTransfer, user: Dict[str, Any] = Depends(get_current_user)):
+    """Transfer funds from this user's wallet to another user's wallet.
+
+    Migrated from server.py on 2026-06-04. Behaviour unchanged — atomic-ish
+    debit + credit + two mirrored transaction rows + notification to the
+    recipient.
+    """
+    if user.get("wallet_frozen"):
+        raise HTTPException(status_code=403, detail="Your wallet is frozen. Contact support.")
+    if user.get("approval_status", "approved") != "approved":
+        raise HTTPException(status_code=403, detail="Account is awaiting admin approval.")
+    if (user.get("wallet_balance") or 0) < payload.amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+
+    rec_query = payload.recipient.strip()
+    if "@" in rec_query:
+        recipient = await db.users.find_one({"email": rec_query.lower()})
+    else:
+        recipient = await db.users.find_one({"referral_code": rec_query.upper()})
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    if recipient["id"] == user["id"]:
+        raise HTTPException(status_code=400, detail="Cannot transfer to yourself")
+    if recipient.get("is_blocked"):
+        raise HTTPException(status_code=400, detail="Recipient account is blocked")
+    if recipient.get("approval_status", "approved") != "approved":
+        raise HTTPException(status_code=400, detail="Recipient is not approved yet")
+
+    # Atomic debit — only proceed if the user has sufficient funds at this
+    # exact moment (Mongo stand-alone has no multi-doc transactions).
+    debit_res = await db.users.update_one(
+        {"id": user["id"], "wallet_balance": {"$gte": payload.amount}},
+        {"$inc": {"wallet_balance": -payload.amount}},
+    )
+    if debit_res.modified_count == 0:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+    await db.users.update_one({"id": recipient["id"]}, {"$inc": {"wallet_balance": payload.amount}})
+
+    ts = now_utc().isoformat()
+    transfer_id = str(uuid.uuid4())
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "type": "transfer_out",
+            "amount": -payload.amount,
+            "status": "success",
+            "description": (
+                f"Transferred ₹{int(payload.amount)} to {recipient.get('name')} "
+                f"({recipient.get('email')})"
+                + (f" — {payload.note}" if payload.note else "")
+            ),
+            "transfer_id": transfer_id,
+            "counterparty_id": recipient["id"],
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": recipient["id"],
+            "type": "transfer_in",
+            "amount": payload.amount,
+            "status": "success",
+            "description": (
+                f"Received ₹{int(payload.amount)} from {user.get('name')} "
+                f"({user.get('email')})"
+                + (f" — {payload.note}" if payload.note else "")
+            ),
+            "transfer_id": transfer_id,
+            "counterparty_id": user["id"],
+            "created_at": ts,
+        })
+    except DuplicateKeyError:
+        pass
+
+    await _create_notification(
+        recipient["id"], "transfer",
+        f"₹{int(payload.amount)} received",
+        f"{user.get('name')} sent you ₹{int(payload.amount)}"
+        + (f" — {payload.note}" if payload.note else ""),
+    )
+    return {"ok": True, "transfer_id": transfer_id, "amount": payload.amount}

@@ -14,7 +14,7 @@ Endpoints (mounted at /api by server.py):
 from __future__ import annotations
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
