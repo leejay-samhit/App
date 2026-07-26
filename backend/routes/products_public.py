@@ -120,15 +120,16 @@ async def list_products(
         if sub_filter:
             q = {"$and": [q, sub_filter]} if "$and" not in q else {"$and": q["$and"] + [sub_filter]}
 
-    # Nov 2026 — Pincode delivery filter.  Only products whose vendor
-    # stamped `store_pincode` matches the customer are shown.  Products
-    # created BEFORE this migration have no `store_pincode` — we treat
-    # them as globally deliverable (i.e. don't exclude them).
+    # Nov 2026 — Pincode delivery filter.  A product is deliverable
+    # when the customer's pincode is EITHER the vendor's store pincode
+    # OR listed in the vendor's explicit `delivery_pincodes` array.
+    # The legacy fallback ("show products with no pincode set") has
+    # been dropped per user directive — filtering must be strict so
+    # customers only see vendors who actually service their area.
     if pincode:
         pin_filter = {"$or": [
             {"store_pincode": pincode},
-            {"store_pincode": None},
-            {"store_pincode": {"$exists": False}},
+            {"delivery_pincodes": pincode},
         ]}
         q = {"$and": [q, pin_filter]} if "$and" not in q else {"$and": q["$and"] + [pin_filter]}
 

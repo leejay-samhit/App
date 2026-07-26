@@ -58,21 +58,49 @@ export default function CheckoutScreen() {
       const { latitude, longitude } = pos.coords;
       setGpsLat(latitude);
       setGpsLng(longitude);
+      // Nov 2026 — Prefer our own /geo/reverse (Nominatim) — it returns
+      // pincode reliably, whereas device-side reverseGeocodeAsync often
+      // omits `postalCode` on Android.  Always OVERWRITE the address
+      // fields so the "Use current" tap feels definitive (per user
+      // directive — one tap should apply and persist).
+      let filled = false;
       try {
-        const rev = await Location.reverseGeocodeAsync({ latitude, longitude });
-        if (rev && rev.length > 0) {
-          const r0 = rev[0];
-          if (r0.postalCode && !pincode) setPincode(r0.postalCode);
-          if (r0.region && !stateName) setStateName(r0.region);
-          if (r0.city && !city) setCity(r0.city);
-          setGpsDistrict((r0.subregion || r0.district || ""));
-          // If line1 is empty, auto-fill a short address hint.
-          if (!line1) {
+        const r = await api.get<any>("/geo/reverse", { params: { lat: latitude, lng: longitude } });
+        const d = r.data || {};
+        if (d.pincode) { setPincode(d.pincode); filled = true; }
+        if (d.state) { setStateName(d.state); filled = true; }
+        if (d.city || d.area) { setCity(d.city || d.area); filled = true; }
+        if (d.district) setGpsDistrict(d.district);
+        const line = [d.area, d.city].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(", ");
+        if (line) setLine1(line);
+      } catch { /* fall through to device reverse-geocode */ }
+      if (!filled) {
+        try {
+          const rev = await Location.reverseGeocodeAsync({ latitude, longitude });
+          if (rev && rev.length > 0) {
+            const r0 = rev[0];
+            if (r0.postalCode) setPincode(r0.postalCode);
+            if (r0.region) setStateName(r0.region);
+            if (r0.city) setCity(r0.city);
+            setGpsDistrict((r0.subregion || r0.district || ""));
             const parts = [r0.name, r0.street].filter(Boolean);
             if (parts.length > 0) setLine1(parts.join(", "));
           }
-        }
-      } catch { /* reverse geocode best-effort */ }
+        } catch { /* reverse geocode best-effort */ }
+      }
+      // Persist the freshly-captured address so the next visit hydrates
+      // it automatically without another GPS prompt.
+      try {
+        const snapshot = {
+          name: user?.name || "",
+          phone: user?.phone || "",
+          line1: line1 || "",
+          line2, city, state: stateName, pincode,
+          latitude, longitude,
+        };
+        // Delay persist by a tick so useState updates settle.
+        setTimeout(() => AsyncStorage.setItem(ADDRESS_KEY, JSON.stringify(snapshot)).catch(() => {}), 200);
+      } catch { /* ignore */ }
     } catch (e: any) {
       Alert.alert("Couldn't capture location", e?.message || "Try again in a moment.");
     } finally { setGpsBusy(false); }
@@ -263,23 +291,52 @@ export default function CheckoutScreen() {
           </View>
 
           {/* Shipping address */}
-          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-            <Text style={styles.sectionLabel}>SHIPPING ADDRESS</Text>
-            <TouchableOpacity onPress={captureAddressGps} disabled={gpsBusy} style={styles.gpsBtn} testID="checkout-gps">
+          <Text style={styles.sectionLabel}>SHIPPING ADDRESS</Text>
+
+          {/* Nov 2026 — Big prominent "Use current location" CTA.
+              Previously buried as a small chip in the section header.
+              One tap auto-fills every shipping field (line1, city,
+              state, pincode) from the device GPS + Nominatim, and
+              persists the snapshot to AsyncStorage so the next visit
+              hydrates it automatically without another GPS prompt.
+              User can still edit any field manually afterwards. */}
+          <TouchableOpacity
+            onPress={captureAddressGps}
+            disabled={gpsBusy}
+            activeOpacity={0.85}
+            style={[styles.gpsCard, (gpsLat !== null && gpsLng !== null) && styles.gpsCardActive]}
+            testID="checkout-gps"
+          >
+            <View style={[styles.gpsIconRing, (gpsLat !== null && gpsLng !== null) && { backgroundColor: colors.brand100 }]}>
               {gpsBusy
-                ? <ActivityIndicator color={colors.primary} size="small" />
-                : <><Feather name="crosshair" size={12} color={colors.primary} /><Text style={styles.gpsBtnText}>Use current</Text></>}
-            </TouchableOpacity>
-          </View>
+                ? <ActivityIndicator color={colors.primary} />
+                : <Feather name="crosshair" size={22} color={colors.primary} />}
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.gpsCardTitle}>
+                {gpsLat !== null && gpsLng !== null ? "Using current location" : "Use my current location"}
+              </Text>
+              <Text style={styles.gpsCardSub} numberOfLines={2}>
+                {gpsLat !== null && gpsLng !== null
+                  ? `${gpsDistrict ? gpsDistrict + " · " : ""}Auto-filled below.  Tap to refresh.`
+                  : "One tap to auto-fill your delivery address."}
+              </Text>
+            </View>
+            <Feather
+              name={gpsLat !== null && gpsLng !== null ? "refresh-cw" : "chevron-right"}
+              size={18}
+              color={colors.primary}
+            />
+          </TouchableOpacity>
           {gpsLat !== null && gpsLng !== null ? (
             <View style={styles.gpsCoordChip} testID="checkout-gps-chip">
               <Feather name="check" size={11} color={colors.success || "#16A34A"} />
               <Text style={styles.gpsCoordText}>
                 GPS · {gpsLat.toFixed(5)}, {gpsLng.toFixed(5)}
-                {gpsDistrict ? ` · ${gpsDistrict}` : ""}
               </Text>
             </View>
           ) : null}
+          <View style={{ height: 8 }} />
           <Text style={styles.sublabel}>Full name *</Text>
           <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="John Doe" placeholderTextColor={colors.textMuted} testID="addr-name" />
           <Text style={styles.sublabel}>Phone number *</Text>
@@ -381,6 +438,22 @@ const styles = StyleSheet.create({
   lineTotal: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
   // Sept 2026 — GPS capture chip on the checkout address form.
   gpsBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.surface, minHeight: 30 },
+  // Nov 2026 — Prominent GPS CTA card
+  gpsCard: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    padding: 14, marginTop: 4,
+    borderRadius: 16, borderWidth: 1, borderColor: colors.primary,
+    backgroundColor: colors.brand100,
+  },
+  gpsCardActive: { backgroundColor: colors.surface, borderColor: colors.primary },
+  gpsIconRing: {
+    width: 46, height: 46, borderRadius: 23,
+    backgroundColor: "#fff",
+    alignItems: "center", justifyContent: "center",
+    borderWidth: 2, borderColor: colors.primary,
+  },
+  gpsCardTitle: { fontSize: 15, fontWeight: "800", color: colors.textMain },
+  gpsCardSub: { fontSize: 12, color: colors.textMuted, marginTop: 3, lineHeight: 16 },
   gpsBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
   gpsCoordChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: (colors.success || "#16A34A") + "1A", paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6, alignSelf: "flex-start", marginTop: 4, marginBottom: 4 },
   gpsCoordText: { fontSize: 10, color: colors.success || "#16A34A", fontWeight: "800", letterSpacing: 0.3 },

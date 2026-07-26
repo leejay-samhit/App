@@ -564,6 +564,9 @@ class VendorEditRequestPayload(BaseModel):
     delivery_radius_km: Optional[float] = None
     delivery_radius_mode: Optional[str] = None
     delivery_available: Optional[bool] = None
+    # Nov 2026 — Extra pincodes the vendor explicitly delivers to.  This
+    # lives ALONGSIDE the km-radius (union — any match ⇒ deliverable).
+    delivery_pincodes: Optional[List[str]] = None
     # Vendor-facing note explaining WHY the change is requested (helps admin).
     note: Optional[str] = None
 

@@ -812,6 +812,7 @@ export function ShopHome({
         <ShopLayoutRenderer
           scope="home"
           category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
+          pincode={deliveryPincode || undefined}
           refreshTick={refreshTick}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
           onCategoryPress={(c) => {

@@ -3605,14 +3605,15 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         raise HTTPException(status_code=400, detail="Cart is empty")
 
     # ── Nov 2026 — Delivery-zone guard.  Reject the order if ANY cart
-    # item's vendor cannot deliver to the customer's pincode.  Products
-    # created BEFORE the migration have no `store_pincode` — they are
-    # treated as globally deliverable so we don't break legacy carts.
+    # item's vendor cannot deliver to the customer's pincode.  A vendor
+    # can deliver when the customer's pincode is EITHER the store pincode
+    # OR listed in the vendor's explicit `delivery_pincodes` array.
+    # (Strict — no legacy fallback per user directive Nov 2026.)
     zone_conflicts: List[str] = []
     for it in items:
         prod = await db.products.find_one(
             {"id": it["product_id"]},
-            {"_id": 0, "name": 1, "store_pincode": 1, "delivery_available": 1},
+            {"_id": 0, "name": 1, "store_pincode": 1, "delivery_pincodes": 1, "delivery_available": 1},
         )
         if not prod:
             continue
@@ -3620,9 +3621,22 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             zone_conflicts.append(f"{prod.get('name', 'A product')} is not available for delivery.")
             continue
         sp = str(prod.get("store_pincode") or "").strip()
-        if sp and sp != shipping_address["pincode"]:
+        extras = prod.get("delivery_pincodes") or []
+        if not isinstance(extras, list):
+            extras = []
+        customer_pin = str(shipping_address.get("pincode") or "").strip()
+        deliverable = bool(customer_pin) and (
+            (sp and sp == customer_pin) or (customer_pin in extras)
+        )
+        # If the vendor hasn't set ANY delivery pincode / extras, they
+        # implicitly deliver nowhere — reject with a clear message.
+        if not deliverable:
+            zone_reason = (
+                f"vendor pincode: {sp}" if sp
+                else "vendor has not configured delivery zone"
+            )
             zone_conflicts.append(
-                f"{prod.get('name', 'A product')} is not deliverable to pincode {shipping_address['pincode']} (vendor pincode: {sp}).",
+                f"{prod.get('name', 'A product')} is not deliverable to pincode {customer_pin or '(none)'} ({zone_reason}).",
             )
     if zone_conflicts:
         raise HTTPException(
@@ -7669,6 +7683,7 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
         "delivery_radius_km": vendor.get("delivery_radius_km"),
         "delivery_radius_mode": vendor.get("delivery_radius_mode") or "pincode",
         "delivery_available": vendor.get("delivery_available", True),
+        "delivery_pincodes": vendor.get("delivery_pincodes") or [],
         "created_at": now_utc().isoformat(),
         # UPDATE 1 (June 2026) — Publish is admin-only. Vendors create their
         # products in a HIDDEN state; only an admin can flip is_published=True

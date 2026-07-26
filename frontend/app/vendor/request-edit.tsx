@@ -37,6 +37,10 @@ export default function VendorRequestEdit() {
     district: "", city: "", address: "",
   });
   const [deliveryRadiusKm, setDeliveryRadiusKm] = useState<number | "pincode">("pincode");
+  // Nov 2026 — Multi-pincode delivery zone.  Vendor can tag any number
+  // of pincodes they explicitly deliver to (union with the km-radius).
+  const [deliveryPincodes, setDeliveryPincodes] = useState<string[]>([]);
+  const [pincodeInput, setPincodeInput] = useState("");
   const [pendingReq, setPendingReq] = useState<any>(null);
 
   useEffect(() => {
@@ -65,6 +69,8 @@ export default function VendorRequestEdit() {
         });
         const km = u.delivery_radius_km ?? a.delivery_radius_km;
         setDeliveryRadiusKm(km || "pincode");
+        const pins = u.delivery_pincodes ?? a.delivery_pincodes ?? [];
+        setDeliveryPincodes(Array.isArray(pins) ? pins.map(String) : []);
         // Check for existing pending request
         try {
           const mine = await api.get<{ items: any[] }>("/vendor/edit-requests/mine");
@@ -102,6 +108,7 @@ export default function VendorRequestEdit() {
         store_address: shopLocation.address || undefined,
         delivery_radius_km: deliveryRadiusKm === "pincode" ? null : deliveryRadiusKm,
         delivery_radius_mode: deliveryRadiusKm === "pincode" ? "pincode" : "radius",
+        delivery_pincodes: deliveryPincodes.length ? deliveryPincodes : undefined,
         location: (shopLocation.latitude !== null && shopLocation.longitude !== null)
           ? { type: "Point", coordinates: [shopLocation.longitude, shopLocation.latitude] }
           : undefined,
@@ -193,6 +200,69 @@ export default function VendorRequestEdit() {
                     );
                   })}
                 </View>
+
+                {/* ── Nov 2026 — Extra delivery pincodes ─────────
+                    Vendor can tag pincodes they explicitly deliver to.
+                    These are added on top of the km-radius (union). */}
+                <View style={{ marginTop: 4 }}>
+                  <Text style={styles.label}>Extra delivery pincodes (optional)</Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>
+                    Tag pincodes beyond the km radius. Customers in these pincodes will see your products.
+                  </Text>
+                  <View style={{ flexDirection: "row", gap: 6 }}>
+                    <TextInput
+                      value={pincodeInput}
+                      onChangeText={(v) => setPincodeInput(v.replace(/\D/g, "").slice(0, 6))}
+                      placeholder="e.g. 517644"
+                      placeholderTextColor={colors.textMuted}
+                      style={[styles.input, { flex: 1, marginTop: 0 }]}
+                      keyboardType="number-pad"
+                      returnKeyType="done"
+                      editable={!pendingReq}
+                      onSubmitEditing={() => {
+                        const v = pincodeInput.trim();
+                        if (v.length !== 6) return;
+                        if (deliveryPincodes.includes(v)) { setPincodeInput(""); return; }
+                        setDeliveryPincodes([...deliveryPincodes, v]);
+                        setPincodeInput("");
+                      }}
+                      testID="vendor-edit-pincode-input"
+                    />
+                    <TouchableOpacity
+                      disabled={!!pendingReq || pincodeInput.length !== 6}
+                      onPress={() => {
+                        const v = pincodeInput.trim();
+                        if (v.length !== 6) return;
+                        if (deliveryPincodes.includes(v)) { setPincodeInput(""); return; }
+                        setDeliveryPincodes([...deliveryPincodes, v]);
+                        setPincodeInput("");
+                      }}
+                      style={[styles.addPinBtn, (pincodeInput.length !== 6 || !!pendingReq) && { opacity: 0.4 }]}
+                      testID="vendor-edit-pincode-add"
+                    >
+                      <Feather name="plus" size={18} color={colors.primaryFg} />
+                    </TouchableOpacity>
+                  </View>
+                  {deliveryPincodes.length > 0 ? (
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                      {deliveryPincodes.map((p) => (
+                        <View key={p} style={styles.pinChip}>
+                          <Feather name="map-pin" size={11} color={colors.primary} />
+                          <Text style={styles.pinChipText}>{p}</Text>
+                          {!pendingReq ? (
+                            <TouchableOpacity
+                              onPress={() => setDeliveryPincodes(deliveryPincodes.filter((x) => x !== p))}
+                              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                              testID={`vendor-edit-pincode-remove-${p}`}
+                            >
+                              <Feather name="x" size={11} color={colors.textMuted} />
+                            </TouchableOpacity>
+                          ) : null}
+                        </View>
+                      ))}
+                    </View>
+                  ) : null}
+                </View>
               </View>
             }
           />
@@ -240,4 +310,17 @@ const styles = StyleSheet.create({
   radiusChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   radiusChipText: { fontSize: 11, fontWeight: "700", color: colors.textMain, letterSpacing: 0.2 },
   radiusChipTextActive: { color: colors.primaryFg },
+  addPinBtn: {
+    width: 46, height: 46, borderRadius: radii.input,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+  },
+  pinChip: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    backgroundColor: colors.brand100,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1, borderColor: colors.primary + "44",
+  },
+  pinChipText: { fontSize: 12, fontWeight: "800", color: colors.textMain, letterSpacing: 0.5 },
 });

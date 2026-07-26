@@ -37,6 +37,8 @@ ALLOWED_FIELDS = {
     "location", "pincode", "state", "district", "city",
     "store_address", "delivery_radius_km", "delivery_radius_mode",
     "delivery_available",
+    # Nov 2026 — extra explicit-delivery pincode list.
+    "delivery_pincodes",
 }
 
 
@@ -147,12 +149,13 @@ async def admin_approve_edit_request(req_id: str, admin: Dict[str, Any] = Depend
         await db.users.update_one({"id": doc["user_id"]}, {"$set": changes})
         # Denormalise pincode/location onto any of the vendor's products so
         # the customer-facing filter works instantly.
-        if any(k in changes for k in ("pincode", "location", "delivery_radius_km", "delivery_radius_mode")):
+        if any(k in changes for k in ("pincode", "location", "delivery_radius_km", "delivery_radius_mode", "delivery_pincodes")):
             prod_updates: Dict[str, Any] = {}
             if "pincode" in changes: prod_updates["store_pincode"] = changes["pincode"]
             if "location" in changes: prod_updates["store_location"] = changes["location"]
             if "delivery_radius_km" in changes: prod_updates["delivery_radius_km"] = changes["delivery_radius_km"]
             if "delivery_radius_mode" in changes: prod_updates["delivery_radius_mode"] = changes["delivery_radius_mode"]
+            if "delivery_pincodes" in changes: prod_updates["delivery_pincodes"] = changes["delivery_pincodes"]
             if prod_updates:
                 await db.products.update_many({"vendor_id": doc["user_id"]}, {"$set": prod_updates})
 

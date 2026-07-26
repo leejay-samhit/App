@@ -98,6 +98,11 @@ export type Product = {
 type RendererProps = {
   scope?: "home" | "category";
   category?: string;
+  // Nov 2026 — Delivery pincode from the parent (customer's chosen
+  // area).  Forwarded to /products?pincode= so the layout renderer
+  // matches the strict vendor-in-zone filter used by the customer
+  // shop home.
+  pincode?: string;
   onProductPress?: (productId: string) => void;
   onCategoryPress?: (category: string) => void;
   onAddToCart?: (productId: string) => void;
@@ -768,7 +773,7 @@ function ContentBoxBlock({
 /* ─────────────────────────── Main Renderer ─────────────────────────── */
 
 export function ShopLayoutRenderer({
-  scope = "home", category, onProductPress, onCategoryPress, onAddToCart, refreshTick,
+  scope = "home", category, pincode, onProductPress, onCategoryPress, onAddToCart, refreshTick,
 }: RendererProps) {
   const [blocks, setBlocks] = useState<LayoutBlock[] | null>(null);
   const [productsById, setProductsById] = useState<Record<string, Product>>({});
@@ -807,9 +812,16 @@ export function ShopLayoutRenderer({
           // Nov 2026 — pass cascading category filter so /products
           // returns Electronics + Mobiles + Chargers when the customer
           // taps "Electronics".  Falls back to the whole catalog on the
-          // home scope.
+          // home scope.  Also forwards the customer's delivery pincode
+          // so the strict vendor-in-zone filter kicks in for the
+          // layout renderer's product fetch too (previously ignored,
+          // causing the shop to show global products even after the
+          // customer set Deliver-to to Tirupati).
           api.get<any>("/products", {
-            params: category ? { category, limit: 120 } : {},
+            params: {
+              ...(category ? { category, limit: 120 } : {}),
+              ...(pincode ? { pincode } : {}),
+            },
           }),
         ]);
         if (cancelled) return;
@@ -866,7 +878,7 @@ export function ShopLayoutRenderer({
       }
     })();
     return () => { cancelled = true; };
-  }, [scope, category, currentUserId, refreshTick, pollTick]);
+  }, [scope, category, pincode, currentUserId, refreshTick, pollTick]);
 
   // Aug 2026 — Silent auto-poll every 30s while the app is foregrounded so
   // admin publishes appear live without a manual pull-to-refresh.  Bumps

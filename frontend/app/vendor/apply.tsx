@@ -65,13 +65,14 @@ export default function VendorApplyScreen() {
     try {
       const { data } = await api.get<VendorStatus>("/vendor/me/status");
       setInfo(data);
-      if (data.vendor_status === "approved") {
-        // Auto-redirect to dashboard
-        setTimeout(() => router.replace("/vendor/dashboard" as any), 100);
-      }
+      // Nov 2026 — Approved vendors STAY on this screen so they can see
+      // their current profile and hit "Request Edit".  Previous version
+      // auto-redirected them to /vendor/dashboard which hid the whole
+      // approval-gated edit flow the user relies on to update delivery
+      // radius or extra pincodes.
     } catch (e) { Alert.alert("Error", formatApiError(e)); }
     finally { setLoading(false); setRefreshing(false); }
-  }, [router]);
+  }, []);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
 

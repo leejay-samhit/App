@@ -455,3 +455,38 @@ async def admin_seed_defaults(admin: Dict[str, Any] = Depends(require_admin)):
     await _ensure_seeded()
     count = await db.shop_categories.count_documents({})
     return {"ok": True, "total": count}
+
+
+@router.post("/admin/products/backfill-store-pincode")
+async def admin_backfill_store_pincode(admin: Dict[str, Any] = Depends(require_admin)):
+    """Nov 2026 — Backfill `store_pincode` / delivery fields on all
+    existing products from their vendor's `users` doc.  Idempotent —
+    safe to run any time after a bulk vendor migration."""
+    updated = 0
+    async for prod in db.products.find({}, {"id": 1, "vendor_id": 1, "store_pincode": 1}):
+        vid = prod.get("vendor_id")
+        if not vid:
+            continue
+        # Skip products that already have a pincode — respect vendor's later edits.
+        if prod.get("store_pincode"):
+            continue
+        vend = await db.users.find_one({"id": vid}, {
+            "_id": 0, "pincode": 1, "location": 1, "city": 1, "state": 1, "district": 1,
+            "delivery_radius_km": 1, "delivery_radius_mode": 1, "delivery_available": 1,
+            "delivery_pincodes": 1,
+        })
+        if not vend or not vend.get("pincode"):
+            continue
+        await db.products.update_one({"id": prod["id"]}, {"$set": {
+            "store_pincode": vend.get("pincode"),
+            "store_location": vend.get("location"),
+            "store_city": vend.get("city"),
+            "store_state": vend.get("state"),
+            "store_district": vend.get("district"),
+            "delivery_radius_km": vend.get("delivery_radius_km"),
+            "delivery_radius_mode": vend.get("delivery_radius_mode") or "pincode",
+            "delivery_available": vend.get("delivery_available", True),
+            "delivery_pincodes": vend.get("delivery_pincodes") or [],
+        }})
+        updated += 1
+    return {"ok": True, "updated": updated}
