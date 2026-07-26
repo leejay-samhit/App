@@ -1,0 +1,33 @@
+{
+  "summary": "Nov 2026 production hardening backend tests — ALL 20 PASSED (100%). Verified: (1) Pincode-scoped ShopLayoutBlock — POST /api/admin/shop-layout accepts scope_pincode, GET /api/shop-layout?pincode=500001 returns pincode-scoped + global(empty scope_pincode) blocks, GET with a non-matching pincode 999999 returns ONLY the global block, GET without pincode returns all. (2) GST bucket in Admin System Wallet — /api/admin/system-wallet response includes gst_bucket {total, invoice_count}; a POS sale with 18% GST (₹100 base) writes exactly one system_wallet_deposits doc with bucket='gst', source='gst_pos', amount=18.0, vendor_id, invoice_no, sale_id; re-fetched system-wallet gst_bucket.total increased by 18.0 and invoice_count incremented by 1. (3) Delivery-radius modes — GET /api/products?pincode=X correctly returns products where delivery_radius_mode ∈ {'both','pincode'} for matching store_pincode, EXCLUDES products with mode='radius' (no delivery_pincodes match) and mode='none', and INCLUDES a mode='radius' product when its delivery_pincodes explicitly lists the pin. Non-matching pincode returns none of the seeded test products. (4) All 8 named indexes present in Mongo: ix_prod_store_pin, ix_prod_del_pins, ix_prod_vendor on products; ix_ver_user_status, ix_ver_status_created on vendor_edit_requests; ix_sl_scope_active, ix_sl_scope_pin on shop_layout_blocks; ix_swd_bucket on system_wallet_deposits. Cleanup verified — no test artifacts remain in DB.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_nov2026_prod_hardening.py",
+    "/app/test_reports/pytest/iter49_nov2026_hardening.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routes/shop_layout.py:213 — _scope_filter merges pincode-filter with scope-filter using $and only when scope-filter is non-empty. When scope='home' the $or covers legacy docs (no scope field / null / empty) and combines correctly with the pincode $or; verified via test 'test_get_without_pincode_returns_all'. No bug.",
+    "routes/vendor_pos.py:352-366 — GST deposit is wrapped in try/except that silently swallows write failures ('GST ledger is telemetry — never block the sale'). That's intentional per the comment, but consider logging the exception with logger.exception for observability. Not a blocker.",
+    "routes/products_public.py:132-149 — pincode filter treats delivery_radius_mode absent as pincode-mode (legacy default). Confirmed working. If a vendor sets mode='both' but does NOT populate store_pincode, the product will NOT appear — that's correct.",
+    "server.py:6786-6841 — All 8 new indexes are created inside startup try-block; if MongoDB is unreachable at startup, index creation is skipped silently. Consider surfacing this via /api/health so admins can monitor. Not required for this task."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_nov2026_prod_hardening.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "skipped"},
+  "seed_data_creation": "Ephemeral test seed: (a) 2 shop_layout_blocks (banner_slider pincode-scoped + section_header global) — deleted at end. (b) 1 db.products doc (TEST_gst_prod_<tag>) + 1 offline_sale + 1 system_wallet_deposits row for the POS-GST flow — all cleaned up. (c) 5 db.products docs for the 4 radius modes + 1 explicit-radius variant — cleaned up. All test-created docs use TEST_ prefix + a per-run uuid4 suffix so parallel runs never collide.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Nov 2026 production hardening (pincode-scoped shop layout, GST bucket in system wallet, delivery-radius mode filter, 8 named Mongo indexes) verified end-to-end via /app/backend/tests/test_nov2026_prod_hardening.py. Re-run standalone: `pytest backend/tests/test_nov2026_prod_hardening.py -v`. Test uses admin support@networkrupay.com/Nlee@1115 and vendor raju@gmail.com/Demo@2026, hits BASE_URL from EXPO_PUBLIC_BACKEND_URL (defaults to http://localhost:8001), and connects to Mongo via MONGO_URL/DB_NAME env vars for index+seed operations. Auth returns {token} (not access_token) — coded correctly.",
+  "rca_of_issue": "N/A — no issues found. Implementation matches problem statement exactly across all 4 change areas."
+}

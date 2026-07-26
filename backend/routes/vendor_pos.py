@@ -344,6 +344,27 @@ async def _create_sale_internal(
     }
     await db.offline_sales.insert_one(sale)
 
+    # ── Nov 2026 — GST collected on POS sales flows into the platform's
+    # GST sub-ledger so it shows up in the Admin System Wallet as a
+    # dedicated bucket.  This is a *tracking* ledger, not a wallet
+    # transfer — the money is with the vendor until admin settles it.
+    try:
+        gst_amt = float((totals or {}).get("gst_total") or 0)
+        if gst_amt > 0:
+            await db.system_wallet_deposits.insert_one({
+                "id": str(uuid.uuid4()),
+                "source": "gst_pos",
+                "bucket": "gst",
+                "amount": round(gst_amt, 2),
+                "vendor_id": vendor_id,
+                "invoice_no": invoice_no,
+                "sale_id": sale["id"],
+                "created_at": now_utc(),
+            })
+    except Exception:
+        # GST ledger is telemetry — never block the sale on a write failure.
+        pass
+
     # 4) Upsert customer record (when named & has phone).
     cust = payload.customer
     if cust.kind == "named" and (cust.phone or cust.email):

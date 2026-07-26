@@ -536,6 +536,9 @@ function BlockFormModal({
   const [type, setType] = useState<BlockType>("banner_slider");
   const [scope, setScope] = useState<"home" | "category">(defaultScope);
   const [scopeCategory, setScopeCategory] = useState(defaultScopeCategory);
+  // Nov 2026 — Optional pincode-scoped layout.  When set, this block
+  // only renders for customers whose delivery pincode matches.
+  const [scopePincode, setScopePincode] = useState<string>("");
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [body, setBody] = useState("");
@@ -589,6 +592,7 @@ function BlockFormModal({
     setType((block?.block_type as BlockType) || "banner_slider");
     setScope((block as any)?.scope || defaultScope);
     setScopeCategory((block as any)?.scope_category || defaultScopeCategory);
+    setScopePincode((block as any)?.scope_pincode || "");
     setTitle(block?.title || "");
     setSubtitle(block?.subtitle || "");
     setBody(block?.body || "");
@@ -677,6 +681,7 @@ function BlockFormModal({
       const payload: any = {
         block_type: type,
         scope, scope_category: scope === "category" ? scopeCategory : "",
+        scope_pincode: (scopePincode || "").trim(),
         title: title.trim(), subtitle: subtitle.trim(), body: body.trim(),
         cta_label: ctaLabel.trim(),
         image_data_url: imageDataUrl,
@@ -763,6 +768,20 @@ function BlockFormModal({
                 </View>
               </>
             ) : null}
+
+            {/* Nov 2026 — Pincode targeting (optional).  Leave blank
+                to render the block on every pincode. */}
+            <Text style={styles.label}>Show only in pincode (optional)</Text>
+            <TextInput
+              value={scopePincode}
+              onChangeText={(v) => setScopePincode(v.replace(/\D/g, "").slice(0, 6))}
+              placeholder="e.g. 517644 — leave blank for all areas"
+              placeholderTextColor={colors.textMuted}
+              style={styles.input}
+              keyboardType="number-pad"
+              maxLength={6}
+              testID="block-scope-pincode"
+            />
 
             {/* Block type */}
             <Text style={styles.label}>Block type</Text>

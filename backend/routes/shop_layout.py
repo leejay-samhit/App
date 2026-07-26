@@ -73,6 +73,12 @@ class ShopLayoutBlockIn(BaseModel):
     # scope routing
     scope: Optional[str] = "home"
     scope_category: Optional[str] = ""
+    # Nov 2026 — Pincode-scoped layouts.  When set, this block ONLY
+    # renders for customers whose delivery pincode matches.  Allows
+    # per-area campaigns (e.g. Tirupati-only banner).  Empty = no
+    # pincode restriction (block renders for all customers on the
+    # given scope).
+    scope_pincode: Optional[str] = ""
     # core
     title: Optional[str] = ""
     subtitle: Optional[str] = ""
@@ -116,6 +122,7 @@ class ShopLayoutBlockPatch(BaseModel):
     block_type: Optional[str] = None
     scope: Optional[str] = None
     scope_category: Optional[str] = None
+    scope_pincode: Optional[str] = None
     title: Optional[str] = None
     subtitle: Optional[str] = None
     body: Optional[str] = None
@@ -164,6 +171,7 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
     # Backfill new fields on legacy docs so the client sees a consistent shape.
     doc.setdefault("scope", "home")
     doc.setdefault("scope_category", "")
+    doc.setdefault("scope_pincode", "")
     doc.setdefault("text_color", "")
     doc.setdefault("bg_color", "")
     doc.setdefault("font_size", None)
@@ -202,7 +210,7 @@ def _validate_type(t: Optional[str]) -> str:
     return t
 
 
-def _scope_filter(scope: Optional[str], category: Optional[str]) -> Dict[str, Any]:
+def _scope_filter(scope: Optional[str], category: Optional[str], pincode: Optional[str] = None) -> Dict[str, Any]:
     q: Dict[str, Any] = {}
     if scope:
         if scope not in ALLOWED_SCOPES:
@@ -214,6 +222,23 @@ def _scope_filter(scope: Optional[str], category: Optional[str]) -> Dict[str, An
             q["scope"] = "category"
             if category:
                 q["scope_category"] = category
+    # Nov 2026 — Pincode-scoped layout blocks.  When the customer's
+    # pincode is known, we OR-in blocks whose `scope_pincode` matches,
+    # AND also include blocks with an empty `scope_pincode` (global).
+    if pincode:
+        pin_filter = {
+            "$or": [
+                {"scope_pincode": pincode},
+                {"scope_pincode": ""},
+                {"scope_pincode": None},
+                {"scope_pincode": {"$exists": False}},
+            ],
+        }
+        # Merge (AND) with the scope filter.
+        if q:
+            q = {"$and": [q, pin_filter]}
+        else:
+            q = pin_filter
     return q
 
 
@@ -223,6 +248,7 @@ def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
         "block_type": body.block_type,
         "scope": (body.scope if body.scope in ALLOWED_SCOPES else "home"),
         "scope_category": (body.scope_category or "").strip(),
+        "scope_pincode": (body.scope_pincode or "").strip(),
         "title": (body.title or "").strip(),
         "subtitle": (body.subtitle or "").strip(),
         "body": (body.body or "").strip(),
@@ -267,7 +293,7 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
         if s and s not in ALLOWED_SCOPES:
             raise HTTPException(status_code=400, detail=f"scope must be one of {sorted(ALLOWED_SCOPES)}")
         updates["scope"] = s or "home"
-    for f in ("scope_category", "title", "subtitle", "body", "cta_label",
+    for f in ("scope_category", "scope_pincode", "title", "subtitle", "body", "cta_label",
               "text_color", "bg_color", "button_color", "button_text_color",
               "category_filter", "flash_sale_ends_at"):
         if f in payload and payload[f] is not None:
@@ -358,16 +384,19 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
 async def list_active_shop_layout(
     scope: Optional[str] = Query("home"),
     category: Optional[str] = Query(None),
+    pincode: Optional[str] = Query(None, description="Nov 2026 — customer delivery pincode; matches pincode-scoped blocks"),
 ):
     """Public read for the mobile app — NO AUTH REQUIRED so unauthenticated
     customers (e.g. on a marketing landing or pre-login browse) can still see
     the merchandised home. Returns active blocks for the requested scope
-    (default 'home'). For scope='category', filter by `scope_category`."""
-    q = _scope_filter(scope, category)
+    (default 'home'). For scope='category', filter by `scope_category`.
+    When `pincode` is provided, pincode-scoped blocks matching AND global
+    (empty scope_pincode) blocks are returned; other pincode blocks are excluded."""
+    q = _scope_filter(scope, category, pincode)
     q["active"] = True
     cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])
     items = [_serialize(d) for d in await cursor.to_list(200)]
-    return {"items": items, "scope": scope or "home", "category": category or ""}
+    return {"items": items, "scope": scope or "home", "category": category or "", "pincode": pincode or ""}
 
 
 # ---------- Admin ----------
@@ -376,9 +405,10 @@ async def list_active_shop_layout(
 async def list_all_shop_layout(
     scope: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
+    pincode: Optional[str] = Query(None),
     _: Dict[str, Any] = Depends(require_admin),
 ):
-    q = _scope_filter(scope, category) if scope else {}
+    q = _scope_filter(scope, category, pincode) if (scope or pincode) else {}
     cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])
     items = [_serialize(d) for d in await cursor.to_list(1000)]
     return {"items": items}

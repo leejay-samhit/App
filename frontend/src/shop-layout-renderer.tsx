@@ -11,12 +11,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, Image, TouchableOpacity, StyleSheet, ScrollView,
-  Dimensions, FlatList, Platform, AppState,
+  Dimensions, FlatList, Platform,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { api } from "./api";
 import { cachedGet } from "./cachedGet";
-import { colors, radii, formatINR } from "./theme";
+import { colors, formatINR } from "./theme";
 import { ContentContainer, SHOP_CARD_RADIUS, SHOP_BANNER_RADIUS, SHOP_SECTION_GAP, SHOP_TYPO } from "./content-container";
 import { useAuth } from "./auth";
 
@@ -823,7 +823,8 @@ export function ShopLayoutRenderer({
   const [productsById, setProductsById] = useState<Record<string, Product>>({});
   const [sourceCache, setSourceCache] = useState<Record<string, Product[]>>({});
   // Aug 2026 — Auto-poll counter for live admin updates (30 s interval).
-  const [pollTick, setPollTick] = useState(0);
+  // pollTick retained (referenced in deps) but auto-poll effect removed.
+  const [pollTick] = useState(0);
   // UPDATE 1 — Hide the current vendor's own products from all admin-managed
   // layout blocks so a vendor can't accidentally buy their own inventory.
   const { user } = useAuth();
@@ -838,8 +839,10 @@ export function ShopLayoutRenderer({
       try {
         const params: any = { scope };
         if (category) params.category = category;
-        // Sept 2026 — layout is admin-config and rarely changes → 2 min
-        // cache TTL. Paints instantly on repeat visits.
+        // Nov 2026 — forward the customer's delivery pincode so the
+        // backend can filter to pincode-scoped layout blocks + global
+        // blocks that apply to any pincode.
+        if (pincode) params.pincode = pincode;
         const applyLayout = (bData: { items?: LayoutBlock[] } | null) => {
           if (cancelled) return null;
           return bData?.items || [];

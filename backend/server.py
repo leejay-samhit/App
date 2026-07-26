@@ -4885,9 +4885,19 @@ async def get_system_wallet(admin: Dict[str, Any] = Depends(require_admin_role("
         raise HTTPException(status_code=404, detail="Admin not found")
     buckets = a.get("wallet_buckets") or {}
     out = {b: float(buckets.get(b) or 0) for b in SYSTEM_WALLET_BUCKETS}
+    # Nov 2026 — Expose the GST sub-ledger (POS invoice GST collected
+    # by vendors, tracked here for platform-side reporting).  Not part
+    # of `wallet_balance` — this is a *ledger* count, not held cash.
+    gst_agg = await db.system_wallet_deposits.aggregate([
+        {"$match": {"bucket": "gst"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    gst_total = float(gst_agg[0]["total"]) if gst_agg else 0.0
+    gst_count = int(gst_agg[0]["count"]) if gst_agg else 0
     deposits = await db.system_wallet_deposits.find({}, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
     return {
         "buckets": out,
+        "gst_bucket": {"total": round(gst_total, 2), "invoice_count": gst_count},
         "total": float(a.get("wallet_balance") or 0),
         "deposits": deposits,
     }
@@ -6818,6 +6828,17 @@ async def _background_init():
             )
             await db.cart.create_index([("user_id", 1)], name="ix_cart_user")
             await db.products.create_index([("category", 1)], name="ix_prod_cat")
+            # Nov 2026 — Hot-path indexes for the strict pincode filter
+            # and delivery-zone check.  Avoids collection scans on
+            # /products?pincode= for stores with lots of vendors.
+            await db.products.create_index([("store_pincode", 1)], name="ix_prod_store_pin")
+            await db.products.create_index([("delivery_pincodes", 1)], name="ix_prod_del_pins")
+            await db.products.create_index([("vendor_id", 1)], name="ix_prod_vendor")
+            await db.vendor_edit_requests.create_index([("user_id", 1), ("status", 1)], name="ix_ver_user_status")
+            await db.vendor_edit_requests.create_index([("status", 1), ("created_at", -1)], name="ix_ver_status_created")
+            await db.shop_layout_blocks.create_index([("scope", 1), ("active", 1)], name="ix_sl_scope_active")
+            await db.shop_layout_blocks.create_index([("scope_pincode", 1)], name="ix_sl_scope_pin")
+            await db.system_wallet_deposits.create_index([("bucket", 1)], name="ix_swd_bucket")
             await db.products.create_index([("is_in_stock", 1)], name="ix_prod_stock")
         except Exception as _idx_err:
             logger.warning(f"Hot-query index setup failed (non-fatal): {_idx_err}")
