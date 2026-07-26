@@ -162,6 +162,41 @@ export default function VendorDashboard() {
               ))}
             </View>
           </View>
+
+          {/* ── Nov 2026 — Profile & delivery-zone shortcut ──
+              Approved vendors couldn't easily discover the "Request
+              Edit" flow because tapping "Vendor Panel" on the profile
+              tab routes here directly.  This banner exposes the
+              delivery-radius / pincode-tag update path prominently. */}
+          <TouchableOpacity
+            onPress={() => router.push("/vendor/request-edit" as any)}
+            activeOpacity={0.85}
+            style={{
+              flexDirection: "row", alignItems: "center", gap: 12,
+              padding: 14, marginBottom: 14,
+              borderRadius: 16, borderWidth: 1, borderColor: colors.primary,
+              backgroundColor: colors.brand100,
+            }}
+            testID="vendor-request-edit-cta"
+          >
+            <View style={{
+              width: 44, height: 44, borderRadius: 22,
+              backgroundColor: "#fff",
+              alignItems: "center", justifyContent: "center",
+              borderWidth: 2, borderColor: colors.primary,
+            }}>
+              <Feather name="map-pin" size={20} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={{ fontSize: 14, fontWeight: "800", color: colors.textMain }}>
+                Update delivery zone & profile
+              </Text>
+              <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 3, lineHeight: 15 }} numberOfLines={2}>
+                Change km-radius, add extra pincodes, or update shop details.  Admin reviews every change.
+              </Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={colors.primary} />
+          </TouchableOpacity>
           <View style={styles.statsGrid}>
             <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
             <StatCard icon="package" label="TODAY ORDERS" value={String(stats.today_orders)} color="#1F5E9E" />
