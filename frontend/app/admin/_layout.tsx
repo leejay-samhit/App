@@ -71,6 +71,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="ticket" options={{ href: null }} />
       <Tabs.Screen name="payment-gateway" options={{ href: null }} />
       <Tabs.Screen name="vendor-applications" options={{ href: null }} />
+      <Tabs.Screen name="vendor-edit-requests" options={{ href: null }} />
       <Tabs.Screen name="service-applications" options={{ href: null }} />
       <Tabs.Screen name="system-wallet" options={{ href: null }} />
       <Tabs.Screen name="vendors" options={{ href: null }} />

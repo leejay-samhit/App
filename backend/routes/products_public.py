@@ -120,17 +120,32 @@ async def list_products(
         if sub_filter:
             q = {"$and": [q, sub_filter]} if "$and" not in q else {"$and": q["$and"] + [sub_filter]}
 
-    # Nov 2026 — Pincode delivery filter.  A product is deliverable
-    # when the customer's pincode is EITHER the vendor's store pincode
-    # OR listed in the vendor's explicit `delivery_pincodes` array.
-    # The legacy fallback ("show products with no pincode set") has
-    # been dropped per user directive — filtering must be strict so
-    # customers only see vendors who actually service their area.
+    # Nov 2026 — Pincode delivery filter (strict).  A product is
+    # deliverable when the customer's pincode matches one of:
+    #   • the vendor's `store_pincode` (only if radius_mode covers it —
+    #     i.e. "pincode" / "both", or the km-radius happens to reach it
+    #     but we can't verify that server-side without both lat/lng)
+    #   • any entry in `delivery_pincodes`
+    #
+    # For mode == "radius" (km only) or "none" — the store_pincode is
+    # NOT auto-deliverable.  This matches the vendor's explicit intent.
     if pincode:
-        pin_filter = {"$or": [
-            {"store_pincode": pincode},
-            {"delivery_pincodes": pincode},
-        ]}
+        pin_filter = {
+            "$or": [
+                # store_pincode matches AND vendor covers "entire pincode"
+                {"$and": [
+                    {"store_pincode": pincode},
+                    {"$or": [
+                        {"delivery_radius_mode": "pincode"},
+                        {"delivery_radius_mode": "both"},
+                        # Legacy vendors before mode field existed — default was pincode.
+                        {"delivery_radius_mode": {"$exists": False}},
+                    ]},
+                ]},
+                # Explicit extra pincode tag matches
+                {"delivery_pincodes": pincode},
+            ]
+        }
         q = {"$and": [q, pin_filter]} if "$and" not in q else {"$and": q["$and"] + [pin_filter]}
 
     # Sort mapping

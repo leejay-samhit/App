@@ -14,6 +14,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import OutOfZoneModal from "../src/OutOfZoneModal";
 
 type CartItem = { id: string; product_id: string; qty: number; product: { name: string; price: number; image_url: string }; line_total: number };
 
@@ -26,6 +27,9 @@ export default function CheckoutScreen() {
   const [loading, setLoading] = useState(true);
   const [placing, setPlacing] = useState(false);
   const [walletBalance, setWalletBalance] = useState<number>(0);
+  // Nov 2026 — Out-of-delivery-zone modal state (replaces plain Alert).
+  const [oozOpen, setOozOpen] = useState(false);
+  const [oozConflicts, setOozConflicts] = useState<string[]>([]);
   // Address fields
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -202,12 +206,12 @@ export default function CheckoutScreen() {
       //   code: "out_of_delivery_zone", message: "...", conflicts: [...] }
       const detail = e?.response?.data?.detail;
       if (detail && typeof detail === "object" && detail.code === "out_of_delivery_zone") {
-        const list = Array.isArray(detail.conflicts) ? detail.conflicts.join("\n\n") : "";
-        Alert.alert(
-          "Out of delivery zone",
-          `${detail.message}\n\n${list}\n\nPlease remove these items or change your shipping pincode.`,
-          [{ text: "OK" }],
-        );
+        // Nov 2026 — Show the redesigned bottom-sheet modal instead of
+        // the plain Alert.  Gives the customer clear next-steps (change
+        // address vs remove ineligible items).
+        const list = Array.isArray(detail.conflicts) ? detail.conflicts : [];
+        setOozConflicts(list);
+        setOozOpen(true);
       } else {
         Alert.alert("Checkout failed", formatApiError(e));
       }
@@ -411,6 +415,16 @@ export default function CheckoutScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+      {/* Nov 2026 — Out-of-delivery-zone bottom sheet */}
+      <OutOfZoneModal
+        visible={oozOpen}
+        conflicts={oozConflicts}
+        onClose={() => setOozOpen(false)}
+        onChangeAddress={() => {
+          // Focus the pincode field so the user can adjust immediately.
+          setPincode("");
+        }}
+      />
     </SafeAreaView>
   );
 }

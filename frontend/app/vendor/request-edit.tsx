@@ -36,7 +36,10 @@ export default function VendorRequestEdit() {
     latitude: null, longitude: null, pincode: "", state: "",
     district: "", city: "", address: "",
   });
-  const [deliveryRadiusKm, setDeliveryRadiusKm] = useState<number | "pincode">("pincode");
+  const [deliveryRadiusKm, setDeliveryRadiusKm] = useState<number | null>(null);
+  // Nov 2026 — Union model.  Vendor can enable a km-radius, an
+  // "entire pincode" catch-all, and extra pincodes — all together.
+  const [coverEntirePincode, setCoverEntirePincode] = useState<boolean>(false);
   // Nov 2026 — Multi-pincode delivery zone.  Vendor can tag any number
   // of pincodes they explicitly deliver to (union with the km-radius).
   const [deliveryPincodes, setDeliveryPincodes] = useState<string[]>([]);
@@ -68,7 +71,10 @@ export default function VendorRequestEdit() {
           address: u.store_address || a.store_address || "",
         });
         const km = u.delivery_radius_km ?? a.delivery_radius_km;
-        setDeliveryRadiusKm(km || "pincode");
+        setDeliveryRadiusKm(typeof km === "number" && km > 0 ? km : null);
+        // Legacy "delivery_radius_mode=pincode" == "cover entire pincode" ON.
+        const mode = u.delivery_radius_mode ?? a.delivery_radius_mode ?? "pincode";
+        setCoverEntirePincode(mode === "pincode" || mode === "both");
         const pins = u.delivery_pincodes ?? a.delivery_pincodes ?? [];
         setDeliveryPincodes(Array.isArray(pins) ? pins.map(String) : []);
         // Check for existing pending request
@@ -106,8 +112,19 @@ export default function VendorRequestEdit() {
         district: shopLocation.district || undefined,
         city: shopLocation.city || undefined,
         store_address: shopLocation.address || undefined,
-        delivery_radius_km: deliveryRadiusKm === "pincode" ? null : deliveryRadiusKm,
-        delivery_radius_mode: deliveryRadiusKm === "pincode" ? "pincode" : "radius",
+        delivery_radius_km: deliveryRadiusKm ?? null,
+        // Nov 2026 — Radius mode encodes BOTH toggles:
+        //   "both"    = km-radius + entire-pincode both on
+        //   "radius"  = only km-radius
+        //   "pincode" = only entire-pincode
+        //   "none"    = neither (only explicit extra pincodes)
+        delivery_radius_mode: (() => {
+          const hasKm = typeof deliveryRadiusKm === "number" && deliveryRadiusKm > 0;
+          if (hasKm && coverEntirePincode) return "both";
+          if (hasKm) return "radius";
+          if (coverEntirePincode) return "pincode";
+          return "none";
+        })(),
         delivery_pincodes: deliveryPincodes.length ? deliveryPincodes : undefined,
         location: (shopLocation.latitude !== null && shopLocation.longitude !== null)
           ? { type: "Point", coordinates: [shopLocation.longitude, shopLocation.latitude] }
@@ -188,11 +205,11 @@ export default function VendorRequestEdit() {
             hint="Tap 'Use current' to auto-fill via GPS, or edit the pincode manually."
             extraSlot={
               <View style={{ gap: 8 }}>
-                <Text style={styles.label}>Delivery radius</Text>
+                <Text style={styles.label}>Delivery radius (km)</Text>
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                  {([2, 5, 10, 20, 50, "pincode"] as const).map((r) => {
+                  {([null, 2, 5, 10, 20, 50] as const).map((r) => {
                     const active = deliveryRadiusKm === r;
-                    const label = r === "pincode" ? "Entire pincode" : `${r} km`;
+                    const label = r === null ? "None" : `${r} km`;
                     return (
                       <TouchableOpacity key={String(r)} disabled={!!pendingReq} onPress={() => setDeliveryRadiusKm(r as any)} style={[styles.radiusChip, active && styles.radiusChipActive]}>
                         <Text style={[styles.radiusChipText, active && styles.radiusChipTextActive]}>{label}</Text>
@@ -200,6 +217,41 @@ export default function VendorRequestEdit() {
                     );
                   })}
                 </View>
+
+                {/* Nov 2026 — "Also cover entire shop pincode" checkbox.
+                    Independent of the km-radius above so vendors can
+                    have BOTH turned on (union — any match delivers). */}
+                <TouchableOpacity
+                  disabled={!!pendingReq}
+                  onPress={() => setCoverEntirePincode((v) => !v)}
+                  activeOpacity={0.75}
+                  style={{
+                    flexDirection: "row", alignItems: "center", gap: 10,
+                    padding: 12, marginTop: 8,
+                    borderRadius: 12, borderWidth: 1,
+                    borderColor: coverEntirePincode ? colors.primary : colors.border,
+                    backgroundColor: coverEntirePincode ? colors.brand100 : colors.surface,
+                  }}
+                  testID="vendor-edit-cover-entire-pincode"
+                >
+                  <View style={{
+                    width: 22, height: 22, borderRadius: 6,
+                    borderWidth: 2,
+                    borderColor: coverEntirePincode ? colors.primary : colors.border,
+                    backgroundColor: coverEntirePincode ? colors.primary : "transparent",
+                    alignItems: "center", justifyContent: "center",
+                  }}>
+                    {coverEntirePincode ? <Feather name="check" size={14} color="#fff" /> : null}
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={{ fontSize: 13, fontWeight: "800", color: colors.textMain }}>
+                      Also cover entire shop pincode
+                    </Text>
+                    <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                      Any address in your shop&apos;s pincode is deliverable, even beyond the km radius.
+                    </Text>
+                  </View>
+                </TouchableOpacity>
 
                 {/* ── Nov 2026 — Extra delivery pincodes ─────────
                     Vendor can tag pincodes they explicitly deliver to.

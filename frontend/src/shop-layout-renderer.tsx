@@ -539,18 +539,24 @@ function ProductGridBlock({
       <View style={[styles.gridWrap, { gap }]}>
         {products.slice(0, block.product_count || 12).map((p) => {
           const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
+          const stockQty = Number(p.stock || 0);
+          const lowStock = inStock && stockQty > 0 && stockQty <= 5;
           return (
             <TouchableOpacity
               key={p.id}
               style={[
                 styles.gridCard,
-                { width: cardWidth, padding: cardPadding, flexBasis: undefined as any },
-                !inStock && { opacity: 0.55 },
+                { width: cardWidth, padding: 0, flexBasis: undefined as any },
+                !inStock && { opacity: 0.7 },
               ]}
               activeOpacity={0.85}
               onPress={() => onProductPress?.(p.id)}
+              testID={`grid-card-${p.id}`}
             >
-              <View style={[styles.gridImgWrap, { aspectRatio: aspect }]}>
+              {/* Image — tighter aspect than before (0.95) so name + price
+                  + Add row have breathing room.  Discount / stock badges
+                  overlay in the corners. */}
+              <View style={[styles.gridImgWrap, { aspectRatio: 0.95 }]}>
                 {pickImage(p) ? (
                   <Image source={{ uri: pickImage(p) }} style={styles.gridImg} resizeMode="cover" />
                 ) : (
@@ -560,23 +566,61 @@ function ProductGridBlock({
                 )}
                 {!inStock ? (
                   <View style={styles.gridOOSBadge}><Text style={styles.gridOOSText}>SOLD OUT</Text></View>
+                ) : lowStock ? (
+                  <View style={[styles.gridOOSBadge, { backgroundColor: "#F59E0B" }]}>
+                    <Text style={styles.gridOOSText}>ONLY {stockQty}</Text>
+                  </View>
                 ) : null}
+                {/* Wishlist heart pill in the top-right corner */}
+                <View style={styles.wishBtn}>
+                  <Feather name="heart" size={13} color="#EF4444" />
+                </View>
               </View>
-              <View style={{ paddingHorizontal: innerPadding - cardPadding, paddingTop: innerPadding - cardPadding + 6, paddingBottom: 2 }}>
+
+              {/* Info block */}
+              <View style={{ paddingHorizontal: 10, paddingTop: 8, paddingBottom: 10 }}>
                 <Text
                   style={[styles.gridName, {
-                    fontSize: 12.5 * fontMul,
-                    minHeight: nameLines === 1 ? 16 : 32,
+                    fontSize: 13 * fontMul,
+                    lineHeight: 17 * (perRow >= 3 ? 0.9 : 1),
                     marginTop: 0,
-                    lineHeight: 16 * (perRow >= 3 ? 0.9 : 1),
+                    minHeight: nameLines === 1 ? 17 : 34,
                   }]}
                   numberOfLines={nameLines}
                 >{p.name}</Text>
-                <View style={[styles.gridFooter, { marginTop: perRow >= 3 ? 3 : 6 }]}>
+
+                {/* Stock line — visible in-stock hint / low-stock warning */}
+                <Text
+                  style={{
+                    fontSize: 10.5 * fontMul,
+                    color: !inStock ? "#DC2626" : lowStock ? "#B45309" : "#0F7A3C",
+                    fontWeight: "700",
+                    marginTop: 3,
+                    letterSpacing: 0.2,
+                  }}
+                  numberOfLines={1}
+                >
+                  {!inStock
+                    ? "Out of stock"
+                    : lowStock
+                    ? `Only ${stockQty} left`
+                    : "In stock"}
+                </Text>
+
+                <View style={[styles.gridFooter, { marginTop: 6, gap: 6 }]}>
                   <Text
-                    style={[styles.gridPrice, { fontSize: 14 * fontMul }]}
+                    style={[styles.gridPrice, { fontSize: 15 * fontMul, flex: 1 }]}
                     numberOfLines={1}
                   >{formatINR(p.price)}</Text>
+                  <TouchableOpacity
+                    onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
+                    disabled={!inStock}
+                    style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
+                    testID={`grid-add-${p.id}`}
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  >
+                    <Feather name="plus" size={14} color="#fff" />
+                  </TouchableOpacity>
                 </View>
               </View>
             </TouchableOpacity>
@@ -802,7 +846,8 @@ export function ShopLayoutRenderer({
         };
         const [bRes, pRes] = await Promise.all([
           cachedGet<{ items: LayoutBlock[] }>("/shop-layout", {
-            ttlMs: 120_000,
+            ttlMs: 600_000,   // Nov 2026 — 10 min TTL (was 2 min) to
+                              // eliminate the constant network churn.
             params,
             onFresh: (fresh) => {
               const items = applyLayout(fresh);
@@ -880,17 +925,14 @@ export function ShopLayoutRenderer({
     return () => { cancelled = true; };
   }, [scope, category, pincode, currentUserId, refreshTick, pollTick]);
 
-  // Aug 2026 — Silent auto-poll every 30s while the app is foregrounded so
-  // admin publishes appear live without a manual pull-to-refresh.  Bumps
-  // `pollTick` which is in the deps array above, so the fetch re-runs.
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (AppState.currentState === "active") {
-        setPollTick((n) => n + 1);
-      }
-    }, 30_000);
-    return () => clearInterval(interval);
-  }, []);
+  // Nov 2026 — Auto-poll REMOVED per user directive.
+  // The prior 30s setInterval caused visible splash flicker and made the
+  // shop feel constantly "loading".  Refreshes are now:
+  //   • Explicit — parent bumps `refreshTick` (e.g. pull-to-refresh).
+  //   • Focus-driven — the Shop tab re-fetches on focus via useFocusEffect
+  //     in shop-home.tsx (which the customer sees as instant).
+  //   • Cache-driven — `cachedGet` serves fresh data if <10 min stale.
+  // Nothing to schedule here.
 
   const visible = useMemo(
     () => (blocks || []).filter((b) => b.active).sort((a, b) => a.sort_order - b.sort_order),
@@ -1171,7 +1213,9 @@ const styles = StyleSheet.create({
     borderRadius: SHOP_CARD_RADIUS,
     borderWidth: 1, borderColor: colors.border,
     overflow: "hidden",
-    padding: 8,
+    // Nov 2026 — padding moved into the inner Info block; card is edge-
+    // to-edge so the image reaches the card border for a hero look.
+    padding: 0,
     // Soft shadow (iOS) + elevation (Android) per spec.
     ...Platform.select({
       ios: {
@@ -1179,6 +1223,23 @@ const styles = StyleSheet.create({
       },
       android: { elevation: 2 },
     }),
+  },
+  // Nov 2026 — Wishlist heart overlay pill
+  wishBtn: {
+    position: "absolute", top: 6, right: 6,
+    width: 26, height: 26, borderRadius: 13,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.92)",
+    ...Platform.select({
+      ios: { shadowColor: "#000", shadowOpacity: 0.08, shadowRadius: 3, shadowOffset: { width: 0, height: 1 } },
+      android: { elevation: 1 },
+    }),
+  },
+  // Nov 2026 — Add-to-Cart quick pill inside the card footer
+  addCartBtn: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
   },
   gridImgWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative", borderRadius: 8, overflow: "hidden" },
   gridImg: { width: "100%", height: "100%" },
