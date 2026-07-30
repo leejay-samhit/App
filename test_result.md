@@ -8876,3 +8876,44 @@ agent_communication:
         - Wallet transfer flow (POST /wallet/transfer)
         - Withdrawal request flow (POST /withdrawals)
         - Any regression on Admin flows (system wallet, layout, categories)
+
+frontend:
+  - task: "Shop category + subcategory location filter"
+    implemented: true
+    working: "NA"
+    file: "app/(tabs)/shop-category/[name].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Category/subcategory pages now read the customer's delivery location via useDeliveryLocation() and pass pincode + lat + lng + strict_location=true to /products and /shop-layout. When the customer's area has no vendors, the NoVendorsHero card is shown with 'Become a vendor here' CTA + support@slangcart.com contact link."
+
+  - task: "NoVendorsHero — location-first empty state hero card"
+    implemented: true
+    working: "NA"
+    file: "src/no-vendors-hero.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "New reusable hero component with primary CTA (Become a vendor) + secondary (Contact support). Wired into shop-home.tsx (renders below layout blocks when products.length===0) and into shop-category/[name].tsx (renders when the category grid is empty for the current location). Verified via screenshot at Kadapa (516003) — hero renders. Verified at Srikalahasti (517644) — Kittu products render (no hero)."
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Category location bug + NoVendorsHero shipped.
+      • useDeliveryLocation hook reads @app/deliveryPincode + @app/deliveryCoords
+        so screens other than shop-home can honour the strict location gate
+        without duplicating the GPS capture code.
+      • shop-category page now passes pincode+lat+lng+strict_location to
+        /products (this was the "still showing all products" bug — the
+        category page ignored the location).
+      • NoVendorsHero component: big storefront icon, WE'RE NOT LIVE HERE YET
+        eyebrow, 3 perk pills (zero fee / own your pincode / live in 24h),
+        primary CTA to /vendor/apply, ghost CTA mailto:support@slangcart.com,
+        and a footer line with the support address.
+      Screenshots verified at Kadapa (hero) and Srikalahasti (products).

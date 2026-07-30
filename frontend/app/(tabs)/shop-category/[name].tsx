@@ -10,6 +10,8 @@ import { api, formatApiError } from "../../../src/api";
 import { colors, radii, spacing, formatINR } from "../../../src/theme";
 import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
 import { useAuth } from "../../../src/auth";
+import { useDeliveryLocation } from "../../../src/use-delivery-location";
+import { NoVendorsHero } from "../../../src/no-vendors-hero";
 
 type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; sub_category?: string; vendor_id?: string | null };
 
@@ -20,6 +22,9 @@ export default function ShopCategoryScreen() {
   // UPDATE 1 — Hide the current vendor's own products from themselves.
   const { user } = useAuth();
   const currentUserId = user?.id || null;
+  // Aug 2026 → Jul 2026 — Read the customer's delivery location so category
+  // pages honour the same strict location gate as the main shop.
+  const { pincode: deliveryPincode, coords: deliveryCoords, hasLocation } = useDeliveryLocation();
   const [refreshing, setRefreshing] = useState(false);
   const [hasLayout, setHasLayout] = useState<boolean | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -41,7 +46,11 @@ export default function ShopCategoryScreen() {
   const load = useCallback(async () => {
     try {
       // Check if admin has configured a layout for this category
-      const lay = await api.get<{ items: any[] }>("/shop-layout", { params: { scope: "category", category } });
+      // Jul 2026 — Forward the customer's pincode so admin layout blocks
+      // scoped to specific pincodes only render for the right cohort.
+      const layParams: Record<string, any> = { scope: "category", category };
+      if (deliveryPincode) layParams.pincode = deliveryPincode;
+      const lay = await api.get<{ items: any[] }>("/shop-layout", { params: layParams });
       const blocks = lay.data?.items || [];
       setHasLayout(blocks.length > 0);
     } catch { setHasLayout(false); }
@@ -53,8 +62,17 @@ export default function ShopCategoryScreen() {
       // downloading the full catalogue and filtering client-side.
       // When a sub-category chip is selected, further narrow by that
       // slug on the backend as well.
-      const params: Record<string, any> = { category, limit: 120 };
+      //
+      // Jul 2026 — Same strict location gate as the main shop.  Without
+      // this, the category page was leaking every vendor's products
+      // regardless of who actually delivers to the customer's area.
+      const params: Record<string, any> = { category, limit: 120, strict_location: "true" };
       if (selectedSub) params.subcategory = selectedSub;
+      if (deliveryPincode) params.pincode = deliveryPincode;
+      if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+      // If we have zero location signals, skip the fetch — an empty
+      // grid + the hero card will explain what's happening.
+      if (!deliveryPincode && !deliveryCoords) { setProducts([]); setLoadingProducts(false); setRefreshing(false); return; }
       const r = await api.get<any>("/products", { params });
       const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
       setProducts(
@@ -68,7 +86,7 @@ export default function ShopCategoryScreen() {
       );
     } catch (e) { /* silent */ }
     finally { setLoadingProducts(false); setRefreshing(false); }
-  }, [category, currentUserId, selectedSub]);
+  }, [category, currentUserId, selectedSub, deliveryPincode, deliveryCoords]);
 
   // Nov 2026 — resolve the parent category by name and fetch its admin-
   // managed subcategories so we can show REAL nested chips.
@@ -199,6 +217,9 @@ export default function ShopCategoryScreen() {
         <ShopLayoutRenderer
           scope="category"
           category={category}
+          pincode={deliveryPincode || undefined}
+          lat={deliveryCoords?.lat}
+          lng={deliveryCoords?.lng}
           refreshTick={refreshTick}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
           onCategoryPress={(c) => router.push(`/shop-category/${encodeURIComponent(c)}` as any)}
@@ -214,28 +235,49 @@ export default function ShopCategoryScreen() {
             its blocks — hasLayout was still `null` and products was still `[]`. */}
         {loadingProducts || hasLayout === null ? (
           <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
-        ) : hasLayout === false && products.length === 0 ? (
-          <View style={styles.emptyCard}>
-            <Feather name="shopping-bag" size={28} color={colors.textMuted} />
-            <Text style={styles.emptyText}>No products in {category}</Text>
-          </View>
+        ) : (hasLayout === false && products.length === 0) ? (
+          // Jul 2026 — Location-aware empty state.  If we have no
+          // vendors nearby for this pincode, show the beautiful
+          // "become a vendor" hero.  Otherwise fall back to the plain
+          // "No products in X" card.
+          !hasLocation ? (
+            <View style={styles.emptyCard}>
+              <Feather name="map-pin" size={24} color={colors.textMuted} />
+              <Text style={styles.emptyText}>Turn on location to see products in your area</Text>
+            </View>
+          ) : (
+            <NoVendorsHero location={deliveryPincode || undefined} compact />
+          )
         ) : hasLayout === false ? (
           (() => {
             // Nov 2026 — server already filtered by subcategory when
             // `selectedSub` is set (see load()).  Show products as-is.
             const filtered = products;
             if (filtered.length === 0) {
+              // Jul 2026 — Match the hero pattern when the sub filter
+              // yields no products either.  When the user cleared to
+              // "All" and STILL sees nothing, that's a "no vendors"
+              // situation — show the hero.  When a sub is active, show
+              // a lighter "no products in sub" card so they can clear.
+              if (!selectedSub) {
+                return hasLocation
+                  ? <NoVendorsHero location={deliveryPincode || undefined} compact />
+                  : (
+                    <View style={styles.emptyCard}>
+                      <Feather name="map-pin" size={24} color={colors.textMuted} />
+                      <Text style={styles.emptyText}>Turn on location to see products in your area</Text>
+                    </View>
+                  );
+              }
               return (
                 <View style={styles.emptyCard}>
                   <Feather name="filter" size={24} color={colors.textMuted} />
                   <Text style={styles.emptyText}>
-                    {selectedSub ? `No products in "${selectedSub}"` : `No products in ${category}`}
+                    No products in "{selectedSub}"
                   </Text>
-                  {selectedSub ? (
-                    <TouchableOpacity onPress={() => setSelectedSub("")} style={{ marginTop: 4 }}>
-                      <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700" }}>Clear filter</Text>
-                    </TouchableOpacity>
-                  ) : null}
+                  <TouchableOpacity onPress={() => setSelectedSub("")} style={{ marginTop: 4 }}>
+                    <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700" }}>Clear filter</Text>
+                  </TouchableOpacity>
                 </View>
               );
             }

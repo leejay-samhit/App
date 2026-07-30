@@ -34,6 +34,7 @@ import {
   requestLocationPermission,
 } from "./location";
 import { useAuth } from "./auth";
+import { NoVendorsHero } from "./no-vendors-hero";
 import { LocationBanner } from "./location-banner";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -865,18 +866,29 @@ export function ShopHome({
                 ))}
               </View>
             ) : filteredProducts.length === 0 ? (
-              <View style={styles.emptyResultsWrap}>
-                <View style={[styles.iconRound, { backgroundColor: colors.brand100 }]}>
-                  <Feather name="package" size={28} color={colors.primary} />
+              // Jul 2026 — Category grid empty state.
+              // If the WHOLE catalog for this delivery zone is empty (not
+              // just this category), the parent path shows the hero.
+              // Here we only reach when the user has already picked a
+              // specific category and it happens to be empty for their
+              // pincode — that's still a "no vendors here" moment, so
+              // we render the hero when products (all cats) is also 0.
+              products.length === 0 ? (
+                <NoVendorsHero location={deliveryPincode || undefined} compact />
+              ) : (
+                <View style={styles.emptyResultsWrap}>
+                  <View style={[styles.iconRound, { backgroundColor: colors.brand100 }]}>
+                    <Feather name="package" size={28} color={colors.primary} />
+                  </View>
+                  <Text style={styles.emptyResultsTitle}>No products in {activeCategory}</Text>
+                  <Text style={styles.emptyResultsSub}>
+                    This category doesn't have anything listed yet. Browse other categories or check back soon.
+                  </Text>
+                  <TouchableOpacity style={styles.bannerCta} onPress={() => setActiveCategory("all")}>
+                    <Text style={[styles.bannerCtaText, { color: colors.primary }]}>Show all categories</Text>
+                  </TouchableOpacity>
                 </View>
-                <Text style={styles.emptyResultsTitle}>No products in {activeCategory}</Text>
-                <Text style={styles.emptyResultsSub}>
-                  This category doesn't have anything listed yet. Browse other categories or check back soon.
-                </Text>
-                <TouchableOpacity style={styles.bannerCta} onPress={() => setActiveCategory("all")}>
-                  <Text style={[styles.bannerCtaText, { color: colors.primary }]}>Show all categories</Text>
-                </TouchableOpacity>
-              </View>
+              )
             ) : (
               <FlatList
                 data={filteredProducts}
@@ -893,24 +905,34 @@ export function ShopHome({
             )}
           </View>
         ) : (
-        <ShopLayoutRenderer
-          scope="home"
-          category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
-          pincode={deliveryPincode || undefined}
-          lat={deliveryCoords?.lat}
-          lng={deliveryCoords?.lng}
-          refreshTick={refreshTick}
-          onProductPress={(id) => router.push(`/product/${id}` as any)}
-          onCategoryPress={(c) => {
-            if (!c) router.push(`${categoryRoutePrefix}/shop` as any);
-            else router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c)}` as any);
-          }}
-          onAddToCart={async (id) => {
-            try {
-              await api.post("/cart", { product_id: id, quantity: 1 });
-            } catch (e) { /* eslint-disable-next-line no-console */ console.warn("add to cart failed:", formatApiError(e)); }
-          }}
-        />
+        <>
+          <ShopLayoutRenderer
+            scope="home"
+            category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
+            pincode={deliveryPincode || undefined}
+            lat={deliveryCoords?.lat}
+            lng={deliveryCoords?.lng}
+            refreshTick={refreshTick}
+            onProductPress={(id) => router.push(`/product/${id}` as any)}
+            onCategoryPress={(c) => {
+              if (!c) router.push(`${categoryRoutePrefix}/shop` as any);
+              else router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c)}` as any);
+            }}
+            onAddToCart={async (id) => {
+              try {
+                await api.post("/cart", { product_id: id, quantity: 1 });
+              } catch (e) { /* eslint-disable-next-line no-console */ console.warn("add to cart failed:", formatApiError(e)); }
+            }}
+          />
+          {/* Jul 2026 — "No vendors nearby" hero card.  When the customer's
+              location has zero deliverable products AND the initial /products
+              fetch has completed, show the hero below the (mostly empty)
+              layout so the customer immediately understands why and what
+              to do next. */}
+          {!loading && products.length === 0 ? (
+            <NoVendorsHero location={deliveryPincode || undefined} />
+          ) : null}
+        </>
         )}
           </>
         )}
