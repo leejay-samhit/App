@@ -8,7 +8,26 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { RichProductEditor } from "../../src/rich-product-editor";
 
-type Stats = { total_sales: number; total_earnings: number; today_earnings: number; today_orders: number; all_orders: number; products_count: number; published_count: number; wallet_balance: number };
+type Stats = {
+  total_sales: number; total_earnings: number; today_earnings: number;
+  today_orders: number; all_orders: number; products_count: number;
+  published_count: number; wallet_balance: number;
+  // Jul 2026 — Per-channel breakdown for the earnings drill-down.
+  online_total?: number; online_today?: number; online_orders_all?: number; online_orders_today?: number;
+  pos_total?: number; pos_today?: number; pos_orders_all?: number; pos_orders_today?: number;
+};
+type EarningRow = {
+  channel: "online" | "pos";
+  id: string;
+  order_id?: string;
+  invoice_no?: string;
+  created_at: string;
+  product_name: string;
+  qty: number;
+  line_total: number;
+  buyer_email?: string;
+  customer_name?: string;
+};
 type Product = { id: string; name: string; price: number; stock: number; image_url: string; description?: string; category?: string; is_published?: boolean; created_at?: string; interested_count?: number };
 type Sale = { id: string; order_id: string; product_id: string; product_name: string; qty: number; line_total: number; vendor_share: number; commission_pct: number; created_at: string };
 type InterestedUser = { id: string; name: string; email: string; phone?: string };
@@ -29,6 +48,12 @@ export default function VendorDashboard() {
   const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Jul 2026 — Earnings drill-down modal state
+  const [earningsOpen, setEarningsOpen] = useState<null | { scope: "today" | "lifetime" }>(null);
+  const [earningRows, setEarningRows] = useState<EarningRow[]>([]);
+  const [earningsLoading, setEarningsLoading] = useState(false);
+  const [earningsMonth, setEarningsMonth] = useState<string>(""); // YYYY-MM
+  const [earningsChannel, setEarningsChannel] = useState<"" | "online" | "pos">("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
   const [interestedFor, setInterestedFor] = useState<Product | null>(null);
@@ -92,6 +117,38 @@ export default function VendorDashboard() {
       Alert.alert("Couldn't post answer", formatApiError(e));
     } finally { setSubmittingAnswer(false); }
   };
+
+  // Jul 2026 — Earnings drill-down: fetch the raw per-row list for the
+  // scope (today / lifetime) and optional month + channel filters.
+  const fetchEarnings = useCallback(async (scope: "today" | "lifetime", month: string, channel: "" | "online" | "pos") => {
+    setEarningsLoading(true);
+    try {
+      const params: Record<string, string> = {};
+      if (scope === "today") {
+        const today = new Date().toISOString().slice(0, 10);
+        params.from_date = today;
+        // Backend uses `to_date` as EXCLUSIVE upper bound so bump by 1 day.
+        const t = new Date(); t.setDate(t.getDate() + 1);
+        params.to_date = t.toISOString().slice(0, 10);
+      } else if (month) {
+        params.month = month;
+      }
+      if (channel) params.channel = channel;
+      const r = await api.get<{ items: EarningRow[] }>("/vendor/me/earnings", { params });
+      setEarningRows(r.data.items || []);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("earnings fetch failed", formatApiError(e));
+      setEarningRows([]);
+    } finally { setEarningsLoading(false); }
+  }, []);
+
+  const openEarnings = useCallback((scope: "today" | "lifetime") => {
+    setEarningsOpen({ scope });
+    setEarningsMonth("");
+    setEarningsChannel("");
+    fetchEarnings(scope, "", "");
+  }, [fetchEarnings]);
 
   if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator size="large" color={colors.primary} /></View></SafeAreaView>;
 
@@ -198,12 +255,37 @@ export default function VendorDashboard() {
             <Feather name="chevron-right" size={18} color={colors.primary} />
           </TouchableOpacity>
           <View style={styles.statsGrid}>
-            <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
+            {/* Jul 2026 — Tappable earnings cards → open a drill-down modal
+                with per-row detail (online + POS combined) and date filters. */}
+            <TouchableOpacity activeOpacity={0.8} style={{ flexBasis: "48%" }} onPress={() => openEarnings("today")} testID="stat-today-earn">
+              <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
+            </TouchableOpacity>
             <StatCard icon="package" label="TODAY ORDERS" value={String(stats.today_orders)} color="#1F5E9E" />
-            <StatCard icon="tag" label="LIFETIME EARNINGS" value={formatINR(stats.total_earnings)} color={colors.primary} />
+            <TouchableOpacity activeOpacity={0.8} style={{ flexBasis: "48%" }} onPress={() => openEarnings("lifetime")} testID="stat-life-earn">
+              <StatCard icon="tag" label="LIFETIME EARNINGS" value={formatINR(stats.total_earnings)} color={colors.primary} />
+            </TouchableOpacity>
             <StatCard icon="shopping-cart" label="LIFETIME SALES" value={formatINR(stats.total_sales)} color="#7A4A0E" />
             <StatCard icon="box" label="PRODUCTS" value={`${stats.published_count}/${stats.products_count}`} color="#1F5E9E" />
             <StatCard icon="credit-card" label="WALLET" value={formatINR(stats.wallet_balance)} color="#1F6B44" />
+          </View>
+          {/* Jul 2026 — Per-channel breakdown pill (Online + POS/New Sales) */}
+          <View style={styles.channelRow}>
+            <View style={styles.channelPill}>
+              <Feather name="globe" size={12} color="#1D4ED8" />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.channelPillLabel}>ONLINE SHOP</Text>
+                <Text style={styles.channelPillValue}>{formatINR(stats.online_total || 0)}</Text>
+                <Text style={styles.channelPillMeta}>{stats.online_orders_all || 0} order{(stats.online_orders_all || 0) === 1 ? "" : "s"}</Text>
+              </View>
+            </View>
+            <View style={[styles.channelPill, { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" }]}>
+              <Feather name="printer" size={12} color="#047857" />
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.channelPillLabel, { color: "#047857" }]}>NEW SALES · POS</Text>
+                <Text style={styles.channelPillValue}>{formatINR(stats.pos_total || 0)}</Text>
+                <Text style={styles.channelPillMeta}>{stats.pos_orders_all || 0} invoice{(stats.pos_orders_all || 0) === 1 ? "" : "s"}</Text>
+              </View>
+            </View>
           </View>
           <TouchableOpacity onPress={onAddProduct} style={styles.primaryBtn} testID="vendor-add-cta">
             <Feather name="plus-circle" size={18} color={colors.primaryFg} /><Text style={styles.primaryBtnText}>  Add new product</Text>
@@ -482,6 +564,141 @@ export default function VendorDashboard() {
           </View>
         </View>
       </Modal>
+
+      {/* Jul 2026 — Earnings drill-down modal */}
+      <Modal
+        visible={!!earningsOpen}
+        animationType="slide"
+        onRequestClose={() => setEarningsOpen(null)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+          <View style={styles.header}>
+            <TouchableOpacity onPress={() => setEarningsOpen(null)} style={styles.iconBtn} testID="earn-close">
+              <Feather name="x" size={22} color={colors.textMain} />
+            </TouchableOpacity>
+            <Text style={styles.title}>
+              {earningsOpen?.scope === "today" ? "Today's Earnings" : "Lifetime Earnings"}
+            </Text>
+            <View style={{ width: 40 }} />
+          </View>
+
+          {/* Filter controls */}
+          <View style={{ paddingHorizontal: spacing.screen, paddingBottom: 8 }}>
+            <View style={{ flexDirection: "row", gap: 6, marginBottom: 8 }}>
+              {(["", "online", "pos"] as const).map((c) => (
+                <TouchableOpacity
+                  key={c || "all"}
+                  onPress={() => {
+                    setEarningsChannel(c);
+                    if (earningsOpen) fetchEarnings(earningsOpen.scope, earningsMonth, c);
+                  }}
+                  style={{
+                    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 99,
+                    backgroundColor: earningsChannel === c ? colors.primary : colors.surface,
+                    borderWidth: 1, borderColor: earningsChannel === c ? colors.primary : colors.border,
+                  }}
+                  testID={`earn-ch-${c || "all"}`}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: earningsChannel === c ? colors.primaryFg : colors.textMain, letterSpacing: 0.4 }}>
+                    {c === "" ? "ALL CHANNELS" : c === "online" ? "ONLINE" : "POS · NEW"}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {earningsOpen?.scope === "lifetime" ? (
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                {(() => {
+                  const now = new Date();
+                  const opts: { key: string; label: string }[] = [{ key: "", label: "All time" }];
+                  for (let i = 0; i < 6; i++) {
+                    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+                    const label = d.toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+                    opts.push({ key, label });
+                  }
+                  return opts.map((o) => {
+                    const on = earningsMonth === o.key;
+                    return (
+                      <TouchableOpacity
+                        key={o.key || "all"}
+                        onPress={() => {
+                          setEarningsMonth(o.key);
+                          if (earningsOpen) fetchEarnings(earningsOpen.scope, o.key, earningsChannel);
+                        }}
+                        style={{
+                          paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+                          backgroundColor: on ? colors.brand100 : colors.surface,
+                          borderWidth: 1, borderColor: on ? colors.primary : colors.border,
+                        }}
+                        testID={`earn-mo-${o.key || "all"}`}
+                      >
+                        <Text style={{ fontSize: 11, fontWeight: on ? "800" : "700", color: on ? colors.primary : colors.textMain }}>
+                          {o.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  });
+                })()}
+              </View>
+            ) : null}
+          </View>
+
+          {/* Summary strip */}
+          <View style={{ flexDirection: "row", justifyContent: "space-between", paddingHorizontal: spacing.screen, marginBottom: 6 }}>
+            <Text style={{ fontSize: 11, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.4 }}>
+              {earningRows.length} TXN{earningRows.length === 1 ? "" : "S"}
+            </Text>
+            <Text style={{ fontSize: 14, fontWeight: "900", color: colors.primary }}>
+              {formatINR(earningRows.reduce((a, r) => a + (r.line_total || 0), 0))}
+            </Text>
+          </View>
+
+          {/* Rows */}
+          {earningsLoading ? (
+            <View style={{ padding: 40, alignItems: "center" }}>
+              <ActivityIndicator color={colors.primary} />
+            </View>
+          ) : (
+            <FlatList
+              contentContainerStyle={{ padding: spacing.screen, paddingTop: 4, paddingBottom: 40 }}
+              data={earningRows}
+              keyExtractor={(r, i) => `${r.channel}-${r.id}-${i}`}
+              renderItem={({ item }) => (
+                <View style={styles.earnRow}>
+                  <View style={{
+                    paddingHorizontal: 6, paddingVertical: 3, borderRadius: 6,
+                    backgroundColor: item.channel === "online" ? "#3B82F620" : "#10B98120",
+                  }}>
+                    <Text style={{
+                      fontSize: 9, fontWeight: "800", letterSpacing: 0.6,
+                      color: item.channel === "online" ? "#1D4ED8" : "#047857",
+                    }}>{item.channel === "online" ? "ONLINE" : "POS"}</Text>
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.earnProduct} numberOfLines={2}>{item.product_name}</Text>
+                    <Text style={styles.earnMeta}>
+                      {new Date(item.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}
+                      {item.qty ? `  ·  Qty ${item.qty}` : ""}
+                      {item.invoice_no ? `  ·  ${item.invoice_no}` : (item.order_id ? `  ·  #${item.order_id.slice(0, 8).toUpperCase()}` : "")}
+                    </Text>
+                  </View>
+                  <Text style={styles.earnAmount}>{formatINR(item.line_total)}</Text>
+                </View>
+              )}
+              ListEmptyComponent={
+                <View style={{ padding: 40, alignItems: "center" }}>
+                  <Feather name="inbox" size={30} color={colors.textMuted} />
+                  <Text style={{ color: colors.textMuted, marginTop: 8, fontWeight: "700", fontSize: 13 }}>
+                    No earnings in this view.
+                  </Text>
+                  <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 4 }}>Try a different month or channel.</Text>
+                </View>
+              }
+            />
+          )}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -514,6 +731,26 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 13, fontWeight: "700", color: colors.textMuted },
   statsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   statCard: { width: "47%", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14 },
+  // Jul 2026 — Per-channel breakdown pills below the stats grid
+  channelRow: { flexDirection: "row", gap: 10, marginTop: 12 },
+  channelPill: {
+    flex: 1, flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: "#EFF6FF", borderColor: "#DBEAFE", borderWidth: 1,
+    borderRadius: 12, padding: 10,
+  },
+  channelPillLabel: { fontSize: 9, fontWeight: "800", letterSpacing: 0.6, color: "#1D4ED8" },
+  channelPillValue: { fontSize: 15, fontWeight: "900", color: colors.textMain, marginTop: 2 },
+  channelPillMeta: { fontSize: 10, color: colors.textMuted, marginTop: 1 },
+  // Earnings drill-down row
+  earnRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    padding: 12, marginBottom: 8,
+    backgroundColor: colors.surface, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  earnProduct: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  earnMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  earnAmount: { fontSize: 15, fontWeight: "900", color: colors.primary },
   statIcon: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", marginBottom: 8 },
   statLabel: { fontSize: 9, letterSpacing: 1, color: colors.textMuted, fontWeight: "700" },
   statValue: { fontSize: 17, fontWeight: "800", marginTop: 2 },

@@ -67,8 +67,13 @@ async def _collect_cascade_names(root_ident: str) -> List[str]:
 
 
 def _build_category_filter(names: List[str]) -> Dict[str, Any]:
-    """Match any product whose `category` OR `subcategory` matches one
-    of the given names (case-insensitive)."""
+    """Match any product whose `category` / `subcategory` / `sub_category`
+    matches one of the given names (case-insensitive).
+
+    Jul 2026 — Added `sub_category` (with underscore) because vendors
+    have been writing the sub-category into that field historically
+    while the tree data model uses `subcategory` — one match blob
+    covers both variants."""
     if not names:
         return {}
     # Escape and build a case-insensitive OR
@@ -77,10 +82,12 @@ def _build_category_filter(names: List[str]) -> Dict[str, Any]:
     return {"$or": [
         {"category": {"$in": names}},
         {"subcategory": {"$in": names}},
+        {"sub_category": {"$in": names}},
         # Legacy free-form vendors may have written the name in different
         # casing — a case-insensitive regex catches those too.
         *[{"category": r} for r in regexes],
         *[{"subcategory": r} for r in regexes],
+        *[{"sub_category": r} for r in regexes],
     ]}
 
 

@@ -22,18 +22,79 @@ import { formatApiError } from "../../src/api";
 export default function VendorInvoices() {
   const router = useRouter();
   const { open } = useLocalSearchParams<{ open?: string }>();
-  const [items, setItems] = useState<PosSale[]>([]);
+  const [items, setItems] = useState<(PosSale & { _channel?: "pos" | "online" })[]>([]);
   const [settings, setSettings] = useState<PosSettings | null>(null);
-  const [preview, setPreview] = useState<PosSale | null>(null);
+  const [preview, setPreview] = useState<(PosSale & { _channel?: "pos" | "online" }) | null>(null);
   const [loading, setLoading] = useState(true);
   const [printing, setPrinting] = useState(false);
+  const [channel, setChannel] = useState<"all" | "pos" | "online">("all");
 
   const load = useCallback(async () => {
     try {
-      const [r, s] = await Promise.all([listSales({ limit: 200, status: "completed" }), getPosSettings()]);
-      setItems(r.items); setSettings(s);
+      // Jul 2026 — Merge POS + online sales into the invoices list so
+      // vendors have a single place to review every sale document.
+      // Online sales come from /api/vendor/me/sales (which now also
+      // includes POS rows tagged with `channel: "pos"`, but here we
+      // just want the online rows to avoid double-counting).
+      const [posRes, s, onlineRes] = await Promise.all([
+        listSales({ limit: 200, status: "completed" }),
+        getPosSettings(),
+        (async () => {
+          try {
+            const { api } = await import("../../src/api");
+            const r = await api.get<{ items: any[] }>("/vendor/me/sales");
+            return r.data?.items || [];
+          } catch { return []; }
+        })(),
+      ]);
+      // Online sales are order-shaped — reshape to PosSale-compatible.
+      const onlineOnly = (onlineRes as any[]).filter((o) => o.channel !== "pos");
+      const onlineAsInvoice = onlineOnly.map((o: any) => {
+        const items = Array.isArray(o.items) ? o.items : [];
+        const total = Number(o.total || 0);
+        return {
+          id: o.order_id || o.id,
+          vendor_id: "",
+          invoice_no: `ORD-${String(o.order_id || o.id).slice(0, 8).toUpperCase()}`,
+          created_at: o.created_at,
+          status: (o.status === "cancelled" ? "cancelled" : "completed") as any,
+          customer: {
+            name: o.buyer_name || "Customer",
+            phone: o.buyer_phone || "",
+            email: o.buyer_email || "",
+            gstin: "",
+          },
+          gst_inclusive: true,
+          totals: {
+            subtotal: total,
+            gst_total: 0,
+            grand_total: total,
+            round_off: 0,
+          },
+          notes: "",
+          items: items.map((it: any) => ({
+            product_id: "",
+            name: it.name || "Item",
+            price: Number(it.price || 0),
+            qty: Number(it.qty || 1),
+            gst_pct: 0,
+            gst_amount: 0,
+            line_total: Number(it.price || 0) * Number(it.qty || 1),
+          })),
+          payments: [{ mode: (o.paid_via || "wallet"), amount: total, reference: "" }],
+          _channel: "online" as const,
+        };
+      });
+      const posWithTag = (posRes.items || []).map((s) => ({ ...s, _channel: "pos" as const }));
+      const merged = [...posWithTag, ...onlineAsInvoice]
+        .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+      setItems(merged);
+      setSettings(s);
       if (open) {
-        try { const one = await getSale(String(open)); setPreview(one); } catch { /* ignore */ }
+        try {
+          const one = await getSale(String(open));
+          setPreview({ ...one, _channel: "pos" });
+        } catch { /* ignore */ }
       }
     } catch (e) { Alert.alert("Load failed", formatApiError(e)); }
     finally { setLoading(false); }
@@ -168,18 +229,50 @@ export default function VendorInvoices() {
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}><Feather name="arrow-left" size={20} color={colors.textMain} /></TouchableOpacity>
         <Text style={styles.title}>Invoices</Text>
       </View>
+      {/* Jul 2026 — Channel filter (POS / Online / All) */}
+      <View style={{ flexDirection: "row", marginHorizontal: spacing.screen, backgroundColor: colors.surfaceMuted, borderRadius: 99, padding: 4, gap: 2, marginBottom: 8 }}>
+        {(["all", "pos", "online"] as const).map((t) => (
+          <TouchableOpacity
+            key={t}
+            onPress={() => setChannel(t)}
+            style={{
+              flex: 1, paddingVertical: 8, alignItems: "center", borderRadius: 99,
+              backgroundColor: channel === t ? colors.primary : "transparent",
+            }}
+            testID={`inv-tab-${t}`}
+          >
+            <Text style={{ fontSize: 11, fontWeight: "800", color: channel === t ? colors.primaryFg : colors.textMuted, letterSpacing: 0.6 }}>
+              {t === "all" ? "ALL" : t === "pos" ? "POS · NEW" : "ONLINE SHOP"}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
       <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 40 }}>
         {loading ? <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} /> :
-          items.length === 0 ? <Text style={{ color: colors.textMuted, textAlign: "center", marginTop: 40 }}>No invoices yet.</Text> :
-            items.map(s => (
-              <TouchableOpacity key={s.id} onPress={() => setPreview(s)} style={styles.card} activeOpacity={0.85}>
+          (() => {
+            const filtered = channel === "all" ? items : items.filter((s) => s._channel === channel);
+            if (filtered.length === 0) return <Text style={{ color: colors.textMuted, textAlign: "center", marginTop: 40 }}>No invoices in this view.</Text>;
+            return filtered.map(s => (
+              <TouchableOpacity key={`${s._channel}-${s.id}`} onPress={() => setPreview(s)} style={styles.card} activeOpacity={0.85}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.inv}>{s.invoice_no}</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Text style={styles.inv} numberOfLines={1}>{s.invoice_no}</Text>
+                    <View style={{
+                      paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
+                      backgroundColor: s._channel === "online" ? "#3B82F620" : "#10B98120",
+                    }}>
+                      <Text style={{
+                        fontSize: 9, fontWeight: "800", letterSpacing: 0.6,
+                        color: s._channel === "online" ? "#1D4ED8" : "#047857",
+                      }}>{s._channel === "online" ? "ONLINE" : "POS"}</Text>
+                    </View>
+                  </View>
                   <Text style={styles.meta}>{new Date(s.created_at).toLocaleString("en-IN")} · {s.customer?.name || "Walk-in"}</Text>
                 </View>
                 <Text style={styles.amount}>{formatINR(s.totals.grand_total)}</Text>
               </TouchableOpacity>
-            ))
+            ));
+          })()
         }
       </ScrollView>
 

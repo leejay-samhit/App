@@ -20,7 +20,7 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl,
-  TouchableOpacity, Image, Alert,
+  TouchableOpacity, Image, Alert, Modal, TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -41,6 +41,12 @@ type VendorSale = {
   product_name?: string; product_image_url?: string; qty?: number; unit_price?: number;
   buyer_name?: string; buyer_email?: string; buyer_phone?: string;
   vendor_id?: string; vendor_name?: string; vendor_email?: string; vendor_phone?: string;
+  // Jul 2026 — Delivery info fields (set via /vendor/orders/:id/delivery-info)
+  estimated_delivery_at?: string | null;
+  delivery_person_name?: string | null;
+  delivery_person_phone?: string | null;
+  channel?: "online" | "pos";
+  invoice_no?: string;
 };
 
 const STATUSES = ["placed", "shipped", "delivered", "cancelled"] as const;
@@ -107,6 +113,12 @@ export default function VendorOrders() {
   const [filter, setFilter] = useState<string>("all");
   const [busy, setBusy] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  // Jul 2026 — Delivery-info modal state
+  const [editingOrder, setEditingOrder] = useState<VendorSale | null>(null);
+  const [editEta, setEditEta] = useState("");
+  const [editName, setEditName] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [savingInfo, setSavingInfo] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -278,20 +290,57 @@ export default function VendorOrders() {
                 {/* Vendor fulfilment controls */}
                 <View style={styles.actionsBlock}>
                   {renderStage(item)}
+
+                  {/* Jul 2026 — Delivery info summary + edit action.
+                      Only relevant for real online orders (not POS). */}
+                  {item.channel !== "pos" && (item.estimated_delivery_at || item.delivery_person_name || item.delivery_person_phone) ? (
+                    <View style={styles.deliveryInfoBox}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                        <Feather name="clock" size={12} color={colors.primary} />
+                        <Text style={styles.deliveryInfoLabel}>DELIVERY INFO · shared with customer</Text>
+                      </View>
+                      {item.estimated_delivery_at ? (
+                        <Text style={styles.deliveryInfoLine}>ETA: {item.estimated_delivery_at}</Text>
+                      ) : null}
+                      {(item.delivery_person_name || item.delivery_person_phone) ? (
+                        <Text style={styles.deliveryInfoLine}>
+                          {item.delivery_person_name || "Rider"}
+                          {item.delivery_person_phone ? ` · ${item.delivery_person_phone}` : ""}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
+
                   <View style={styles.btnRow}>
-                    {item.status === "placed" && (
+                    {item.status === "placed" && item.channel !== "pos" && (
                       <TouchableOpacity onPress={() => setStatus(orderId, "shipped")} disabled={busy === orderId} style={styles.primaryBtn} testID={`vship-${orderId}`}>
                         <Feather name="truck" size={14} color={colors.primaryFg} />
                         <Text style={styles.primaryBtnText}>Mark shipped</Text>
                       </TouchableOpacity>
                     )}
-                    {item.status === "shipped" && (
+                    {item.status === "shipped" && item.channel !== "pos" && (
                       <TouchableOpacity onPress={() => setStatus(orderId, "delivered")} disabled={busy === orderId} style={styles.primaryBtn} testID={`vdeliv-${orderId}`}>
                         <Feather name="check-circle" size={14} color={colors.primaryFg} />
                         <Text style={styles.primaryBtnText}>Mark delivered</Text>
                       </TouchableOpacity>
                     )}
-                    {(item.status === "placed" || item.status === "shipped") && (
+                    {item.channel !== "pos" && (item.status === "placed" || item.status === "shipped") && (
+                      <TouchableOpacity
+                        onPress={() => {
+                          setEditingOrder(item);
+                          setEditEta(item.estimated_delivery_at || "");
+                          setEditName(item.delivery_person_name || "");
+                          setEditPhone(item.delivery_person_phone || "");
+                        }}
+                        disabled={busy === orderId}
+                        style={styles.infoBtn}
+                        testID={`vdlvinfo-${orderId}`}
+                      >
+                        <Feather name="edit-3" size={14} color={colors.primary} />
+                        <Text style={styles.infoBtnText}>Delivery info</Text>
+                      </TouchableOpacity>
+                    )}
+                    {item.channel !== "pos" && (item.status === "placed" || item.status === "shipped") && (
                       <TouchableOpacity onPress={() => setStatus(orderId, "cancelled")} disabled={busy === orderId} style={styles.ghostBtn} testID={`vcancel-${orderId}`}>
                         <Feather name="x-circle" size={14} color="#B3261E" />
                         <Text style={styles.ghostBtnText}>Cancel & refund</Text>
@@ -314,6 +363,92 @@ export default function VendorOrders() {
           }
         />
       )}
+
+      {/* Jul 2026 — Delivery info modal.  Vendor sets ETA + delivery
+          person contact.  Both fields are optional; blank fields
+          preserve the existing value on save. */}
+      <Modal visible={!!editingOrder} transparent animationType="slide" onRequestClose={() => setEditingOrder(null)}>
+        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setEditingOrder(null)}>
+          <TouchableOpacity activeOpacity={1} style={styles.modalSheet} onPress={() => { /* stopPropagation */ }}>
+            <View style={styles.modalGrabber} />
+            <Text style={styles.modalTitle}>Delivery information</Text>
+            <Text style={styles.modalSub}>Order #{(editingOrder?.order_id || editingOrder?.id || "").slice(0, 8).toUpperCase()}</Text>
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Estimated delivery (ETA)</Text>
+              <TextInput
+                value={editEta}
+                onChangeText={setEditEta}
+                placeholder="e.g. Tomorrow by 6:00 PM  ·  or 2026-07-31 18:00"
+                placeholderTextColor={colors.textMuted}
+                style={styles.fieldInput}
+                testID="vdlvinfo-eta"
+              />
+            </View>
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Delivery person — name</Text>
+              <TextInput
+                value={editName}
+                onChangeText={setEditName}
+                placeholder="Ravi Kumar"
+                placeholderTextColor={colors.textMuted}
+                style={styles.fieldInput}
+                testID="vdlvinfo-name"
+              />
+            </View>
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Delivery person — phone</Text>
+              <TextInput
+                value={editPhone}
+                onChangeText={setEditPhone}
+                placeholder="98765 43210"
+                placeholderTextColor={colors.textMuted}
+                keyboardType="phone-pad"
+                style={styles.fieldInput}
+                testID="vdlvinfo-phone"
+              />
+            </View>
+
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
+              <TouchableOpacity
+                onPress={() => setEditingOrder(null)}
+                style={[styles.modalBtn, styles.modalGhost]}
+                disabled={savingInfo}
+              >
+                <Text style={styles.modalGhostText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={async () => {
+                  if (!editingOrder) return;
+                  const oid = editingOrder.order_id || editingOrder.id;
+                  setSavingInfo(true);
+                  try {
+                    await api.patch(`/vendor/orders/${oid}/delivery-info`, {
+                      estimated_delivery_at: editEta.trim(),
+                      delivery_person_name: editName.trim(),
+                      delivery_person_phone: editPhone.trim(),
+                    });
+                    setEditingOrder(null);
+                    await load();
+                  } catch (e) {
+                    Alert.alert("Couldn't save", formatApiError(e));
+                  } finally { setSavingInfo(false); }
+                }}
+                style={[styles.modalBtn, styles.modalPrimary, savingInfo && { opacity: 0.6 }]}
+                disabled={savingInfo}
+                testID="vdlvinfo-save"
+              >
+                {savingInfo ? <ActivityIndicator color={colors.primaryFg} /> : (
+                  <>
+                    <Feather name="check" size={15} color={colors.primaryFg} />
+                    <Text style={styles.modalPrimaryText}>Save & notify customer</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -360,4 +495,45 @@ const styles = StyleSheet.create({
   emptyBox: { alignItems: "center", padding: 40, gap: 6 },
   emptyText: { fontSize: 14, color: colors.textMuted, fontWeight: "700", textAlign: "center" },
   emptyHint: { fontSize: 12, color: colors.textMuted, textAlign: "center" },
+
+  // Jul 2026 — Delivery info summary + modal
+  deliveryInfoBox: {
+    backgroundColor: colors.brand100, borderRadius: 10,
+    padding: 10, marginBottom: 6,
+    borderWidth: 1, borderColor: colors.primary + "22",
+  },
+  deliveryInfoLabel: { fontSize: 9, fontWeight: "800", color: colors.primary, letterSpacing: 0.8 },
+  deliveryInfoLine: { fontSize: 12, color: colors.textMain, fontWeight: "700", marginTop: 2 },
+  infoBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 10, paddingVertical: 8, borderRadius: 99,
+    borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.brand100,
+  },
+  infoBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary },
+
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
+  modalSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: 22, paddingBottom: 34,
+  },
+  modalGrabber: { width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: "center", marginBottom: 14 },
+  modalTitle: { fontSize: 18, fontWeight: "900", color: colors.textMain },
+  modalSub: { fontSize: 12, color: colors.textMuted, marginTop: 2, marginBottom: 14, letterSpacing: 0.5 },
+  fieldBlock: { marginBottom: 12 },
+  fieldLabel: { fontSize: 11, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.5, marginBottom: 6 },
+  fieldInput: {
+    fontSize: 13, color: colors.textMain,
+    borderWidth: 1, borderColor: colors.border, borderRadius: 10,
+    paddingHorizontal: 12, paddingVertical: 10,
+    backgroundColor: colors.surfaceMuted,
+  },
+  modalBtn: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    paddingVertical: 13, borderRadius: 12,
+  },
+  modalPrimary: { backgroundColor: colors.primary },
+  modalPrimaryText: { color: colors.primaryFg, fontWeight: "800", fontSize: 13 },
+  modalGhost: { backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  modalGhostText: { color: colors.textMain, fontWeight: "800", fontSize: 13 },
 });

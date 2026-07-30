@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration Jul-2026 backend regression covering features/bugs A–G plus prior iteration regressions. 21 pytest cases in /app/backend/tests/test_iteration_jul2026_delivery_earnings.py — 18 PASSED, 3 SKIPPED (no seed data available: vendor A has zero online orders; customer leejay@gmail.com has zero orders — so the PATCH-round-trip and two of the three /orders/cancel gates could not execute against real data). All shape/auth/math checks and the sub_category filter fix succeeded. Zero critical or minor backend issues.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_jul2026_delivery_earnings.py",
+    "/app/test_reports/pytest/iteration_52.xml"
+  ],
+  "action_items": [
+    "Optional but recommended: seed a small end-to-end order (customer → vendor A) so the PATCH /vendor/orders/{id}/delivery-info round-trip and the two remaining /orders/{id}/cancel gates (status!=placed AND delivery_info_updated_at set) can be exercised against real rows. Currently these paths pass by ownership/shape checks only.",
+    "Consider trimming server.py — it's at 9,476 lines. Moving the vendor stats/earnings/sales/delivery-info block (~500 lines) into /app/backend/routes/vendor_dashboard.py would keep the modular refactor going."
+  ],
+  "critical_code_review_comments": [
+    "backend/server.py is 9,476 lines — well above the 700-line ceiling from the code-review guideline. Vendor dashboard block (stats + earnings + sales + delivery-info) is a natural next carve-out.",
+    "vendor_my_stats correctly excludes cancelled POS rows via {status: {$ne: 'cancelled'}} but vendor_my_sales appends ALL POS rows (including cancelled) then labels them 'delivered' or 'cancelled'. That's consistent with the intent (show cancelled POS invoices too), but it does mean the sales list totals include cancelled invoices while /vendor/me/stats does not — worth confirming with product owner that the dashboard KPI and the Sales list intentionally diverge.",
+    "vendor_update_delivery_info uses vendor_sales as the ownership signal. If a vendor has ONLY POS sales for a given order (no vendor_sales row), the endpoint returns 403 — this is by design since online delivery info only applies to online orders, but a clearer 404/422 message would be friendlier than 'Not your order'."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% of executed (18/18), 3 skipped due to missing seed data", "frontend": "n/a"},
+  "seed_data_creation": "None — read-only regression + endpoint auth/shape verification. Recommended: seed one customer order (leejay → vendor A) for full end-to-end delivery-info + cancel testing.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "test_iteration_jul2026_delivery_earnings.py is idempotent and safe to re-run. It uses vendor B (knasar786) for stats/earnings shape checks (0 products = clean 0/0 math), vendor A (brightkittu) for stats + sales content checks, and leejay for cancel-flow shape. If the main agent adds a seed order (or runs an admin-side POS entry for knasar786), rerun to exercise the 3 currently-skipped tests.",
+  "rca_of_issue": "Sub-category filter bug (C) confirmed fixed: /api/products?category=Mobiles&subcategory=Apple now returns 2 items (both stored with sub_category='Apple' — underscore variant) because products_public._build_category_filter (lines 69–91) now matches both subcategory AND sub_category, plus case-insensitive regex fallbacks. /api/products?category=Mobiles&subcategory=Samsung returns 1 item. Regression: pincode strict_location + admin shop-layout still respond correctly."
+}

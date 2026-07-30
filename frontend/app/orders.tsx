@@ -6,12 +6,12 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, FlatList, Image, TouchableOpacity, ActivityIndicator,
-  RefreshControl, Modal, Platform, Share,
+  RefreshControl, Modal, Platform, Share, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api } from "../src/api";
+import { api, formatApiError } from "../src/api";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
 type OrderItem = { name: string; price: number; image_url: string; qty: number };
@@ -27,6 +27,11 @@ type Order = {
     line1?: string; line2?: string; city?: string;
     state?: string; pincode?: string; phone?: string;
   };
+  // Jul 2026 — Delivery info fields set by the vendor
+  estimated_delivery_at?: string | null;
+  delivery_person_name?: string | null;
+  delivery_person_phone?: string | null;
+  delivery_info_updated_at?: string | null;
 };
 
 const STATUS_META: Record<string, { color: string; label: string; icon: any }> = {
@@ -199,6 +204,73 @@ export default function OrdersScreen() {
                     <Feather name="chevron-right" size={14} color={colors.primary} />
                   </View>
                 </View>
+
+                {/* Jul 2026 — Vendor-provided delivery info (ETA + rider).
+                    Rendered here so the customer sees the update instantly
+                    without opening the invoice modal. */}
+                {(item.estimated_delivery_at || item.delivery_person_name || item.delivery_person_phone) ? (
+                  <View style={styles.dlvBox}>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <Feather name="truck" size={12} color="#3B82F6" />
+                      <Text style={styles.dlvLabel}>DELIVERY UPDATE</Text>
+                    </View>
+                    {item.estimated_delivery_at ? (
+                      <Text style={styles.dlvLine}>Arrives by <Text style={{ fontWeight: "900" }}>{item.estimated_delivery_at}</Text></Text>
+                    ) : null}
+                    {(item.delivery_person_name || item.delivery_person_phone) ? (
+                      <TouchableOpacity
+                        onPress={() => {
+                          if (item.delivery_person_phone) {
+                            try { require("react-native").Linking.openURL(`tel:${item.delivery_person_phone}`); } catch { /* ignore */ }
+                          }
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.dlvLine}>
+                          Delivered by <Text style={{ fontWeight: "900" }}>{item.delivery_person_name || "Rider"}</Text>
+                          {item.delivery_person_phone ? (
+                            <Text style={{ color: "#3B82F6", fontWeight: "800" }}>  ·  📞 {item.delivery_person_phone}</Text>
+                          ) : null}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                ) : null}
+
+                {/* Jul 2026 — Cancel button ONLY when the order is still at
+                    "placed" AND the vendor hasn't taken any action yet.
+                    Once the vendor sets ETA / rider or moves the status
+                    forward, cancellation is disabled. */}
+                {item.status === "placed" && !item.delivery_info_updated_at ? (
+                  <TouchableOpacity
+                    onPress={(e) => {
+                      e.stopPropagation?.();
+                      Alert.alert(
+                        "Cancel this order?",
+                        `Your ${formatINR(item.total)} refund will be credited back to your wallet.`,
+                        [
+                          { text: "Keep order", style: "cancel" },
+                          {
+                            text: "Cancel order", style: "destructive",
+                            onPress: async () => {
+                              try {
+                                await api.post(`/orders/${item.id}/cancel`);
+                                await load();
+                              } catch (err) {
+                                Alert.alert("Couldn't cancel", formatApiError(err));
+                              }
+                            },
+                          },
+                        ],
+                      );
+                    }}
+                    style={styles.cancelBtn}
+                    testID={`user-cancel-${item.id}`}
+                  >
+                    <Feather name="x-circle" size={13} color="#B3261E" />
+                    <Text style={styles.cancelBtnText}>Cancel order</Text>
+                  </TouchableOpacity>
+                ) : null}
               </TouchableOpacity>
             );
           }}
@@ -336,10 +408,23 @@ const styles = StyleSheet.create({
   thumb: { width: 44, height: 44, borderRadius: 8, backgroundColor: colors.surfaceMuted },
   thumbMore: { alignItems: "center", justifyContent: "center", backgroundColor: colors.brand100, borderRadius: 8 },
   thumbMoreText: { fontSize: 11, fontWeight: "800", color: colors.primary },
-  metaRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },
-  metaText: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
+  metaRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },  metaText: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
   viewBtn: { flexDirection: "row", alignItems: "center", gap: 2 },
   viewBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
+  // Jul 2026 — Vendor-provided delivery update box (customer view)
+  dlvBox: {
+    marginTop: 10, padding: 10, borderRadius: 10,
+    backgroundColor: "#EFF6FF", borderWidth: 1, borderColor: "#DBEAFE",
+  },
+  dlvLabel: { fontSize: 9, fontWeight: "800", color: "#1D4ED8", letterSpacing: 0.8 },
+  dlvLine: { fontSize: 12, color: colors.textMain, marginTop: 2, lineHeight: 18 },
+  // Jul 2026 — User cancel-order button (gated to placed + no vendor action)
+  cancelBtn: {
+    marginTop: 10, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, paddingVertical: 10, borderRadius: 10,
+    borderWidth: 1, borderColor: "#FCA5A5", backgroundColor: "#FEF2F2",
+  },
+  cancelBtnText: { fontSize: 12, fontWeight: "800", color: "#B3261E" },
   // Invoice preview styles
   invHead: { alignItems: "center", marginTop: 8, marginBottom: 14, paddingVertical: 14, borderBottomWidth: 2, borderBottomColor: colors.primary },
   invBrand: { fontSize: 28, fontWeight: "900", color: colors.primary, letterSpacing: 3 },

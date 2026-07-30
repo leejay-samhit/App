@@ -7557,23 +7557,156 @@ async def vendor_my_status(user: Dict[str, Any] = Depends(get_current_user)):
 
 @api_router.get("/vendor/me/stats")
 async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
+    """Jul 2026 rewrite — Vendor Dashboard KPI numbers now report the
+    GROSS customer-paid amount for BOTH channels (online + POS), no
+    margin or commission deduction.  Also returns per-channel breakdowns
+    so the dashboard drill-down can filter cleanly.
+    """
     today_iso = now_utc().date().isoformat()
-    sales = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).to_list(5000)
-    total_sales = sum(s.get("line_total", 0) for s in sales)
-    total_earnings = sum(s.get("vendor_share", 0) for s in sales)
-    today_earnings = sum(s.get("vendor_share", 0) for s in sales if (s.get("created_at") or "").startswith(today_iso))
-    today_orders = len({s.get("order_id") for s in sales if (s.get("created_at") or "").startswith(today_iso)})
+
+    # ── Online sales (vendor_sales collection — one row per line item) ─
+    online_rows = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).to_list(20000)
+    online_total = sum(float(s.get("line_total") or 0) for s in online_rows)
+    online_today = sum(
+        float(s.get("line_total") or 0)
+        for s in online_rows if (s.get("created_at") or "").startswith(today_iso)
+    )
+    online_orders_all = len({s.get("order_id") for s in online_rows if s.get("order_id")})
+    online_orders_today = len({
+        s.get("order_id") for s in online_rows
+        if s.get("order_id") and (s.get("created_at") or "").startswith(today_iso)
+    })
+
+    # ── POS sales (vendor_pos_sales — one row per invoice) ────────────
+    pos_rows = await db.vendor_pos_sales.find(
+        {"vendor_id": vendor["id"], "status": {"$ne": "cancelled"}},
+        {"_id": 0},
+    ).to_list(20000)
+    pos_total = sum(float(s.get("total") or 0) for s in pos_rows)
+    pos_today = sum(
+        float(s.get("total") or 0)
+        for s in pos_rows if (s.get("created_at") or "").startswith(today_iso)
+    )
+    pos_orders_all = len(pos_rows)
+    pos_orders_today = len([s for s in pos_rows if (s.get("created_at") or "").startswith(today_iso)])
+
     products_count = await db.products.count_documents({"vendor_id": vendor["id"]})
     published_count = await db.products.count_documents({"vendor_id": vendor["id"], "is_published": True})
+
     return {
-        "total_sales": round(total_sales, 2),
-        "total_earnings": round(total_earnings, 2),
-        "today_earnings": round(today_earnings, 2),
-        "today_orders": today_orders,
-        "all_orders": len({s.get("order_id") for s in sales}),
+        # Gross customer-paid amounts (no margin / commission deduction).
+        "total_sales": round(online_total + pos_total, 2),
+        "total_earnings": round(online_total + pos_total, 2),  # alias for legacy FE
+        "today_earnings": round(online_today + pos_today, 2),
+        "today_orders": online_orders_today + pos_orders_today,
+        "all_orders": online_orders_all + pos_orders_all,
+        # Per-channel breakdown for the dashboard drill-down.
+        "online_total": round(online_total, 2),
+        "online_today": round(online_today, 2),
+        "online_orders_all": online_orders_all,
+        "online_orders_today": online_orders_today,
+        "pos_total": round(pos_total, 2),
+        "pos_today": round(pos_today, 2),
+        "pos_orders_all": pos_orders_all,
+        "pos_orders_today": pos_orders_today,
         "products_count": products_count,
         "published_count": published_count,
         "wallet_balance": round(float(vendor.get("wallet_balance") or 0), 2),
+    }
+
+
+@api_router.get("/vendor/me/earnings")
+async def vendor_my_earnings(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD inclusive"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD inclusive"),
+    month: Optional[str] = Query(None, description="YYYY-MM shortcut for from/to a whole month"),
+    channel: Optional[str] = Query(None, description="'online' | 'pos' | None=both"),
+    vendor: Dict[str, Any] = Depends(require_vendor),
+):
+    """Jul 2026 — Earnings drill-down endpoint used by the Vendor
+    Dashboard's tap-to-open detail sheet.  Returns raw sale rows
+    (both online and POS unless `channel` is set) with per-row totals
+    and product summaries, filtered by date/month.
+    """
+    # Normalise date range
+    if month:
+        try:
+            y, m = month.split("-")
+            y_i, m_i = int(y), int(m)
+        except Exception:
+            raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+        from_date = f"{y_i:04d}-{m_i:02d}-01"
+        # naive next-month calc
+        if m_i == 12:
+            to_date = f"{y_i + 1:04d}-01-01"
+        else:
+            to_date = f"{y_i:04d}-{m_i + 1:02d}-01"
+
+    def _in_range(s: str) -> bool:
+        if not s:
+            return False
+        if from_date and s < from_date:
+            return False
+        if to_date and s >= to_date:
+            return False
+        return True
+
+    online_out: List[Dict[str, Any]] = []
+    pos_out: List[Dict[str, Any]] = []
+
+    if channel in (None, "", "online", "both"):
+        rows = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).sort("created_at", -1).to_list(20000)
+        for s in rows:
+            if from_date or to_date:
+                if not _in_range((s.get("created_at") or "")[:10]):
+                    continue
+            online_out.append({
+                "channel": "online",
+                "id": s.get("id"),
+                "order_id": s.get("order_id"),
+                "created_at": s.get("created_at"),
+                "product_name": s.get("product_name") or "Product",
+                "qty": int(s.get("qty") or 1) or 1,
+                "line_total": round(float(s.get("line_total") or 0), 2),
+                "buyer_email": s.get("buyer_email"),
+            })
+
+    if channel in (None, "", "pos", "both"):
+        rows = await db.vendor_pos_sales.find(
+            {"vendor_id": vendor["id"], "status": {"$ne": "cancelled"}},
+            {"_id": 0},
+        ).sort("created_at", -1).to_list(20000)
+        for s in rows:
+            if from_date or to_date:
+                if not _in_range((s.get("created_at") or "")[:10]):
+                    continue
+            items = s.get("items") or []
+            summary = ", ".join(
+                f"{(it.get('name') or 'Item')} × {int(it.get('qty') or 1)}"
+                for it in items[:3]
+            ) or "POS Sale"
+            if len(items) > 3:
+                summary += f" +{len(items) - 3} more"
+            pos_out.append({
+                "channel": "pos",
+                "id": s.get("id"),
+                "invoice_no": s.get("invoice_number") or s.get("invoice_no"),
+                "created_at": s.get("created_at"),
+                "product_name": summary,
+                "qty": sum(int(it.get("qty") or 1) for it in items),
+                "line_total": round(float(s.get("total") or 0), 2),
+                "customer_name": s.get("customer_name") or "Walk-in",
+            })
+
+    merged = sorted(online_out + pos_out, key=lambda x: x.get("created_at") or "", reverse=True)
+    return {
+        "items": merged,
+        "total": len(merged),
+        "sum_amount": round(sum(r["line_total"] for r in merged), 2),
+        "online_count": len(online_out),
+        "pos_count": len(pos_out),
+        "online_sum": round(sum(r["line_total"] for r in online_out), 2),
+        "pos_sum": round(sum(r["line_total"] for r in pos_out), 2),
     }
 
 
@@ -7716,11 +7849,50 @@ async def vendor_my_sales(
                 "shipping_address": addr,
                 "paid_via": parent.get("paid_via") or "wallet",
                 "payment_status": parent.get("payment_status"),
+                # Jul 2026 — Delivery info (set via PATCH /vendor/orders/{id}/delivery-info)
+                "estimated_delivery_at": parent.get("estimated_delivery_at") or s.get("estimated_delivery_at"),
+                "delivery_person_name": parent.get("delivery_person_name") or s.get("delivery_person_name"),
+                "delivery_person_phone": parent.get("delivery_person_phone") or s.get("delivery_person_phone"),
             }
         grouped[oid]["items"].append(item)
         grouped[oid]["total"] = round(float(grouped[oid]["total"]) + line_total, 2)
 
     out = list(grouped.values())
+
+    # Jul 2026 — Also include POS sales so the Sales screen shows every
+    # channel in one list (per user directive: "showing value Zero and
+    # not showing Product details — should display both online and new
+    # sales").  POS rows are already order-shaped (one row per invoice).
+    pos_rows = await db.vendor_pos_sales.find(
+        {"vendor_id": vendor["id"]},
+        {"_id": 0},
+    ).to_list(20000)
+    for s in pos_rows:
+        items = s.get("items") or []
+        shaped_items = [{
+            "name": it.get("name") or "Item",
+            "price": float(it.get("price") or it.get("unit_price") or 0),
+            "qty": int(it.get("qty") or 1) or 1,
+            "image_url": it.get("image_url") or "",
+            "line_total": float(it.get("line_total") or (float(it.get("price") or 0) * int(it.get("qty") or 1))),
+        } for it in items]
+        out.append({
+            "id": s.get("id"),
+            "order_id": s.get("id"),
+            "user_id": None,
+            "created_at": s.get("created_at"),
+            "status": "delivered" if s.get("status") != "cancelled" else "cancelled",
+            "items": shaped_items,
+            "total": float(s.get("total") or 0),
+            "buyer_name": s.get("customer_name") or "Walk-in customer",
+            "buyer_email": s.get("customer_email"),
+            "buyer_phone": s.get("customer_phone"),
+            "paid_via": (s.get("payment_method") or "cash").lower(),
+            "payment_status": "paid",
+            "channel": "pos",
+            "invoice_no": s.get("invoice_number") or s.get("invoice_no"),
+        })
+
     # Filter by status if requested
     if status and status != "all":
         out = [o for o in out if o.get("status") == status]
@@ -7732,6 +7904,68 @@ async def vendor_my_sales(
 # ---- Vendor-scoped order status update (mirrors admin endpoint) ----
 class VendorOrderStatusUpdate(BaseModel):
     status: str
+
+
+class VendorOrderDeliveryInfo(BaseModel):
+    """Jul 2026 — Vendor sets/updates ETA + delivery-person contact.
+
+    Both fields are optional; the vendor can update one at a time. The
+    ETA is stored as an ISO-8601 string so the user-facing timeline can
+    format it in the customer's locale. Delivery person is a
+    lightweight name + phone — no separate user record needed.
+    """
+    estimated_delivery_at: Optional[str] = None
+    delivery_person_name: Optional[str] = None
+    delivery_person_phone: Optional[str] = None
+
+
+@api_router.patch("/vendor/orders/{order_id}/delivery-info")
+async def vendor_update_delivery_info(
+    order_id: str,
+    payload: VendorOrderDeliveryInfo,
+    vendor: Dict[str, Any] = Depends(require_vendor),
+):
+    """Vendor sets estimated delivery time + delivery person contact.
+    Also mirrors the values onto the vendor_sales rows so the /vendor/me/sales
+    listing can render the same info without a per-order lookup.
+    """
+    owns = await db.vendor_sales.find_one({"order_id": order_id, "vendor_id": vendor["id"]})
+    if not owns:
+        raise HTTPException(status_code=403, detail="Not your order")
+
+    update: Dict[str, Any] = {"delivery_info_updated_at": now_utc().isoformat()}
+    if payload.estimated_delivery_at is not None:
+        update["estimated_delivery_at"] = (payload.estimated_delivery_at or "").strip() or None
+    if payload.delivery_person_name is not None:
+        update["delivery_person_name"] = (payload.delivery_person_name or "").strip() or None
+    if payload.delivery_person_phone is not None:
+        update["delivery_person_phone"] = (payload.delivery_person_phone or "").strip() or None
+
+    await db.orders.update_one({"id": order_id}, {"$set": update})
+    # Denormalise onto vendor_sales rows so /vendor/me/sales sees updates instantly.
+    await db.vendor_sales.update_many({"order_id": order_id, "vendor_id": vendor["id"]}, {"$set": update})
+
+    # Notify the customer if we have a buyer_id on the order.
+    o = await db.orders.find_one({"id": order_id}, {"_id": 0, "user_id": 1, "id": 1})
+    if o and o.get("user_id"):
+        try:
+            bits: List[str] = []
+            if payload.estimated_delivery_at:
+                bits.append(f"ETA: {payload.estimated_delivery_at}")
+            if payload.delivery_person_name or payload.delivery_person_phone:
+                dn = payload.delivery_person_name or "Rider"
+                dp = payload.delivery_person_phone or ""
+                bits.append(f"{dn}{(' · ' + dp) if dp else ''}")
+            await _create_notification(
+                o["user_id"], "order",
+                f"Delivery info updated for #{order_id[:8].upper()}",
+                " · ".join(bits) if bits else "Your vendor updated delivery info.",
+            )
+        except Exception:
+            pass
+
+    fresh = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    return {"ok": True, "order": fresh}
 
 
 @api_router.patch("/vendor/orders/{order_id}/status")

@@ -324,14 +324,40 @@ export default function ProfileScreen() {
           <Text style={styles.groupLabel}>EARN MORE</Text>
           <View style={styles.groupCard}>
             <TouchableOpacity
-              onPress={() => router.push((((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "/vendor/dashboard" : "/vendor/apply") as any)}
+              onPress={() => {
+                const u: any = user;
+                const isApprovedVendor = !!(u?.is_vendor_approved || (u?.is_vendor && u?.vendor_status === "approved"));
+                router.push((isApprovedVendor ? "/vendor/dashboard" : "/vendor/apply") as any);
+              }}
               style={styles.rowItem}
               testID="profile-vendor-link"
             >
-              <View style={[styles.kycDot, { backgroundColor: ((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? colors.success : (user as any)?.vendor_status === "pending" ? colors.warning : (user as any)?.vendor_status === "suspended" ? "#B3261E" : "#94A3B8" }]} />
+              {(() => {
+                const u: any = user;
+                const isApprovedVendor = !!(u?.is_vendor_approved || (u?.is_vendor && u?.vendor_status === "approved"));
+                const st = u?.vendor_status as string | null | undefined;
+                const dot = isApprovedVendor ? colors.success
+                  : st === "pending" ? colors.warning
+                  : st === "suspended" ? "#B3261E"
+                  : "#94A3B8";
+                return <View style={[styles.kycDot, { backgroundColor: dot }]} />;
+              })()}
               <View style={{ flex: 1 }}>
-                <Text style={styles.kycTitle}>{((user as any)?.is_vendor && (user as any)?.vendor_status === "approved") ? "Vendor Panel" : "Become a Vendor"}</Text>
-                <Text style={styles.kycSub}>{(user as any)?.vendor_status ? ((user as any).vendor_status as string).toUpperCase() : "SELL ON OUR PLATFORM"}</Text>
+                {(() => {
+                  const u: any = user;
+                  const isApprovedVendor = !!(u?.is_vendor_approved || (u?.is_vendor && u?.vendor_status === "approved"));
+                  const businessName = u?.vendor_business_name || u?.shop_name;
+                  return (
+                    <>
+                      <Text style={styles.kycTitle}>
+                        {isApprovedVendor ? (businessName ? `Vendor · ${businessName}` : "Vendor Panel") : "Become a Vendor"}
+                      </Text>
+                      <Text style={styles.kycSub}>
+                        {isApprovedVendor ? "APPROVED · TAP TO OPEN DASHBOARD" : (u?.vendor_status ? String(u.vendor_status).toUpperCase() : "SELL ON OUR PLATFORM")}
+                      </Text>
+                    </>
+                  );
+                })()}
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
