@@ -2650,9 +2650,85 @@ async def admin_create_product(p: ProductCreate, admin: Dict[str, Any] = Depends
 
 
 @api_router.get("/admin/products")
-async def admin_list_products(_: Dict[str, Any] = Depends(require_admin)):
-    items = await db.products.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+async def admin_list_products(
+    vendor_id: Optional[str] = None,
+    vendor_q: Optional[str] = None,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """Admin product list with vendor name enrichment + filters.
+
+    Jul 2026 upgrade:
+      • Every product doc is augmented with `vendor_name` / `vendor_email`
+        (looked up from `users`) so the admin table can show WHOSE product
+        it is at-a-glance.
+      • `?vendor_id=` — exact match on the vendor owning the product.
+      • `?vendor_q=`  — case-insensitive search across vendor name /
+        vendor business name / vendor email; matched vendor ids are then
+        AND-ed into the product query.
+    """
+    prod_query: Dict[str, Any] = {}
+    if vendor_id:
+        prod_query["vendor_id"] = vendor_id
+    elif vendor_q:
+        rx = {"$regex": vendor_q.strip(), "$options": "i"}
+        vend_ids = [
+            v["id"] async for v in db.users.find(
+                {"$or": [{"name": rx}, {"vendor_business_name": rx}, {"email": rx}]},
+                {"id": 1},
+            )
+        ]
+        # If no vendor matched, return empty list rather than everything.
+        if not vend_ids:
+            return []
+        prod_query["vendor_id"] = {"$in": vend_ids}
+
+    items = await db.products.find(prod_query, {"_id": 0}).sort("created_at", -1).to_list(2000)
+
+    # Enrich with vendor name / email in a single batched lookup.
+    vend_ids_present = [p.get("vendor_id") for p in items if p.get("vendor_id")]
+    vend_map: Dict[str, Dict[str, Any]] = {}
+    if vend_ids_present:
+        async for v in db.users.find(
+            {"id": {"$in": list(set(vend_ids_present))}},
+            {"_id": 0, "id": 1, "name": 1, "email": 1, "vendor_business_name": 1},
+        ):
+            vend_map[v["id"]] = v
+    for p in items:
+        vid = p.get("vendor_id")
+        if vid and vid in vend_map:
+            vv = vend_map[vid]
+            p["vendor_name"] = vv.get("vendor_business_name") or vv.get("name") or "—"
+            p["vendor_email"] = vv.get("email")
+        elif not p.get("vendor_name"):
+            p["vendor_name"] = "Admin catalog"
     return items
+
+
+@api_router.get("/admin/vendors")
+async def admin_list_vendors(q: Optional[str] = None, _: Dict[str, Any] = Depends(require_admin)):
+    """Lightweight vendor picker for the admin Products page filter.
+
+    Returns approved vendors (id / display name / email / store_pincode)
+    optionally narrowed by a substring `q` against name / business name /
+    email.  Kept fast and paginated-off for the ≤ few-hundred vendors we
+    have today.
+    """
+    query: Dict[str, Any] = {"is_vendor_approved": True}
+    if q:
+        rx = {"$regex": q.strip(), "$options": "i"}
+        query["$or"] = [{"name": rx}, {"vendor_business_name": rx}, {"email": rx}]
+    items = []
+    async for v in db.users.find(
+        query,
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "vendor_business_name": 1, "store_pincode": 1},
+    ).sort("vendor_business_name", 1).limit(500):
+        items.append({
+            "id": v["id"],
+            "name": v.get("vendor_business_name") or v.get("name") or v.get("email"),
+            "email": v.get("email"),
+            "store_pincode": v.get("store_pincode") or "",
+        })
+    return {"items": items}
 
 
 @api_router.patch("/admin/products/{product_id}")

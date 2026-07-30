@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, TextInput,
   ActivityIndicator, FlatList, Platform, useWindowDimensions,
-  Modal, Pressable, RefreshControl,
+  Modal, Pressable, RefreshControl, Linking,
 } from "react-native";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -28,7 +28,11 @@ import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-ico
 import { api, formatApiError } from "./api";
 import { colors, spacing } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
-import { getCurrentCoords } from "./location";
+import {
+  getCurrentCoords,
+  checkLocationPermission,
+  requestLocationPermission,
+} from "./location";
 import { useAuth } from "./auth";
 import { LocationBanner } from "./location-banner";
 
@@ -155,18 +159,21 @@ export function ShopHome({
   const [apiCategories, setApiCategories] = useState<ApiCategory[] | null>(null);
 
   // ── Delivery address (live reverse-geocoded from user coords) ─────────
+  // Jul 2026 — Shop is now LOCATION-FIRST.  We require GPS on mount and
+  // send lat/lng + pincode to the products endpoint with strict_location
+  // so only nearby-vendor products render.  Manual pincode entry has been
+  // removed (see git history for the old free-text search UI).
   const [deliveryAddress, setDeliveryAddress] = useState<string>(defaultAddress);
   const [deliveryPincode, setDeliveryPincode] = useState<string>("");
+  const [deliveryCoords, setDeliveryCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [permStatus, setPermStatus] = useState<"unknown" | "granted" | "denied" | "unsupported" | "prompt">("unknown");
   const [locModalOpen, setLocModalOpen] = useState(false);
   const [locBusy, setLocBusy] = useState(false);
-  const [manualAddress, setManualAddress] = useState<string>("");
-  // Nov 2026 — Nominatim search results within the location modal.
-  const [locSearchResults, setLocSearchResults] = useState<any[]>([]);
-  const [locSearching, setLocSearching] = useState(false);
 
   // Persisted cache key — survives reloads / logout-login on the same device.
-  const ADDR_KEY = "@app/deliveryAddress";
-  const PIN_KEY  = "@app/deliveryPincode";
+  const ADDR_KEY  = "@app/deliveryAddress";
+  const PIN_KEY   = "@app/deliveryPincode";
+  const COORDS_KEY = "@app/deliveryCoords";
 
   // Hydrate cached address on mount, then try to refresh from current GPS.
   useEffect(() => {
@@ -175,8 +182,15 @@ export function ShopHome({
       try {
         const cached = await AsyncStorage.getItem(ADDR_KEY);
         const cachedPin = await AsyncStorage.getItem(PIN_KEY);
+        const cachedCoordsRaw = await AsyncStorage.getItem(COORDS_KEY);
         if (cached && !cancelled) setDeliveryAddress(cached);
         if (cachedPin && !cancelled) setDeliveryPincode(cachedPin);
+        if (cachedCoordsRaw && !cancelled) {
+          try {
+            const cc = JSON.parse(cachedCoordsRaw);
+            if (cc && typeof cc.lat === "number" && typeof cc.lng === "number") setDeliveryCoords(cc);
+          } catch { /* ignore */ }
+        }
       } catch { /* ignore */ }
       // Fire-and-forget refresh from current location.
       refreshLocation(false);
@@ -185,10 +199,14 @@ export function ShopHome({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const persistAddress = useCallback(async (a: string, pin?: string) => {
+  const persistAddress = useCallback(async (a: string, pin?: string, coords?: { lat: number; lng: number } | null) => {
     try {
       await AsyncStorage.setItem(ADDR_KEY, a);
       if (pin !== undefined) await AsyncStorage.setItem(PIN_KEY, pin);
+      if (coords !== undefined) {
+        if (coords) await AsyncStorage.setItem(COORDS_KEY, JSON.stringify(coords));
+        else await AsyncStorage.removeItem(COORDS_KEY);
+      }
     } catch { /* ignore */ }
   }, []);
 
@@ -198,18 +216,31 @@ export function ShopHome({
    * On web, `Location.reverseGeocodeAsync` isn't supported so we fall back
    * to plain "City near {lat},{lng}".
    *
-   * Nov 2026 — Also POSTs the coords to `/api/geo/reverse` so we get the
-   * server-authoritative pincode (Nominatim), which the shop uses to
-   * filter products by vendor delivery zone.
+   * Jul 2026 — Also captures lat/lng in deliveryCoords + updates
+   * permStatus so the gate can react.
    */
   const refreshLocation = useCallback(async (interactive: boolean) => {
     setLocBusy(true);
     try {
+      // Step 1 — permission check
+      let ps = await checkLocationPermission();
+      if (ps === "undetermined") {
+        // Only prompt when the user asks (interactive) or on first mount
+        // (interactive=false → still probe once because we want to know
+        // whether the browser already has permission).
+        ps = await requestLocationPermission();
+      }
+      if (ps === "denied") { setPermStatus("denied"); return; }
+      if (ps === "unsupported") { setPermStatus("unsupported"); return; }
+      setPermStatus(ps === "granted" ? "granted" : "prompt");
+
       const c = await getCurrentCoords();
       if (!c) {
         if (interactive) alert("Couldn't read your GPS. Please check location permission in your device settings.");
         return;
       }
+      setDeliveryCoords({ lat: c.lat, lng: c.lng });
+
       let nice = "";
       let pin = "";
       // Prefer our own /geo/reverse — returns pincode consistently
@@ -237,63 +268,30 @@ export function ShopHome({
       const display = pin ? `${nice} · ${pin}` : nice;
       setDeliveryAddress(display);
       setDeliveryPincode(pin);
-      persistAddress(display, pin);
+      persistAddress(display, pin, { lat: c.lat, lng: c.lng });
     } finally { setLocBusy(false); }
   }, [persistAddress]);
 
-  const onSaveManualAddress = useCallback(() => {
-    const v = manualAddress.trim();
-    if (!v) return;
-    setDeliveryAddress(v);
-    persistAddress(v, "");
-    setDeliveryPincode("");
-    setLocModalOpen(false);
-    setManualAddress("");
-    setLocSearchResults([]);
-  }, [manualAddress, persistAddress]);
-
-  // Nov 2026 — Search by place name via OSM Nominatim proxy.  Kicks off
-  // when the user types 3+ characters into the manual box.  Debounced
-  // via setTimeout to respect Nominatim's 1 rps policy.
-  useEffect(() => {
-    const q = manualAddress.trim();
-    if (q.length < 3) { setLocSearchResults([]); return; }
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      setLocSearching(true);
-      try {
-        const r = await api.get<{ items: any[] }>("/geo/search", { params: { q, limit: 6 } });
-        if (!cancelled) setLocSearchResults(r.data?.items || []);
-      } catch {
-        if (!cancelled) setLocSearchResults([]);
-      } finally {
-        if (!cancelled) setLocSearching(false);
-      }
-    }, 450);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [manualAddress]);
-
-  const onPickSearchResult = useCallback((item: any) => {
-    const parts = [item.area || item.city, item.state].filter(Boolean);
-    const nice = parts.join(", ");
-    const display = item.pincode ? `${nice} · ${item.pincode}` : nice;
-    setDeliveryAddress(display);
-    setDeliveryPincode(item.pincode || "");
-    persistAddress(display, item.pincode || "");
-    setLocModalOpen(false);
-    setManualAddress("");
-    setLocSearchResults([]);
-  }, [persistAddress]);
+  // Jul 2026 — Manual address entry was removed.  The shop is now
+  // location-first (GPS or nothing).  If the user needs to change their
+  // area, they should update their delivery address in Profile → Addresses
+  // (that flow captures both pincode + lat/lng via the picker).
 
   // ── Data ───────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // Nov 2026 — Pass the delivery pincode so the backend filters
-      // products to vendors who deliver to the customer's area.  When
-      // there's no pincode yet, the query is unfiltered (default UX).
-      const params: Record<string, any> = {};
+      // Jul 2026 — Location-first shop.  We only fetch products when
+      // we have a real location signal (pincode or coords).  strict_location
+      // ensures the backend returns [] if the signal doesn't match any
+      // nearby vendor, so the customer sees an empty-state rather than
+      // the global catalog.
+      const params: Record<string, any> = { strict_location: "true" };
       if (deliveryPincode) params.pincode = deliveryPincode;
+      if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+      // If we have NO location signal yet, skip the fetch entirely —
+      // the LocationGate view is what the user sees.
+      if (!deliveryPincode && !deliveryCoords) { setProducts([]); return; }
       const r = await api.get<any>("/products", { params });
       const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
       const inStock = list.filter((p) => p && p.is_in_stock !== false);
@@ -306,7 +304,7 @@ export function ShopHome({
       // eslint-disable-next-line no-console
       console.warn("ShopHome /products failed:", formatApiError(e));
     } finally { setLoading(false); }
-  }, [currentUserId, deliveryPincode]);
+  }, [currentUserId, deliveryPincode, deliveryCoords]);
 
   // Admin-managed categories — fetched in parallel with products.
   //
@@ -478,6 +476,92 @@ export function ShopHome({
   // approximate with a solid colour from the slide's palette so we don't
   // need to install a new dependency. Looks great with the white bg.
   const activeBanner = banners[bannerIdx % banners.length];
+
+  // Jul 2026 — Location gate.  We show a full-screen "Enable location to
+  // browse products" screen when we haven't captured GPS yet.  Users
+  // hydrating from a cached location fall through immediately (they've
+  // shopped here before).  A hard-denied permission gets an "Open
+  // Settings" CTA; an "undetermined" or first-open state gets a
+  // "Turn on location" CTA that triggers the OS prompt.
+  const hasLocation = !!(deliveryCoords || deliveryPincode);
+  if (!hasLocation) {
+    return (
+      <View style={{ flex: 1, backgroundColor: colors.background, alignItems: "center", justifyContent: "center", padding: 28 }}>
+        <View style={{
+          width: 88, height: 88, borderRadius: 44,
+          backgroundColor: colors.brand100,
+          alignItems: "center", justifyContent: "center", marginBottom: 20,
+        }}>
+          <Feather name="map-pin" size={38} color={colors.primary} />
+        </View>
+        <Text style={{ fontSize: 20, fontWeight: "900", color: colors.textMain, textAlign: "center", letterSpacing: -0.4 }}>
+          Turn on location to shop
+        </Text>
+        <Text style={{ fontSize: 13, color: colors.textMuted, textAlign: "center", marginTop: 10, lineHeight: 20, maxWidth: 320 }}>
+          Slangcart shows you products from vendors who actually deliver to
+          you. We need your device location to find nearby shops — nothing
+          is shared with anyone else.
+        </Text>
+
+        {permStatus === "denied" ? (
+          <>
+            <TouchableOpacity
+              onPress={() => { try { Linking.openSettings(); } catch { /* ignore */ } }}
+              style={{
+                marginTop: 24, backgroundColor: colors.primary,
+                paddingHorizontal: 24, paddingVertical: 13,
+                borderRadius: 999, minWidth: 220,
+                alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8,
+              }}
+              testID="loc-gate-open-settings"
+            >
+              <Feather name="settings" size={16} color={colors.primaryFg} />
+              <Text style={{ color: colors.primaryFg, fontWeight: "800", fontSize: 15 }}>Open Settings</Text>
+            </TouchableOpacity>
+            <Text style={{ fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 12, maxWidth: 300 }}>
+              You previously denied location. Enable it in your device
+              Settings → Slangcart → Location, then come back and tap Retry.
+            </Text>
+            <TouchableOpacity
+              onPress={() => refreshLocation(true)}
+              disabled={locBusy}
+              style={{ marginTop: 10, paddingHorizontal: 20, paddingVertical: 10 }}
+              testID="loc-gate-retry"
+            >
+              <Text style={{ color: colors.primary, fontWeight: "800", fontSize: 14 }}>Retry</Text>
+            </TouchableOpacity>
+          </>
+        ) : permStatus === "unsupported" ? (
+          <Text style={{ marginTop: 24, fontSize: 13, color: colors.textMuted, textAlign: "center", maxWidth: 300 }}>
+            Location isn't supported by this device / browser. Please open
+            Slangcart on a phone with GPS to browse products.
+          </Text>
+        ) : (
+          <TouchableOpacity
+            onPress={() => refreshLocation(true)}
+            disabled={locBusy}
+            style={{
+              marginTop: 24, backgroundColor: colors.primary,
+              paddingHorizontal: 24, paddingVertical: 13,
+              borderRadius: 999, minWidth: 220,
+              alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8,
+              opacity: locBusy ? 0.7 : 1,
+            }}
+            testID="loc-gate-enable"
+          >
+            {locBusy ? (
+              <ActivityIndicator color={colors.primaryFg} />
+            ) : (
+              <>
+                <Feather name="navigation" size={16} color={colors.primaryFg} />
+                <Text style={{ color: colors.primaryFg, fontWeight: "800", fontSize: 15 }}>Turn on location</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  }
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (
@@ -813,6 +897,8 @@ export function ShopHome({
           scope="home"
           category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
           pincode={deliveryPincode || undefined}
+          lat={deliveryCoords?.lat}
+          lng={deliveryCoords?.lng}
           refreshTick={refreshTick}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
           onCategoryPress={(c) => {
@@ -832,10 +918,9 @@ export function ShopHome({
 
       {/* ── Delivery-location picker modal ─────────────────────────────
           Opens when the user taps the "Deliver to {city}" pill in the
-          header. Offers two paths:
-            1. Auto-detect via device GPS + reverse geocoding
-            2. Manual text entry (saved to AsyncStorage)
-          Selected address is persisted locally so it survives reloads. */}
+          header.  Jul 2026 — Location-first shop: manual pincode entry
+          has been removed.  The only way to set / refresh the location
+          is via device GPS ("Use my current location"). */}
       <Modal
         visible={locModalOpen}
         animationType="slide"
@@ -847,16 +932,21 @@ export function ShopHome({
             <View style={styles.modalGrabber} />
             <View style={styles.modalHeader}>
               <Feather name="map-pin" size={18} color={colors.primary} />
-              <Text style={styles.modalTitle}>Set delivery location</Text>
+              <Text style={styles.modalTitle}>Delivery location</Text>
             </View>
             <Text style={styles.modalCurrent} numberOfLines={2}>
               Current: <Text style={{ fontWeight: "900", color: colors.textMain }}>{deliveryAddress}</Text>
+            </Text>
+            <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 8, lineHeight: 18 }}>
+              We use your live GPS to show only products from vendors who
+              actually deliver to your area. Tap the button below to
+              refresh your position.
             </Text>
 
             <TouchableOpacity
               onPress={() => refreshLocation(true)}
               disabled={locBusy}
-              style={[styles.modalPrimary, locBusy && { opacity: 0.7 }]}
+              style={[styles.modalPrimary, locBusy && { opacity: 0.7 }, { marginTop: 14 }]}
               testID="home-loc-use-current"
             >
               {locBusy ? (
@@ -869,74 +959,15 @@ export function ShopHome({
               )}
             </TouchableOpacity>
 
-            <View style={styles.modalDividerRow}>
-              <View style={styles.modalDividerLine} />
-              <Text style={styles.modalDividerText}>OR ENTER MANUALLY</Text>
-              <View style={styles.modalDividerLine} />
-            </View>
-
-            <View style={styles.modalInputRow}>
-              <TextInput
-                value={manualAddress}
-                onChangeText={setManualAddress}
-                placeholder="e.g. Srikalahasti, Andheri West, 517644…"
-                placeholderTextColor={colors.textMuted}
-                style={styles.modalInput}
-                returnKeyType="done"
-                onSubmitEditing={onSaveManualAddress}
-                testID="home-loc-manual-input"
-              />
+            {permStatus === "denied" ? (
               <TouchableOpacity
-                onPress={onSaveManualAddress}
-                style={[styles.modalSaveBtn, !manualAddress.trim() && { opacity: 0.4 }]}
-                disabled={!manualAddress.trim()}
-                testID="home-loc-save"
+                onPress={() => { try { Linking.openSettings(); } catch { /* ignore */ } }}
+                style={[styles.modalPrimary, { backgroundColor: colors.surfaceMuted, marginTop: 10 }]}
+                testID="home-loc-open-settings"
               >
-                <Feather name="check" size={16} color={colors.primaryFg} />
+                <Feather name="settings" size={15} color={colors.textMain} />
+                <Text style={[styles.modalPrimaryText, { color: colors.textMain }]}>Open Settings</Text>
               </TouchableOpacity>
-            </View>
-
-            {/* Nov 2026 — Nominatim search suggestions.  Appears as the
-                user types 3+ characters into the manual box.  Tapping a
-                suggestion sets the delivery address + pincode instantly
-                so the shop can filter to that vendor coverage area. */}
-            {(manualAddress.trim().length >= 3) ? (
-              <View style={{ marginTop: 8, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, overflow: "hidden" }}>
-                {locSearching ? (
-                  <View style={{ padding: 12, flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <ActivityIndicator size="small" color={colors.primary} />
-                    <Text style={{ fontSize: 12, color: colors.textMuted }}>Searching…</Text>
-                  </View>
-                ) : locSearchResults.length === 0 ? (
-                  <Text style={{ padding: 12, fontSize: 12, color: colors.textMuted }}>
-                    No matches. Tap ✓ to save as-is.
-                  </Text>
-                ) : (
-                  locSearchResults.map((it, i) => (
-                    <TouchableOpacity
-                      key={`${it.lat}-${it.lng}-${i}`}
-                      onPress={() => onPickSearchResult(it)}
-                      style={{
-                        flexDirection: "row", alignItems: "center", gap: 10,
-                        paddingHorizontal: 12, paddingVertical: 10,
-                        borderTopWidth: i === 0 ? 0 : 1, borderTopColor: colors.border,
-                      }}
-                      testID={`home-loc-suggestion-${i}`}
-                    >
-                      <Feather name="map-pin" size={14} color={colors.primary} />
-                      <View style={{ flex: 1, minWidth: 0 }}>
-                        <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }} numberOfLines={1}>
-                          {[it.area || it.city, it.state].filter(Boolean).join(", ") || it.display_name}
-                        </Text>
-                        <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }} numberOfLines={1}>
-                          {it.pincode ? `Pincode ${it.pincode} · ` : ""}{it.display_name}
-                        </Text>
-                      </View>
-                      <Feather name="chevron-right" size={14} color={colors.textMuted} />
-                    </TouchableOpacity>
-                  ))
-                )}
-              </View>
             ) : null}
 
             <TouchableOpacity

@@ -88,24 +88,39 @@ def _build_category_filter(names: List[str]) -> Dict[str, Any]:
 async def list_products(
     category: Optional[str] = Query(None, description="Filter by category name/id — cascades to all descendants when it matches a category tree node"),
     subcategory: Optional[str] = Query(None, description="Filter by subcategory name — ignored when `category` is a leaf"),
-    pincode: Optional[str] = Query(None, description="Nov 2026 — filter products to vendors whose store_pincode matches (delivery zone)"),
+    pincode: Optional[str] = Query(None, description="Nov 2026 — filter products to vendors whose store_pincode / delivery_pincodes matches"),
+    lat: Optional[float] = Query(None, description="Jul 2026 — customer latitude (used together with lng to km-radius match vendors)"),
+    lng: Optional[float] = Query(None, description="Jul 2026 — customer longitude"),
+    strict_location: bool = Query(False, description="Jul 2026 — when true, require a location match. If no pincode + no lat/lng is provided, return an empty list instead of the global catalog."),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
     sort: str = Query("newest", description="newest | popular | price_asc | price_desc"),
 ):
     """PUBLIC — paginated + category-cascading product list.
 
-    Nov 2026 upgrade:
+    Jul 2026 — location-first behaviour:
+      • When `lat` + `lng` are provided, the endpoint additionally OR-includes
+        vendors within their `delivery_radius_km` of the customer, calculated
+        with the haversine formula in-Python from vendor `lat`/`lng` docs.
+      • When `strict_location=true` and NEITHER pincode NOR (lat,lng) is
+        provided → returns `{items: [], total: 0}` immediately (used by the
+        Shop screen to force GPS capture before showing products).
+
+    Nov 2026 upgrade (retained):
       • Supports `?category=` (id / name / slug) with automatic descendant
-        cascade — tapping "Electronics" returns Electronics + Mobiles +
-        Laptops + Chargers products in one call.
-      • `?subcategory=` narrows further to just that leaf.
-      • `?pincode=` filters to vendors whose `store_pincode` equals the
-        customer's delivery pincode (pincode-based match).  Empty /
-        missing pincode → show all (default behaviour).
-      • `?limit` + `?offset` paginate.  Also returns a `total` count.
+        cascade.
+      • `?subcategory=` narrows further to that leaf.
+      • `?pincode=` filters to vendors whose store_pincode / delivery_pincodes
+        matches.
+      • `?limit` + `?offset` paginate with a `total` count.
       • `?sort=` supports newest / popular / price_asc / price_desc.
     """
+    # ── strict location gate ────────────────────────────────────────────
+    have_pincode = bool(pincode)
+    have_coords = (lat is not None and lng is not None)
+    if strict_location and not have_pincode and not have_coords:
+        return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
+
     q: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
 
     if category:
@@ -120,33 +135,41 @@ async def list_products(
         if sub_filter:
             q = {"$and": [q, sub_filter]} if "$and" not in q else {"$and": q["$and"] + [sub_filter]}
 
-    # Nov 2026 — Pincode delivery filter (strict).  A product is
-    # deliverable when the customer's pincode matches one of:
-    #   • the vendor's `store_pincode` (only if radius_mode covers it —
-    #     i.e. "pincode" / "both", or the km-radius happens to reach it
-    #     but we can't verify that server-side without both lat/lng)
-    #   • any entry in `delivery_pincodes`
-    #
-    # For mode == "radius" (km only) or "none" — the store_pincode is
-    # NOT auto-deliverable.  This matches the vendor's explicit intent.
-    if pincode:
-        pin_filter = {
-            "$or": [
-                # store_pincode matches AND vendor covers "entire pincode"
+    # Nov 2026 → Jul 2026 — Location filter (by vendor, not by product).
+    # Vendor delivery config lives on the USER doc (store_pincode,
+    # delivery_pincodes, delivery_radius_km/mode, lat/lng), so we resolve
+    # the set of eligible vendor ids in a single query, then filter
+    # products by vendor_id IN that set.
+    location_or: List[Dict[str, Any]] = []
+    if have_pincode or have_coords:
+        vendor_ids = await _eligible_vendor_ids(
+            pincode=pincode,
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
+        )
+        if vendor_ids:
+            location_or.append({"vendor_id": {"$in": list(vendor_ids)}})
+        # Backward compat — the ORIGINAL denormalized filter (if any
+        # products happen to carry these fields directly on the product).
+        if have_pincode:
+            location_or.extend([
                 {"$and": [
                     {"store_pincode": pincode},
                     {"$or": [
                         {"delivery_radius_mode": "pincode"},
                         {"delivery_radius_mode": "both"},
-                        # Legacy vendors before mode field existed — default was pincode.
                         {"delivery_radius_mode": {"$exists": False}},
                     ]},
                 ]},
-                # Explicit extra pincode tag matches
                 {"delivery_pincodes": pincode},
-            ]
-        }
+            ])
+
+    if location_or:
+        pin_filter = {"$or": location_or}
         q = {"$and": [q, pin_filter]} if "$and" not in q else {"$and": q["$and"] + [pin_filter]}
+    elif strict_location:
+        # We had location signals but no vendors matched — return empty.
+        return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
 
     # Sort mapping
     sort_spec: List[tuple] = [("created_at", -1)]
@@ -167,12 +190,7 @@ async def list_products(
     items = await cursor.to_list(limit)
     shaped = [_shape_product(p) for p in items]
 
-    # Historically the endpoint returned a bare array.  To keep back-compat
-    # for older builds, ALWAYS include an array response when no pagination
-    # or category param is used AND no explicit envelope is needed. When
-    # any query parameter is present, return a rich envelope with
-    # `items` / `total` / `offset` / `limit`.
-    if category or subcategory or pincode or offset > 0 or limit != 60 or sort != "newest":
+    if category or subcategory or pincode or have_coords or offset > 0 or limit != 60 or sort != "newest":
         return {
             "items": shaped,
             "total": total,
@@ -181,6 +199,89 @@ async def list_products(
             "has_more": (offset + len(shaped)) < total,
         }
     return shaped
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Location-based vendor eligibility helper.
+# ─────────────────────────────────────────────────────────────────────
+async def _eligible_vendor_ids(
+    pincode: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> set:
+    """Return the set of approved-vendor user ids that can DELIVER to the
+    customer identified by `pincode` and/or `(lat, lng)`.
+
+    A vendor is eligible when ANY of:
+      1) Pincode mode: customer pincode == vendor.store_pincode AND the
+         vendor's delivery_radius_mode allows pincode delivery
+         (`pincode` / `both`, or the legacy vendors where mode is unset).
+      2) Explicit pincode allow-list: customer pincode is in the vendor's
+         `delivery_pincodes` array (regardless of mode).
+      3) Radius mode: the customer's lat/lng is within
+         `vendor.delivery_radius_km` km of the vendor's own lat/lng
+         (mode `radius` / `both`).
+
+    Vendors that predate the `delivery_radius_mode` field are treated
+    conservatively — they only match via (1) and (2).
+    """
+    import math
+    ids: set = set()
+
+    # ─ Pincode-based matches (Mongo query — fast) ──────────────────
+    if pincode:
+        pincode_filter = {
+            "is_vendor_approved": True,
+            "$or": [
+                {"delivery_pincodes": pincode},
+                {"$and": [
+                    {"store_pincode": pincode},
+                    {"$or": [
+                        {"delivery_radius_mode": "pincode"},
+                        {"delivery_radius_mode": "both"},
+                        {"delivery_radius_mode": {"$exists": False}},
+                    ]},
+                ]},
+            ],
+        }
+        async for v in db.users.find(pincode_filter, {"_id": 0, "id": 1}):
+            ids.add(v["id"])
+
+    # ─ Radius-based matches (in-Python haversine) ──────────────────
+    if lat is not None and lng is not None:
+        R = 6371.0088  # Earth radius, km
+        plat = math.radians(lat); plng = math.radians(lng)
+        radius_filter = {
+            "is_vendor_approved": True,
+            "lat": {"$type": "number"}, "lng": {"$type": "number"},
+            "delivery_radius_km": {"$gt": 0},
+            "$or": [
+                {"delivery_radius_mode": "radius"},
+                {"delivery_radius_mode": "both"},
+            ],
+        }
+        async for v in db.users.find(
+            radius_filter,
+            {"_id": 0, "id": 1, "lat": 1, "lng": 1, "delivery_radius_km": 1},
+        ):
+            try:
+                vlat = math.radians(float(v["lat"])); vlng = math.radians(float(v["lng"]))
+                dlat = vlat - plat; dlng = vlng - plng
+                a = math.sin(dlat/2)**2 + math.cos(plat)*math.cos(vlat)*math.sin(dlng/2)**2
+                d = 2 * R * math.asin(math.sqrt(a))
+                if d <= float(v.get("delivery_radius_km") or 0):
+                    ids.add(v["id"])
+            except Exception:
+                continue
+    return ids
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Haversine-based vendor lookup used by /products?lat=&lng=.
+# Deprecated: use `_eligible_vendor_ids` instead. Kept for import compat.
+# ─────────────────────────────────────────────────────────────────────
+async def _vendors_within_radius(lat: float, lng: float) -> set:
+    return await _eligible_vendor_ids(lat=lat, lng=lng)
 
 
 # IMPORTANT: this route MUST be declared BEFORE `/products/{product_id}` or
@@ -192,6 +293,10 @@ async def list_products_by_source(
     source: str = "trending",
     limit: int = 10,
     category: str | None = None,
+    pincode: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    strict_location: bool = False,
 ):
     """Return products for a Shop Layout section based on a logical source:
 
@@ -201,17 +306,52 @@ async def list_products_by_source(
       source=category  → filtered by `category` field
 
     Optional `category` filter narrows ALL sources to a department/category.
-    Always returns a flat ARRAY of shaped products (same shape as /products),
-    so the mobile renderer can drop them straight into a product grid.
+    Jul 2026 — Location filter (`pincode` / `lat` / `lng` /
+    `strict_location=true`) matches the customer's delivery zone so that
+    shop-layout blocks never leak products from vendors who don't
+    deliver.  Always returns a flat ARRAY of shaped products (same shape
+    as /products).
     """
     limit = max(1, min(50, int(limit or 10)))
     src = (source or "trending").strip().lower()
     if src not in ("trending", "new", "best", "category", "manual"):
         src = "trending"
 
+    have_pincode = bool(pincode)
+    have_coords = (lat is not None and lng is not None)
+    if strict_location and not have_pincode and not have_coords:
+        return []
+
     q: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
     if category:
         q["category"] = category
+
+    # Jul 2026 — apply vendor-in-zone filter identical to /products
+    if have_pincode or have_coords:
+        vendor_ids = await _eligible_vendor_ids(
+            pincode=pincode,
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
+        )
+        location_or: List[Dict[str, Any]] = []
+        if vendor_ids:
+            location_or.append({"vendor_id": {"$in": list(vendor_ids)}})
+        if have_pincode:
+            location_or.extend([
+                {"$and": [
+                    {"store_pincode": pincode},
+                    {"$or": [
+                        {"delivery_radius_mode": "pincode"},
+                        {"delivery_radius_mode": "both"},
+                        {"delivery_radius_mode": {"$exists": False}},
+                    ]},
+                ]},
+                {"delivery_pincodes": pincode},
+            ])
+        if location_or:
+            q = {"$and": [q, {"$or": location_or}]}
+        elif strict_location:
+            return []
 
     if src == "new":
         cursor = db.products.find(q, {"_id": 0}).sort("created_at", -1).limit(limit)

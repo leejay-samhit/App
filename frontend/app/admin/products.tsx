@@ -68,8 +68,12 @@ type Product = {
   category?: string;
   is_published?: boolean;
   vendor_id?: string;
+  vendor_name?: string;
+  vendor_email?: string;
   interested_count?: number;
 };
+
+type VendorLite = { id: string; name: string; email?: string; store_pincode?: string };
 
 type InterestedUser = { id: string; name: string; email: string; phone?: string };
 
@@ -84,15 +88,20 @@ export default function AdminProducts() {
   // Auto-opens on the admin's first visit to /admin/products
   const { visible: helpVisible, close: helpClose } = useFirstVisitGuide("products-v1");
   const [search, setSearch] = useState("");
+  // Jul 2026 — Vendor filter: admin can narrow products by vendor.
+  const [vendorFilter, setVendorFilter] = useState<VendorLite | null>(null);
+  const [vendorPickerOpen, setVendorPickerOpen] = useState(false);
   const [interestedFor, setInterestedFor] = useState<Product | null>(null);
 
   const load = useCallback(async () => {
     try {
+      const params: Record<string, string> = {};
+      if (vendorFilter?.id) params.vendor_id = vendorFilter.id;
       // /admin/products doesn't include interested_count yet; fetch from public
       // /products too and merge for the count display. Admin keeps full access
       // (incl. unpublished items via /admin/products).
       const [admin, pub] = await Promise.all([
-        api.get<Product[]>("/admin/products"),
+        api.get<Product[]>("/admin/products", { params }),
         api.get<any>("/products").catch(() => ({ data: [] })),
       ]);
       const pubList: any[] = Array.isArray(pub.data) ? pub.data : (pub.data?.items || []);
@@ -105,7 +114,7 @@ export default function AdminProducts() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [vendorFilter]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -174,7 +183,7 @@ export default function AdminProducts() {
             <TextInput
               value={search}
               onChangeText={setSearch}
-              placeholder="Search products"
+              placeholder="Search products, vendor, or category"
               placeholderTextColor={colors.textMuted}
               style={styles.searchInput}
             />
@@ -182,6 +191,35 @@ export default function AdminProducts() {
               <TouchableOpacity onPress={() => setSearch("")}><Feather name="x-circle" size={16} color={colors.textMuted} /></TouchableOpacity>
             ) : null}
           </View>
+
+          {/* Jul 2026 — Vendor filter chip.  Tap to open the vendor picker
+              modal; the current filter shows as a coloured pill with an
+              inline clear button. */}
+          <TouchableOpacity
+            style={[styles.vendorFilterChip, vendorFilter && styles.vendorFilterChipOn]}
+            onPress={() => setVendorPickerOpen(true)}
+            testID="products-vendor-filter-chip"
+            activeOpacity={0.8}
+          >
+            <Feather name="briefcase" size={13} color={vendorFilter ? colors.primaryFg : colors.textMain} />
+            <Text
+              style={[styles.vendorFilterText, vendorFilter && { color: colors.primaryFg }]}
+              numberOfLines={1}
+            >
+              {vendorFilter ? `Vendor: ${vendorFilter.name}` : "Filter by vendor"}
+            </Text>
+            {vendorFilter ? (
+              <TouchableOpacity
+                onPress={() => setVendorFilter(null)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                testID="products-vendor-filter-clear"
+              >
+                <Feather name="x-circle" size={14} color={colors.primaryFg} />
+              </TouchableOpacity>
+            ) : (
+              <Feather name="chevron-down" size={13} color={colors.textMain} />
+            )}
+          </TouchableOpacity>
 
           {/* Stats strip */}
           <View style={styles.statsStrip}>
@@ -194,9 +232,14 @@ export default function AdminProducts() {
           {/* Grid */}
           {(() => {
             const q = search.trim().toLowerCase();
-            const filtered = q ? items.filter(p => p.name.toLowerCase().includes(q) || (p.category || "").toLowerCase().includes(q)) : items;
+            const filtered = q ? items.filter(p =>
+              p.name.toLowerCase().includes(q)
+              || (p.category || "").toLowerCase().includes(q)
+              || (p.vendor_name || "").toLowerCase().includes(q)
+              || (p.vendor_email || "").toLowerCase().includes(q)
+            ) : items;
             if (filtered.length === 0) {
-              return <Text style={styles.empty}>{search ? "No matches" : "No products yet — tap the + to add one."}</Text>;
+              return <Text style={styles.empty}>{search ? "No matches" : (vendorFilter ? `No products from ${vendorFilter.name} yet.` : "No products yet — tap the + to add one.")}</Text>;
             }
             return (
               <View style={styles.grid}>
@@ -240,6 +283,18 @@ export default function AdminProducts() {
                       <View style={styles.gridBody}>
                         {item.category ? <Text style={styles.gridCat} numberOfLines={1}>{item.category}</Text> : null}
                         <Text style={styles.gridName} numberOfLines={2}>{item.name}</Text>
+                        {/* Jul 2026 — Show which vendor owns this product so admins can spot ownership at-a-glance. */}
+                        {item.vendor_name ? (
+                          <View style={styles.vendorRow}>
+                            <Feather name="briefcase" size={9} color={item.vendor_id ? colors.primary : colors.textMuted} />
+                            <Text
+                              style={[styles.vendorRowText, !item.vendor_id && { color: colors.textMuted, fontStyle: "italic" }]}
+                              numberOfLines={1}
+                            >
+                              {item.vendor_name}
+                            </Text>
+                          </View>
+                        ) : null}
                         <View style={styles.gridFooter}>
                           <Text style={styles.gridPrice}>{formatINR(item.price)}</Text>
                           <Text style={styles.gridStock}>{item.stock ?? 0} in stock</Text>
@@ -278,9 +333,163 @@ export default function AdminProducts() {
       />
 
       <InterestedModal product={interestedFor} onClose={() => setInterestedFor(null)} />
+
+      {/* Jul 2026 — Vendor picker modal for the products filter */}
+      <VendorPickerModal
+        visible={vendorPickerOpen}
+        onClose={() => setVendorPickerOpen(false)}
+        onPick={(v) => { setVendorFilter(v); setVendorPickerOpen(false); }}
+        selectedId={vendorFilter?.id}
+      />
     </SafeAreaView>
   );
 }
+
+function VendorPickerModal({
+  visible,
+  onClose,
+  onPick,
+  selectedId,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onPick: (v: VendorLite | null) => void;
+  selectedId?: string;
+}) {
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<VendorLite[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const params: Record<string, string> = {};
+        if (q.trim()) params.q = q.trim();
+        const r = await api.get<{ items: VendorLite[] }>("/admin/vendors", { params });
+        if (!cancelled) setItems(r.data.items || []);
+      } catch { /* ignore */ }
+      finally { if (!cancelled) setLoading(false); }
+    }, q ? 300 : 0);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [visible, q]);
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <TouchableOpacity style={vpStyles.overlay} activeOpacity={1} onPress={onClose}>
+        <TouchableOpacity activeOpacity={1} style={vpStyles.sheet} onPress={() => {}}>
+          <View style={vpStyles.handle} />
+          <Text style={vpStyles.title}>Filter by vendor</Text>
+          <Text style={vpStyles.subtitle}>Show only products owned by this vendor.</Text>
+
+          <View style={vpStyles.search}>
+            <Feather name="search" size={15} color={colors.textMuted} />
+            <TextInput
+              value={q}
+              onChangeText={setQ}
+              placeholder="Search vendor by name or email"
+              placeholderTextColor={colors.textMuted}
+              style={vpStyles.searchInput}
+              autoFocus
+              testID="vendor-picker-search"
+            />
+          </View>
+
+          <TouchableOpacity
+            onPress={() => onPick(null)}
+            style={[vpStyles.row, !selectedId && vpStyles.rowOn]}
+            testID="vendor-picker-all"
+          >
+            <View style={[vpStyles.avatar, { backgroundColor: colors.brand100 }]}>
+              <Feather name="grid" size={16} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={vpStyles.rowName}>All vendors</Text>
+              <Text style={vpStyles.rowSub}>Clear the filter</Text>
+            </View>
+            {!selectedId ? <Feather name="check" size={18} color={colors.primary} /> : null}
+          </TouchableOpacity>
+
+          <ScrollView
+            style={{ maxHeight: 360 }}
+            contentContainerStyle={{ paddingBottom: 12 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {loading ? (
+              <View style={{ padding: 24, alignItems: "center" }}>
+                <ActivityIndicator color={colors.primary} />
+              </View>
+            ) : items.length === 0 ? (
+              <Text style={vpStyles.empty}>No vendors match.</Text>
+            ) : (
+              items.map((v) => {
+                const on = selectedId === v.id;
+                return (
+                  <TouchableOpacity
+                    key={v.id}
+                    onPress={() => onPick(v)}
+                    style={[vpStyles.row, on && vpStyles.rowOn]}
+                    testID={`vendor-picker-${v.id}`}
+                  >
+                    <View style={[vpStyles.avatar, { backgroundColor: colors.brand100 }]}>
+                      <Text style={{ color: colors.primary, fontWeight: "900", fontSize: 14 }}>
+                        {(v.name || "?")[0].toUpperCase()}
+                      </Text>
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={vpStyles.rowName} numberOfLines={1}>{v.name}</Text>
+                      <Text style={vpStyles.rowSub} numberOfLines={1}>
+                        {v.email}{v.store_pincode ? ` · ${v.store_pincode}` : ""}
+                      </Text>
+                    </View>
+                    {on ? <Feather name="check" size={18} color={colors.primary} /> : null}
+                  </TouchableOpacity>
+                );
+              })
+            )}
+          </ScrollView>
+
+          <TouchableOpacity onPress={onClose} style={vpStyles.close}>
+            <Text style={vpStyles.closeText}>Close</Text>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
+const vpStyles = StyleSheet.create({
+  overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
+  sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 34 },
+  handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: "center", marginBottom: 14 },
+  title: { fontSize: 18, fontWeight: "900", color: colors.textMain },
+  subtitle: { fontSize: 12, color: colors.textMuted, marginTop: 2, marginBottom: 14 },
+  search: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: colors.surfaceMuted, borderRadius: 12,
+    paddingHorizontal: 12, height: 42, marginBottom: 12,
+  },
+  searchInput: { flex: 1, fontSize: 13, color: colors.textMain, paddingVertical: 0 },
+  row: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    paddingHorizontal: 12, paddingVertical: 12,
+    borderRadius: 12, marginBottom: 6,
+    borderWidth: 1, borderColor: "transparent",
+  },
+  rowOn: { backgroundColor: colors.brand100, borderColor: colors.primary },
+  avatar: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  rowName: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  rowSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  empty: { padding: 24, textAlign: "center", color: colors.textMuted, fontSize: 12 },
+  close: {
+    marginTop: 8, paddingVertical: 12,
+    borderRadius: 12, alignItems: "center",
+    backgroundColor: colors.surfaceMuted,
+  },
+  closeText: { color: colors.textMain, fontWeight: "800", fontSize: 14 },
+});
 
 function Stat({ label, value, accent, warn }: { label: string; value: string; accent?: boolean; warn?: boolean }) {
   return (
@@ -974,6 +1183,20 @@ const styles = StyleSheet.create({
   editBtn: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted },
   deleteBtn: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: "#FCE9E5" },
   empty: { padding: 40, textAlign: "center", color: colors.textMuted },
+
+  // Jul 2026 — Vendor filter chip + row
+  vendorFilterChip: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.surface,
+    marginBottom: 12,
+  },
+  vendorFilterChipOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  vendorFilterText: { fontSize: 13, fontWeight: "700", color: colors.textMain, flex: 1 },
+  vendorRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 4 },
+  vendorRowText: { fontSize: 10, fontWeight: "700", color: colors.primary, flexShrink: 1 },
 });
 
 const modalStyles = StyleSheet.create({

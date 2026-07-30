@@ -210,7 +210,14 @@ def _validate_type(t: Optional[str]) -> str:
     return t
 
 
-def _scope_filter(scope: Optional[str], category: Optional[str], pincode: Optional[str] = None) -> Dict[str, Any]:
+def _scope_filter(scope: Optional[str], category: Optional[str], pincode: Optional[str] = None, admin_view: bool = False) -> Dict[str, Any]:
+    """Build the Mongo query used by both the public and admin
+    shop-layout endpoints.
+
+    admin_view=True skips the strict "hide-targeted-when-no-pincode"
+    guard so that the Admin UI can still see every block regardless of
+    scope_pincode (they can then filter by pincode explicitly).
+    """
     q: Dict[str, Any] = {}
     if scope:
         if scope not in ALLOWED_SCOPES:
@@ -222,9 +229,21 @@ def _scope_filter(scope: Optional[str], category: Optional[str], pincode: Option
             q["scope"] = "category"
             if category:
                 q["scope_category"] = category
-    # Nov 2026 — Pincode-scoped layout blocks.  When the customer's
-    # pincode is known, we OR-in blocks whose `scope_pincode` matches,
-    # AND also include blocks with an empty `scope_pincode` (global).
+    # Jul 2026 → Nov 2026 upgrade — Pincode-scoped layout blocks.
+    #
+    # Semantics for the PUBLIC /shop-layout endpoint:
+    #   • When the customer's pincode IS known, we OR-in blocks whose
+    #     `scope_pincode` matches AND global (blank scope_pincode) blocks.
+    #   • When the customer's pincode is UNKNOWN (missing or empty), we
+    #     ONLY return the global blocks — pincode-targeted campaigns
+    #     must never leak to customers whose location we can't verify.
+    #     (Bug fix Jul 2026: previously we returned every block in this
+    #     branch, so a "Srikalahasti Sale" block was visible to
+    #     Cuddapah users.)
+    #
+    # Admin view bypasses this and can see everything (with the option
+    # to explicitly filter by pincode).
+    pin_filter: Dict[str, Any] = {}
     if pincode:
         pin_filter = {
             "$or": [
@@ -234,7 +253,15 @@ def _scope_filter(scope: Optional[str], category: Optional[str], pincode: Option
                 {"scope_pincode": {"$exists": False}},
             ],
         }
-        # Merge (AND) with the scope filter.
+    elif not admin_view:
+        pin_filter = {
+            "$or": [
+                {"scope_pincode": ""},
+                {"scope_pincode": None},
+                {"scope_pincode": {"$exists": False}},
+            ],
+        }
+    if pin_filter:
         if q:
             q = {"$and": [q, pin_filter]}
         else:
@@ -408,7 +435,7 @@ async def list_all_shop_layout(
     pincode: Optional[str] = Query(None),
     _: Dict[str, Any] = Depends(require_admin),
 ):
-    q = _scope_filter(scope, category, pincode) if (scope or pincode) else {}
+    q = _scope_filter(scope, category, pincode, admin_view=True) if (scope or pincode) else {}
     cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])
     items = [_serialize(d) for d in await cursor.to_list(1000)]
     return {"items": items}

@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 51 backend-only regression: verified location-first Shop, admin vendor filters and pincode-scoped Shop Layout. All 20 pytest cases in test_location_first_shop_iter51.py PASSED (100%). strict_location gate returns empty envelope without geo signals; pincode=517644 returns exactly the 3 Kittu products (all vendor_id=283753d8-...); pincode=516002 and lat/lng=Kadapa return 0. /api/products/by-source honours the same filter. /api/admin/products enriches vendor_name (Bright Kittu Store for kittu items, 'Admin catalog' for legacy) and supports both ?vendor_id= and ?vendor_q=. /api/admin/vendors returns the picker-shaped {items:[{id,name,email,store_pincode}]} envelope and narrows on ?q=kittu. Shop-layout scope_pincode block created for 517644 is correctly HIDDEN when no pincode is supplied AND when pincode=516002, and correctly INCLUDED when pincode=517644 alongside global blocks; /admin/shop-layout still sees everything. Auth regression PASSED for admin, user, and vendor. Wallet/transfer + withdrawals endpoints still respond (422 validation / 405 method-not-allowed as expected — reachable, not broken).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/admin/vendors",
+        "issue": "Duplicate route registration in /app/backend/server.py — the correct picker-shape handler at line 2707 (accepts ?q=, returns {items:[{id,name,email,store_pincode}]}) is shadowed by a second async def admin_list_vendors at line 7832 (no ?q=, returns full vendor docs with total_sales/total_earnings/products_count). FastAPI dispatches to the first registered route so the CURRENT behaviour is correct and tests pass, but the second definition is dead code that will surprise the next dev and could flip the response shape if the file is ever reordered. Recommend renaming the older/richer version to /api/admin/vendors/full (or /admin/vendors-with-stats) and dropping the duplicate path."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_location_first_shop_iter51.py",
+    "/app/test_reports/pytest/iteration51_location_first.xml"
+  ],
+  "action_items": [
+    "Resolve duplicate GET /api/admin/vendors registration in server.py (lines 2707 & 7832): the older stats-heavy handler at 7832 shadows nothing today (first-registered wins) but is a latent shape-flip bug. Rename its path to /admin/vendors/full or delete it if the vendors admin UI already reads the picker endpoint plus per-vendor stats via a different route."
+  ],
+  "critical_code_review_comments": [
+    "server.py has two async def admin_list_vendors decorated with the identical @api_router.get('/admin/vendors') — Python only keeps the second symbol in the module namespace, but FastAPI has both routes registered and dispatches to the first-registered one. Any future edit that reorders routes will silently change /admin/vendors' response contract.",
+    "products_public.py returns TWO different envelopes from /products (bare list vs. {items,total,limit,offset,has_more}) depending on whether ANY filter param was provided. That branching is fragile — recommend always returning the paginated envelope so downstream (admin UI, mobile) has a single shape to handle. Not blocking for this iteration but worth queuing.",
+    "_eligible_vendor_ids in products_public.py iterates cursors twice for pincode+radius and unions in-Python. Fine for current vendor count (<500), but add a cap/log if the vendor pool grows past a few thousand — otherwise the km-radius path becomes O(n) haversine per request."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_location_first_shop_iter51.py (new)",
+    "/app/test_reports/pytest/iteration51_location_first.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (20/20)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Created ONE ephemeral shop-layout block with scope_pincode=517644, title='TEST_ITER51_SCOPED_517644' via POST /api/admin/shop-layout, then deleted it in the fixture teardown. No residual data left in DB.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All Jul 2026 location-first + admin-vendor-filter + pincode-scoped-layout endpoints are behaving per spec. The one code-quality finding is the duplicate @api_router.get('/admin/vendors') declaration in server.py — if the main agent renames or deletes the second handler, re-run backend/tests/test_location_first_shop_iter51.py::TestAdminVendors to confirm the picker shape still returns. Test credentials in /app/memory/test_credentials.md are current (support@slangcart.com/3)Ywxtic). Kittu vendor id 283753d8-0838-4a94-9158-ddfe464acdba has exactly 3 published products.",
+  "rca_of_issue": "N/A — no regression introduced. Latent risk (duplicate route) documented under minor + action_items."
+}

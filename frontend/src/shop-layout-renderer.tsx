@@ -98,11 +98,12 @@ export type Product = {
 type RendererProps = {
   scope?: "home" | "category";
   category?: string;
-  // Nov 2026 — Delivery pincode from the parent (customer's chosen
-  // area).  Forwarded to /products?pincode= so the layout renderer
-  // matches the strict vendor-in-zone filter used by the customer
-  // shop home.
+  // Jul 2026 — Delivery location from the parent (customer's chosen area).
+  // Forwarded to /products and /shop-layout so only products from vendors
+  // that actually deliver to the customer render.
   pincode?: string;
+  lat?: number;
+  lng?: number;
   onProductPress?: (productId: string) => void;
   onCategoryPress?: (category: string) => void;
   onAddToCart?: (productId: string) => void;
@@ -817,7 +818,7 @@ function ContentBoxBlock({
 /* ─────────────────────────── Main Renderer ─────────────────────────── */
 
 export function ShopLayoutRenderer({
-  scope = "home", category, pincode, onProductPress, onCategoryPress, onAddToCart, refreshTick,
+  scope = "home", category, pincode, lat, lng, onProductPress, onCategoryPress, onAddToCart, refreshTick,
 }: RendererProps) {
   const [blocks, setBlocks] = useState<LayoutBlock[] | null>(null);
   const [productsById, setProductsById] = useState<Record<string, Product>>({});
@@ -857,18 +858,17 @@ export function ShopLayoutRenderer({
               if (items) setBlocks(items);
             },
           }),
-          // Nov 2026 — pass cascading category filter so /products
-          // returns Electronics + Mobiles + Chargers when the customer
-          // taps "Electronics".  Falls back to the whole catalog on the
-          // home scope.  Also forwards the customer's delivery pincode
-          // so the strict vendor-in-zone filter kicks in for the
-          // layout renderer's product fetch too (previously ignored,
-          // causing the shop to show global products even after the
-          // customer set Deliver-to to Tirupati).
+          // Jul 2026 — pass lat/lng + strict_location so the layout
+          // renderer's products fetch matches the customer's actual
+          // delivery zone (previously only pincode was forwarded, and
+          // when pincode reverse-geocode failed the shop leaked all
+          // products regardless of location).
           api.get<any>("/products", {
             params: {
               ...(category ? { category, limit: 120 } : {}),
               ...(pincode ? { pincode } : {}),
+              ...(lat !== undefined && lng !== undefined ? { lat, lng } : {}),
+              strict_location: "true",
             },
           }),
         ]);
@@ -901,6 +901,10 @@ export function ShopLayoutRenderer({
                     source: ds,
                     limit: b.product_count || 10,
                     ...(b.category_filter ? { category: b.category_filter } : (category ? { category } : {})),
+                    // Jul 2026 — enforce delivery zone on layout-block products too.
+                    ...(pincode ? { pincode } : {}),
+                    ...(lat !== undefined && lng !== undefined ? { lat, lng } : {}),
+                    strict_location: "true",
                   },
                 });
                 const data = r.data;
@@ -926,7 +930,7 @@ export function ShopLayoutRenderer({
       }
     })();
     return () => { cancelled = true; };
-  }, [scope, category, pincode, currentUserId, refreshTick, pollTick]);
+  }, [scope, category, pincode, lat, lng, currentUserId, refreshTick, pollTick]);
 
   // Nov 2026 — Auto-poll REMOVED per user directive.
   // The prior 30s setInterval caused visible splash flicker and made the
