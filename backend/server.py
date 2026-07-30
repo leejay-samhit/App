@@ -7829,8 +7829,12 @@ async def admin_reject_vendor(app_id: str, payload: VendorRejectRequest, admin: 
     return {"ok": True, "application": fresh}
 
 
-@api_router.get("/admin/vendors")
-async def admin_list_vendors(admin: Dict[str, Any] = Depends(require_admin)):
+# Jul 2026 — Renamed from GET /admin/vendors to /admin/vendors/detailed
+# because the new lightweight vendor picker at /admin/vendors (line 2707)
+# takes precedence for the Products page filter.  This detailed endpoint
+# still powers the Admin → Vendors dashboard with per-vendor sales rollups.
+@api_router.get("/admin/vendors/detailed")
+async def admin_list_vendors_detailed(admin: Dict[str, Any] = Depends(require_admin)):
     vendors = await db.users.find({"is_vendor": True}, {"_id": 0, "hashed_password": 0}).sort("vendor_approved_at", -1).to_list(2000)
     out: List[Dict[str, Any]] = []
     for v in vendors:

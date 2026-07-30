@@ -21,7 +21,7 @@ export default function AdminVendorsList() {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get<{ items: Vendor[] }>("/admin/vendors");
+      const { data } = await api.get<{ items: Vendor[] }>("/admin/vendors/detailed");
       setItems(data.items || []);
     } catch (e) { Alert.alert("Couldn't load", formatApiError(e)); }
     finally { setLoading(false); setRefreshing(false); }
