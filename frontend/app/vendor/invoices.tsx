@@ -18,6 +18,7 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { listSales, getSale, PosSale, getPosSettings, PosSettings } from "../../src/vendor-pos-client";
 import { formatApiError } from "../../src/api";
+import { FadeSlideIn, ListRowSkeleton } from "../../src/anim";
 
 export default function VendorInvoices() {
   const router = useRouter();
@@ -248,12 +249,14 @@ export default function VendorInvoices() {
         ))}
       </View>
       <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 40 }}>
-        {loading ? <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} /> :
-          (() => {
+        {loading ? (
+          <View>{[...Array(5)].map((_, i) => <ListRowSkeleton key={i} />)}</View>
+        ) : (() => {
             const filtered = channel === "all" ? items : items.filter((s) => s._channel === channel);
             if (filtered.length === 0) return <Text style={{ color: colors.textMuted, textAlign: "center", marginTop: 40 }}>No invoices in this view.</Text>;
-            return filtered.map(s => (
-              <TouchableOpacity key={`${s._channel}-${s.id}`} onPress={() => setPreview(s)} style={styles.card} activeOpacity={0.85}>
+            return filtered.map((s, idx) => (
+              <FadeSlideIn key={`${s._channel}-${s.id}`} delay={Math.min(idx, 6) * 40}>
+              <TouchableOpacity onPress={() => setPreview(s)} style={styles.card} activeOpacity={0.85}>
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                     <Text style={styles.inv} numberOfLines={1}>{s.invoice_no}</Text>
@@ -271,6 +274,7 @@ export default function VendorInvoices() {
                 </View>
                 <Text style={styles.amount}>{formatINR(s.totals.grand_total)}</Text>
               </TouchableOpacity>
+              </FadeSlideIn>
             ));
           })()
         }

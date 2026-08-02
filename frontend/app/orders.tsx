@@ -13,6 +13,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../src/api";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { FadeSlideIn, ListRowSkeleton } from "../src/anim";
 
 type OrderItem = { name: string; price: number; image_url: string; qty: number };
 type Order = {
@@ -133,7 +134,9 @@ export default function OrdersScreen() {
       />
 
       {loading ? (
-        <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
+          {[...Array(5)].map((_, i) => <ListRowSkeleton key={i} />)}
+        </View>
       ) : filtered.length === 0 ? (
         <View style={styles.empty}>
           <Feather name="package" size={36} color={colors.textMuted} />
@@ -150,10 +153,11 @@ export default function OrdersScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
           data={filtered}
           keyExtractor={(o) => o.id}
-          renderItem={({ item }) => {
+          renderItem={({ item, index }) => {
             const meta = STATUS_META[item.status || "placed"] || STATUS_META.placed;
             const totalItems = (item.items || []).reduce((a, i) => a + (i.qty || 0), 0);
             return (
+              <FadeSlideIn delay={Math.min(index, 6) * 40}>
               <TouchableOpacity
                 style={styles.card}
                 onPress={() => setPreview(item)}
@@ -272,6 +276,7 @@ export default function OrdersScreen() {
                   </TouchableOpacity>
                 ) : null}
               </TouchableOpacity>
+              </FadeSlideIn>
             );
           }}
         />

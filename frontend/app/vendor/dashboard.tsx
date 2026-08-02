@@ -7,6 +7,7 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { RichProductEditor } from "../../src/rich-product-editor";
+import { FadeSlideIn, StatCardSkeleton, ListRowSkeleton } from "../../src/anim";
 
 type Stats = {
   total_sales: number; total_earnings: number; today_earnings: number;
@@ -150,7 +151,21 @@ export default function VendorDashboard() {
     fetchEarnings(scope, "", "");
   }, [fetchEarnings]);
 
-  if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator size="large" color={colors.primary} /></View></SafeAreaView>;
+  if (loading) return (
+    <SafeAreaView style={styles.safe}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
+          <Feather name="arrow-left" size={20} color={colors.textMain} />
+        </TouchableOpacity>
+        <Text style={styles.title}>Vendor Dashboard</Text>
+      </View>
+      <View style={{ paddingHorizontal: spacing.screen, paddingTop: 10 }}>
+        <View style={styles.statsGrid}>
+          {[...Array(6)].map((_, i) => <StatCardSkeleton key={i} />)}
+        </View>
+      </View>
+    </SafeAreaView>
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -180,6 +195,7 @@ export default function VendorDashboard() {
 
       {tab === "home" && stats && (
         <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
+          <FadeSlideIn triggerKey={`home-${refreshing ? "r" : "d"}`}>
           <GradientCard variant="emerald" style={{ marginBottom: 14, padding: 18 }}>
             <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>VENDOR</Text>
             <Text style={{ fontSize: 24, fontWeight: "900", color: "#fff", marginTop: 4, letterSpacing: -0.6 }}>
@@ -254,8 +270,8 @@ export default function VendorDashboard() {
             </View>
             <Feather name="chevron-right" size={18} color={colors.primary} />
           </TouchableOpacity>
-          <View style={styles.statsGrid}>
-            {/* Jul 2026 — Tappable earnings cards → open a drill-down modal
+          <FadeSlideIn>
+          <View style={styles.statsGrid}>            {/* Jul 2026 — Tappable earnings cards → open a drill-down modal
                 with per-row detail (online + POS combined) and date filters. */}
             <TouchableOpacity activeOpacity={0.8} style={{ flexBasis: "48%" }} onPress={() => openEarnings("today")} testID="stat-today-earn">
               <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
@@ -268,7 +284,9 @@ export default function VendorDashboard() {
             <StatCard icon="box" label="PRODUCTS" value={`${stats.published_count}/${stats.products_count}`} color="#1F5E9E" />
             <StatCard icon="credit-card" label="WALLET" value={formatINR(stats.wallet_balance)} color="#1F6B44" />
           </View>
+          </FadeSlideIn>
           {/* Jul 2026 — Per-channel breakdown pill (Online + POS/New Sales) */}
+          <FadeSlideIn delay={60}>
           <View style={styles.channelRow}>
             <View style={styles.channelPill}>
               <Feather name="globe" size={12} color="#1D4ED8" />
@@ -287,9 +305,13 @@ export default function VendorDashboard() {
               </View>
             </View>
           </View>
+          </FadeSlideIn>
+          <FadeSlideIn delay={120}>
           <TouchableOpacity onPress={onAddProduct} style={styles.primaryBtn} testID="vendor-add-cta">
             <Feather name="plus-circle" size={18} color={colors.primaryFg} /><Text style={styles.primaryBtnText}>  Add new product</Text>
           </TouchableOpacity>
+          </FadeSlideIn>
+          </FadeSlideIn>
         </ScrollView>
       )}
 

@@ -35,6 +35,7 @@ import {
 } from "./location";
 import { useAuth } from "./auth";
 import { NoVendorsHero } from "./no-vendors-hero";
+import { FadeSlideIn, ProductCardSkeleton } from "./anim";
 import { LocationBanner } from "./location-banner";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -696,7 +697,9 @@ export function ShopHome({
               <Text style={styles.searchResultCount}>{filteredProducts.length} product{filteredProducts.length === 1 ? "" : "s"}</Text>
             </View>
             {loading ? (
-              <View style={styles.loadingRow}><ActivityIndicator color={colors.primary} /></View>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, paddingHorizontal: 4 }}>
+                {[...Array(6)].map((_, i) => <ProductCardSkeleton key={i} />)}
+              </View>
             ) : filteredProducts.length === 0 ? (
               <View style={styles.emptyResultsWrap}>
                 <View style={[styles.iconRound, { backgroundColor: colors.brand100 }]}>
@@ -906,31 +909,35 @@ export function ShopHome({
           </View>
         ) : (
         <>
-          <ShopLayoutRenderer
-            scope="home"
-            category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
-            pincode={deliveryPincode || undefined}
-            lat={deliveryCoords?.lat}
-            lng={deliveryCoords?.lng}
-            refreshTick={refreshTick}
-            onProductPress={(id) => router.push(`/product/${id}` as any)}
-            onCategoryPress={(c) => {
-              if (!c) router.push(`${categoryRoutePrefix}/shop` as any);
-              else router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c)}` as any);
-            }}
-            onAddToCart={async (id) => {
-              try {
-                await api.post("/cart", { product_id: id, quantity: 1 });
-              } catch (e) { /* eslint-disable-next-line no-console */ console.warn("add to cart failed:", formatApiError(e)); }
-            }}
-          />
+          <FadeSlideIn triggerKey={`shop-${refreshTick}-${loading ? "l" : "d"}`}>
+            <ShopLayoutRenderer
+              scope="home"
+              category={activeCategory && activeCategory !== "all" ? activeCategory : undefined}
+              pincode={deliveryPincode || undefined}
+              lat={deliveryCoords?.lat}
+              lng={deliveryCoords?.lng}
+              refreshTick={refreshTick}
+              onProductPress={(id) => router.push(`/product/${id}` as any)}
+              onCategoryPress={(c) => {
+                if (!c) router.push(`${categoryRoutePrefix}/shop` as any);
+                else router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c)}` as any);
+              }}
+              onAddToCart={async (id) => {
+                try {
+                  await api.post("/cart", { product_id: id, quantity: 1 });
+                } catch (e) { /* eslint-disable-next-line no-console */ console.warn("add to cart failed:", formatApiError(e)); }
+              }}
+            />
+          </FadeSlideIn>
           {/* Jul 2026 — "No vendors nearby" hero card.  When the customer's
               location has zero deliverable products AND the initial /products
               fetch has completed, show the hero below the (mostly empty)
               layout so the customer immediately understands why and what
               to do next. */}
           {!loading && products.length === 0 ? (
-            <NoVendorsHero location={deliveryPincode || undefined} />
+            <FadeSlideIn delay={80}>
+              <NoVendorsHero location={deliveryPincode || undefined} />
+            </FadeSlideIn>
           ) : null}
         </>
         )}

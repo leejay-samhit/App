@@ -865,7 +865,7 @@ export function ShopLayoutRenderer({
           // products regardless of location).
           api.get<any>("/products", {
             params: {
-              ...(category ? { category, limit: 120 } : {}),
+              ...(category ? { category, limit: 240 } : { limit: 240 }),
               ...(pincode ? { pincode } : {}),
               ...(lat !== undefined && lng !== undefined ? { lat, lng } : {}),
               strict_location: "true",
@@ -989,7 +989,12 @@ export function ShopLayoutRenderer({
         title: "",           // no heading — visual continuity
         data_source: (category ? "category" : "new") as any,
         category_filter: category || "",
-        product_count: 8,
+        // Dec 2026 — Auto-injected block was previously capped at 8
+        // products which made the shop feel empty when the admin
+        // dropped a lone banner.  Bump to 200 so the customer sees ALL
+        // products under the current category (or the full 'new'
+        // arrivals list up to the /products limit=120 fetch).
+        product_count: 200,
         layout_style: "grid" as any,
         product_ids: [] as string[],
       } as LayoutBlock);

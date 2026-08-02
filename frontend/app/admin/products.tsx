@@ -6,6 +6,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
+import { FadeSlideIn, ListRowSkeleton, ProductCardSkeleton } from "../../src/anim";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
@@ -160,12 +161,17 @@ export default function AdminProducts() {
       />
 
       {loading ? (
-        <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
+            {[...Array(6)].map((_, i) => <ProductCardSkeleton key={i} />)}
+          </View>
+        </View>
       ) : (
         <ScrollView
           contentContainerStyle={{ padding: spacing.screen, paddingTop: 4, paddingBottom: 80 }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
         >
+          <FadeSlideIn triggerKey={`admprod-${refreshing ? "r" : "d"}`}>
           {/* Hero summary card */}
           <GradientCard variant="primary" style={{ marginBottom: 14, padding: 18 }}>
             <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>CATALOG</Text>
@@ -318,6 +324,7 @@ export default function AdminProducts() {
               </View>
             );
           })()}
+          </FadeSlideIn>
         </ScrollView>
       )}
 

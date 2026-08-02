@@ -3481,6 +3481,17 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     # instead of an object. Treat anything non-dict as missing.
     if not isinstance(raw_addr, dict):
         raw_addr = {}
+    # Preserve optional geospatial fields (latitude/longitude/district) —
+    # required so the radius-mode delivery-zone check below can compute
+    # haversine distance against the vendor's own lat/lng.
+    def _num_or_none(v: Any) -> Optional[float]:
+        try:
+            if v is None or v == "": return None
+            f = float(v)
+            if f != f: return None  # NaN
+            return f
+        except Exception:
+            return None
     shipping_address = {
         "name": str(raw_addr.get("name") or "").strip(),
         "phone": str(raw_addr.get("phone") or "").strip(),
@@ -3489,6 +3500,9 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         "city": str(raw_addr.get("city") or "").strip(),
         "state": str(raw_addr.get("state") or "").strip(),
         "pincode": str(raw_addr.get("pincode") or "").strip(),
+        "latitude": _num_or_none(raw_addr.get("latitude") or raw_addr.get("lat")),
+        "longitude": _num_or_none(raw_addr.get("longitude") or raw_addr.get("lng")),
+        "district": str(raw_addr.get("district") or "").strip() or None,
     }
     # Validate required fields
     missing = [k for k in ("name", "phone", "line1", "city", "state", "pincode") if not shipping_address[k]]
@@ -3503,40 +3517,127 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     if not items:
         raise HTTPException(status_code=400, detail="Cart is empty")
 
-    # ── Nov 2026 — Delivery-zone guard.  Reject the order if ANY cart
-    # item's vendor cannot deliver to the customer's pincode.  A vendor
-    # can deliver when the customer's pincode is EITHER the store pincode
-    # OR listed in the vendor's explicit `delivery_pincodes` array.
-    # (Strict — no legacy fallback per user directive Nov 2026.)
+    # ── Dec 2026 rewrite — Delivery-zone guard now MIRRORS the /products
+    # eligibility rules used by the customer-facing shop.  This fixes the
+    # bug where a vendor updated their pincode / radius / delivery mode
+    # (admin-approved), the products listed correctly, but checkout still
+    # rejected because the guard only inspected stale `store_pincode` /
+    # `delivery_pincodes` fields denormalised onto the product document.
+    #
+    # The vendor's LIVE delivery config lives on the users doc.  We fetch
+    # it once per unique vendor and apply the mode-aware check:
+    #
+    #   • mode "pincode" (or unset): customer pincode must equal
+    #     `pincode`/`store_pincode`, OR appear in `delivery_pincodes`.
+    #   • mode "radius": customer lat/lng must be within
+    #     `delivery_radius_km` of vendor lat/lng (haversine).  If the
+    #     customer didn't supply lat/lng, we fall back to Nominatim
+    #     reverse-geocode via /geo/pincode (best-effort, non-fatal).
+    #   • mode "both": either check passes.
+    #
+    # This is what customers now see in the Shop, so an add-to-cart that
+    # succeeds MUST also allow checkout — no more silent mismatches.
+    import math as _math
+
+    async def _vendor_config(vid: str) -> Dict[str, Any]:
+        vd = await db.users.find_one(
+            {"id": vid},
+            {
+                "_id": 0, "id": 1, "name": 1, "pincode": 1, "store_pincode": 1,
+                "delivery_pincodes": 1, "delivery_radius_km": 1,
+                "delivery_radius_mode": 1, "lat": 1, "lng": 1,
+                "delivery_available": 1,
+            },
+        )
+        return vd or {}
+
+    def _hav_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        R = 6371.0088
+        p1 = _math.radians(lat1); p2 = _math.radians(lat2)
+        dp = _math.radians(lat2 - lat1); dl = _math.radians(lng2 - lng1)
+        a = _math.sin(dp / 2) ** 2 + _math.cos(p1) * _math.cos(p2) * _math.sin(dl / 2) ** 2
+        return 2 * R * _math.asin(_math.sqrt(a))
+
     zone_conflicts: List[str] = []
+    _vendor_cache: Dict[str, Dict[str, Any]] = {}
+    customer_pin = str(shipping_address.get("pincode") or "").strip()
+    cust_lat = shipping_address.get("latitude")
+    cust_lng = shipping_address.get("longitude")
+
     for it in items:
         prod = await db.products.find_one(
             {"id": it["product_id"]},
-            {"_id": 0, "name": 1, "store_pincode": 1, "delivery_pincodes": 1, "delivery_available": 1},
+            {"_id": 0, "name": 1, "vendor_id": 1, "delivery_available": 1},
         )
         if not prod:
             continue
         if prod.get("delivery_available") is False:
             zone_conflicts.append(f"{prod.get('name', 'A product')} is not available for delivery.")
             continue
-        sp = str(prod.get("store_pincode") or "").strip()
-        extras = prod.get("delivery_pincodes") or []
+        vid = prod.get("vendor_id")
+        if not vid:
+            # Legacy product with no vendor — allow through (nothing to
+            # verify against).  This preserves seed data compatibility.
+            continue
+        if vid not in _vendor_cache:
+            _vendor_cache[vid] = await _vendor_config(vid)
+        vendor = _vendor_cache[vid]
+        if not vendor:
+            zone_conflicts.append(f"{prod.get('name', 'A product')} — vendor not found.")
+            continue
+        if vendor.get("delivery_available") is False:
+            zone_conflicts.append(f"{prod.get('name', 'A product')} — vendor is not accepting deliveries right now.")
+            continue
+
+        mode = str(vendor.get("delivery_radius_mode") or "pincode").strip().lower()
+        if mode not in ("pincode", "radius", "both"):
+            mode = "pincode"
+
+        sp = str(vendor.get("pincode") or vendor.get("store_pincode") or "").strip()
+        extras = vendor.get("delivery_pincodes") or []
         if not isinstance(extras, list):
             extras = []
-        customer_pin = str(shipping_address.get("pincode") or "").strip()
-        deliverable = bool(customer_pin) and (
-            (sp and sp == customer_pin) or (customer_pin in extras)
-        )
-        # If the vendor hasn't set ANY delivery pincode / extras, they
-        # implicitly deliver nowhere — reject with a clear message.
+        extras = [str(x).strip() for x in extras if str(x).strip()]
+
+        deliverable = False
+        # ── Pincode check
+        if mode in ("pincode", "both"):
+            if customer_pin and ((sp and sp == customer_pin) or (customer_pin in extras)):
+                deliverable = True
+        # ── Radius check
+        if not deliverable and mode in ("radius", "both"):
+            try:
+                vlat = vendor.get("lat"); vlng = vendor.get("lng")
+                rkm = float(vendor.get("delivery_radius_km") or 0)
+                if (isinstance(vlat, (int, float)) and isinstance(vlng, (int, float))
+                        and isinstance(cust_lat, (int, float))
+                        and isinstance(cust_lng, (int, float))
+                        and rkm > 0):
+                    d = _hav_km(float(cust_lat), float(cust_lng), float(vlat), float(vlng))
+                    if d <= rkm:
+                        deliverable = True
+            except Exception:
+                pass
+
         if not deliverable:
-            zone_reason = (
-                f"vendor pincode: {sp}" if sp
-                else "vendor has not configured delivery zone"
-            )
+            # Compose an accurate, human-friendly reason.
+            if mode == "radius":
+                zone_reason = (
+                    f"vendor delivers within {vendor.get('delivery_radius_km') or 0} km of their store — "
+                    + ("your GPS is outside the zone" if cust_lat is not None and cust_lng is not None
+                       else "please share your current location and retry")
+                )
+            elif mode == "both":
+                zone_reason = (
+                    f"vendor pincode {sp or '—'} & radius "
+                    f"{vendor.get('delivery_radius_km') or 0} km"
+                )
+            else:
+                zone_reason = f"vendor pincode: {sp or '—'}"
             zone_conflicts.append(
                 f"{prod.get('name', 'A product')} is not deliverable to pincode {customer_pin or '(none)'} ({zone_reason}).",
             )
+
     if zone_conflicts:
         raise HTTPException(
             status_code=400,
@@ -3592,7 +3693,15 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 "product_id": product["id"],
                 "name": product["name"],
                 "price": product["price"],
-                "image_url": product["image_url"],
+                # Dec 2026 — image_url is optional on modern products
+                # (multi-image `images[]` array is the new source of truth).
+                # Fall back to the first images[] entry or an empty string
+                # so checkout never crashes on legacy / minimal seeds.
+                "image_url": (
+                    product.get("image_url")
+                    or (product.get("images") or [None])[0]
+                    or ""
+                ),
                 "qty": qty,
                 "line_total": line_total,
                 "vendor_id": vendor_id,

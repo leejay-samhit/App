@@ -8917,3 +8917,32 @@ agent_communication:
         primary CTA to /vendor/apply, ghost CTA mailto:support@slangcart.com,
         and a footer line with the support address.
       Screenshots verified at Kadapa (hero) and Srikalahasti (products).
+
+frontend:
+  - task: "Unified app-wide entrance animation + skeletons"
+    implemented: true
+    working: "NA"
+    file: "src/anim/fade-slide-in.tsx, src/anim/skeleton.tsx, src/anim/index.ts"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "New reusable animation primitives standardise how every screen appears: FadeSlideIn (320ms fade + 12px upward slide, Easing.out(cubic)) for content, and Skeleton / ProductCardSkeleton / ListRowSkeleton / StatCardSkeleton for loading states. Wired into shop-home, shop-category, vendor dashboard, vendor orders, vendor invoices, user orders, admin products — replacing scattered ActivityIndicators and mismatched fade / slide-from-bottom animations. Powered by react-native-reanimated 4 (no new deps). Staggered list items get delay = idx * 42ms so cards cascade in."
+
+agent_communication:
+  - agent: "main"
+    message: |
+      App-wide animation unification shipped.
+      • src/anim/: FadeSlideIn primitive (single canonical entrance) +
+        Skeleton components (ProductCardSkeleton, ListRowSkeleton,
+        StatCardSkeleton).  ANIM constants exported so every screen uses
+        the same duration / easing / slide distance.
+      • Applied to 7 high-visibility screens: shop-home, shop-category,
+        vendor/dashboard, vendor/orders, vendor/invoices, orders (user),
+        admin/products.
+      • Loading state everywhere is now the shimmer skeleton — no more
+        mixed ActivityIndicator / dots / blank white flashes.
+      • Verified via screenshot: Srikalahasti shop shows the 3 Kittu
+        products fading in with the new stagger.

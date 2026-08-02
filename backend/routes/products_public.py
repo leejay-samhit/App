@@ -319,7 +319,7 @@ async def list_products_by_source(
     deliver.  Always returns a flat ARRAY of shaped products (same shape
     as /products).
     """
-    limit = max(1, min(50, int(limit or 10)))
+    limit = max(1, min(300, int(limit or 10)))
     src = (source or "trending").strip().lower()
     if src not in ("trending", "new", "best", "category", "manual"):
         src = "trending"

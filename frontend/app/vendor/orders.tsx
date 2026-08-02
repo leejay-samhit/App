@@ -27,6 +27,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { FadeSlideIn, ListRowSkeleton } from "../../src/anim";
 import { downloadOrdersCsv, ExportOrderLike } from "../../src/exportOrdersCsv";
 
 type VendorSale = {
@@ -237,17 +238,20 @@ export default function VendorOrders() {
       </View>
 
       {loading ? (
-        <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
+          {[...Array(5)].map((_, i) => <ListRowSkeleton key={i} />)}
+        </View>
       ) : (
         <FlatList
           contentContainerStyle={{ padding: spacing.screen, paddingTop: 8 }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
           data={items}
           keyExtractor={(i, idx) => String(i?.id || idx)}
-          renderItem={({ item }) => {
+          renderItem={({ item, index }) => {
             const orderId = item.order_id || item.id;
             const safeItems = Array.isArray(item.items) ? item.items : [];
             return (
+              <FadeSlideIn delay={Math.min(index, 6) * 40}>
               <View style={styles.card} testID={`vorder-${orderId}`}>
                 <View style={styles.cardTop}>
                   <View style={{ flex: 1 }}>
@@ -350,6 +354,7 @@ export default function VendorOrders() {
                   </View>
                 </View>
               </View>
+              </FadeSlideIn>
             );
           }}
           ListEmptyComponent={

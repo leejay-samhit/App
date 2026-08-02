@@ -12,6 +12,7 @@ import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
 import { useAuth } from "../../../src/auth";
 import { useDeliveryLocation } from "../../../src/use-delivery-location";
 import { NoVendorsHero } from "../../../src/no-vendors-hero";
+import { FadeSlideIn, ProductCardSkeleton } from "../../../src/anim";
 
 type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; sub_category?: string; vendor_id?: string | null };
 
@@ -234,7 +235,9 @@ export default function ShopCategoryScreen() {
             card briefly flashed while ShopLayoutRenderer was still fetching
             its blocks — hasLayout was still `null` and products was still `[]`. */}
         {loadingProducts || hasLayout === null ? (
-          <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, paddingHorizontal: 4 }}>
+            {[...Array(6)].map((_, i) => <ProductCardSkeleton key={i} />)}
+          </View>
         ) : (hasLayout === false && products.length === 0) ? (
           // Jul 2026 — Location-aware empty state.  If we have no
           // vendors nearby for this pincode, show the beautiful
@@ -283,10 +286,11 @@ export default function ShopCategoryScreen() {
             }
             return (
               <View style={styles.gridWrap}>
-                {filtered.map((p) => {
+                {filtered.map((p, idx) => {
               const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
               return (
-                <View key={p.id} style={[styles.gridCard, !inStock && { opacity: 0.55 }]}>
+                <FadeSlideIn key={p.id} delay={Math.min(idx, 8) * 40} style={styles.gridCard as any}>
+                <View style={[!inStock && { opacity: 0.55 }]}>
                   <TouchableOpacity activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>
                     <Image source={{ uri: p.image_url }} style={styles.gridImg} resizeMode="cover" />
                   </TouchableOpacity>
@@ -320,6 +324,7 @@ export default function ShopCategoryScreen() {
                     </View>
                   </View>
                 </View>
+                </FadeSlideIn>
               );
             })}
               </View>
