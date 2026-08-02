@@ -15,6 +15,7 @@ import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import OutOfZoneModal from "../src/OutOfZoneModal";
+import { useDeliveryLocation } from "../src/use-delivery-location";
 
 type CartItem = { id: string; product_id: string; qty: number; product: { name: string; price: number; image_url: string }; line_total: number };
 
@@ -23,6 +24,13 @@ const ADDRESS_KEY = "@checkout-address-v1";
 export default function CheckoutScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  // Dec 2026 — shared delivery-location hook so coords captured on the
+  // Shop tab auto-flow into checkout.  Previously the customer had to
+  // tap "Use current location" AGAIN here (many didn't), which meant
+  // the backend never received lat/lng and the radius-mode delivery
+  // check always failed — surfacing as "Some items can't be delivered"
+  // even when the user was clearly within the vendor's radius.
+  const deliveryLoc = useDeliveryLocation();
   const [items, setItems] = useState<CartItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [placing, setPlacing] = useState(false);
@@ -152,6 +160,18 @@ export default function CheckoutScreen() {
       } catch { /* ignore */ }
     })();
   }, [load, user]);
+
+  // Dec 2026 — When the checkout-local address snapshot has NO lat/lng
+  // (e.g. the customer entered the address by hand on this page but had
+  // already granted GPS on the Shop tab), copy the shared coords over so
+  // the backend's radius-mode delivery check has data to work with.
+  useEffect(() => {
+    if (gpsLat !== null && gpsLng !== null) return;
+    if (deliveryLoc.coords && typeof deliveryLoc.coords.lat === "number" && typeof deliveryLoc.coords.lng === "number") {
+      setGpsLat(deliveryLoc.coords.lat);
+      setGpsLng(deliveryLoc.coords.lng);
+    }
+  }, [deliveryLoc.coords, gpsLat, gpsLng]);
 
   const total = items.reduce((s, i) => s + ((i.line_total) || (i.product?.price || 0) * (i.qty || 1)), 0);
   const canAffordWallet = walletBalance >= total;

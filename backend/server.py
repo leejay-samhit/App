@@ -11,7 +11,7 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 import httpx
 import jwt
@@ -3539,6 +3539,39 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     # succeeds MUST also allow checkout — no more silent mismatches.
     import math as _math
 
+    async def _pincode_latlng(pin: str) -> Optional[Tuple[float, float]]:
+        """Dec 2026 — Best-effort lat/lng lookup for a pincode when the
+        customer didn't share GPS.  Order:
+          1. Local db.pincodes catalogue (fast, offline-safe).
+          2. Nominatim forward geocode (network, throttled).
+        Returns None if both fail — caller then treats the customer as
+        having no coords."""
+        if not pin or not pin.isdigit():
+            return None
+        try:
+            row = await db.pincodes.find_one({"pincode": pin}, {"_id": 0, "lat": 1, "lng": 1})
+            if row and row.get("lat") and row.get("lng"):
+                return (float(row["lat"]), float(row["lng"]))
+        except Exception:
+            pass
+        # Fallback — Nominatim.  We import lazily to avoid a hard import
+        # dependency when the route isn't mounted (e.g. tests).
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                r = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"q": pin, "format": "jsonv2", "countrycodes": "in", "limit": 1},
+                    headers={"User-Agent": "Slangcart/1.0 (contact: support@slangcart.com)", "Accept-Language": "en"},
+                )
+                if r.status_code == 200:
+                    arr = r.json() or []
+                    if arr:
+                        return (float(arr[0].get("lat") or 0), float(arr[0].get("lon") or 0))
+        except Exception:
+            pass
+        return None
+
     async def _vendor_config(vid: str) -> Dict[str, Any]:
         vd = await db.users.find_one(
             {"id": vid},
@@ -3563,6 +3596,15 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     customer_pin = str(shipping_address.get("pincode") or "").strip()
     cust_lat = shipping_address.get("latitude")
     cust_lng = shipping_address.get("longitude")
+    # Dec 2026 — If the client didn't share GPS, transparently derive it
+    # from the shipping pincode so the radius check still has data.  We
+    # do this ONCE for the whole checkout (not per-cart-item).
+    if not (isinstance(cust_lat, (int, float)) and isinstance(cust_lng, (int, float))):
+        pin_ll = await _pincode_latlng(customer_pin)
+        if pin_ll:
+            cust_lat, cust_lng = pin_ll
+            shipping_address["latitude"] = cust_lat
+            shipping_address["longitude"] = cust_lng
 
     for it in items:
         prod = await db.products.find_one(
