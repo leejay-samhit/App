@@ -84,6 +84,3 @@ credentials.json
 *.key
 .credentials
 # .env files are managed by the deployment pipeline — do NOT ignore.
-.env
-.env.*
-*.env
