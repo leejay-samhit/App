@@ -2708,27 +2708,50 @@ async def admin_list_products(
 async def admin_list_vendors(q: Optional[str] = None, _: Dict[str, Any] = Depends(require_admin)):
     """Lightweight vendor picker for the admin Products page filter.
 
-    Returns approved vendors (id / display name / email / store_pincode)
-    optionally narrowed by a substring `q` against name / business name /
-    email.  Kept fast and paginated-off for the ≤ few-hundred vendors we
-    have today.
+    Dec 2026 — Returns ALL vendors (approved + pending) so the admin can
+    filter products by ANY vendor, not just approved ones.  Search also
+    now covers store_pincode so admins can find a vendor by their PIN
+    (useful when a customer complains about a specific area).
+
+    Kept fast and paginated-off for the ≤ few-hundred vendors we have
+    today.  Sorted approved-first, then by display name.
     """
-    query: Dict[str, Any] = {"is_vendor_approved": True}
+    query: Dict[str, Any] = {
+        "$or": [
+            {"is_vendor": True},
+            {"is_vendor_approved": True},
+            {"vendor_status": {"$exists": True}},
+        ],
+    }
     if q:
         rx = {"$regex": q.strip(), "$options": "i"}
-        query["$or"] = [{"name": rx}, {"vendor_business_name": rx}, {"email": rx}]
+        query = {
+            "$and": [
+                query,
+                {"$or": [
+                    {"name": rx},
+                    {"vendor_business_name": rx},
+                    {"email": rx},
+                    {"store_pincode": rx},
+                    {"phone": rx},
+                ]},
+            ],
+        }
     items = []
     async for v in db.users.find(
         query,
-        {"_id": 0, "id": 1, "name": 1, "email": 1, "vendor_business_name": 1, "store_pincode": 1},
-    ).sort("vendor_business_name", 1).limit(500):
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "vendor_business_name": 1,
+         "store_pincode": 1, "is_vendor_approved": 1, "vendor_status": 1},
+    ).sort([("is_vendor_approved", -1), ("vendor_business_name", 1)]).limit(1000):
         items.append({
             "id": v["id"],
             "name": v.get("vendor_business_name") or v.get("name") or v.get("email"),
             "email": v.get("email"),
             "store_pincode": v.get("store_pincode") or "",
+            "is_approved": bool(v.get("is_vendor_approved")),
+            "status": v.get("vendor_status") or ("approved" if v.get("is_vendor_approved") else "pending"),
         })
-    return {"items": items}
+    return {"items": items, "total": len(items)}
 
 
 @api_router.patch("/admin/products/{product_id}")

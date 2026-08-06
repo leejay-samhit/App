@@ -74,7 +74,7 @@ type Product = {
   interested_count?: number;
 };
 
-type VendorLite = { id: string; name: string; email?: string; store_pincode?: string };
+type VendorLite = { id: string; name: string; email?: string; store_pincode?: string; is_approved?: boolean; status?: string };
 
 type InterestedUser = { id: string; name: string; email: string; phone?: string };
 
@@ -389,14 +389,14 @@ function VendorPickerModal({
         <TouchableOpacity activeOpacity={1} style={vpStyles.sheet} onPress={() => {}}>
           <View style={vpStyles.handle} />
           <Text style={vpStyles.title}>Filter by vendor</Text>
-          <Text style={vpStyles.subtitle}>Show only products owned by this vendor.</Text>
+          <Text style={vpStyles.subtitle}>All vendors listed below. Search by name, email, phone or pincode.</Text>
 
           <View style={vpStyles.search}>
             <Feather name="search" size={15} color={colors.textMuted} />
             <TextInput
               value={q}
               onChangeText={setQ}
-              placeholder="Search vendor by name or email"
+              placeholder="Search vendor by name, email, phone, or pincode"
               placeholderTextColor={colors.textMuted}
               style={vpStyles.searchInput}
               autoFocus
@@ -433,6 +433,8 @@ function VendorPickerModal({
             ) : (
               items.map((v) => {
                 const on = selectedId === v.id;
+                const status = (v.status || (v.is_approved ? "approved" : "pending")).toLowerCase();
+                const statusColor = status === "approved" ? "#16A34A" : status === "rejected" ? "#DC2626" : "#F59E0B";
                 return (
                   <TouchableOpacity
                     key={v.id}
@@ -446,9 +448,14 @@ function VendorPickerModal({
                       </Text>
                     </View>
                     <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={vpStyles.rowName} numberOfLines={1}>{v.name}</Text>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={vpStyles.rowName} numberOfLines={1}>{v.name}</Text>
+                        <View style={{ paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, backgroundColor: statusColor + "22" }}>
+                          <Text style={{ fontSize: 9, fontWeight: "900", color: statusColor, letterSpacing: 0.5 }}>{status.toUpperCase()}</Text>
+                        </View>
+                      </View>
                       <Text style={vpStyles.rowSub} numberOfLines={1}>
-                        {v.email}{v.store_pincode ? ` · ${v.store_pincode}` : ""}
+                        {v.email}{v.store_pincode ? ` · PIN ${v.store_pincode}` : ""}
                       </Text>
                     </View>
                     {on ? <Feather name="check" size={18} color={colors.primary} /> : null}

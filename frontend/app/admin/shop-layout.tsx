@@ -174,13 +174,47 @@ export default function AdminShopLayoutScreen() {
   // /admin/shop-categories reflects here the next time admin pops back.
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  // Filter items by current scope
+  // Dec 2026 — Pincode search filter.  When admin types a pincode, we
+  // narrow the visible blocks to those whose `scope_pincode` matches
+  // (exact or partial prefix).  Empty pincode = show all blocks
+  // (including ones with no scope_pincode set = global blocks).
+  const [pincodeSearch, setPincodeSearch] = useState<string>("");
+
+  // Filter items by current scope + pincode search
   const filteredItems = useMemo(() => {
+    const pin = pincodeSearch.trim();
     return items.filter((b) => {
       const itemScope = (b as any).scope || "home";
-      if (scope === "home") return itemScope === "home" || !itemScope;
-      return itemScope === "category" && (b as any).scope_category === scopeCategory;
+      if (scope === "home") {
+        if (!(itemScope === "home" || !itemScope)) return false;
+      } else {
+        if (!(itemScope === "category" && (b as any).scope_category === scopeCategory)) return false;
+      }
+      if (pin) {
+        const sp = String((b as any).scope_pincode || "").trim();
+        // A pincode filter matches when the block's scope_pincode either
+        // equals the search OR starts-with the search (so typing "5176"
+        // matches every block scoped to 5176xx).
+        if (!sp) return false;
+        return sp === pin || sp.startsWith(pin);
+      }
+      return true;
     });
+  }, [items, scope, scopeCategory, pincodeSearch]);
+
+  // Dec 2026 — Compute the distinct pincodes used across the currently-
+  // scoped blocks so admin can see at a glance which pincodes have
+  // custom layouts (renders as tappable chips below the search).
+  const distinctPincodes = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((b: any) => {
+      const s = String(b?.scope_pincode || "").trim();
+      const bScope = b?.scope || "home";
+      if (scope === "home" && !(bScope === "home" || !bScope)) return;
+      if (scope === "category" && !(bScope === "category" && b?.scope_category === scopeCategory)) return;
+      if (s) set.add(s);
+    });
+    return Array.from(set).sort();
   }, [items, scope, scopeCategory]);
 
   // Delete with 2-tap confirm
@@ -323,6 +357,54 @@ export default function AdminShopLayoutScreen() {
         })}
       </ScrollView>
 
+      {/* Dec 2026 — Pincode search filter.  Type a pincode (or prefix)
+          to narrow the block list to blocks scoped to that pincode.
+          Tapping a chip auto-fills the search.  "Clear" resets to show
+          every block in the current scope (including global ones with
+          no pincode set). */}
+      <View style={styles.pinBar}>
+        <View style={styles.pinInputWrap}>
+          <Feather name="map-pin" size={14} color={colors.textMuted} />
+          <TextInput
+            value={pincodeSearch}
+            onChangeText={(t) => setPincodeSearch(t.replace(/[^0-9]/g, "").slice(0, 6))}
+            placeholder="Filter blocks by pincode (e.g. 517644)"
+            placeholderTextColor={colors.textMuted}
+            keyboardType="number-pad"
+            maxLength={6}
+            style={styles.pinInput}
+            testID="shop-layout-pin-search"
+          />
+          {pincodeSearch ? (
+            <TouchableOpacity onPress={() => setPincodeSearch("")} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} testID="shop-layout-pin-clear">
+              <Feather name="x-circle" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
+        {distinctPincodes.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ gap: 6, paddingHorizontal: 4 }}
+            style={{ marginTop: 8 }}
+          >
+            {distinctPincodes.map((p) => {
+              const active = pincodeSearch === p;
+              return (
+                <TouchableOpacity
+                  key={p}
+                  onPress={() => setPincodeSearch(active ? "" : p)}
+                  style={[styles.pinChip, active && styles.pinChipActive]}
+                  testID={`pin-chip-${p}`}
+                >
+                  <Text style={[styles.pinChipText, active && styles.pinChipTextActive]}>{p}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        ) : null}
+      </View>
+
       {loading ? (
         <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
       ) : (
@@ -365,8 +447,21 @@ export default function AdminShopLayoutScreen() {
           {filteredItems.length === 0 ? (
             <View style={styles.emptyCard}>
               <Feather name="layout" size={28} color={colors.textMuted} />
-              <Text style={styles.emptyText}>No blocks for {scope === "home" ? "Home" : scopeCategory}</Text>
-              <Text style={styles.emptySub}>Tap + to add a banner slider, category circles, product grid, flash sale, or any other block.</Text>
+              <Text style={styles.emptyText}>
+                {pincodeSearch
+                  ? `No blocks matching pincode ${pincodeSearch}`
+                  : `No blocks for ${scope === "home" ? "Home" : scopeCategory}`}
+              </Text>
+              <Text style={styles.emptySub}>
+                {pincodeSearch
+                  ? "Clear the pincode filter above or add a new block scoped to this pincode."
+                  : "Tap + to add a banner slider, category circles, product grid, flash sale, or any other block."}
+              </Text>
+              {pincodeSearch ? (
+                <TouchableOpacity onPress={() => setPincodeSearch("")} style={{ marginTop: 6 }}>
+                  <Text style={{ color: colors.primary, fontWeight: "800", fontSize: 12 }}>Clear pincode filter</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           ) : (
             <DraggableLayoutList
@@ -1391,6 +1486,23 @@ const styles = StyleSheet.create({
   scopeTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   scopeTabText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
   scopeTabTextActive: { color: colors.primaryFg },
+  // Dec 2026 — Pincode filter bar (below scope tabs)
+  pinBar: { paddingHorizontal: spacing.screen, paddingTop: 2, paddingBottom: 8 },
+  pinInputWrap: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+    borderRadius: 12, paddingHorizontal: 12, height: 40,
+  },
+  pinInput: { flex: 1, fontSize: 13, color: colors.textMain, paddingVertical: 0, letterSpacing: 0.5 },
+  pinChip: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    minHeight: 30, alignItems: "center", justifyContent: "center",
+  },
+  pinChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  pinChipText: { fontSize: 11, fontWeight: "800", color: colors.textMain, letterSpacing: 0.4 },
+  pinChipTextActive: { color: colors.primaryFg },
   heroBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: "#fff" },
   heroBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary },
 });
