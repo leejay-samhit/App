@@ -105,7 +105,6 @@
       ],
       "expo-font",
       "expo-secure-store",
-      "./plugins/network-security-config",
       [
         "expo-notifications",
         {
