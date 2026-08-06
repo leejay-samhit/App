@@ -32,20 +32,7 @@
         ],
         "NSFaceIDUsageDescription": "Sign in instantly with Face ID instead of typing your password.",
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": false,
-          "NSPinnedDomains": {
-            "REPLACE_WITH_PROD_API_HOSTNAME": {
-              "NSIncludesSubdomains": true,
-              "NSPinnedCAIdentities": [
-                {
-                  "SPKI-SHA256-BASE64": "REPLACE_WITH_PRIMARY_PIN_SHA256_BASE64"
-                },
-                {
-                  "SPKI-SHA256-BASE64": "REPLACE_WITH_BACKUP_PIN_SHA256_BASE64"
-                }
-              ]
-            }
-          }
+          "NSAllowsArbitraryLoads": false
         }
       },
       "bundleIdentifier": "app.emergent.networkpay16728573e"
@@ -118,6 +105,7 @@
       ],
       "expo-font",
       "expo-secure-store",
+      "./plugins/network-security-config",
       [
         "expo-notifications",
         {

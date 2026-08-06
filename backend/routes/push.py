@@ -29,7 +29,7 @@ from core.security import get_current_user, require_admin_role
 
 logger = logging.getLogger(__name__)
 
-PUSH_BASE_URL = "https://integrations.emergentagent.com"
+PUSH_BASE_URL = os.environ.get("EMERGENT_PUSH_BASE_URL", "https://integrations.emergentagent.com")
 PUSH_KEY = os.environ.get("EMERGENT_PUSH_KEY", "placeholder")
 
 # Module-level shared async client. Kept alive across the FastAPI lifespan
