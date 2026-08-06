@@ -7613,6 +7613,25 @@ async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depen
         raise HTTPException(status_code=400, detail="You already have an active application")
     app_id = str(uuid.uuid4())
     ts = now_utc().isoformat()
+    # Dec 2026 — Extract lat/lng scalars from the GeoJSON `location` payload
+    # so the products_public / eligibility checks can read them directly.
+    # Without this, radius-mode delivery never matched (the filter reads
+    # top-level lat/lng, not location.coordinates).
+    loc_lat: Optional[float] = None
+    loc_lng: Optional[float] = None
+    if isinstance(payload.location, dict):
+        coords = payload.location.get("coordinates") or []
+        if isinstance(coords, list) and len(coords) >= 2:
+            try:
+                loc_lng = float(coords[0]); loc_lat = float(coords[1])
+            except Exception:
+                loc_lat = loc_lng = None
+    # Normalize delivery_pincodes into stripped strings.
+    pins_in = payload.delivery_pincodes or []
+    if not isinstance(pins_in, list):
+        pins_in = []
+    delivery_pincodes_clean = [str(p).strip() for p in pins_in if str(p).strip()]
+
     doc = {
         "id": app_id,
         "user_id": user["id"],
@@ -7628,6 +7647,8 @@ async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depen
         # Nov 2026 — persist location / delivery details on the application row
         # so the admin can see what was submitted for approval.
         "location": payload.location,
+        "lat": loc_lat,
+        "lng": loc_lng,
         "pincode": (payload.pincode or "").strip() or None,
         "state": (payload.state or "").strip() or None,
         "district": (payload.district or "").strip() or None,
@@ -7635,6 +7656,7 @@ async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depen
         "store_address": (payload.store_address or "").strip() or None,
         "delivery_radius_km": payload.delivery_radius_km,
         "delivery_radius_mode": payload.delivery_radius_mode,
+        "delivery_pincodes": delivery_pincodes_clean,
         "delivery_available": payload.delivery_available if payload.delivery_available is not None else True,
         # Sept 2026 — Persist the consent audit block for legal review.
         "accepted_terms": (payload.accepted_terms.model_dump() if payload.accepted_terms else None),
@@ -7649,14 +7671,21 @@ async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depen
         "vendor_status": "pending",
         "shop_name": shop,
     }
-    if payload.pincode: user_update["pincode"] = payload.pincode
+    if payload.pincode:
+        user_update["pincode"] = payload.pincode
+        # Denormalise as store_pincode so the eligibility check (which reads
+        # pincode OR store_pincode) sees it consistently.
+        user_update["store_pincode"] = payload.pincode
     if payload.state: user_update["state"] = payload.state
     if payload.district: user_update["district"] = payload.district
     if payload.city: user_update["city"] = payload.city
     if payload.store_address: user_update["store_address"] = payload.store_address
     if payload.location: user_update["location"] = payload.location
+    if loc_lat is not None: user_update["lat"] = loc_lat
+    if loc_lng is not None: user_update["lng"] = loc_lng
     if payload.delivery_radius_km is not None: user_update["delivery_radius_km"] = payload.delivery_radius_km
     if payload.delivery_radius_mode: user_update["delivery_radius_mode"] = payload.delivery_radius_mode
+    if delivery_pincodes_clean: user_update["delivery_pincodes"] = delivery_pincodes_clean
     if payload.delivery_available is not None: user_update["delivery_available"] = payload.delivery_available
     await db.users.update_one({"id": user["id"]}, {"$set": user_update})
     # Notify admins
@@ -8154,12 +8183,47 @@ async def admin_approve_vendor(app_id: str, admin: Dict[str, Any] = Depends(requ
         "approved_by_email": admin.get("email"),
         "updated_at": ts,
     }})
-    await db.users.update_one({"id": a["user_id"]}, {"$set": {
+    # Dec 2026 — CRITICAL: Set is_vendor_approved AND denormalise every
+    # delivery-config field from the application onto the user doc.  The
+    # customer-facing shop's `_eligible_vendor_ids` filter reads these
+    # scalar fields (lat, lng, store_pincode, delivery_pincodes,
+    # delivery_radius_km, delivery_radius_mode) — so without this copy,
+    # newly-approved vendors' products never appear in the Shop for
+    # customers even though the vendor CAN log in and add products.
+    user_set: Dict[str, Any] = {
         "is_vendor": True,
+        "is_vendor_approved": True,
         "vendor_status": "approved",
         "shop_name": a.get("shop_name"),
         "vendor_approved_at": ts,
-    }})
+    }
+    # Denormalise delivery / location config
+    if a.get("pincode"):
+        user_set["pincode"] = a["pincode"]
+        user_set["store_pincode"] = a["pincode"]
+    if a.get("state"): user_set["state"] = a["state"]
+    if a.get("district"): user_set["district"] = a["district"]
+    if a.get("city"): user_set["city"] = a["city"]
+    if a.get("store_address"): user_set["store_address"] = a["store_address"]
+    if a.get("location"): user_set["location"] = a["location"]
+    if isinstance(a.get("lat"), (int, float)): user_set["lat"] = float(a["lat"])
+    if isinstance(a.get("lng"), (int, float)): user_set["lng"] = float(a["lng"])
+    if a.get("delivery_radius_km") is not None:
+        user_set["delivery_radius_km"] = a["delivery_radius_km"]
+    if a.get("delivery_radius_mode"):
+        user_set["delivery_radius_mode"] = a["delivery_radius_mode"]
+    if a.get("delivery_pincodes"):
+        user_set["delivery_pincodes"] = a["delivery_pincodes"]
+    if a.get("delivery_available") is not None:
+        user_set["delivery_available"] = a["delivery_available"]
+    await db.users.update_one({"id": a["user_id"]}, {"$set": user_set})
+    # Bust the products_public cascade + eligibility caches so the newly
+    # approved vendor's zone takes effect immediately across /products.
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
     try:
         await _create_notification(a["user_id"], "vendor", "Vendor account approved!", "You can now list and sell products.")
     except Exception:

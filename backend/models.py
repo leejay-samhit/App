@@ -537,8 +537,12 @@ class VendorApplyRequest(BaseModel):
     city: Optional[str] = None
     store_address: Optional[str] = None
     delivery_radius_km: Optional[float] = None
-    delivery_radius_mode: Optional[str] = None  # "pincode" | "radius"
+    delivery_radius_mode: Optional[str] = None  # "pincode" | "radius" | "both" | "none"
     delivery_available: Optional[bool] = None
+    # Dec 2026 — Explicit pincodes the vendor delivers to (in ADDITION to
+    # km-radius or entire-store-pincode).  Matches the /vendor/edit-requests
+    # schema so both flows can specify identical delivery configuration.
+    delivery_pincodes: Optional[List[str]] = None
     # Sept 2026 — Consent audit block (nullable so legacy clients still work).
     accepted_terms: Optional[AcceptedTermsBlock] = None
 

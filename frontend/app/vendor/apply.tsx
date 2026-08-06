@@ -38,7 +38,16 @@ export default function VendorApplyScreen() {
   // reverse-geocode auto-fills pincode/state/district/city.  Delivery
   // radius picker is rendered inside the LocationPicker's extraSlot.
   const [shopLocation, setShopLocation] = useState<LocationValue>(EMPTY_LOCATION);
-  const [deliveryRadiusKm, setDeliveryRadiusKm] = useState<number | "pincode">(5);
+  // Dec 2026 — Dual-toggle delivery configuration matching
+  // /vendor/request-edit so both flows have IDENTICAL data shape:
+  //   • deliveryRadiusKm : number | null    — km radius chip (2/5/10/20/50), null = off
+  //   • coverEntirePincode : boolean         — deliver to entire shop pincode
+  //   • deliveryPincodes : string[]          — EXTRA pincodes the vendor delivers to
+  // Any subset can be enabled together — mode is computed at submit time.
+  const [deliveryRadiusKm, setDeliveryRadiusKm] = useState<number | null>(5);
+  const [coverEntirePincode, setCoverEntirePincode] = useState<boolean>(true);
+  const [deliveryPincodes, setDeliveryPincodes] = useState<string[]>([]);
+  const [pincodeDraft, setPincodeDraft] = useState<string>("");
   const [deliveryAvailable, setDeliveryAvailable] = useState<boolean>(true);
   // Sept 2026 — T&C gate (mirror of web /become-vendor). First-time apply
   // MUST accept the Vendor Declaration & GST Compliance Agreement; the
@@ -87,6 +96,23 @@ export default function VendorApplyScreen() {
     setTermsError(null);
     setSubmitting(true);
     try {
+      // Dec 2026 — Compute mode from BOTH toggles so admin approval,
+      // shop eligibility and checkout all read a consistent shape.
+      const hasKm = typeof deliveryRadiusKm === "number" && deliveryRadiusKm > 0;
+      const mode: string = (() => {
+        if (hasKm && coverEntirePincode) return "both";
+        if (hasKm) return "radius";
+        if (coverEntirePincode) return "pincode";
+        return "none";
+      })();
+      if (mode === "none" && deliveryPincodes.length === 0) {
+        Alert.alert(
+          "Delivery zone required",
+          "Pick a km radius, enable 'Cover entire pincode', or add at least one pincode you deliver to.",
+        );
+        setSubmitting(false);
+        return;
+      }
       await api.post("/vendor/apply", {
         shop_name: shopName.trim(), gst_number: gst.trim(), pan_number: pan.trim(),
         bank_name: bankName.trim(), bank_account: bankAccount.trim(), bank_ifsc: bankIfsc.trim(),
@@ -105,8 +131,9 @@ export default function VendorApplyScreen() {
         district: shopLocation.district || null,
         city: shopLocation.city || null,
         store_address: shopLocation.address || null,
-        delivery_radius_km: deliveryRadiusKm === "pincode" ? null : deliveryRadiusKm,
-        delivery_radius_mode: deliveryRadiusKm === "pincode" ? "pincode" : "radius",
+        delivery_radius_km: hasKm ? deliveryRadiusKm : null,
+        delivery_radius_mode: mode,
+        delivery_pincodes: deliveryPincodes,
         delivery_available: deliveryAvailable,
         // Audit-log block — backend is expected to persist this alongside
         // the application row so we can prove consent if a vendor disputes.
@@ -247,23 +274,87 @@ export default function VendorApplyScreen() {
                 hint="Tap 'Use current' to capture GPS + auto-fill pincode/state/district. Editable if auto-detect misses."
                 extraSlot={
                   <View style={{ gap: 8 }}>
-                    <Text style={styles.label}>Delivery radius *</Text>
+                    <Text style={styles.label}>Delivery radius</Text>
                     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                      {([2, 5, 10, 20, 50, "pincode"] as const).map((r) => {
+                      {([null, 2, 5, 10, 20, 50] as const).map((r) => {
                         const active = deliveryRadiusKm === r;
-                        const label = r === "pincode" ? "Entire pincode" : `${r} km`;
+                        const label = r === null ? "None" : `${r} km`;
                         return (
                           <TouchableOpacity
                             key={String(r)}
-                            onPress={() => setDeliveryRadiusKm(r)}
+                            onPress={() => setDeliveryRadiusKm(r as any)}
                             style={[styles.radiusChip, active && styles.radiusChipActive]}
-                            testID={`vapply-radius-${r}`}
+                            testID={`vapply-radius-${r ?? "none"}`}
                           >
                             <Text style={[styles.radiusChipText, active && styles.radiusChipTextActive]}>{label}</Text>
                           </TouchableOpacity>
                         );
                       })}
                     </View>
+
+                    {/* Dec 2026 — Cover entire pincode is an INDEPENDENT
+                        toggle.  Vendors can enable both km-radius AND
+                        entire-pincode coverage at the same time (mode
+                        computed at submit).  This was the bug the user
+                        reported: previous UX forced either/or which
+                        made products invisible in customer shop. */}
+                    <TouchableOpacity
+                      onPress={() => setCoverEntirePincode((v) => !v)}
+                      style={[styles.radiusChip, coverEntirePincode && styles.radiusChipActive, { marginTop: 6, alignSelf: "flex-start" }]}
+                      testID="vapply-cover-pincode"
+                    >
+                      <Feather name={coverEntirePincode ? "check-square" : "square"} size={13} color={coverEntirePincode ? colors.primaryFg : colors.textMain} />
+                      <Text style={[styles.radiusChipText, coverEntirePincode && styles.radiusChipTextActive, { marginLeft: 6 }]}>
+                        Also cover the entire shop pincode
+                      </Text>
+                    </TouchableOpacity>
+
+                    {/* Extra delivery pincodes — vendor can also list
+                        specific neighbouring pincodes they deliver to.
+                        Adds to the km-radius / entire-pincode zones
+                        (union — any match ⇒ deliverable). */}
+                    <Text style={[styles.label, { marginTop: 8 }]}>Extra delivery pincodes (optional)</Text>
+                    <View style={{ flexDirection: "row", gap: 6 }}>
+                      <TextInput
+                        style={[styles.input, { flex: 1 }]}
+                        value={pincodeDraft}
+                        onChangeText={(t) => setPincodeDraft(t.replace(/[^0-9]/g, "").slice(0, 6))}
+                        placeholder="e.g. 517641"
+                        placeholderTextColor={colors.textMuted}
+                        keyboardType="number-pad"
+                        maxLength={6}
+                        testID="vapply-pin-draft"
+                      />
+                      <TouchableOpacity
+                        onPress={() => {
+                          const v = pincodeDraft.trim();
+                          if (v.length !== 6) { Alert.alert("Pincode must be 6 digits"); return; }
+                          if (deliveryPincodes.includes(v)) { setPincodeDraft(""); return; }
+                          setDeliveryPincodes((prev) => [...prev, v]);
+                          setPincodeDraft("");
+                        }}
+                        style={[styles.radiusChip, styles.radiusChipActive, { paddingHorizontal: 14 }]}
+                        testID="vapply-pin-add"
+                      >
+                        <Feather name="plus" size={13} color={colors.primaryFg} />
+                        <Text style={[styles.radiusChipText, styles.radiusChipTextActive, { marginLeft: 4 }]}>Add</Text>
+                      </TouchableOpacity>
+                    </View>
+                    {deliveryPincodes.length > 0 ? (
+                      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                        {deliveryPincodes.map((p) => (
+                          <TouchableOpacity
+                            key={p}
+                            onPress={() => setDeliveryPincodes((prev) => prev.filter((x) => x !== p))}
+                            style={[styles.radiusChip, styles.radiusChipActive]}
+                            testID={`vapply-pin-chip-${p}`}
+                          >
+                            <Text style={[styles.radiusChipText, styles.radiusChipTextActive]}>{p}</Text>
+                            <Feather name="x" size={11} color={colors.primaryFg} style={{ marginLeft: 6 }} />
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    ) : null}
 
                     <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
                       {[true, false].map((v) => (
