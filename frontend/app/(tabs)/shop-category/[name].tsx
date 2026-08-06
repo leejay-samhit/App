@@ -1,7 +1,7 @@
 // Dynamic Category Page — fully rendered from admin-managed `shop_layout`
 // blocks where scope="category" and scope_category=<name>. Falls back to a
 // plain product grid filtered by category if no admin layout exists.
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Image, ActivityIndicator, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -13,6 +13,7 @@ import { useAuth } from "../../../src/auth";
 import { useDeliveryLocation } from "../../../src/use-delivery-location";
 import { NoVendorsHero } from "../../../src/no-vendors-hero";
 import { FadeSlideIn, ProductCardSkeleton } from "../../../src/anim";
+import { cachedGet } from "../../../src/cachedGet";
 
 type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; sub_category?: string; vendor_id?: string | null };
 
@@ -44,75 +45,95 @@ export default function ShopCategoryScreen() {
   // `product.sub_category` values if the admin hasn't split the tree yet.
   const [adminSubs, setAdminSubs] = useState<{ id: string; name: string }[]>([]);
 
-  const load = useCallback(async () => {
-    try {
-      // Check if admin has configured a layout for this category
-      // Jul 2026 — Forward the customer's pincode so admin layout blocks
-      // scoped to specific pincodes only render for the right cohort.
-      const layParams: Record<string, any> = { scope: "category", category };
-      if (deliveryPincode) layParams.pincode = deliveryPincode;
-      const lay = await api.get<{ items: any[] }>("/shop-layout", { params: layParams });
-      const blocks = lay.data?.items || [];
-      setHasLayout(blocks.length > 0);
-    } catch { setHasLayout(false); }
-    try {
-      // ── Nov 2026 — Server-side cascade filter ──
-      // Passing `?category=<name>` triggers the backend to walk the
-      // category tree (parent + all descendants) and return every
-      // matching product in a single query — instant compared to
-      // downloading the full catalogue and filtering client-side.
-      // When a sub-category chip is selected, further narrow by that
-      // slug on the backend as well.
-      //
-      // Jul 2026 — Same strict location gate as the main shop.  Without
-      // this, the category page was leaking every vendor's products
-      // regardless of who actually delivers to the customer's area.
-      const params: Record<string, any> = { category, limit: 120, strict_location: "true" };
-      if (selectedSub) params.subcategory = selectedSub;
-      if (deliveryPincode) params.pincode = deliveryPincode;
-      if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
-      // If we have zero location signals, skip the fetch — an empty
-      // grid + the hero card will explain what's happening.
-      if (!deliveryPincode && !deliveryCoords) { setProducts([]); setLoadingProducts(false); setRefreshing(false); return; }
-      const r = await api.get<any>("/products", { params });
-      const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
+  const load = useCallback(async (options?: { silent?: boolean }) => {
+    // Dec 2026 — Latency killer.  Previously each mount fired 3 sequential
+    // network calls (layout → tree → products) and every subcategory chip
+    // tap re-fetched /products from scratch, so the grid flashed empty for
+    // 500-1500ms every time.
+    //
+    // New flow:
+    //   • cachedGet with SWR — cached copy paints instantly, network
+    //     revalidates in the background and updates state via `onFresh`.
+    //   • All three calls fire in parallel — no waterfall.
+    //   • Subcategory chip tap is 100% client-side (see filtered useMemo
+    //     below) — zero network round-trip.
+    if (!options?.silent) setLoadingProducts(true);
+    // Layout — 10 min TTL
+    const layParams: Record<string, any> = { scope: "category", category };
+    if (deliveryPincode) layParams.pincode = deliveryPincode;
+    cachedGet<{ items: any[] }>("/shop-layout", {
+      ttlMs: 600_000,
+      params: layParams,
+      onFresh: (fresh) => setHasLayout((fresh?.items || []).length > 0),
+    }).then((cached) => {
+      if (cached) setHasLayout((cached?.items || []).length > 0);
+    });
+
+    // Skip products fetch entirely when no location signals — hero card
+    // handles the empty state.
+    if (!deliveryPincode && !deliveryCoords) {
+      setProducts([]); setLoadingProducts(false); setRefreshing(false); return;
+    }
+
+    // Products — 60 s TTL.  Fetch WITHOUT subcategory filter — the chip
+    // strip narrows client-side so tapping between chips is instant.
+    const params: Record<string, any> = { category, limit: 240, strict_location: "true" };
+    if (deliveryPincode) params.pincode = deliveryPincode;
+    if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+    const applyList = (data: any) => {
+      const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
       setProducts(
         list.filter((p: any) => {
-          // Belt-and-braces: still hide the vendor's own products from
-          // themselves even though the server cascade already did the
-          // category work.
           if (currentUserId && p.vendor_id && p.vendor_id === currentUserId) return false;
           return true;
         }),
       );
-    } catch (e) { /* silent */ }
-    finally { setLoadingProducts(false); setRefreshing(false); }
-  }, [category, currentUserId, selectedSub, deliveryPincode, deliveryCoords]);
+      setLoadingProducts(false);
+      setRefreshing(false);
+    };
+    cachedGet<any>("/products", {
+      ttlMs: 60_000,
+      params,
+      onFresh: applyList,
+    }).then((cached) => {
+      if (cached) applyList(cached);
+    }).catch(() => { setLoadingProducts(false); setRefreshing(false); });
+  }, [category, currentUserId, deliveryPincode, deliveryCoords]);
+
+  // Dec 2026 — Client-side subcategory filter.  Zero network calls on
+  // chip tap.  Cascades product.sub_category (case-insensitive).
+  const filtered = useMemo(() => {
+    if (!selectedSub) return products;
+    const target = selectedSub.trim().toLowerCase();
+    return products.filter((p) => (p.sub_category || "").trim().toLowerCase() === target
+      || (p.category || "").trim().toLowerCase() === target);
+  }, [products, selectedSub]);
 
   // Nov 2026 — resolve the parent category by name and fetch its admin-
   // managed subcategories so we can show REAL nested chips.
+  // Dec 2026 — Uses cachedGet with 10 min TTL so switching between
+  // categories doesn't re-fetch the tree every time.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const tree = await api.get<{ items: any[] }>("/shop-categories/tree");
-        if (cancelled) return;
-        const walk = (nodes: any[], target: string): any | null => {
-          const t = target.trim().toLowerCase();
-          for (const n of nodes) {
-            if ((n.name || "").trim().toLowerCase() === t) return n;
-            const inner = walk(n.children || [], target);
-            if (inner) return inner;
-          }
-          return null;
-        };
-        const node = walk(tree.data?.items || [], category);
-        const subs = (node?.children || []).map((c: any) => ({ id: c.id, name: c.name }));
-        setAdminSubs(subs);
-      } catch {
-        setAdminSubs([]);
-      }
-    })();
+    const apply = (tree: any) => {
+      if (cancelled || !tree) return;
+      const walk = (nodes: any[], target: string): any | null => {
+        const t = target.trim().toLowerCase();
+        for (const n of nodes) {
+          if ((n.name || "").trim().toLowerCase() === t) return n;
+          const inner = walk(n.children || [], target);
+          if (inner) return inner;
+        }
+        return null;
+      };
+      const node = walk(tree.items || [], category);
+      const subs = (node?.children || []).map((c: any) => ({ id: c.id, name: c.name }));
+      setAdminSubs(subs);
+    };
+    cachedGet<{ items: any[] }>("/shop-categories/tree", {
+      ttlMs: 600_000,
+      onFresh: apply,
+    }).then((cached) => { if (cached) apply(cached); });
     return () => { cancelled = true; };
   }, [category]);
 
@@ -253,9 +274,9 @@ export default function ShopCategoryScreen() {
           )
         ) : hasLayout === false ? (
           (() => {
-            // Nov 2026 — server already filtered by subcategory when
-            // `selectedSub` is set (see load()).  Show products as-is.
-            const filtered = products;
+            // Dec 2026 — subcategory filter is now applied client-side
+            // via the `filtered` useMemo above.  Zero network calls on
+            // chip tap.
             if (filtered.length === 0) {
               // Jul 2026 — Match the hero pattern when the sub filter
               // yields no products either.  When the user cleared to

@@ -12,7 +12,8 @@ Endpoints (mounted at /api by server.py):
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -22,6 +23,31 @@ from core.security import get_current_user
 from core.utils import now_utc
 
 router = APIRouter(tags=["products-public"])
+
+# ─────────────────────────────────────────────────────────────────────
+# Dec 2026 — In-memory caches for the two hottest helpers.  Every
+# /products, /products/by-source, /shop-categories/tree and category
+# screen mount runs `_collect_cascade_names` + `_eligible_vendor_ids`
+# — hitting Mongo O(N) each time, where N = approved-vendor count.
+#
+# These caches turn the O(N) scans into O(1) lookups for repeated
+# customer sessions (which is the common case: the same customer
+# opens several categories in a row from the same GPS/pincode).
+#
+# TTLs are short (60s) so vendor pincode / radius edits still flow
+# through quickly; admin approval flow also busts the vendor cache
+# via `bust_eligible_vendor_cache()` below.
+# ─────────────────────────────────────────────────────────────────────
+_CASCADE_TTL = 300.0          # 5 min — category tree changes are rare
+_ELIGIBLE_TTL = 60.0           # 1 min — vendor config changes take up to 60s to propagate
+_cascade_cache: Dict[str, Tuple[float, List[str]]] = {}
+_eligible_cache: Dict[str, Tuple[float, set]] = {}
+
+
+def bust_products_public_caches() -> None:
+    """Called by admin routes after vendor approval / category edits."""
+    _cascade_cache.clear()
+    _eligible_cache.clear()
 
 
 def _shape_product(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -40,7 +66,18 @@ async def _collect_cascade_names(root_ident: str) -> List[str]:
     """Given a category name OR id, return the set of category names to
     match against products (root + every descendant).  Supports both
     lookups because vendors historically wrote free-form names into
-    `product.category` while the new tree stores UUIDs."""
+    `product.category` while the new tree stores UUIDs.
+
+    Dec 2026 — Cached for 5 min so repeated category-screen mounts (the
+    hot path from the customer's shop navigation) don't re-walk the
+    tree via 3-6 Mongo queries every time.
+    """
+    key = (root_ident or "").strip().lower()
+    now = time.time()
+    hit = _cascade_cache.get(key)
+    if hit and (now - hit[0]) < _CASCADE_TTL:
+        return list(hit[1])
+
     # Locate the root by id, then fall back to name / slug
     root = await db.shop_categories.find_one({"id": root_ident})
     if not root:
@@ -48,7 +85,9 @@ async def _collect_cascade_names(root_ident: str) -> List[str]:
     if not root:
         root = await db.shop_categories.find_one({"slug": root_ident.lower()})
     if not root:
-        return [root_ident]  # fall back to literal text match
+        result = [root_ident]  # fall back to literal text match
+        _cascade_cache[key] = (now, result)
+        return result
 
     # BFS to collect all descendants
     names: List[str] = [(root.get("name") or "").strip()]
@@ -63,7 +102,9 @@ async def _collect_cascade_names(root_ident: str) -> List[str]:
                 n = (c.get("name") or "").strip()
                 if n and n not in names: names.append(n)
         frontier = next_layer
-    return [n for n in names if n]
+    result = [n for n in names if n]
+    _cascade_cache[key] = (now, result)
+    return result
 
 
 def _build_category_filter(names: List[str]) -> Dict[str, Any]:
@@ -231,7 +272,22 @@ async def _eligible_vendor_ids(
 
     Vendors that predate the `delivery_radius_mode` field are treated
     conservatively — they only match via (1) and (2).
+
+    Dec 2026 — Result is cached in-memory for 60s keyed by
+    (pincode, lat, lng).  This turns the O(N) vendor scan + haversine
+    loop into an O(1) lookup for repeated calls from the same
+    customer session (category screen, layout blocks, checkout).
     """
+    # Round coords to 3 decimal places (~110m) for cache key stability
+    # — a customer walking 100m shouldn't invalidate their session.
+    lat_k = round(float(lat), 3) if lat is not None else None
+    lng_k = round(float(lng), 3) if lng is not None else None
+    cache_key = f"{pincode or ''}|{lat_k or ''}|{lng_k or ''}"
+    now = time.time()
+    hit = _eligible_cache.get(cache_key)
+    if hit and (now - hit[0]) < _ELIGIBLE_TTL:
+        return set(hit[1])
+
     import math
     ids: set = set()
 
@@ -280,6 +336,7 @@ async def _eligible_vendor_ids(
                     ids.add(v["id"])
             except Exception:
                 continue
+    _eligible_cache[cache_key] = (now, ids)
     return ids
 
 

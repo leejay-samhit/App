@@ -158,6 +158,15 @@ async def admin_approve_edit_request(req_id: str, admin: Dict[str, Any] = Depend
             if "delivery_pincodes" in changes: prod_updates["delivery_pincodes"] = changes["delivery_pincodes"]
             if prod_updates:
                 await db.products.update_many({"vendor_id": doc["user_id"]}, {"$set": prod_updates})
+            # Dec 2026 — Bust the products_public cascade + eligibility
+            # caches so the vendor's new pincode / radius / mode takes
+            # effect immediately across /products, /products/by-source,
+            # and category screens.
+            try:
+                from routes.products_public import bust_products_public_caches
+                bust_products_public_caches()
+            except Exception:
+                pass
 
     await db.vendor_edit_requests.update_one(
         {"id": req_id},
