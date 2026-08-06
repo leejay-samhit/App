@@ -247,23 +247,17 @@ export default function ShopCategoryScreen() {
           onCategoryPress={(c) => router.push(`/shop-category/${encodeURIComponent(c)}` as any)}
         />
 
-        {/* Fallback / supplementary product grid — wrapped in horizontal
-            padding so it matches Shop-home's card sections. */}
+        {/* Product grid — Dec 2026: ALWAYS renders below the admin's
+            layout blocks (not gated by hasLayout).  Admin can drop
+            banners without the grid disappearing, and the empty state
+            uses the same location-aware NoVendorsHero regardless of
+            whether a sub-filter is active. */}
         <View style={{ paddingHorizontal: spacing.screen, paddingTop: spacing.screen }}>
-        {/* Aug 2026 — Flash-of-empty fix: only render the empty state
-            AFTER we've confirmed the admin has NO layout for this category
-            AND the product query has finished.  Previously the "No products"
-            card briefly flashed while ShopLayoutRenderer was still fetching
-            its blocks — hasLayout was still `null` and products was still `[]`. */}
-        {loadingProducts || hasLayout === null ? (
+        {loadingProducts ? (
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, paddingHorizontal: 4 }}>
-            {[...Array(6)].map((_, i) => <ProductCardSkeleton key={i} />)}
+            {[...Array(6)].map((_, i) => <ProductCardSkeleton key={i} index={i} />)}
           </View>
-        ) : (hasLayout === false && products.length === 0) ? (
-          // Jul 2026 — Location-aware empty state.  If we have no
-          // vendors nearby for this pincode, show the beautiful
-          // "become a vendor" hero.  Otherwise fall back to the plain
-          // "No products in X" card.
+        ) : products.length === 0 ? (
           !hasLocation ? (
             <View style={styles.emptyCard}>
               <Feather name="map-pin" size={24} color={colors.textMuted} />
@@ -272,36 +266,26 @@ export default function ShopCategoryScreen() {
           ) : (
             <NoVendorsHero location={deliveryPincode || undefined} compact />
           )
-        ) : hasLayout === false ? (
+        ) : (
           (() => {
-            // Dec 2026 — subcategory filter is now applied client-side
-            // via the `filtered` useMemo above.  Zero network calls on
-            // chip tap.
+            // Dec 2026 — subcategory filter is applied client-side.
             if (filtered.length === 0) {
-              // Jul 2026 — Match the hero pattern when the sub filter
-              // yields no products either.  When the user cleared to
-              // "All" and STILL sees nothing, that's a "no vendors"
-              // situation — show the hero.  When a sub is active, show
-              // a lighter "no products in sub" card so they can clear.
-              if (!selectedSub) {
-                return hasLocation
-                  ? <NoVendorsHero location={deliveryPincode || undefined} compact />
-                  : (
-                    <View style={styles.emptyCard}>
-                      <Feather name="map-pin" size={24} color={colors.textMuted} />
-                      <Text style={styles.emptyText}>Turn on location to see products in your area</Text>
-                    </View>
-                  );
-              }
+              // A sub-filter is active but has no matches.  Show the
+              // hero card (matches "we're not live here yet" pattern
+              // the user requested) with a compact Clear-filter chip.
               return (
-                <View style={styles.emptyCard}>
-                  <Feather name="filter" size={24} color={colors.textMuted} />
-                  <Text style={styles.emptyText}>
-                    No products in "{selectedSub}"
-                  </Text>
-                  <TouchableOpacity onPress={() => setSelectedSub("")} style={{ marginTop: 4 }}>
-                    <Text style={{ fontSize: 12, color: colors.primary, fontWeight: "700" }}>Clear filter</Text>
-                  </TouchableOpacity>
+                <View>
+                  <NoVendorsHero location={deliveryPincode || undefined} compact />
+                  {selectedSub ? (
+                    <TouchableOpacity
+                      onPress={() => setSelectedSub("")}
+                      style={styles.clearFilterCta}
+                      testID="clear-subcategory-filter"
+                    >
+                      <Feather name="x-circle" size={13} color={colors.primary} />
+                      <Text style={styles.clearFilterText}>Clear "{selectedSub}" filter</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
               );
             }
@@ -351,7 +335,7 @@ export default function ShopCategoryScreen() {
               </View>
             );
           })()
-        ) : null}
+        )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -368,6 +352,16 @@ const styles = StyleSheet.create({
   hint: { fontSize: 11, color: colors.textMuted, marginVertical: 10, fontStyle: "italic", textAlign: "center" },
   emptyCard: { backgroundColor: colors.surface, borderRadius: radii.card, padding: 28, alignItems: "center", borderWidth: 1, borderColor: colors.border, gap: 6 },
   emptyText: { fontSize: 13, fontWeight: "700", color: colors.textMain },
+  // Dec 2026 — Compact "clear sub-category" CTA shown below the
+  // NoVendorsHero when a sub-filter is active but has no results.
+  clearFilterCta: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    alignSelf: "center", marginTop: 10,
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999,
+    backgroundColor: colors.brand100 || colors.surface,
+    borderWidth: 1, borderColor: colors.primary + "33",
+  },
+  clearFilterText: { fontSize: 12, color: colors.primary, fontWeight: "800", letterSpacing: 0.2 },
   gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   gridCard: { flexBasis: "48%", flexGrow: 0, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   gridImg: { width: "100%", aspectRatio: 1.05, backgroundColor: colors.surfaceMuted },

@@ -962,45 +962,23 @@ export function ShopLayoutRenderer({
   //     React remounts don't thrash.
   const augmented = useMemo<LayoutBlock[]>(() => {
     if (visible.length === 0) return visible;
-    const PRODUCT_TYPES = new Set(["product_grid", "horizontal_slider", "flash_sale"]);
-    const BANNER_TYPES = new Set([
-      "banner_slider", "background", "offer_cards", "brand_slider",
-      "announcement_strip", "section_header", "text",
-      "category_circles", "content_box",
-    ]);
-    const out: LayoutBlock[] = [];
-    for (let i = 0; i < visible.length; i++) {
-      const b = visible[i];
-      out.push(b);
-      if (!BANNER_TYPES.has(b.block_type)) continue;
-      // Peek forward — do we already have a product block right after?
-      const next = visible[i + 1];
-      if (next && PRODUCT_TYPES.has(next.block_type)) continue;
-      // Skip auto-inject if the very next block is another banner-of-
-      // same-type (e.g. two announcement strips) to keep the layout tidy.
-      const autoId = `__auto:${b.id}`;
-      out.push({
-        id: autoId,
-        block_type: "product_grid",
-        scope: b.scope,
-        scope_category: b.scope_category,
-        active: true,
-        sort_order: (b.sort_order ?? 0) + 0.5,
-        title: "",           // no heading — visual continuity
-        data_source: (category ? "category" : "new") as any,
-        category_filter: category || "",
-        // Dec 2026 — Auto-injected block was previously capped at 8
-        // products which made the shop feel empty when the admin
-        // dropped a lone banner.  Bump to 200 so the customer sees ALL
-        // products under the current category (or the full 'new'
-        // arrivals list up to the /products limit=120 fetch).
-        product_count: 200,
-        layout_style: "grid" as any,
-        product_ids: [] as string[],
-      } as LayoutBlock);
-    }
-    return out;
-  }, [visible, category]);
+    // Dec 2026 v2 — Auto-inject REMOVED per user directive.
+    //
+    // Previously we injected a synthetic product_grid below every
+    // banner/announcement block that had no product block after it.
+    // This gave two bad outcomes:
+    //   1. Home banners visually "leaked" — huge white gap + shadow
+    //      of the auto-grid below what should be a lone banner.
+    //   2. Category screens double-rendered products (once inside the
+    //      auto-injected block, once in the fallback grid below the
+    //      renderer), or hid the fallback altogether.
+    //
+    // The Shop-category screen (see shop-category/[name].tsx) now ALWAYS
+    // renders a product grid BELOW <ShopLayoutRenderer>, so admin can
+    // freely drop banners/announcements without polluting the grid.
+    // ShopLayoutRenderer only renders exactly what admin configured.
+    return visible;
+  }, [visible]);
 
   // Analytics: batch impressions + clicks and flush every 5s / on unmount
   const eventQueueRef = useRef<{ block_id: string; event: "impression" | "click"; scope: string }[]>([]);

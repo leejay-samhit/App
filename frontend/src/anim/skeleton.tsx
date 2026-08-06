@@ -14,7 +14,7 @@
 import React, { useEffect } from "react";
 import { View, StyleSheet, ViewStyle, StyleProp } from "react-native";
 import Animated, {
-  useSharedValue, useAnimatedStyle, withRepeat, withTiming, Easing,
+  useSharedValue, useAnimatedStyle, withRepeat, withTiming, withDelay, Easing,
 } from "react-native-reanimated";
 import { colors, radii } from "../theme";
 
@@ -50,14 +50,33 @@ export function Skeleton({ width = "100%", height = 12, radius = 6, style }: Pro
   );
 }
 
-/** Product-card placeholder that matches the real Shop grid tile. */
-export function ProductCardSkeleton({ width = "48%" }: { width?: number | `${number}%` }) {
+/** Product-card placeholder that matches the real Shop grid tile.
+ *
+ *  Dec 2026 — Accepts an `index` for the parent list to stagger the
+ *  reveal (a "falling in" cascade instead of every card popping at
+ *  once).  Combined with the shimmer, this matches the Amazon/Flipkart
+ *  polish the user asked for. */
+export function ProductCardSkeleton({ width = "48%", index = 0 }: { width?: number | `${number}%`; index?: number }) {
+  const drop = useSharedValue(0);
+  useEffect(() => {
+    // A short delay proportional to the card's position produces the
+    // "falling" cascade; capped at 320 ms so 6+ cards don't feel slow.
+    const delay = Math.min(index, 8) * 40;
+    drop.value = withDelay(
+      delay,
+      withTiming(1, { duration: 380, easing: Easing.out(Easing.cubic) }),
+    );
+  }, [index]);
+  const anim = useAnimatedStyle(() => ({
+    opacity: drop.value,
+    transform: [{ translateY: (1 - drop.value) * 16 }],
+  }));
   return (
-    <View style={[styles.card, { width: width as any }]}>
+    <Animated.View style={[styles.card, { width: width as any }, anim]}>
       <Skeleton height={120} radius={radii.card - 2} style={{ marginBottom: 10 }} />
       <Skeleton width="80%" height={12} style={{ marginBottom: 6 }} />
       <Skeleton width="55%" height={14} />
-    </View>
+    </Animated.View>
   );
 }
 
