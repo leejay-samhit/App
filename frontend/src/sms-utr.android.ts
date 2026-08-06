@@ -18,8 +18,15 @@ type SmsModule = {
 };
 let SMS: SmsModule | null = null;
 try {
+  // Dec 2026 — Variable indirection so Metro can't statically resolve
+  // the module.  This lets release builds succeed even when the SMS
+  // User Consent native module isn't installed (in which case the
+  // feature degrades to a no-op).  When the module IS installed (via
+  // EAS dev/prod build with autolinking), the runtime require picks it
+  // up transparently.
+  const _modId = "@eabdullazyanov/react-native-sms-user-consent";
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  SMS = require("@eabdullazyanov/react-native-sms-user-consent");
+  SMS = require(_modId);
 } catch {
   SMS = null;
 }

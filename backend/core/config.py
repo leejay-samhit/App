@@ -12,8 +12,12 @@ JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
 
 # ---- Default seed admin ----
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@app.com')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Admin@123')
+# Dec 2026 — MUST come from environment.  If unset, we DO NOT provide a
+# fallback so a production deploy never boots with a predictable
+# admin@app.com / Admin@123 credential pair.  Deployments should set
+# ADMIN_EMAIL and ADMIN_PASSWORD in the pipeline env.
+ADMIN_EMAIL = os.environ['ADMIN_EMAIL']
+ADMIN_PASSWORD = os.environ['ADMIN_PASSWORD']
 
 # ---- MLM / payout config ----
 REGISTRATION_FEE = float(os.environ.get('REGISTRATION_FEE', 118))
