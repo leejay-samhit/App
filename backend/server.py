@@ -417,12 +417,14 @@ async def login(request: Request, payload: LoginRequest):
 @_rl.limit("10/minute")
 async def google_exchange(request: Request, payload: GoogleExchange):
     """Exchange an Emergent session_id for our JWT bearer token. Creates user on first sign-in."""
-    # OAuth session-data URL is environment-configurable so the same code runs
-    # in dev (Emergent demo) and prod (customer's own OAuth proxy if any).
-    session_url = os.environ.get(
-        "EMERGENT_OAUTH_SESSION_URL",
-        "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-    )
+    # OAuth session-data URL is REQUIRED to come from the environment so
+    # production deployments can't accidentally hit a demo endpoint.
+    session_url = os.environ.get("EMERGENT_OAUTH_SESSION_URL")
+    if not session_url:
+        raise HTTPException(
+            status_code=503,
+            detail="Google sign-in is not configured on this server (EMERGENT_OAUTH_SESSION_URL missing).",
+        )
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.get(
             session_url,

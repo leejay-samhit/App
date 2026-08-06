@@ -52,6 +52,7 @@
     },
     "android": {
       "package": "com.slangcart.app",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#143D2E"

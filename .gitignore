@@ -83,6 +83,4 @@ android-sdk/
 credentials.json
 *.key
 .credentials
-.env
-.env.*
-*.env
+# .env files are managed by the deployment pipeline — do NOT ignore.
