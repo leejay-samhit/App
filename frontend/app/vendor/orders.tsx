@@ -20,7 +20,7 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl,
-  TouchableOpacity, Image, Alert, Modal, TextInput,
+  TouchableOpacity, Image, Alert, Modal, TextInput, Linking, Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -48,6 +48,16 @@ type VendorSale = {
   delivery_person_phone?: string | null;
   channel?: "online" | "pos";
   invoice_no?: string;
+  // Dec 2026 — Delivery-address block (from checkout).  Includes optional
+  // GPS coords so the vendor can tap "Open in Google Maps" and route to
+  // the customer's exact location.
+  shipping_address?: {
+    name?: string; phone?: string;
+    line1?: string; line2?: string;
+    city?: string; state?: string; pincode?: string;
+    latitude?: number | null; longitude?: number | null;
+    district?: string;
+  };
 };
 
 const STATUSES = ["placed", "shipped", "delivered", "cancelled"] as const;
@@ -291,6 +301,80 @@ export default function VendorOrders() {
                   <Text style={styles.totalValue}>{formatINR(item.total || 0)}</Text>
                 </View>
 
+                {/* Dec 2026 — Customer delivery address + Google Maps CTA.
+                    Only rendered for online orders (POS has no shipping
+                    address).  When the customer shared GPS at checkout
+                    we render a "Open in Maps" button that routes to the
+                    exact lat/lng; otherwise it falls back to an address
+                    search query, which Maps still resolves accurately in
+                    most cases. */}
+                {item.channel !== "pos" && item.shipping_address ? (() => {
+                  const addr = item.shipping_address!;
+                  const hasCoords = typeof addr.latitude === "number" && typeof addr.longitude === "number"
+                    && !Number.isNaN(addr.latitude as any) && !Number.isNaN(addr.longitude as any);
+                  const addrLine = [addr.line1, addr.line2, addr.city, addr.state, addr.pincode].filter(Boolean).join(", ");
+                  const openMaps = async () => {
+                    // Prefer geo: URI on mobile so it opens the native map
+                    // app; fall back to https://maps.google.com on web.
+                    let url = "";
+                    if (hasCoords) {
+                      const lat = addr.latitude; const lng = addr.longitude;
+                      url = Platform.select({
+                        ios: `https://maps.apple.com/?ll=${lat},${lng}&q=${encodeURIComponent(addr.name || "Delivery")}`,
+                        android: `geo:${lat},${lng}?q=${lat},${lng}(${encodeURIComponent(addr.name || "Delivery")})`,
+                        default: `https://www.google.com/maps?q=${lat},${lng}`,
+                      }) as string;
+                    } else if (addrLine) {
+                      url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addrLine)}`;
+                    } else {
+                      Alert.alert("No address available", "This order has no shipping address to open on the map.");
+                      return;
+                    }
+                    try {
+                      const ok = await Linking.canOpenURL(url);
+                      if (!ok && Platform.OS === "android") {
+                        // Fallback for Android when geo: isn't registered
+                        await Linking.openURL(`https://www.google.com/maps?q=${addr.latitude},${addr.longitude}`);
+                        return;
+                      }
+                      await Linking.openURL(url);
+                    } catch (e: any) {
+                      Alert.alert("Couldn't open Maps", e?.message || "Try copying the address instead.");
+                    }
+                  };
+                  return (
+                    <View style={styles.addrBox}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                        <Feather name="map-pin" size={12} color={colors.primary} />
+                        <Text style={styles.addrLabel}>DELIVER TO · customer address</Text>
+                      </View>
+                      {addr.name || addr.phone ? (
+                        <Text style={styles.addrLine} numberOfLines={1}>
+                          {addr.name || "—"}{addr.phone ? ` · ${addr.phone}` : ""}
+                        </Text>
+                      ) : null}
+                      {addrLine ? (
+                        <Text style={styles.addrLine2} numberOfLines={2}>{addrLine}</Text>
+                      ) : null}
+                      {hasCoords ? (
+                        <TouchableOpacity onPress={openMaps} style={styles.gpsChip} testID={`vendor-order-map-${orderId}`}>
+                          <Feather name="navigation" size={12} color="#fff" />
+                          <Text style={styles.gpsChipText}>
+                            GPS · {Number(addr.latitude).toFixed(5)}, {Number(addr.longitude).toFixed(5)}
+                          </Text>
+                          <Feather name="external-link" size={11} color="#fff" />
+                        </TouchableOpacity>
+                      ) : addrLine ? (
+                        <TouchableOpacity onPress={openMaps} style={[styles.gpsChip, { backgroundColor: colors.textMain }]} testID={`vendor-order-map-${orderId}`}>
+                          <Feather name="map" size={12} color="#fff" />
+                          <Text style={styles.gpsChipText}>Open in Maps</Text>
+                          <Feather name="external-link" size={11} color="#fff" />
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+                  );
+                })() : null}
+
                 {/* Vendor fulfilment controls */}
                 <View style={styles.actionsBlock}>
                   {renderStage(item)}
@@ -509,6 +593,24 @@ const styles = StyleSheet.create({
   },
   deliveryInfoLabel: { fontSize: 9, fontWeight: "800", color: colors.primary, letterSpacing: 0.8 },
   deliveryInfoLine: { fontSize: 12, color: colors.textMain, fontWeight: "700", marginTop: 2 },
+  // Dec 2026 — Customer delivery address + Google Maps CTA (see orders card)
+  addrBox: {
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  addrLabel: { fontSize: 9, fontWeight: "800", color: colors.primary, letterSpacing: 0.8 },
+  addrLine: { fontSize: 13, color: colors.textMain, fontWeight: "800", marginTop: 2 },
+  addrLine2: { fontSize: 12, color: colors.textMuted, fontWeight: "600", marginTop: 2, lineHeight: 17 },
+  gpsChip: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    paddingHorizontal: 10, paddingVertical: 7, borderRadius: 999,
+    backgroundColor: colors.primary, alignSelf: "flex-start", marginTop: 8,
+  },
+  gpsChipText: { fontSize: 11, fontWeight: "800", color: "#fff", letterSpacing: 0.3 },
   infoBtn: {
     flexDirection: "row", alignItems: "center", gap: 6,
     paddingHorizontal: 10, paddingVertical: 8, borderRadius: 99,
