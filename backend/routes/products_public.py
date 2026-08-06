@@ -140,7 +140,7 @@ async def list_products(
     lat: Optional[float] = Query(None, description="Jul 2026 — customer latitude (used together with lng to km-radius match vendors)"),
     lng: Optional[float] = Query(None, description="Jul 2026 — customer longitude"),
     strict_location: bool = Query(False, description="Jul 2026 — when true, require a location match. If no pincode + no lat/lng is provided, return an empty list instead of the global catalog."),
-    limit: int = Query(60, ge=1, le=200),
+    limit: int = Query(60, ge=1, le=300),
     offset: int = Query(0, ge=0),
     sort: str = Query("newest", description="newest | popular | price_asc | price_desc"),
 ):
