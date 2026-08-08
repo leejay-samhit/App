@@ -133,7 +133,7 @@ export default function AdminShopLayoutScreen() {
   // with /admin/shop-categories. When admin adds / removes / hides a
   // category there, the scope tabs and the in-form category pickers
   // here update on the next focus / refresh automatically.
-  const [shopCats, setShopCats] = useState<{ name: string; active: boolean }[]>([]);
+  const [shopCats, setShopCats] = useState<{ id?: string; name: string; active: boolean; parent_id?: string | null; depth?: number }[]>([]);
 
   // Categories list — sourced ONLY from active admin-managed
   // shop_categories so it stays perfectly in sync with
@@ -142,14 +142,43 @@ export default function AdminShopLayoutScreen() {
   // We also include any scope_category currently in use by an existing
   // layout block so admin can still reach and clean up orphaned blocks
   // after a category is deleted.
+  // Dec 2026 — Show categories as HIERARCHY breadcrumbs so admin can
+  // pick nested subcategories (e.g. "Groceries › Fruits › Citrus")
+  // when creating a scoped shop-layout block.  Storage remains
+  // `scope_category = leaf name` so it still matches the customer's
+  // `/shop-category/{name}` URL exactly.
   const categories = useMemo(() => {
-    const set = new Set<string>();
-    shopCats.forEach((c) => { if (c.active && c.name) set.add(c.name); });
+    // Build a map: id → cat for parent-path resolution
+    const byId = new Map<string, any>();
+    shopCats.forEach((c: any) => { if (c?.id) byId.set(c.id, c); });
+    const path = (c: any): string => {
+      const parts: string[] = [c.name];
+      let cur = c;
+      const seen = new Set<string>([c.id]);
+      while (cur?.parent_id && byId.has(cur.parent_id) && !seen.has(cur.parent_id)) {
+        cur = byId.get(cur.parent_id);
+        seen.add(cur.id);
+        parts.unshift(cur.name);
+      }
+      return parts.join(" › ");
+    };
+    const map = new Map<string, { name: string; label: string; depth: number }>();
+    // Admin cats (only include active ones)
+    shopCats.forEach((c: any) => {
+      if (!c?.name || c.active === false) return;
+      if (map.has(c.name)) return;
+      map.set(c.name, { name: c.name, label: path(c), depth: Number(c.depth || 0) });
+    });
+    // Also include any legacy scope_category currently in use by blocks
+    // but not present in the tree (so admin can still edit / migrate them).
     items.forEach((b: any) => {
       const sc = b?.scope_category;
-      if (b?.scope === "category" && typeof sc === "string" && sc) set.add(sc);
+      if (b?.scope === "category" && typeof sc === "string" && sc && !map.has(sc)) {
+        map.set(sc, { name: sc, label: sc, depth: 0 });
+      }
     });
-    return Array.from(set).sort();
+    // Sort: depth first (parents at top), then alphabetical by label
+    return Array.from(map.values()).sort((a, b) => a.depth - b.depth || a.label.localeCompare(b.label));
   }, [shopCats, items]);
 
   const load = useCallback(async () => {
@@ -158,7 +187,7 @@ export default function AdminShopLayoutScreen() {
         api.get<{ items: Block[] }>("/admin/shop-layout"),
         api.get<any>("/admin/products"),
         api.get<{ blocks: Record<string, { impressions: number; clicks: number; ctr: number }> }>("/admin/shop-layout/analytics", { params: { days: 7 } }).catch(() => ({ data: { blocks: {} } as any })),
-        api.get<{ items: { name: string; active: boolean }[] }>("/admin/shop-categories").catch(() => ({ data: { items: [] } as any })),
+        api.get<{ items: { id?: string; name: string; active: boolean; parent_id?: string | null; depth?: number }[] }>("/admin/shop-categories").catch(() => ({ data: { items: [] } as any })),
       ]);
       setItems(bRes.data?.items || []);
       const pData = pRes.data;
@@ -343,15 +372,16 @@ export default function AdminShopLayoutScreen() {
           <Text style={[styles.scopeTabText, scope === "home" && styles.scopeTabTextActive]}>Home</Text>
         </TouchableOpacity>
         {categories.map((c) => {
-          const active = scope === "category" && scopeCategory === c;
+          const active = scope === "category" && scopeCategory === c.name;
           return (
             <TouchableOpacity
-              key={c}
-              onPress={() => { setScope("category"); setScopeCategory(c); }}
-              style={[styles.scopeTab, active && styles.scopeTabActive]}
+              key={c.name}
+              onPress={() => { setScope("category"); setScopeCategory(c.name); }}
+              style={[styles.scopeTab, active && styles.scopeTabActive, c.depth ? { paddingLeft: 10 + Math.min(c.depth, 3) * 6 } : null]}
+              testID={`scope-cat-${c.name}`}
             >
-              <Feather name="grid" size={12} color={active ? colors.primaryFg : colors.textMain} />
-              <Text style={[styles.scopeTabText, active && styles.scopeTabTextActive]}>{c}</Text>
+              <Feather name={c.depth ? "corner-down-right" : "grid"} size={12} color={active ? colors.primaryFg : colors.textMain} />
+              <Text style={[styles.scopeTabText, active && styles.scopeTabTextActive]} numberOfLines={1}>{c.label}</Text>
             </TouchableOpacity>
           );
         })}
@@ -623,7 +653,7 @@ function BlockCard({
 function BlockFormModal({
   visible, block, products, categories, defaultScope, defaultScopeCategory, onClose, onSaved,
 }: {
-  visible: boolean; block: Block | null; products: Product[]; categories: string[];
+  visible: boolean; block: Block | null; products: Product[]; categories: { name: string; label: string; depth: number }[];
   defaultScope: "home" | "category"; defaultScopeCategory: string;
   onClose: () => void; onSaved: () => void;
 }) {
@@ -856,8 +886,14 @@ function BlockFormModal({
                   {categories.length === 0 ? (
                     <Text style={styles.hint}>No categories yet — assign a category to your products first.</Text>
                   ) : categories.map((c) => (
-                    <TouchableOpacity key={c} onPress={() => setScopeCategory(c)} style={[styles.chip, scopeCategory === c && styles.chipActive]}>
-                      <Text style={[styles.chipText, scopeCategory === c && { color: colors.primaryFg }]}>{c}</Text>
+                    <TouchableOpacity
+                      key={c.name}
+                      onPress={() => setScopeCategory(c.name)}
+                      style={[styles.chip, scopeCategory === c.name && styles.chipActive]}
+                      testID={`block-cat-${c.name}`}
+                    >
+                      {c.depth ? <Feather name="corner-down-right" size={11} color={scopeCategory === c.name ? colors.primaryFg : colors.primary} style={{ marginRight: 4 }} /> : null}
+                      <Text style={[styles.chipText, scopeCategory === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>

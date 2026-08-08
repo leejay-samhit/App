@@ -23,7 +23,11 @@ const REFRESH_KEY = "auth_refresh_token";
 
 export const api = axios.create({
   baseURL: `${BASE_URL}/api`,
-  timeout: 20000,
+  // Dec 2026 — Bumped from 20s → 60s so vendor uploads with several
+  // MB of base64 images don't spuriously time out on flaky 3G/4G.
+  // The response interceptor still auto-retries safe GETs on genuine
+  // transient failures, so this only affects request duration bound.
+  timeout: 60000,
 });
 
 // ────────────────── REQUEST INTERCEPTOR ──────────────────
@@ -109,7 +113,7 @@ api.interceptors.response.use(
   async (error: AxiosError<any>) => {
     const status = error.response?.status;
     const detail = error.response?.data?.detail;
-    const original = error.config as AxiosRequestConfig & { _retry?: boolean };
+    const original = error.config as AxiosRequestConfig & { _retry?: boolean; _retryCount?: number };
 
     if (status === 401 && detail === "session_revoked") {
       // Definitive kick: clear tokens and notify UI.
@@ -131,6 +135,31 @@ api.interceptors.response.use(
       }
       // Refresh failed terminal — _refreshAccessToken already emitted the event.
       return Promise.reject(error);
+    }
+
+    // Dec 2026 — Transient-error retry with exponential backoff.
+    //
+    // The user reported random "network error" pop-ups on live vendor
+    // uploads / customer browsing bursts.  Most of these are transient
+    // (mobile flakey Wi-Fi, brief server GC pauses, gateway 502s under
+    // load).  We now retry the SAFE verbs automatically up to 2 times
+    // with 250ms → 700ms backoff, so short blips never surface as red
+    // toasts.  Non-idempotent verbs (POST/PUT/DELETE) are NOT retried
+    // to avoid accidental double-writes.
+    const method = (original?.method || "get").toLowerCase();
+    const isSafe = method === "get" || method === "head" || method === "options";
+    const isTransient = (
+      // No response = network layer failure (DNS, TCP reset, timeout).
+      !error.response ||
+      // Server-side transient errors — 502/503/504 from gateways under load.
+      status === 502 || status === 503 || status === 504
+    );
+    const retryCount = original?._retryCount || 0;
+    if (isSafe && isTransient && retryCount < 2 && original) {
+      original._retryCount = retryCount + 1;
+      const delay = 250 + retryCount * 450;  // 250 ms → 700 ms
+      await new Promise((r) => setTimeout(r, delay));
+      return api.request(original);
     }
 
     return Promise.reject(error);
@@ -160,6 +189,12 @@ export const getAuthToken = async () => AsyncStorage.getItem(ACCESS_KEY);
 export const getRefreshToken = async () => AsyncStorage.getItem(REFRESH_KEY);
 
 export const formatApiError = (e: any): string => {
+  // Dec 2026 — Friendlier fall-back for network-layer failures so
+  // users don't see the cryptic "Network Error" default.
+  if (e?.code === "ECONNABORTED") return "Request timed out. Please check your connection and try again.";
+  if (!e?.response && (e?.message === "Network Error" || e?.code === "ERR_NETWORK")) {
+    return "You appear to be offline. Retrying automatically…";
+  }
   const detail = e?.response?.data?.detail;
   if (!detail) return e?.message || "Something went wrong";
   if (typeof detail === "string") return detail;
