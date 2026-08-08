@@ -6,7 +6,7 @@ import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, I
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { api, formatApiError } from "../../../src/api";
+import { api, formatApiError, resolveImageUrl } from "../../../src/api";
 import { colors, radii, spacing, formatINR } from "../../../src/theme";
 import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
 import { useAuth } from "../../../src/auth";
@@ -297,7 +297,7 @@ export default function ShopCategoryScreen() {
                 <FadeSlideIn key={p.id} delay={Math.min(idx, 8) * 40} style={styles.gridCard as any}>
                 <View style={[!inStock && { opacity: 0.55 }]}>
                   <TouchableOpacity activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>
-                    <Image source={{ uri: p.image_url }} style={styles.gridImg} resizeMode="cover" />
+                    <Image source={{ uri: resolveImageUrl(p.image_url) }} style={styles.gridImg} resizeMode="cover" />
                   </TouchableOpacity>
                   <View style={{ padding: 10 }}>
                     <TouchableOpacity activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>

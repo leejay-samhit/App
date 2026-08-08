@@ -11,7 +11,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { api, formatApiError } from "../src/api";
+import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import OutOfZoneModal from "../src/OutOfZoneModal";
@@ -281,7 +281,7 @@ export default function CheckoutScreen() {
           <Text style={styles.sectionLabel}>ORDER SUMMARY ({items.length} {items.length === 1 ? "item" : "items"})</Text>
           {items.map((it) => {
             const p = it.product || {} as any;
-            const img = p.image_url;
+            const img = resolveImageUrl(p.image_url);
             const nm = p.name || "Product";
             const price = p.price || 0;
             const line = it.line_total || price * (it.qty || 1);

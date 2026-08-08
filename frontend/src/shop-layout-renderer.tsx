@@ -14,7 +14,7 @@ import {
   Dimensions, FlatList, Platform,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import { api } from "./api";
+import { api, resolveImageUrl } from "./api";
 import { cachedGet } from "./cachedGet";
 import { colors, formatINR } from "./theme";
 import { ContentContainer, SHOP_CARD_RADIUS, SHOP_BANNER_RADIUS, SHOP_SECTION_GAP, SHOP_TYPO } from "./content-container";
@@ -129,7 +129,8 @@ function SkeletonBlock({ height = 140 }: { height?: number }) {
 
 function pickImage(p?: Product): string | undefined {
   if (!p) return undefined;
-  return p.image_data_url || p.image_url || p.images?.[0];
+  const raw = (p as any).image_data_url || p.image_url || p.images?.[0];
+  return resolveImageUrl(raw) || undefined;
 }
 
 function alignToTextAlign(a?: string): "left" | "center" | "right" {

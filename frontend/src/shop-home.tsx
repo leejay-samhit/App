@@ -25,7 +25,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 // Aug 2026 — removed useSafeAreaInsets to prevent double-padding gap.
 // Parent screens already handle safe-area via <SafeAreaView edges={["top"]}>.
-import { api, formatApiError } from "./api";
+import { api, formatApiError, resolveImageUrl } from "./api";
 import { colors, spacing } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
 import {
@@ -66,7 +66,7 @@ const seededDiscount = (id: string) => {
   return 10 + (Math.abs(h) % 50); // 10 – 59 %
 };
 const productImage = (p: Product) =>
-  (p.images && p.images[0]) || p.image_data_url || p.image_url || null;
+  resolveImageUrl((p.images && p.images[0]) || (p as any).image_data_url || p.image_url || null);
 
 // Hardcoded category circles per spec — used as fallback when the
 // admin-managed /api/shop-categories endpoint is unreachable. In normal

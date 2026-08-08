@@ -9,7 +9,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api, formatApiError } from "../src/api";
+import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
 type Product = {
@@ -94,7 +94,7 @@ export default function WishlistScreen() {
           <View style={styles.grid}>
             {items.map((p) => {
               const oos = (p.stock || 0) === 0;
-              const cover = p.image_url || p.image_data_url || "";
+              const cover = resolveImageUrl(p.image_url || (p as any).image_data_url || "");
               return (
                 <TouchableOpacity
                   key={p.id}

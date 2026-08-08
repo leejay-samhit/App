@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api, formatApiError } from "../src/api";
+import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
@@ -109,7 +109,7 @@ export default function CartScreen() {
           >
             {items.map((it) => (
               <View key={it.id} style={styles.line} testID={`cart-line-${it.product_id}`}>
-                <Image source={{ uri: it.product.image_url }} style={styles.image} />
+                <Image source={{ uri: resolveImageUrl(it.product.image_url) }} style={styles.image} />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.lineName} numberOfLines={2}>{it.product.name}</Text>
                   <View style={styles.qtyPill}>

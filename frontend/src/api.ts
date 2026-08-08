@@ -5,6 +5,19 @@ import { getDeviceFingerprint } from "./device";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
+/** Dec 2026 — Resolve a possibly-relative product image URL against the
+ *  backend base.  List endpoints now return `/api/products/{id}/image`
+ *  paths (see backend `_slim_list_item`) so the mobile client can lazy-
+ *  load each thumbnail as a card scrolls into view.  Absolute URLs and
+ *  base64 data URIs pass through untouched. */
+export function resolveImageUrl(url?: string | null): string {
+  if (!url) return "";
+  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) return url;
+  if (url.startsWith("/api/")) return `${BASE_URL}${url}`;
+  if (url.startsWith("/")) return `${BASE_URL}${url}`;
+  return url;
+}
+
 const ACCESS_KEY  = "auth_token";
 const REFRESH_KEY = "auth_refresh_token";
 

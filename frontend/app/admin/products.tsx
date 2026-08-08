@@ -5,7 +5,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import { api, formatApiError } from "../../src/api";
+import { api, formatApiError, resolveImageUrl } from "../../src/api";
 import { FadeSlideIn, ListRowSkeleton, ProductCardSkeleton } from "../../src/anim";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
@@ -262,7 +262,7 @@ export default function AdminProducts() {
                     >
                       <View style={styles.gridImgWrap}>
                         {item.image_url
-                          ? <Image source={{ uri: item.image_url }} style={styles.gridImg} />
+                          ? <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.gridImg} />
                           : <View style={[styles.gridImg, { backgroundColor: colors.surfaceMuted }]} />}
                         {item.is_published === false && (
                           <View style={styles.draftPillTop}><Text style={styles.draftPillText}>DRAFT</Text></View>

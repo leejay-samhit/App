@@ -11,7 +11,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api, formatApiError } from "../src/api";
+import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { FadeSlideIn, ListRowSkeleton } from "../src/anim";
 
@@ -352,7 +352,7 @@ export default function OrdersScreen() {
               renderItem={({ item, index }) => (
                 <View style={styles.lineRow}>
                   {item.image_url ? (
-                    <Image source={{ uri: item.image_url }} style={styles.lineImg} />
+                    <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.lineImg} />
                   ) : (
                     <View style={[styles.lineImg, { alignItems: "center", justifyContent: "center" }]}>
                       <Feather name="image" size={16} color={colors.textMuted} />

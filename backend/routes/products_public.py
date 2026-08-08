@@ -62,6 +62,45 @@ def _shape_product(p: Dict[str, Any]) -> Dict[str, Any]:
     return p
 
 
+# Dec 2026 — Slim projection for LIST endpoints.  Vendors often paste
+# 200-500 KB base64 images per product, so a naive list of 40 products
+# would ship 20+ MB over the wire → "network error" on mobile.  For
+# list views we ONLY return the primary `image_url` (typically a small
+# CDN URL or thumbnail) and drop:
+#   • `images[]`              — full-size gallery, only needed on detail
+#   • `description`           — long-form, only needed on detail
+#   • `specifications`        — structured detail block
+#   • `interested_users[]`    — raw user list (privacy)
+#   • `reviews[]`, `questions[]` — heavy relational blobs
+#   • base64 `image_url` values are TRUNCATED to nothing so clients can
+#     lazy-load the full image via /products/{id}.
+_LIST_PROJECTION: Dict[str, int] = {
+    "_id": 0,
+    "images": 0,
+    "description": 0,
+    "specifications": 0,
+    "interested_users": 0,
+    "reviews": 0,
+    "questions": 0,
+}
+
+
+def _slim_list_item(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Post-process a list-item document for the wire.
+
+    When `image_url` is a giant base64 `data:` URI we rewrite it to a
+    RELATIVE endpoint that the client fetches lazily (RN Image caches
+    aggressively).  Regular URLs pass through untouched.
+    """
+    img = p.get("image_url") or ""
+    if isinstance(img, str) and img.startswith("data:"):
+        # Replace with a stable, cacheable endpoint URL — the RN Image
+        # component fetches this only when the card scrolls into view.
+        p["image_url"] = f"/api/products/{p.get('id')}/image"
+        p["has_inline_image"] = True
+    return _shape_product(p)
+
+
 async def _collect_cascade_names(root_ident: str) -> List[str]:
     """Given a category name OR id, return the set of category names to
     match against products (root + every descendant).  Supports both
@@ -234,9 +273,9 @@ async def list_products(
     # relying on the newly-added compound indexes.
     total = await db.products.count_documents(q)
 
-    cursor = db.products.find(q, {"_id": 0}).sort(sort_spec).skip(offset).limit(limit)
+    cursor = db.products.find(q, _LIST_PROJECTION).sort(sort_spec).skip(offset).limit(limit)
     items = await cursor.to_list(limit)
-    shaped = [_shape_product(p) for p in items]
+    shaped = [_slim_list_item(p) for p in items]
 
     if category or subcategory or pincode or have_coords or offset > 0 or limit != 60 or sort != "newest":
         return {
@@ -418,13 +457,13 @@ async def list_products_by_source(
             return []
 
     if src == "new":
-        cursor = db.products.find(q, {"_id": 0}).sort("created_at", -1).limit(limit)
+        cursor = db.products.find(q, _LIST_PROJECTION).sort("created_at", -1).limit(limit)
     elif src == "category":
-        cursor = db.products.find(q, {"_id": 0}).sort("created_at", -1).limit(limit)
+        cursor = db.products.find(q, _LIST_PROJECTION).sort("created_at", -1).limit(limit)
     else:
         # trending / best → pull a larger window, then sort in-process by a
         # composite "popularity" score so MongoDB doesn't need a custom index.
-        cursor = db.products.find(q, {"_id": 0}).sort("created_at", -1).limit(max(limit * 4, 40))
+        cursor = db.products.find(q, _LIST_PROJECTION).sort("created_at", -1).limit(max(limit * 4, 40))
 
     items = await cursor.to_list(limit * 4 if src in ("trending", "best") else limit)
     if src in ("trending", "best"):
@@ -438,7 +477,56 @@ async def list_products_by_source(
             return interested_n * 5 + sales
         items.sort(key=score, reverse=True)
         items = items[:limit]
-    return [_shape_product(p) for p in items]
+    return [_slim_list_item(p) for p in items]
+
+
+@router.get("/products/{product_id}/image")
+async def get_product_image(product_id: str, idx: int = Query(0, ge=0, le=32)):
+    """Dec 2026 — Lazy-load endpoint for large base64 product images.
+
+    List endpoints (`/products`, `/products/by-source`) now strip the
+    heavy `image_url` base64 blob and set `has_inline_image=true` so a
+    naive customer list of 40 products drops from ~20 MB to <100 KB
+    over the wire.  The mobile client fetches each product's actual
+    image lazily as its card scrolls into view by pointing the
+    `<Image source={{ uri: '/api/products/{id}/image' }}>` at this
+    endpoint — the RN Image component handles disk caching so a
+    scrolled-past image doesn't re-fetch.
+
+    `idx` picks a specific slot from the `images[]` gallery (defaults
+    to the primary `image_url`).  Returned as a proper image response
+    (correct Content-Type) with strong caching headers so CDNs / RN
+    Image cache aggressively.
+    """
+    from fastapi.responses import Response
+    p = await db.products.find_one({"id": product_id}, {"_id": 0, "image_url": 1, "images": 1, "is_published": 1})
+    if not p or p.get("is_published") is False:
+        raise HTTPException(status_code=404, detail="Not found")
+    src = ""
+    if idx == 0:
+        src = str(p.get("image_url") or "")
+    if not src:
+        imgs = p.get("images") or []
+        if 0 <= idx < len(imgs):
+            src = str(imgs[idx] or "")
+    if not src:
+        # 1×1 transparent PNG placeholder so <Image> doesn't render broken
+        import base64
+        px = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+        return Response(px, media_type="image/png", headers={"Cache-Control": "public, max-age=60"})
+    # data:image/<mime>;base64,<...>
+    if src.startswith("data:"):
+        try:
+            head, b64 = src.split(",", 1)
+            mime = head[5:].split(";", 1)[0] or "image/jpeg"
+            import base64
+            raw = base64.b64decode(b64)
+            return Response(raw, media_type=mime, headers={"Cache-Control": "public, max-age=604800, immutable"})
+        except Exception:
+            raise HTTPException(status_code=500, detail="Corrupt image data")
+    # Already a URL — redirect (cheap, cached by clients)
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(src, status_code=307)
 
 
 @router.get("/products/{product_id}")

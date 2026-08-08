@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, ScrollView, FlatList, Modal, TextInput, Touchab
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api, formatApiError } from "../../src/api";
+import { api, formatApiError, resolveImageUrl } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { RichProductEditor } from "../../src/rich-product-editor";
@@ -343,7 +343,7 @@ export default function VendorDashboard() {
                   >
                     <View style={styles.vendorImgWrap}>
                       {item.image_url
-                        ? <Image source={{ uri: item.image_url }} style={styles.vendorImg} />
+                        ? <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.vendorImg} />
                         : <View style={[styles.vendorImg, { backgroundColor: "#F1F3F5" }]} />}
                       {item.is_published === false && (
                         <View style={styles.vendorDraftPill}><Text style={styles.vendorDraftText}>HIDDEN</Text></View>
