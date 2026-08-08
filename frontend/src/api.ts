@@ -189,14 +189,16 @@ export const getAuthToken = async () => AsyncStorage.getItem(ACCESS_KEY);
 export const getRefreshToken = async () => AsyncStorage.getItem(REFRESH_KEY);
 
 export const formatApiError = (e: any): string => {
-  // Dec 2026 — Friendlier fall-back for network-layer failures so
-  // users don't see the cryptic "Network Error" default.
-  if (e?.code === "ECONNABORTED") return "Request timed out. Please check your connection and try again.";
+  // Dec 2026 — Terse, engineering-style messages.  The user asked for
+  // NO friendly banter — the API retry logic (interceptor above) masks
+  // transient blips silently, so anything that reaches the UI here is a
+  // legitimate error the user needs to see raw.
+  if (e?.code === "ECONNABORTED") return "Timed out.";
   if (!e?.response && (e?.message === "Network Error" || e?.code === "ERR_NETWORK")) {
-    return "You appear to be offline. Retrying automatically…";
+    return "No connection.";
   }
   const detail = e?.response?.data?.detail;
-  if (!detail) return e?.message || "Something went wrong";
+  if (!detail) return e?.message || "Error";
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     return detail

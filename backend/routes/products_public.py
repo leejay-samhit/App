@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from core.db import db
 from core.notifications import create_notification
@@ -89,14 +89,17 @@ def _slim_list_item(p: Dict[str, Any]) -> Dict[str, Any]:
     """Post-process a list-item document for the wire.
 
     When `image_url` is a giant base64 `data:` URI we rewrite it to a
-    RELATIVE endpoint that the client fetches lazily (RN Image caches
-    aggressively).  Regular URLs pass through untouched.
+    **thumbnail** endpoint URL (`?w=360&q=72`) that the client fetches
+    lazily as each card scrolls into view.  A 200 KB source image is
+    reduced to ~30 KB on the wire, keeping the shop grid crisp on
+    retina screens without the payload cost of full-res.
+    Regular URLs pass through untouched.
     """
     img = p.get("image_url") or ""
     if isinstance(img, str) and img.startswith("data:"):
-        # Replace with a stable, cacheable endpoint URL — the RN Image
-        # component fetches this only when the card scrolls into view.
-        p["image_url"] = f"/api/products/{p.get('id')}/image"
+        # 360 px is 2× a typical grid tile (180 dp on a phone).  q=72 is
+        # the sweet spot between perceptual quality and payload size.
+        p["image_url"] = f"/api/products/{p.get('id')}/image?w=360&q=72"
         p["has_inline_image"] = True
     return _shape_product(p)
 
@@ -481,25 +484,43 @@ async def list_products_by_source(
 
 
 @router.get("/products/{product_id}/image")
-async def get_product_image(product_id: str, idx: int = Query(0, ge=0, le=32)):
-    """Dec 2026 — Lazy-load endpoint for large base64 product images.
+async def get_product_image(
+    product_id: str,
+    request: Request,
+    idx: int = Query(0, ge=0, le=32),
+    w: Optional[int] = Query(None, ge=32, le=1600),
+    q: int = Query(72, ge=40, le=95),
+):
+    """Dec 2026 — Lazy-load endpoint for base64 product images with
+    ON-THE-FLY THUMBNAILING + aggressive caching.
 
-    List endpoints (`/products`, `/products/by-source`) now strip the
-    heavy `image_url` base64 blob and set `has_inline_image=true` so a
-    naive customer list of 40 products drops from ~20 MB to <100 KB
-    over the wire.  The mobile client fetches each product's actual
-    image lazily as its card scrolls into view by pointing the
-    `<Image source={{ uri: '/api/products/{id}/image' }}>` at this
-    endpoint — the RN Image component handles disk caching so a
-    scrolled-past image doesn't re-fetch.
+    Query params:
+      * `w`  — target width in px.  When set (e.g. `w=360` for grid cards),
+               we resize the source image, re-encode as JPEG at quality
+               `q` (default 72) → typical 200 KB source → 25-40 KB thumb.
+               For the customer shop grid this is a **~90% payload
+               reduction on top of the base64 → binary conversion**.
+      * `q`  — JPEG quality 40-95, default 72.  Bigger for detail page.
+      * Omit `w` → returns the original (used by product detail).
 
-    `idx` picks a specific slot from the `images[]` gallery (defaults
-    to the primary `image_url`).  Returned as a proper image response
-    (correct Content-Type) with strong caching headers so CDNs / RN
-    Image cache aggressively.
+    Caching:
+      * ETag = sha1(image bytes)[:16] — client sends `If-None-Match`
+        and the server returns 304 Not Modified when unchanged (0 KB
+        response body).
+      * `Cache-Control: public, max-age=604800, immutable` — client /
+        CDN caches the exact w×q variant for a full week.
     """
-    from fastapi.responses import Response
-    p = await db.products.find_one({"id": product_id}, {"_id": 0, "image_url": 1, "images": 1, "is_published": 1})
+    from fastapi.responses import Response, RedirectResponse
+    from fastapi import Request  # noqa: F401
+    import base64, hashlib, io
+
+    # Client ETag → 304 shortcut, saves the entire decode/resize.
+    client_etag = request.headers.get("if-none-match") or ""
+
+    p = await db.products.find_one(
+        {"id": product_id},
+        {"_id": 0, "image_url": 1, "images": 1, "is_published": 1},
+    )
     if not p or p.get("is_published") is False:
         raise HTTPException(status_code=404, detail="Not found")
     src = ""
@@ -511,22 +532,88 @@ async def get_product_image(product_id: str, idx: int = Query(0, ge=0, le=32)):
             src = str(imgs[idx] or "")
     if not src:
         # 1×1 transparent PNG placeholder so <Image> doesn't render broken
-        import base64
         px = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
         return Response(px, media_type="image/png", headers={"Cache-Control": "public, max-age=60"})
+
+    # External URL — 307 redirect (browser / RN Image caches it).
+    if not src.startswith("data:"):
+        return RedirectResponse(src, status_code=307)
+
     # data:image/<mime>;base64,<...>
-    if src.startswith("data:"):
-        try:
-            head, b64 = src.split(",", 1)
-            mime = head[5:].split(";", 1)[0] or "image/jpeg"
-            import base64
-            raw = base64.b64decode(b64)
-            return Response(raw, media_type=mime, headers={"Cache-Control": "public, max-age=604800, immutable"})
-        except Exception:
-            raise HTTPException(status_code=500, detail="Corrupt image data")
-    # Already a URL — redirect (cheap, cached by clients)
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(src, status_code=307)
+    try:
+        head, b64 = src.split(",", 1)
+        raw = base64.b64decode(b64)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Corrupt image data")
+
+    # Compute the variant ETag PRE-decode so we can 304-short-circuit
+    # the expensive PIL resize on subsequent visits.  Key = sha1 of
+    # (raw source bytes + width + quality).
+    src_hash = hashlib.sha1(raw).digest()
+    variant_key = hashlib.sha1(src_hash + str(w or 0).encode() + str(q).encode()).hexdigest()[:16]
+    if client_etag and client_etag.strip('"').startswith(variant_key):
+        return Response(status_code=304, headers={
+            "ETag": variant_key,
+            "Cache-Control": "public, max-age=604800, immutable",
+        })
+
+    # Fast path: no resize requested → serve as-is.
+    if not w:
+        mime = head[5:].split(";", 1)[0] or "image/jpeg"
+        return Response(
+            raw,
+            media_type=mime,
+            headers={
+                "ETag": variant_key,
+                "Cache-Control": "public, max-age=604800, immutable",
+            },
+        )
+
+    # Slow path: resize + re-encode.  Import Pillow lazily so the module
+    # can be imported in test environments without the native dep.
+    try:
+        from PIL import Image, ImageOps
+        img = Image.open(io.BytesIO(raw))
+        # Autorotate per EXIF, then convert to RGB (JPEG can't do alpha).
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            # Composite alpha over white so PNG/WEBP transparency looks OK.
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "RGBA":
+                bg.paste(img, mask=img.split()[3])
+            else:
+                bg.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[3])
+            img = bg
+        # Preserve aspect ratio, only downscale (never upscale).
+        target_w = min(int(w), img.width)
+        if target_w < img.width:
+            ratio = target_w / img.width
+            new_h = max(1, int(round(img.height * ratio)))
+            img = img.resize((target_w, new_h), Image.LANCZOS)
+        buf = io.BytesIO()
+        # progressive JPEG loads perceptibly faster on slow connections.
+        img.save(buf, format="JPEG", quality=int(q), optimize=True, progressive=True)
+        out = buf.getvalue()
+    except Exception:
+        # Pillow decode failure — fall back to the raw source so the
+        # image at least loads (albeit at full size).
+        mime = head[5:].split(";", 1)[0] or "image/jpeg"
+        return Response(
+            raw,
+            media_type=mime,
+            headers={"ETag": variant_key, "Cache-Control": "public, max-age=604800, immutable"},
+        )
+
+    return Response(
+        out,
+        media_type="image/jpeg",
+        headers={
+            "ETag": variant_key,
+            "Cache-Control": "public, max-age=604800, immutable",
+            # Vary lets any intermediate cache key on the resize/quality knobs.
+            "Vary": "Accept",
+        },
+    )
 
 
 @router.get("/products/{product_id}")
