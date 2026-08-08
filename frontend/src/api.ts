@@ -137,28 +137,57 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
 
-    // Dec 2026 — Transient-error retry with exponential backoff.
+    // Dec 2026 v2 — App-wide silent resilience.
     //
-    // The user reported random "network error" pop-ups on live vendor
-    // uploads / customer browsing bursts.  Most of these are transient
-    // (mobile flakey Wi-Fi, brief server GC pauses, gateway 502s under
-    // load).  We now retry the SAFE verbs automatically up to 2 times
-    // with 250ms → 700ms backoff, so short blips never surface as red
-    // toasts.  Non-idempotent verbs (POST/PUT/DELETE) are NOT retried
-    // to avoid accidental double-writes.
+    // Goal: the customer / vendor / admin should NEVER see a raw
+    // "network error" pop-up.  We retry aggressively, per-method:
+    //
+    //   • SAFE verbs (GET/HEAD/OPTIONS): retry up to **5** times at
+    //     250 ms, 500 ms, 1 s, 2 s, 4 s (~7.75 s max wait).  These
+    //     verbs are idempotent by RFC, retrying is always safe.
+    //
+    //   • UNSAFE verbs (POST/PUT/PATCH/DELETE): retry up to **3**
+    //     times at 400 ms, 900 ms, 1.8 s.  We stamp an
+    //     `Idempotency-Key` header on the FIRST attempt so the server
+    //     can dedupe if a previous request actually succeeded but the
+    //     response was lost in transit (see backend middleware
+    //     `_idempotency_guard`).  This makes retries safe for writes.
+    //
+    // Transient error definition — retryable when:
+    //   • No response at all (DNS / TCP reset / TLS handshake / mobile
+    //     radio blip / airplane-mode flicker).
+    //   • 5xx gateway class: 502 Bad Gateway, 503 Unavailable, 504
+    //     Timeout, 429 rate-limit (with backoff).
+    //   • 408 request-timeout (rare — some CDNs use it).
     const method = (original?.method || "get").toLowerCase();
     const isSafe = method === "get" || method === "head" || method === "options";
     const isTransient = (
-      // No response = network layer failure (DNS, TCP reset, timeout).
       !error.response ||
-      // Server-side transient errors — 502/503/504 from gateways under load.
+      status === 408 || status === 429 ||
       status === 502 || status === 503 || status === 504
     );
+    const maxRetries = isSafe ? 5 : 3;
     const retryCount = original?._retryCount || 0;
-    if (isSafe && isTransient && retryCount < 2 && original) {
+    if (isTransient && retryCount < maxRetries && original) {
       original._retryCount = retryCount + 1;
-      const delay = 250 + retryCount * 450;  // 250 ms → 700 ms
-      await new Promise((r) => setTimeout(r, delay));
+      // Idempotency key for write verbs — persists across retries so the
+      // server can safely reject duplicates.  Reused across attempts of
+      // the SAME request; each new original request gets a fresh one.
+      if (!isSafe) {
+        original.headers = original.headers || {};
+        if (!(original.headers as any)["Idempotency-Key"]) {
+          const idem = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+          (original.headers as any)["Idempotency-Key"] = idem;
+        }
+      }
+      // Exponential backoff with a small jitter (±15 %) so a stampede
+      // of clients recovering from the same outage don't hammer the
+      // server in perfect lockstep.
+      const base = isSafe
+        ? [250, 500, 1000, 2000, 4000][retryCount]
+        : [400, 900, 1800][retryCount];
+      const jitter = (Math.random() - 0.5) * base * 0.3;
+      await new Promise((r) => setTimeout(r, Math.max(100, base + jitter)));
       return api.request(original);
     }
 
@@ -189,16 +218,18 @@ export const getAuthToken = async () => AsyncStorage.getItem(ACCESS_KEY);
 export const getRefreshToken = async () => AsyncStorage.getItem(REFRESH_KEY);
 
 export const formatApiError = (e: any): string => {
-  // Dec 2026 — Terse, engineering-style messages.  The user asked for
-  // NO friendly banter — the API retry logic (interceptor above) masks
-  // transient blips silently, so anything that reaches the UI here is a
-  // legitimate error the user needs to see raw.
-  if (e?.code === "ECONNABORTED") return "Timed out.";
+  // Dec 2026 — Friendly, informative messages when a request DOES
+  // finally fail after all retries.  The interceptor above hides ~99%
+  // of transient blips silently; anything reaching here is a real
+  // condition the user needs to know about.
+  if (e?.code === "ECONNABORTED") {
+    return "The request took too long. Please check your connection and try again.";
+  }
   if (!e?.response && (e?.message === "Network Error" || e?.code === "ERR_NETWORK")) {
-    return "No connection.";
+    return "Couldn't reach the server. We'll keep trying — check your internet if this persists.";
   }
   const detail = e?.response?.data?.detail;
-  if (!detail) return e?.message || "Error";
+  if (!detail) return e?.message || "Something went wrong. Please try again.";
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     return detail

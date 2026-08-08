@@ -176,6 +176,14 @@ from slowapi.errors import RateLimitExceeded  # noqa: E402
 from core.rate_limit import limiter as _rate_limiter, rate_limit_handler  # noqa: E402
 
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+# Dec 2026 — Idempotency guard for retried writes.  When the frontend
+# auto-retries a POST/PUT/PATCH/DELETE because its previous attempt
+# timed out mid-response, this middleware detects the same
+# `Idempotency-Key` header and REPLAYS the original success response
+# instead of executing the handler twice.  Prevents duplicate orders,
+# duplicate wallet debits, etc. at any scale.
+from core.idempotency import IdempotencyMiddleware  # noqa: E402
+app.add_middleware(IdempotencyMiddleware)
 app.state.limiter = _rate_limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
