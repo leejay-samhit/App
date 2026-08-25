@@ -26,8 +26,10 @@ import { useBranding } from "../../src/branding";
 import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
 export default function ProfileScreen() {
+  useBackToInitialTab();
   const {
     user,
     logout,

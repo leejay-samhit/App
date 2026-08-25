@@ -59,3 +59,9 @@ Real payment gateway (Razorpay/Cashfree), Mobile recharge API, Push notification
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`
+
+
+## Jun 2026 P0 Batch (post-handoff)
+- Fixed Android hardware-back closing app on Dashboard/Chat/Profile/Wallet/Network — now navigates back to Shop tab.
+- Fixed Admin Shop Layout force-close on subcategory selection (categories.map object-rendering bug).
+- Added `q` search param on /api/products backed by pincode/vendor-eligibility filter so Shop search finds products beyond first-paint set.

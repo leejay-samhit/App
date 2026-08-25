@@ -16,6 +16,7 @@ import { api } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
 type Node = {
   id: string;
@@ -39,6 +40,7 @@ function flatten(nodes: Node[], depth = 1): Array<Node & { _depth: number }> {
 }
 
 export default function NetworkScreen() {
+  useBackToInitialTab();
   const { user } = useAuth();
   const [tree, setTree] = useState<Node[]>([]);
   const [loading, setLoading] = useState(true);

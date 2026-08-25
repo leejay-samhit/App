@@ -178,6 +178,7 @@ def _build_category_filter(names: List[str]) -> Dict[str, Any]:
 async def list_products(
     category: Optional[str] = Query(None, description="Filter by category name/id — cascades to all descendants when it matches a category tree node"),
     subcategory: Optional[str] = Query(None, description="Filter by subcategory name — ignored when `category` is a leaf"),
+    q: Optional[str] = Query(None, description="Free-text search — case-insensitive substring match across name / description / brand / category"),
     pincode: Optional[str] = Query(None, description="Nov 2026 — filter products to vendors whose store_pincode / delivery_pincodes matches"),
     lat: Optional[float] = Query(None, description="Jul 2026 — customer latitude (used together with lng to km-radius match vendors)"),
     lng: Optional[float] = Query(None, description="Jul 2026 — customer longitude"),
@@ -211,19 +212,35 @@ async def list_products(
     if strict_location and not have_pincode and not have_coords:
         return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
 
-    q: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
+    query: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
 
     if category:
         names = await _collect_cascade_names(category)
         cat_filter = _build_category_filter(names)
         if cat_filter:
-            q = {"$and": [q, cat_filter]}
+            query = {"$and": [query, cat_filter]}
 
     if subcategory:
         sub_names = await _collect_cascade_names(subcategory)
         sub_filter = _build_category_filter(sub_names)
         if sub_filter:
-            q = {"$and": [q, sub_filter]} if "$and" not in q else {"$and": q["$and"] + [sub_filter]}
+            query = {"$and": [query, sub_filter]} if "$and" not in query else {"$and": query["$and"] + [sub_filter]}
+
+    # Dec 2026 — Free-text search across name / description / brand /
+    # category / sub_category.  Case-insensitive, escapes regex metas.
+    if q and q.strip():
+        import re as _re
+        needle = _re.escape(q.strip())
+        text_or = {"$or": [
+            {"name": {"$regex": needle, "$options": "i"}},
+            {"description": {"$regex": needle, "$options": "i"}},
+            {"brand": {"$regex": needle, "$options": "i"}},
+            {"category": {"$regex": needle, "$options": "i"}},
+            {"sub_category": {"$regex": needle, "$options": "i"}},
+            {"subcategory": {"$regex": needle, "$options": "i"}},
+            {"tags": {"$regex": needle, "$options": "i"}},
+        ]}
+        query = {"$and": [query, text_or]} if "$and" not in query else {"$and": query["$and"] + [text_or]}
 
     # Nov 2026 → Jul 2026 — Location filter (by vendor, not by product).
     # Vendor delivery config lives on the USER doc (store_pincode,
@@ -256,7 +273,7 @@ async def list_products(
 
     if location_or:
         pin_filter = {"$or": location_or}
-        q = {"$and": [q, pin_filter]} if "$and" not in q else {"$and": q["$and"] + [pin_filter]}
+        query = {"$and": [query, pin_filter]} if "$and" not in query else {"$and": query["$and"] + [pin_filter]}
     elif strict_location:
         # We had location signals but no vendors matched — return empty.
         return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
@@ -274,13 +291,13 @@ async def list_products(
 
     # Total count (parallel to the paginated fetch) — kept cheap by
     # relying on the newly-added compound indexes.
-    total = await db.products.count_documents(q)
+    total = await db.products.count_documents(query)
 
-    cursor = db.products.find(q, _LIST_PROJECTION).sort(sort_spec).skip(offset).limit(limit)
+    cursor = db.products.find(query, _LIST_PROJECTION).sort(sort_spec).skip(offset).limit(limit)
     items = await cursor.to_list(limit)
     shaped = [_slim_list_item(p) for p in items]
 
-    if category or subcategory or pincode or have_coords or offset > 0 or limit != 60 or sort != "newest":
+    if category or subcategory or (q and q.strip()) or pincode or have_coords or offset > 0 or limit != 60 or sort != "newest":
         return {
             "items": shaped,
             "total": total,

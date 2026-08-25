@@ -22,6 +22,7 @@ import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
+import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
 type Withdrawal = {
   id: string;
@@ -43,6 +44,7 @@ type Txn = {
 };
 
 export default function WalletScreen() {
+  useBackToInitialTab();
   const router = useRouter();
   const { user, refresh } = useAuth();
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);

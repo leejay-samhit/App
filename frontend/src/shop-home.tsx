@@ -291,6 +291,12 @@ export function ShopHome({
       const params: Record<string, any> = { strict_location: "true" };
       if (deliveryPincode) params.pincode = deliveryPincode;
       if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+      // Dec 2026 — When user submitted a search, forward it as `q` to the
+      // backend AND bump the limit so we don't miss deep-catalog hits.
+      if (searchSubmitted && search.trim()) {
+        params.q = search.trim();
+        params.limit = 240;
+      }
       // If we have NO location signal yet, skip the fetch entirely —
       // the LocationGate view is what the user sees.
       if (!deliveryPincode && !deliveryCoords) { setProducts([]); return; }
@@ -306,7 +312,7 @@ export function ShopHome({
       // eslint-disable-next-line no-console
       console.warn("ShopHome /products failed:", formatApiError(e));
     } finally { setLoading(false); }
-  }, [currentUserId, deliveryPincode, deliveryCoords]);
+  }, [currentUserId, deliveryPincode, deliveryCoords, searchSubmitted, search]);
 
   // Admin-managed categories — fetched in parallel with products.
   //

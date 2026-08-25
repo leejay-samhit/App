@@ -8946,3 +8946,35 @@ agent_communication:
         mixed ActivityIndicator / dots / blank white flashes.
       • Verified via screenshot: Srikalahasti shop shows the 3 Kittu
         products fading in with the new stagger.
+
+
+  - agent: "main"
+    message: |
+      P0 bug batch (Jun 2026, back to work after handoff):
+
+      1. **Android Hardware Back button** — Previously exited app on
+         non-shop tabs. Fixed by extending src/use-double-tap-exit.ts:
+         • Kept useDoubleTapExit() (toast → exit) for /(tabs)/shop
+           (initial tab), now scoped to useFocusEffect.
+         • NEW useBackToInitialTab() → replaces route with /shop.
+         Added to dashboard, chat, profile, wallet, network tab roots.
+         iOS/web unaffected (no hardware back).
+
+      2. **Admin Shop Layout crash on subcategory selection** — Root
+         cause: `categories` state moved to `{name, label, depth}[]`
+         but three JSX map blocks still did `key={c}` / `<Text>{c}</Text>`
+         (rendering an object). Fixed all 3 sites in
+         app/admin/shop-layout.tsx (viewAllLink picker, categoryFilter
+         picker, item-level category link picker).
+
+      3. **Shop Search broken (didn't return deep-catalog products)** —
+         Backend /api/products now accepts `q` search param
+         (case-insensitive regex across name/description/brand/category/
+         sub_category/tags). Location filter still applies so search
+         only returns vendor-pincode-eligible products. Frontend
+         shop-home.tsx now forwards submitted search to backend with
+         limit=240 so entire local catalog is searched, not just the
+         initial 60-item paint.
+
+      Backend restart + smoke-tested via curl: `?q=widget` returns
+      Test Widget only from published catalog. Frontend restart OK.

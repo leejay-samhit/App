@@ -25,6 +25,7 @@ import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
 import { Sparkline, DonutProgress, BarChart } from "../../src/charts";
 import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { startBackgroundProviderLocation, stopBackgroundProviderLocation, pushLocationNow } from "../../src/bg-location";
+import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
 type Tier = { name: string; min: number; color: string; icon: string };
 
@@ -57,6 +58,7 @@ type Notif = {
 };
 
 export default function DashboardScreen() {
+  useBackToInitialTab();
   const { user } = useAuth();
   const branding = useBranding();
   // Admin-configurable WhatsApp support number (falls back to the default

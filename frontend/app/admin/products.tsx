@@ -117,7 +117,14 @@ export default function AdminProducts() {
     }
   }, [vendorFilter]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => {
+    load();
+    // Dec 2026 — Silent auto-refresh every 15 s so new vendor products
+    // & publish-toggle changes appear without a manual pull-to-refresh.
+    // Interval is cleared on blur (useFocusEffect cleanup runs).
+    const iv = setInterval(() => { load(); }, 15000);
+    return () => clearInterval(iv);
+  }, [load]));
 
   const onDelete = (p: Product) => {
     Alert.alert("Delete product?", `"${p.name}" will be removed permanently and from all open carts.`, [

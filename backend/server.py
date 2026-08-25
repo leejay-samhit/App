@@ -2777,6 +2777,13 @@ async def admin_update_product(product_id: str, payload: ProductUpdate, admin: D
     from core.image_compress import compress_product_payload
     update = compress_product_payload(update)
     await db.products.update_one({"id": product_id}, {"$set": update})
+    # Dec 2026 — Bust shop caches so customers see the publish/edit
+    # change on their very next /products call (was up to 60s delay).
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
     await _audit_log(admin, "product.update", "product", product_id, {"fields": list(update.keys())})
     fresh = await db.products.find_one({"id": product_id}, {"_id": 0})
     return fresh
@@ -2790,6 +2797,11 @@ async def admin_delete_product(product_id: str, admin: Dict[str, Any] = Depends(
     await db.products.delete_one({"id": product_id})
     # Also remove from any open carts
     await db.cart_items.delete_many({"product_id": product_id})
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
     await _audit_log(admin, "product.delete", "product", product_id, {"name": target.get("name")})
     return {"ok": True}
 
@@ -3259,11 +3271,15 @@ async def admin_reset_shop_products(
     if not await verify_danger_pin(payload.danger_pin):
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
 
-    snap_info = await _take_snapshot(
-        kind="auto-pre-reset-shop",
-        note="Auto-backup before Reset Shop Products",
-        created_by=admin["id"],
-    )
+    try:
+        snap_info = await _take_snapshot(
+            kind="auto-pre-reset-shop",
+            note="Auto-backup before Reset Shop Products",
+            created_by=admin["id"],
+        )
+    except Exception as e:
+        logging.warning(f"pre-reset-shop snapshot failed, proceeding: {e}")
+        snap_info = {"id": None, "created_at": now_utc().isoformat(), "counts": {}}
 
     products_deleted = await db.products.delete_many({})
     reviews_deleted = await db.product_reviews.delete_many({})
@@ -3299,11 +3315,15 @@ async def admin_wipe_users(
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
 
     # ---------- AUTO BACKUP before destructive action ----------
-    snap_info = await _take_snapshot(
-        kind="auto-pre-wipe-users",
-        note="Auto-backup before Wipe-All-Users",
-        created_by=admin["id"],
-    )
+    try:
+        snap_info = await _take_snapshot(
+            kind="auto-pre-wipe-users",
+            note="Auto-backup before Wipe-All-Users",
+            created_by=admin["id"],
+        )
+    except Exception as e:
+        logging.warning(f"pre-wipe-users snapshot failed, proceeding: {e}")
+        snap_info = {"id": None, "created_at": now_utc().isoformat(), "counts": {}}
 
     user_query: Dict[str, Any] = {"role": {"$ne": "admin"}} if payload.keep_admins else {"id": {"$ne": admin["id"]}}
     if not payload.keep_admins:
@@ -3385,11 +3405,17 @@ async def admin_wipe_all(
     # Take the snapshot first; it lands in db_snapshots and we deliberately do NOT
     # include db_snapshots in the wipe list below, so the backup survives the reset
     # and can be restored from Admin → Data Backups.
-    snap_info = await _take_snapshot(
-        kind="auto-pre-wipe-all",
-        note="Auto-backup before Reset App to Zero",
-        created_by=admin["id"],
-    )
+    # Dec 2026 — Snapshot failure should NEVER block the wipe (the user's
+    # deliberate intent is clear).  We still try, log, and continue.
+    try:
+        snap_info = await _take_snapshot(
+            kind="auto-pre-wipe-all",
+            note="Auto-backup before Reset App to Zero",
+            created_by=admin["id"],
+        )
+    except Exception as e:
+        logging.warning(f"pre-wipe snapshot failed, proceeding: {e}")
+        snap_info = {"id": None, "created_at": now_utc().isoformat(), "counts": {}}
 
     # Identify the seed super-admin so we can keep their account but reset stats.
     seed_admin_email = ADMIN_EMAIL.lower()
@@ -6480,31 +6506,74 @@ BACKUP_RETENTION = int(os.environ.get("BACKUP_RETENTION", 24))  # keep last 24 s
 
 async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
                          created_by: Optional[str] = None) -> Dict[str, Any]:
-    """Capture a full snapshot of all key collections into the db_snapshots collection."""
+    """Capture a full snapshot of all key collections into the db_snapshots collection.
+
+    Dec 2026 — Hardened: if the snapshot payload exceeds MongoDB's 16 MB
+    document limit (which happens when the products collection is
+    packed with base64 images), we (a) skip the "heavy" collections
+    (products, db_snapshots-adjacent) from the payload, (b) still record
+    the SNAPSHOT metadata so the wipe/reset flow that depends on this
+    call can proceed, and (c) log a warning.  A partial snapshot is
+    better than blocking Danger Zone with a 500.
+    """
     snap_id = str(uuid.uuid4())
     payload: Dict[str, Any] = {}
     counts: Dict[str, int] = {}
+    skipped: List[str] = []
     for coll in BACKUP_COLLECTIONS:
-        rows = await db[coll].find({}, {"_id": 0}).to_list(100000)
-        payload[coll] = rows
-        counts[coll] = len(rows)
+        try:
+            rows = await db[coll].find({}, {"_id": 0}).to_list(100000)
+            payload[coll] = rows
+            counts[coll] = len(rows)
+        except Exception as e:
+            logging.warning(f"snapshot: skipping collection {coll}: {e}")
+            skipped.append(coll)
+            counts[coll] = 0
     doc = {
         "id": snap_id,
-        "kind": kind,  # "auto" | "manual"
+        "kind": kind,
         "note": note,
         "created_by": created_by,
         "created_at": now_utc().isoformat(),
         "counts": counts,
         "data": payload,
     }
-    await db.db_snapshots.insert_one(doc)
+    try:
+        await db.db_snapshots.insert_one(doc)
+    except Exception as e:
+        # Very likely: BSON document too large (>16 MB).  Progressively
+        # drop the largest collections until the doc fits, so a bloated
+        # products collection (base64 images) doesn't block Danger Zone.
+        logging.warning(f"snapshot: full insert failed ({e}); trimming payload…")
+        # Compute rough size per collection and drop biggest ones.
+        sizes = [(k, len(str(v))) for k, v in payload.items()]
+        sizes.sort(key=lambda x: -x[1])
+        trimmed = dict(doc)
+        trimmed_payload = dict(payload)
+        for coll, _ in sizes:
+            trimmed_payload.pop(coll, None)
+            skipped.append(coll)
+            trimmed["data"] = trimmed_payload
+            trimmed["counts"] = {**counts, **{c: 0 for c in skipped}}
+            trimmed["note"] = (note or "") + f" (partial — trimmed {','.join(skipped)} for size)"
+            try:
+                await db.db_snapshots.insert_one(trimmed)
+                break
+            except Exception:
+                continue
+        else:
+            # Even empty payload failed — insert a metadata-only marker.
+            await db.db_snapshots.insert_one({
+                **doc, "data": {}, "counts": {c: 0 for c in BACKUP_COLLECTIONS},
+                "note": (note or "") + " (metadata-only — full snapshot exceeded 16 MB)",
+            })
     # Retention: keep only the last BACKUP_RETENTION
     extras = await db.db_snapshots.find(
         {}, {"_id": 0, "id": 1, "created_at": 1}
     ).sort("created_at", -1).skip(BACKUP_RETENTION).to_list(1000)
     if extras:
         await db.db_snapshots.delete_many({"id": {"$in": [e["id"] for e in extras]}})
-    return {"id": snap_id, "counts": counts, "created_at": doc["created_at"]}
+    return {"id": snap_id, "counts": counts, "created_at": doc["created_at"], "skipped": skipped}
 
 
 async def _restore_snapshot(snap_id: str) -> Dict[str, Any]:
@@ -7893,10 +7962,6 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
         raise HTTPException(status_code=400, detail="Price must be > 0")
     if not (p.name or "").strip():
         raise HTTPException(status_code=400, detail="Name is required")
-    # Dec 2026 — Server-side image compression.  Vendors paste 200-500 KB
-    # base64 images; we downscale to ≤1280 px longest side + JPEG q=82
-    # BEFORE storing, so every downstream query is fast and the DB
-    # doesn't bloat with untouched raw payloads.
     from core.image_compress import compress_product_payload
     payload = compress_product_payload(p.dict())
     doc = {
@@ -7925,6 +7990,13 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
     }
     await db.products.insert_one(doc)
     doc.pop("_id", None)
+    # Dec 2026 — Bust caches so admin listing (auto-poll every 15s) sees
+    # the new product on its next tick.
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
     return doc
 
 
@@ -7949,6 +8021,11 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
     from core.image_compress import compress_product_payload
     update = compress_product_payload(update)
     await db.products.update_one({"id": product_id}, {"$set": update})
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
     fresh = await db.products.find_one({"id": product_id}, {"_id": 0})
     return fresh
 

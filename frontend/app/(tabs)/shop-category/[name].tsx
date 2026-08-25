@@ -139,16 +139,34 @@ export default function ShopCategoryScreen() {
 
   useEffect(() => { load(); }, [load]);
 
+  const [cartCount, setCartCount] = useState<number>(0);
+  const [addedFlash, setAddedFlash] = useState<string>("");
+
+  // Dec 2026 — Refresh the top-right cart badge whenever we mount or
+  // after a successful add-to-cart.
+  const refreshCartCount = useCallback(async () => {
+    try {
+      const r = await api.get<any>("/cart");
+      const items = r.data?.items || [];
+      const n = items.reduce((a: number, it: any) => a + (Number(it.qty) || 1), 0);
+      setCartCount(n);
+    } catch {/* silent */}
+  }, []);
+
+  useEffect(() => { refreshCartCount(); }, [refreshCartCount]);
+
   const onAddToCart = async (p: Product) => {
     if (addingId) return;
     setAddingId(p.id);
     try {
       await api.post("/cart/add", { product_id: p.id, qty: 1 });
-      Alert.alert("Added to cart", `${p.name} added.`, [
-        { text: "Keep shopping", style: "cancel" },
-        { text: "View cart", onPress: () => router.push("/cart" as any) },
-      ]);
-    } catch (e) { Alert.alert("Failed", formatApiError(e)); }
+      // Dec 2026 — No more blocking popup.  Refresh the badge and
+      // flash a tiny inline confirmation strip that fades out on its
+      // own; user keeps browsing without a tap-to-dismiss dance.
+      refreshCartCount();
+      setAddedFlash(`Added • ${p.name.slice(0, 32)}`);
+      setTimeout(() => setAddedFlash(""), 1600);
+    } catch (e) { Alert.alert("Couldn't add", formatApiError(e)); }
     finally { setAddingId(null); }
   };
 
@@ -162,10 +180,22 @@ export default function ShopCategoryScreen() {
           <Text style={styles.headerEyebrow}>CATEGORY</Text>
           <Text style={styles.headerTitle} numberOfLines={1}>{category || "All"}</Text>
         </View>
-        <TouchableOpacity onPress={() => router.push("/cart")} style={styles.iconBtn}>
+        <TouchableOpacity onPress={() => router.push("/cart")} style={styles.iconBtn} testID="cat-cart-btn">
           <Feather name="shopping-cart" size={18} color={colors.textMain} />
+          {cartCount > 0 ? (
+            <View style={styles.cartBadge}>
+              <Text style={styles.cartBadgeText}>{cartCount > 99 ? "99+" : String(cartCount)}</Text>
+            </View>
+          ) : null}
         </TouchableOpacity>
       </View>
+      {/* Dec 2026 — Inline "added" strip; auto-fades in 1.6 s.  No blocking Alert. */}
+      {addedFlash ? (
+        <View style={styles.addedFlash} pointerEvents="none">
+          <Feather name="check-circle" size={13} color="#fff" />
+          <Text style={styles.addedFlashText} numberOfLines={1}>{addedFlash}</Text>
+        </View>
+      ) : null}
 
       <ScrollView
         contentContainerStyle={{ paddingBottom: 80 }}
@@ -362,6 +392,22 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.primary + "33",
   },
   clearFilterText: { fontSize: 12, color: colors.primary, fontWeight: "800", letterSpacing: 0.2 },
+  // Dec 2026 — Cart badge + inline added flash strip
+  cartBadge: {
+    position: "absolute", top: -2, right: -2,
+    minWidth: 18, height: 18, borderRadius: 9,
+    backgroundColor: "#DC2626", alignItems: "center", justifyContent: "center",
+    paddingHorizontal: 4, borderWidth: 2, borderColor: colors.background || "#fff",
+  },
+  cartBadgeText: { fontSize: 10, fontWeight: "900", color: "#fff", letterSpacing: 0.2 },
+  addedFlash: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    alignSelf: "center", marginTop: 4, marginBottom: 2,
+    backgroundColor: colors.primary,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    maxWidth: "90%",
+  },
+  addedFlashText: { fontSize: 11, fontWeight: "700", color: "#fff", letterSpacing: 0.2 },
   gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   gridCard: { flexBasis: "48%", flexGrow: 0, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   gridImg: { width: "100%", aspectRatio: 1.05, backgroundColor: colors.surfaceMuted },

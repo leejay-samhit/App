@@ -201,7 +201,13 @@ export default function AdminShopLayoutScreen() {
 
   // Re-fetch on focus so removing / adding a category in
   // /admin/shop-categories reflects here the next time admin pops back.
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => {
+    load();
+    // Dec 2026 — Silent auto-refresh so admin sees new blocks / edits
+    // from other admins without a manual pull-to-refresh.
+    const iv = setInterval(() => { load(); }, 20000);
+    return () => clearInterval(iv);
+  }, [load]));
 
   // Dec 2026 — Pincode search filter.  When admin types a pincode, we
   // narrow the visible blocks to those whose `scope_pincode` matches
@@ -1137,8 +1143,9 @@ function BlockFormModal({
                         <Text style={[styles.chipText, !categoryFilter && { color: colors.primaryFg }]}>All</Text>
                       </TouchableOpacity>
                       {categories.map((c) => (
-                        <TouchableOpacity key={c} onPress={() => setCategoryFilter(c)} style={[styles.chip, categoryFilter === c && styles.chipActive]}>
-                          <Text style={[styles.chipText, categoryFilter === c && { color: colors.primaryFg }]}>{c}</Text>
+                        <TouchableOpacity key={c.name} onPress={() => setCategoryFilter(c.name)} style={[styles.chip, categoryFilter === c.name && styles.chipActive]}>
+                          {c.depth ? <Feather name="corner-down-right" size={11} color={categoryFilter === c.name ? colors.primaryFg : colors.primary} style={{ marginRight: 4 }} /> : null}
+                          <Text style={[styles.chipText, categoryFilter === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
                         </TouchableOpacity>
                       ))}
                     </View>
@@ -1190,8 +1197,8 @@ function BlockFormModal({
                             <Text style={[styles.chipText, !viewAllLink && { color: colors.primaryFg }]}>Whole shop</Text>
                           </TouchableOpacity>
                           {categories.map((c) => (
-                            <TouchableOpacity key={`val-${c}`} onPress={() => setViewAllLink(c)} style={[styles.chip, viewAllLink === c && styles.chipActive]}>
-                              <Text style={[styles.chipText, viewAllLink === c && { color: colors.primaryFg }]}>{c}</Text>
+                            <TouchableOpacity key={`val-${c.name}`} onPress={() => setViewAllLink(c.name)} style={[styles.chip, viewAllLink === c.name && styles.chipActive]}>
+                              <Text style={[styles.chipText, viewAllLink === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
                             </TouchableOpacity>
                           ))}
                         </View>
@@ -1250,8 +1257,8 @@ function BlockFormModal({
                       {it.link_type === "category" ? (
                         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4 }}>
                           {categories.map((c) => (
-                            <TouchableOpacity key={c} onPress={() => updateItem(idx, { link_value: c })} style={[styles.miniChip, it.link_value === c && styles.miniChipActive]}>
-                              <Text style={[styles.miniChipText, it.link_value === c && { color: colors.primaryFg }]}>{c}</Text>
+                            <TouchableOpacity key={c.name} onPress={() => updateItem(idx, { link_value: c.name })} style={[styles.miniChip, it.link_value === c.name && styles.miniChipActive]}>
+                              <Text style={[styles.miniChipText, it.link_value === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
                             </TouchableOpacity>
                           ))}
                         </View>

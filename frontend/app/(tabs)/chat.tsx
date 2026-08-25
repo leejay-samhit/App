@@ -14,6 +14,7 @@ import { colors, radii, spacing } from "../../src/theme";
 import { useChatSocket } from "../../src/use-chat-socket";
 import { useChatSettings } from "../../src/chat-settings";
 import { ChatLockGate } from "../../src/chat-lock-gate";
+import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
 type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; is_vendor?: boolean; is_service_provider?: boolean };
 type Thread = { id: string; other: UserBrief; is_downline: boolean; unread_count: number; last_message: any; last_message_at?: string };
@@ -29,6 +30,7 @@ const TABS: { key: Tab; label: string; icon: any }[] = [
 ];
 
 export default function ChatListScreen() {
+  useBackToInitialTab();
   const router = useRouter();
   const { user } = useAuth();
   // Show referral codes only to admins. Regular users see clean
