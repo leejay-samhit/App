@@ -3,7 +3,7 @@
 //   • Show ALL orders (not just shipped).
 //   • Filter chips at the top for quick status navigation.
 //   • Tap any card → full-screen invoice preview with print/share.
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, FlatList, Image, TouchableOpacity, ActivityIndicator,
   RefreshControl, Modal, Platform, Share, Alert,
@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
+import { useSwipePager } from "../src/use-swipe-pager";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { FadeSlideIn, ListRowSkeleton } from "../src/anim";
@@ -65,6 +66,19 @@ export default function OrdersScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
+  // Jun 2026 — Swipe left/right to move through the status filters, using
+  // the same gesture as the bottom tab bar.
+  const filterStripRef = useRef<FlatList<(typeof FILTERS)[number]> | null>(null);
+  const stepFilter = useCallback((dir: 1 | -1) => {
+    const next = FILTERS.indexOf(filter) + dir;
+    if (next < 0 || next >= FILTERS.length) return;
+    setFilter(FILTERS[next]);
+    filterStripRef.current?.scrollToIndex({ index: next, animated: true, viewPosition: 0.5 });
+  }, [filter]);
+  const swipeHandlers = useSwipePager({
+    onNext: () => stepFilter(1),
+    onPrev: () => stepFilter(-1),
+  });
   const [preview, setPreview] = useState<Order | null>(null);
   const [chatBusy, setChatBusy] = useState<string | null>(null);
 
@@ -138,8 +152,12 @@ export default function OrdersScreen() {
 
       {/* Filter chips */}
       <FlatList
+        ref={filterStripRef}
         horizontal
         showsHorizontalScrollIndicator={false}
+        // Keep the strip at its natural height — without this the horizontal
+        // list stretches to fill the column and swallows the order cards.
+        style={styles.chipStripOuter}
         contentContainerStyle={styles.chipStrip}
         data={FILTERS}
         keyExtractor={(k) => k}
@@ -166,6 +184,9 @@ export default function OrdersScreen() {
         }}
       />
 
+      {/* Jun 2026 — Swipe surface: a left/right flick anywhere in the list
+          body steps through the status filters. */}
+      <View style={{ flex: 1 }} {...swipeHandlers}>
       {loading ? (
         <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
           {[...Array(5)].map((_, i) => <ListRowSkeleton key={i} />)}
@@ -412,6 +433,8 @@ export default function OrdersScreen() {
           }}
         />
       )}
+      </View>
+
 
       {/* Full-screen invoice preview */}
       <Modal visible={!!preview} animationType="slide" onRequestClose={() => setPreview(null)}>
@@ -546,6 +569,7 @@ const styles = StyleSheet.create({
   backBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   shareBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   title: { fontSize: 20, fontWeight: "800", color: colors.textMain, letterSpacing: -0.5 },
+  chipStripOuter: { flexGrow: 0, flexShrink: 0 },
   chipStrip: { paddingHorizontal: spacing.screen, paddingVertical: 8, gap: 6 },
   chip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 99, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },

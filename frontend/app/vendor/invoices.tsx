@@ -15,9 +15,13 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import * as Print from "expo-print";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { useSwipePager } from "../../src/use-swipe-pager";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { listSales, getSale, PosSale, getPosSettings, PosSettings } from "../../src/vendor-pos-client";
 import { formatApiError } from "../../src/api";
+
+// Channel tab order — also the sequence the left/right swipe walks through.
+const INV_TABS: ("all" | "pos" | "online")[] = ["all", "pos", "online"];
 import { FadeSlideIn, ListRowSkeleton } from "../../src/anim";
 
 export default function VendorInvoices() {
@@ -29,6 +33,16 @@ export default function VendorInvoices() {
   const [loading, setLoading] = useState(true);
   const [printing, setPrinting] = useState(false);
   const [channel, setChannel] = useState<"all" | "pos" | "online">("all");
+  // Jun 2026 — Same left/right swipe as the rest of the app.
+  const stepChannel = useCallback((dir: 1 | -1) => {
+    const next = INV_TABS.indexOf(channel) + dir;
+    if (next < 0 || next >= INV_TABS.length) return;
+    setChannel(INV_TABS[next]);
+  }, [channel]);
+  const swipeHandlers = useSwipePager({
+    onNext: () => stepChannel(1),
+    onPrev: () => stepChannel(-1),
+  });
 
   const load = useCallback(async () => {
     try {
@@ -232,7 +246,7 @@ export default function VendorInvoices() {
       </View>
       {/* Jul 2026 — Channel filter (POS / Online / All) */}
       <View style={{ flexDirection: "row", marginHorizontal: spacing.screen, backgroundColor: colors.surfaceMuted, borderRadius: 99, padding: 4, gap: 2, marginBottom: 8 }}>
-        {(["all", "pos", "online"] as const).map((t) => (
+        {INV_TABS.map((t) => (
           <TouchableOpacity
             key={t}
             onPress={() => setChannel(t)}
@@ -248,6 +262,8 @@ export default function VendorInvoices() {
           </TouchableOpacity>
         ))}
       </View>
+      {/* Swipe surface — flick left/right to change the channel tab. */}
+      <View style={{ flex: 1 }} {...swipeHandlers}>
       <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 40 }}>
         {loading ? (
           <View>{[...Array(5)].map((_, i) => <ListRowSkeleton key={i} />)}</View>
@@ -279,6 +295,7 @@ export default function VendorInvoices() {
           })()
         }
       </ScrollView>
+      </View>
 
       <Modal visible={!!preview} animationType="slide" onRequestClose={() => setPreview(null)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>

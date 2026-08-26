@@ -250,3 +250,62 @@ testing gestures, otherwise the gesture silently never fires.
   right flick back to Fashion, vertical drag leaves the category unchanged.
 - Category screen (navigated in-app, no splash): left flick on Electronics
   with no sub-categories hopped to the Fashion sibling as designed.
+
+
+## Jun 2026 — One App-Wide Left/Right Swipe (Iter 58)
+
+User feedback (with a WhatsApp screen recording): tab-to-tab swipe did nothing
+(Shop→Services→Dashboard→Chat→Profile), My Orders had no swipe, and the dark
+"black box with white letters" toast + the two manual arrow keys on the shop
+category screen were unwanted. Ask: ONE consistent swipe animation everywhere
+tabs exist.
+
+### New shared primitive — `src/use-swipe-pager.ts`
+`useSwipePager({ onNext, onPrev, enabled })` returns PanResponder handlers.
+Single source of truth for the feel:
+- claims the touch only on a clearly horizontal drag (`|dx| > 24 && |dy| < 24`)
+- commits on `|dx| > 60` OR a fast flick (`|vx| > 0.35`)
+- non-capturing, so vertical ScrollViews, horizontal chip strips and buttons
+  keep their own gestures
+- callbacks live in a ref, so the responder is created once
+
+### Where it's wired (one behaviour, no exceptions)
+| Screen | Swipe walks |
+|---|---|
+| `app/(tabs)/_layout.tsx` | Shop · Services · Dashboard · Chat · Profile |
+| `app/orders.tsx` | All · Placed · Shipped · Delivered · Cancelled |
+| `app/(tabs)/shop-category/[name].tsx` | sub-sections, then sibling categories |
+| `app/vendor/dashboard.tsx` | Overview · Products · Sales · Q&A |
+| `app/vendor/orders.tsx` | all · placed · shipped · delivered · cancelled |
+| `app/vendor/invoices.tsx` | All · Store sale · Shop orders |
+
+Bottom tabs also got `animation: "shift"` so the outgoing screen slides out
+while the incoming one slides in, matching the reference video.
+
+### Precedence rule (important)
+The FIVE main tab screens let the TAB pager own horizontal swipes. The home
+screen therefore does NOT claim them any more (its category swipe from
+iteration 57 was removed) — otherwise Shop→Services could never fire once
+shop categories existed. Non-tab screens (My Orders, category detail, vendor
+panel) own their own strip. `tabIndex < 0` disables the tab gesture on
+drilled-in routes such as `shop-category/[name]`, `wallet` and `network`.
+
+### Removed per user request
+- The dark swipe toast on shop home AND the category screen (`swipeHint`).
+- The manual `cat-prev` / `cat-next` chevrons beside the cart icon
+  (plus their `navArrows` styles). The header eyebrow still reads
+  "SWIPE ↔ CATEGORY" as the only affordance.
+
+### Bugs found and fixed while building this
+1. `stepFilter` originally did `setFilter(cur => { …scrollToIndex… })` — a
+   side effect inside a state updater, which React 18 dev double-invokes, so
+   swipes skipped filters. Now computed outside the updater.
+2. The My Orders chip `FlatList` stretched to fill the column once the list
+   body was wrapped in a flex View. Fixed with
+   `chipStripOuter: { flexGrow: 0, flexShrink: 0 }`.
+
+### Known pre-existing (NOT caused by this change, web-preview only)
+The buyer Dashboard renders blank below the earnings card on react-native-web
+because the Reanimated `entering={FadeInDown…}` blocks stay at opacity 0.
+Verified identical with `animation: "shift"` removed and on a direct page
+load. Works on device.

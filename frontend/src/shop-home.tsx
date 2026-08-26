@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, TextInput,
   ActivityIndicator, FlatList, Platform, useWindowDimensions,
-  Modal, Pressable, RefreshControl, Linking, PanResponder,
+  Modal, Pressable, RefreshControl, Linking,
 } from "react-native";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -159,11 +159,10 @@ export function ShopHome({
   // Admin-managed shop categories (fetched from /api/shop-categories).
   // Falls back to a hardcoded short list if the API fails.
   const [apiCategories, setApiCategories] = useState<ApiCategory[] | null>(null);
-  // Jun 2026 — HOME SWIPE. Flicking left/right on the home body glides
-  // through the category strip in place (no navigation, no reload) so
-  // shoppers can graze the whole shop with their thumb. A short toast
-  // names whatever the swipe landed on.
-  const [swipeHint, setSwipeHint] = useState<string>("");
+  // Jun 2026 — The category strip auto-scrolls to keep the active chip in
+  // view. Horizontal swipes on this screen belong to the BOTTOM TAB pager
+  // (Shop ⇄ Services ⇄ Dashboard …), so the home screen deliberately does
+  // NOT claim them — categories are chosen by tapping a circle.
   const catStripRef = useRef<ScrollView | null>(null);
 
   // ── Delivery address (live reverse-geocoded from user coords) ─────────
@@ -497,47 +496,6 @@ export function ShopHome({
   // shopped here before).  A hard-denied permission gets an "Open
   // Settings" CTA; an "undetermined" or first-open state gets a
   // "Turn on location" CTA that triggers the OS prompt.
-  // ── Home swipe navigation ──────────────────────────────────────────────
-  // One conceptual list: ["all", …admin categories]. A horizontal flick
-  // steps through it in place — the filtered grid renders instantly from
-  // already-loaded products, so gliding across the shop costs no network.
-  // Vertical scrolling and the horizontal category strip are untouched
-  // because the responder only claims clearly-horizontal drags on the body.
-  const catChain = useMemo(
-    () => ["all", ...(apiCategories || []).map((c) => c.name)],
-    [apiCategories],
-  );
-
-  const swipeStep = useCallback((dir: 1 | -1) => {
-    if (catChain.length < 2) return;
-    const cur = catChain.indexOf(activeCategory);
-    const next = (cur < 0 ? 0 : cur) + dir;
-    if (next < 0 || next >= catChain.length) return;
-    const name = catChain[next];
-    setActiveCategory(name);
-    setSwipeHint(name === "all" ? "All categories" : name);
-    // Keep the tapped chip in view so the strip mirrors the swipe.
-    catStripRef.current?.scrollTo({ x: Math.max(0, (next - 1) * 76), animated: true });
-  }, [catChain, activeCategory]);
-
-  useEffect(() => {
-    if (!swipeHint) return;
-    const t = setTimeout(() => setSwipeHint(""), 1400);
-    return () => clearTimeout(t);
-  }, [swipeHint]);
-
-  const swipeRef = useRef(swipeStep);
-  swipeRef.current = swipeStep;
-  const panResponder = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 24 && Math.abs(g.dy) < 24,
-      onPanResponderRelease: (_e, g) => {
-        if (g.dx <= -60) swipeRef.current(1);
-        else if (g.dx >= 60) swipeRef.current(-1);
-      },
-    }),
-  ).current;
-
   const hasLocation = !!(deliveryCoords || deliveryPincode);
   if (!hasLocation) {
     return (
@@ -720,15 +678,6 @@ export function ShopHome({
         </View>
       </View>
 
-      {/* Jun 2026 — Swipe feedback toast for the home category glide. */}
-      {swipeHint ? (
-        <View style={styles.swipeHint} pointerEvents="none">
-          <Feather name="chevrons-right" size={13} color="#fff" />
-          <Text style={styles.swipeHintText} numberOfLines={1}>{swipeHint}</Text>
-        </View>
-      ) : null}
-
-      <View style={{ flex: 1 }} {...panResponder.panHandlers}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: 32 }}
         showsVerticalScrollIndicator={false}
@@ -1007,7 +956,6 @@ export function ShopHome({
           </>
         )}
       </ScrollView>
-      </View>
 
       {/* ── Delivery-location picker modal ─────────────────────────────
           Opens when the user taps the "Deliver to {city}" pill in the
@@ -1256,15 +1204,6 @@ const styles = StyleSheet.create({
   // header / banner / grid below, so the row of circles is visually
   // anchored. Was 12 — felt too tight against the screen edge.
   catScroll: { paddingHorizontal: spacing.screen, paddingVertical: 14, gap: spacing.gridGap },
-  // Jun 2026 — Home swipe feedback toast
-  swipeHint: {
-    flexDirection: "row", alignItems: "center", gap: 6,
-    alignSelf: "center", marginTop: 6,
-    backgroundColor: colors.textMain,
-    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
-    maxWidth: "90%",
-  },
-  swipeHintText: { color: "#fff", fontSize: 12, fontWeight: "800" },
 
   catItem: { alignItems: "center", width: 72 },
   catCircle: {

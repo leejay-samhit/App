@@ -1,0 +1,44 @@
+{
+  "summary": "Iter 58 (one consistent left/right swipe animation across all tab surfaces + removal of the black swipe toast and the manual prev/next chevrons on the category screen) fully validated on the 390x844 web preview via CDP touch events. Every swipe surface behaves per spec: bottom tabs, /orders filters, /shop-category, /vendor/dashboard, /vendor/orders and /vendor/invoices all step exactly one position per flick, both boundaries hold with no wrap-around, tab-swipe is correctly DISABLED on drilled-in routes (/wallet, /network, /shop-category/<name>) and Shop-home correctly RELEASES the horizontal drag to the parent tab pager. UI-side: the black swipe toast and the cat-prev / cat-next chevron buttons are gone; the 'SWIPE ↔ CATEGORY' eyebrow still renders; the /orders chip strip is a compact 30px row (no giant pills); multi-vendor split cards, group header, 'Ask this seller', invoice modal, cash summary card all confirmed working (regression sweep pass). Zero blocking issues found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/seed_iter58_cats.py",
+    "/app/test_reports/iter58_shop_after_swipes.png",
+    "/app/test_reports/iter58_orders_start.png",
+    "/app/test_reports/iter58_orders_after.png",
+    "/app/test_reports/iter58_category.png",
+    "/app/test_reports/iter58_vdash.png",
+    "/app/test_reports/iter58_vdash_after_L1.png",
+    "/app/test_reports/iter58_vdash_L2.png",
+    "/app/test_reports/iter58_vdash_L3.png",
+    "/app/test_reports/iter58_vdash_L4.png",
+    "/app/test_reports/iter58_vorders.png",
+    "/app/test_reports/iter58_vinvoices.png"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "shop-home.tsx has two duplicate style keys (`sectionTitle` — no, actually `hList`) declared twice inside the StyleSheet.create block (lines 1261 and 1266); RN-Web silently uses the second definition. Pre-existing per gotchas, not introduced by iter 58, but worth de-duping in a future cleanup.",
+    "Frontend .env exposes the backend URL as EXPO_PUBLIC_BACKEND_URL, not the EXPO_BACKEND_URL name mentioned in the system prompt. Only relevant for tooling; the app itself reads EXPO_PUBLIC_BACKEND_URL correctly."
+  ],
+  "updated_files": [
+    "/app/backend/tests/seed_iter58_cats.py (NEW — seeds 3 sibling root categories ITER58_Electronics/Fashion/Home so the category-swipe past-end sibling-jump can be observed, with a `cleanup` mode that removes only ITER58_* rows; verified DB left in original state)"
+  ],
+  "success_rate": {
+    "backend": "not tested (frontend-only iteration per request)",
+    "frontend": "100% — 6/6 swipe surfaces + 3/3 disabled-swipe surfaces + regression sweep all pass"
+  },
+  "seed_data_creation": "Seeded 3 root shop categories (ITER58_Electronics / ITER58_Fashion / ITER58_Home) for the category sibling-jump test. Cleaned up via `python backend/tests/seed_iter58_cats.py cleanup` — DB left exactly as found (verified: all three DELETE 200s).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Playwright page.mouse.* still does NOT reach PanResponder on RN-Web — use CDP `Input.dispatchTouchEvent` (touchStart → ~12 touchMove @ 12ms apart → touchEnd with empty touchPoints[]) exactly like this iteration's script. The Slangcart splash overlay class-token to poll for is 'r-bottom-1p0dtai' — keep waiting on document.elementFromPoint(200,500).className until it clears (~2-4s after page.goto). Login testIDs are `login-email-input`, `login-password-input`, `login-submit-button` (NOTE: it is -button, not -submit). Buyer testbuyer@test.com has 27 orders across all statuses, perfect for filter-step tests. RN-Web renders colors.primary at rgb(20, 61, 46) not rgb(16, 185, 129); active-tab detection via border-bottom-color needs the darker value. On the vendor dashboard the tab-active indicator is border-bottom colour on the TouchableOpacity itself, but the swipe still fires — verify via content-text change ('Cloud POS' / 'Stock ' / 'Order #' / 'No customer questions yet').",
+  "rca_of_issue": "No issues found. Coverage: (a) Bottom tab pager — page.goto /shop then 4x left-flick walked shop→services→dashboard→chat→profile (URL confirmed after each), 5th left-flick stayed on profile, 4x right-flick walked back, 5th stayed on shop; (b) /orders — 4x left-flick chip strip walked all→placed→shipped→delivered→cancelled with each step in exact order (no double-step regression), 5th flick stayed on cancelled, right-flicks mirrored back and stayed on all, chip-strip element measured 30px height (compact — no full-height pills regression) and order-<uuid> card was visible below at rect.top=173 confirming the chipStripOuter flexGrow/flexShrink 0 fix holds; (c) /shop-category/ITER58_Electronics — cat-prev and cat-next selectors NOT FOUND (chevrons removed), dark toast probe returned None (toast removed), 'SWIPE ↔ CATEGORY' eyebrow present in body text, left-flicks walked Electronics→Fashion→Home with boundary hold at Home, right-flicks walked back with boundary hold at Electronics — sibling category jump confirmed; (d) /wallet and /network — left-flick did NOT change URL (tab swipe correctly disabled by the `tabIndex >= 0` guard in TabsLayout because the segment isn't in HARDCODED_ORDER); (e) /shop — left-flick correctly went to /services confirming Shop home does NOT claim horizontal swipes any more; (f) /vendor/dashboard — 3 successive left-flicks visibly changed content from Overview (Cloud POS quick-links) → Products (product cards) → Sales (Order # rows) → Q&A (No customer questions yet), 4th stayed on Q&A (boundary), tab underline moved with each flick; (g) /vendor/orders — walked all→placed→shipped→delivered→cancelled with each single step, boundaries held; (h) /vendor/invoices — walked all→pos→online, boundaries held. Regression sweep: cash-summary-card testID present on vendor dashboard; /orders showed 'order-group-<id>' header '1 checkout · 2 sellers · ₹350 total · each seller ships and updates separately · 2/2'; each split order card had Ask this seller + Invoice buttons; Cancel order button rendered on placed orders; invoice modal reachable."
+}

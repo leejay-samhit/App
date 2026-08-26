@@ -18,6 +18,7 @@
  *     as the admin export so pivot tables line up.
  */
 import { useCallback, useState } from "react";
+import { useSwipePager } from "../../src/use-swipe-pager";
 import {
   View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl,
   TouchableOpacity, Image, Alert, Modal, TextInput, Linking, Platform,
@@ -65,6 +66,8 @@ type VendorSale = {
 };
 
 const STATUSES = ["placed", "shipped", "delivered", "cancelled"] as const;
+// Status tab order — also the sequence the left/right swipe walks through.
+const VORDER_TABS: string[] = ["all", ...STATUSES];
 const STATUS_COLORS: Record<string, string> = {
   placed: colors.warning,
   shipped: colors.brand500,
@@ -126,6 +129,16 @@ export default function VendorOrders() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<string>("all");
+  // Jun 2026 — One shared swipe behaviour across the app.
+  const stepFilter = useCallback((dir: 1 | -1) => {
+    const next = VORDER_TABS.indexOf(filter) + dir;
+    if (next < 0 || next >= VORDER_TABS.length) return;
+    setFilter(VORDER_TABS[next]);
+  }, [filter]);
+  const swipeHandlers = useSwipePager({
+    onNext: () => stepFilter(1),
+    onPrev: () => stepFilter(-1),
+  });
   const [busy, setBusy] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   // Jul 2026 — Delivery-info modal state
@@ -244,13 +257,16 @@ export default function VendorOrders() {
       </View>
 
       <View style={styles.tabs}>
-        {["all", ...STATUSES].map((t) => (
+        {VORDER_TABS.map((t) => (
           <TouchableOpacity key={t} onPress={() => setFilter(t)} style={[styles.tab, filter === t && styles.tabActive]} testID={`vorder-tab-${t}`}>
             <Text style={[styles.tabText, filter === t && styles.tabTextActive]}>{t.toUpperCase()}</Text>
           </TouchableOpacity>
         ))}
       </View>
 
+      {/* Jun 2026 — Same left/right swipe as everywhere else in the app:
+          flick the list body to move through the status tabs. */}
+      <View style={{ flex: 1 }} {...swipeHandlers}>
       {loading ? (
         <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
           {[...Array(5)].map((_, i) => <ListRowSkeleton key={i} />)}
@@ -469,6 +485,7 @@ export default function VendorOrders() {
           }
         />
       )}
+      </View>
 
       {/* Jul 2026 — Delivery info modal.  Vendor sets ETA + delivery
           person contact.  Both fields are optional; blank fields

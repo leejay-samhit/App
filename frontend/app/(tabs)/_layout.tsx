@@ -1,10 +1,18 @@
-import { Tabs } from "expo-router";
+import { Tabs, useRouter, useSegments } from "expo-router";
 import { Feather } from "@expo/vector-icons";
-import { Platform } from "react-native";
+import { Platform, View } from "react-native";
+import { useCallback } from "react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 import { useBranding } from "../../src/branding";
 import { DesktopShell, useIsDesktop } from "../../src/desktop-shell";
+import { useSwipePager } from "../../src/use-swipe-pager";
+
+// Hardcoded visible-tab order per current UX spec:
+// SHOP · SERVICES · DASHBOARD · CHAT · PROFILE
+// Dashboard sits dead-center as the visual anchor. Declared at module scope
+// so the swipe callbacks have a stable dependency.
+const HARDCODED_ORDER = ["shop", "services", "dashboard", "chat", "profile"];
 
 export default function TabsLayout() {
   const { tabs } = useBranding();
@@ -28,10 +36,32 @@ export default function TabsLayout() {
   // keeps working.
   const HARD_HIDDEN: Set<string> = new Set(["wallet", "network", "shop-category/[name]"]);
 
-  // Hardcoded visible-tab order per current UX spec:
-  // SHOP · SERVICES · DASHBOARD · CHAT · PROFILE
-  // Dashboard sits dead-center as the visual anchor.
-  const HARDCODED_ORDER = ["shop", "services", "dashboard", "chat", "profile"];
+
+  // ── Jun 2026 — WhatsApp-style swipe between the bottom tabs ───────────
+  // A left/right flick anywhere on a tab screen moves to the neighbouring
+  // tab, and React Navigation's "shift" animation slides the outgoing screen
+  // out while the incoming one slides in from the opposite side.
+  //
+  // The gesture is deliberately scoped to the FIVE visible tabs: drilled-in
+  // routes that live inside this group (shop-category/[name], wallet,
+  // network) keep their own gestures, so a swipe there never yanks the user
+  // out of the screen they're browsing.
+  const router = useRouter();
+  const segments = useSegments() as string[];
+  const currentTab = segments[segments.length - 1] || "";
+  const tabIndex = HARDCODED_ORDER.indexOf(currentTab);
+
+  const goToTab = useCallback((dir: 1 | -1) => {
+    if (tabIndex < 0) return;
+    const next = HARDCODED_ORDER[tabIndex + dir];
+    if (next) router.navigate(`/(tabs)/${next}` as any);
+  }, [tabIndex, router]);
+
+  const swipeHandlers = useSwipePager({
+    onNext: () => goToTab(1),
+    onPrev: () => goToTab(-1),
+    enabled: !isDesktop && tabIndex >= 0,
+  });
 
   // Every screen file under (tabs)/ must still be registered as a route, even
   // hidden ones. Build the full registration list = visible (in our order) +
@@ -45,10 +75,14 @@ export default function TabsLayout() {
 
   return (
     <DesktopShell>
+      <View style={{ flex: 1 }} {...swipeHandlers}>
       <Tabs
         initialRouteName="shop"
         screenOptions={{
           headerShown: false,
+          // Horizontal slide so a swipe (or a tab tap) reads as moving
+          // sideways through the app, matching the reference video.
+          animation: "shift",
           tabBarActiveTintColor: colors.primary,
           tabBarInactiveTintColor: colors.textMuted,
           tabBarHideOnKeyboard: true,
@@ -88,6 +122,7 @@ export default function TabsLayout() {
         );
       })}
       </Tabs>
+      </View>
     </DesktopShell>
   );
 }

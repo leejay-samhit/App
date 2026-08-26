@@ -8,6 +8,7 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { RichProductEditor } from "../../src/rich-product-editor";
 import { FadeSlideIn, StatCardSkeleton, ListRowSkeleton } from "../../src/anim";
+import { useSwipePager } from "../../src/use-swipe-pager";
 
 type Stats = {
   total_sales: number; total_earnings: number; today_earnings: number;
@@ -42,9 +43,22 @@ type VendorQuestion = {
   answers: QuestionAnswer[]; answered: boolean; created_at: string;
 };
 
+// Tab order — also the sequence the left/right swipe walks through.
+const VENDOR_TABS: ("home" | "products" | "sales" | "qa")[] = ["home", "products", "sales", "qa"];
+
 export default function VendorDashboard() {
   const router = useRouter();
   const [tab, setTab] = useState<"home" | "products" | "sales" | "qa">("home");
+  // Jun 2026 — Same left/right swipe behaviour as the rest of the app.
+  const stepTab = useCallback((dir: 1 | -1) => {
+    const next = VENDOR_TABS.indexOf(tab) + dir;
+    if (next < 0 || next >= VENDOR_TABS.length) return;
+    setTab(VENDOR_TABS[next]);
+  }, [tab]);
+  const swipeHandlers = useSwipePager({
+    onNext: () => stepTab(1),
+    onPrev: () => stepTab(-1),
+  });
   const [stats, setStats] = useState<Stats | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
@@ -196,6 +210,10 @@ export default function VendorDashboard() {
         ))}
       </View>
 
+      {/* Jun 2026 — Swipe surface: a left/right flick moves through the
+          Overview · Products · Sales · Q&A tabs, matching the app-wide
+          gesture. */}
+      <View style={{ flex: 1 }} {...swipeHandlers}>
       {tab === "home" && stats && (
         <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
           <FadeSlideIn triggerKey={`home-${refreshing ? "r" : "d"}`}>
@@ -591,6 +609,7 @@ export default function VendorDashboard() {
           </KeyboardAvoidingView>
         )
       )}
+      </View>
 
       <RichProductEditor
         visible={editorOpen}
