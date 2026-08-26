@@ -11,6 +11,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Slider from "@react-native-community/slider";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
@@ -117,8 +118,12 @@ export default function CheckoutScreen() {
       Alert.alert("Couldn't capture location", e?.message || "Try again in a moment.");
     } finally { setGpsBusy(false); }
   };
-  // Payment method
-  const [paymentMethod, setPaymentMethod] = useState<"wallet" | "cod">("wallet");
+  // Payment method — Jun 2026 adds the "wallet_cod" combo where the
+  // wallet covers part of the bill and cash covers the rest.
+  const [paymentMethod, setPaymentMethod] = useState<"wallet" | "cod" | "wallet_cod">("wallet");
+  // How much of the bill the wallet should cover in combo mode.
+  const [walletSplit, setWalletSplit] = useState(0);
+  const [splitTouched, setSplitTouched] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -175,6 +180,21 @@ export default function CheckoutScreen() {
 
   const total = items.reduce((s, i) => s + ((i.line_total) || (i.product?.price || 0) * (i.qty || 1)), 0);
   const canAffordWallet = walletBalance >= total;
+  // Jun 2026 — Wallet+COD combo maths. `maxWalletUsable` is the most the
+  // wallet can contribute; the slider defaults to that (auto-max) and the
+  // buyer can drag it down to ₹0 to pay more in cash.
+  const maxWalletUsable = Math.min(walletBalance, total);
+  const walletPart = paymentMethod === "wallet_cod"
+    ? Math.max(0, Math.min(Math.round(walletSplit), Math.floor(maxWalletUsable)))
+    : paymentMethod === "wallet" ? total : 0;
+  const cashPart = Math.max(0, Math.round((total - walletPart) * 100) / 100);
+
+  // Auto-max the wallet the first time the combo option is selected.
+  useEffect(() => {
+    if (paymentMethod === "wallet_cod" && !splitTouched) {
+      setWalletSplit(Math.floor(maxWalletUsable));
+    }
+  }, [paymentMethod, maxWalletUsable, splitTouched]);
 
   const onPlaceOrder = async () => {
     // Validate
@@ -191,6 +211,10 @@ export default function CheckoutScreen() {
     }
     if (paymentMethod === "wallet" && !canAffordWallet) {
       Alert.alert("Insufficient wallet balance", `You need ₹${total.toFixed(0)} but your wallet has ₹${walletBalance.toFixed(0)}. Switch to Cash on Delivery or top up your wallet.`);
+      return;
+    }
+    if (paymentMethod === "wallet_cod" && walletPart <= 0) {
+      Alert.alert("Nothing from wallet", "Drag the slider up to use wallet money, or pick Cash on Delivery.");
       return;
     }
     if (items.length === 0) {
@@ -213,12 +237,24 @@ export default function CheckoutScreen() {
       };
       // Persist address (with GPS) for next time
       try { await AsyncStorage.setItem(ADDRESS_KEY, JSON.stringify(shipping_address)); } catch { /* ignore */ }
-      const r = await api.post<any>("/orders/checkout", { payment_method: paymentMethod, shipping_address });
+      const r = await api.post<any>("/orders/checkout", {
+        payment_method: paymentMethod,
+        wallet_amount: paymentMethod === "wallet_cod" ? walletPart : undefined,
+        shipping_address,
+      });
+      // Jun 2026 — checkout now returns one order per vendor.
+      const splitCount = Number(r.data?.split_count || 1);
+      const codDue = Number(r.data?.cod_due || 0);
+      const walletUsed = Number(r.data?.wallet_paid || 0);
+      const lines: string[] = [];
+      if (splitCount > 1) {
+        lines.push(`Split into ${splitCount} orders — one per seller, each tracked separately.`);
+      }
+      if (walletUsed > 0) lines.push(`₹${walletUsed.toFixed(0)} debited from your wallet.`);
+      if (codDue > 0) lines.push(`₹${codDue.toFixed(0)} to pay in cash on delivery.`);
       Alert.alert(
-        "Order placed! 🎉",
-        paymentMethod === "cod"
-          ? `Pay ₹${total.toFixed(0)} cash to the delivery agent on arrival.`
-          : `₹${total.toFixed(0)} debited from your wallet.`,
+        splitCount > 1 ? `${splitCount} orders placed! 🎉` : "Order placed! 🎉",
+        lines.join("\n") || `₹${total.toFixed(0)} confirmed.`,
         [{ text: "View orders", onPress: () => router.replace("/orders" as any) }],
       );
     } catch (e: any) {
@@ -410,13 +446,97 @@ export default function CheckoutScreen() {
               <Text style={styles.paymentSub}>Pay cash to the delivery agent on arrival</Text>
             </View>
           </TouchableOpacity>
+
+          {/* Jun 2026 — Wallet + Cash combo. Slider starts at the max
+              usable wallet amount (auto-max) and can be dragged down so
+              the buyer decides how much cash to hand over on delivery. */}
+          <TouchableOpacity
+            onPress={() => setPaymentMethod("wallet_cod")}
+            disabled={maxWalletUsable <= 0}
+            style={[
+              styles.paymentOption,
+              paymentMethod === "wallet_cod" && styles.paymentOptionActive,
+              maxWalletUsable <= 0 && { opacity: 0.5 },
+            ]}
+            testID="pay-wallet-cod"
+          >
+            <View style={styles.radio}>{paymentMethod === "wallet_cod" ? <View style={styles.radioDot} /> : null}</View>
+            <Feather name="pie-chart" size={20} color={colors.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.paymentTitle}>Wallet + Cash on Delivery</Text>
+              <Text style={styles.paymentSub}>
+                {maxWalletUsable <= 0
+                  ? "Add wallet money to use this option"
+                  : "Use part of your wallet, pay the rest in cash"}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {paymentMethod === "wallet_cod" ? (
+            <View style={styles.splitBox} testID="wallet-split-box">
+              <View style={styles.splitRow}>
+                <View style={styles.splitCell}>
+                  <Text style={styles.splitLabel}>FROM WALLET</Text>
+                  <Text style={styles.splitValueWallet} testID="split-wallet-amount">{formatINR(walletPart)}</Text>
+                </View>
+                <View style={styles.splitDivider} />
+                <View style={[styles.splitCell, { alignItems: "flex-end" }]}>
+                  <Text style={styles.splitLabel}>CASH ON DELIVERY</Text>
+                  <Text style={styles.splitValueCash} testID="split-cash-amount">{formatINR(cashPart)}</Text>
+                </View>
+              </View>
+
+              <Slider
+                style={{ width: "100%", height: 40 }}
+                minimumValue={0}
+                maximumValue={Math.max(1, Math.floor(maxWalletUsable))}
+                step={1}
+                value={walletPart}
+                onValueChange={(v: number) => { setSplitTouched(true); setWalletSplit(v); }}
+                minimumTrackTintColor={colors.primary}
+                maximumTrackTintColor={colors.border}
+                thumbTintColor={colors.primary}
+                testID="wallet-split-slider"
+              />
+
+              <View style={styles.splitQuickRow}>
+                {[0, 0.25, 0.5, 0.75, 1].map((f) => {
+                  const amt = Math.floor(maxWalletUsable * f);
+                  const active = walletPart === amt;
+                  return (
+                    <TouchableOpacity
+                      key={f}
+                      onPress={() => { setSplitTouched(true); setWalletSplit(amt); }}
+                      style={[styles.splitChip, active && styles.splitChipActive]}
+                      testID={`split-chip-${f}`}
+                    >
+                      <Text style={[styles.splitChipText, active && styles.splitChipTextActive]}>
+                        {f === 0 ? "₹0" : f === 1 ? "Max" : `${f * 100}%`}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={styles.splitHint}>
+                Wallet balance {formatINR(walletBalance)} · drag to change the split
+              </Text>
+            </View>
+          ) : null}
         </ScrollView>
 
         {/* Sticky Place Order */}
         <View style={styles.stickyCta}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.stickyLabel}>{paymentMethod === "cod" ? "Pay on delivery" : "Total"}</Text>
-            <Text style={styles.stickyAmount}>{formatINR(total)}</Text>
+            <Text style={styles.stickyLabel}>
+              {paymentMethod === "cod" ? "PAY ON DELIVERY"
+                : paymentMethod === "wallet_cod" ? `WALLET ${formatINR(walletPart)} + CASH` : "TOTAL"}
+            </Text>
+            <Text style={styles.stickyAmount}>
+              {paymentMethod === "wallet_cod" ? formatINR(cashPart) : formatINR(total)}
+            </Text>
+            {paymentMethod === "wallet_cod" ? (
+              <Text style={styles.stickySub}>of {formatINR(total)} total</Text>
+            ) : null}
           </View>
           <TouchableOpacity
             onPress={onPlaceOrder}
@@ -508,6 +628,21 @@ const styles = StyleSheet.create({
   // Sticky CTA
   stickyCta: { position: "absolute", left: 0, right: 0, bottom: 0, flexDirection: "row", alignItems: "center", paddingHorizontal: spacing.screen, paddingTop: 12, paddingBottom: 20, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border, gap: 14 },
   stickyLabel: { fontSize: 10, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.8 },
+  stickySub: { fontSize: 10, color: colors.textMuted, fontWeight: "600", marginTop: 1 },
+  // Jun 2026 — Wallet + COD split panel
+  splitBox: { padding: 14, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.primary, marginTop: 2 },
+  splitRow: { flexDirection: "row", alignItems: "center" },
+  splitCell: { flex: 1, gap: 3 },
+  splitDivider: { width: 1, height: 34, backgroundColor: colors.border, marginHorizontal: 10 },
+  splitLabel: { fontSize: 9, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.9 },
+  splitValueWallet: { fontSize: 20, fontWeight: "900", color: colors.primary, letterSpacing: -0.5 },
+  splitValueCash: { fontSize: 20, fontWeight: "900", color: "#B45309", letterSpacing: -0.5 },
+  splitQuickRow: { flexDirection: "row", gap: 6, marginTop: 4 },
+  splitChip: { flex: 1, paddingVertical: 8, borderRadius: 999, alignItems: "center", backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, minHeight: 34 },
+  splitChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  splitChipText: { fontSize: 11, fontWeight: "800", color: colors.textMain },
+  splitChipTextActive: { color: colors.primaryFg },
+  splitHint: { fontSize: 10, color: colors.textMuted, marginTop: 10, textAlign: "center", fontWeight: "600" },
   stickyAmount: { fontSize: 22, fontWeight: "900", color: colors.primary, letterSpacing: -0.5 },
   placeBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 20, paddingVertical: 14, borderRadius: 999, backgroundColor: colors.primary },
   placeBtnText: { fontSize: 14, fontWeight: "900", color: colors.primaryFg, letterSpacing: -0.2 },

@@ -153,9 +153,78 @@ async def cart_clear(user: Dict[str, Any] = Depends(get_current_user)):
 @router.get("/orders/me")
 async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
     """User's order history. Returns up to 500 rows newest-first — the FE
-    paginates client-side because order volumes are very small per user."""
+    paginates client-side because order volumes are very small per user.
+
+    Jun 2026 — checkouts are now SPLIT into one order per vendor, so each
+    row already carries `vendor_id` / `vendor_name` / `order_number`.
+    Legacy pre-split orders are back-filled on read so the UI can render
+    a single consistent card design.
+    """
     items = await db.orders.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+    # Back-fill vendor identity for legacy (pre-split) orders.
+    need_vendor = [o for o in items if not o.get("vendor_name")]
+    vendor_ids = set()
+    for o in need_vendor:
+        vid = o.get("vendor_id") or next(
+            (it.get("vendor_id") for it in (o.get("items") or []) if it.get("vendor_id")), None,
+        )
+        if vid:
+            vendor_ids.add(vid)
+    names: Dict[str, str] = {}
+    if vendor_ids:
+        rows = await db.users.find(
+            {"id": {"$in": list(vendor_ids)}},
+            {"_id": 0, "id": 1, "vendor_business_name": 1, "shop_name": 1, "name": 1},
+        ).to_list(len(vendor_ids))
+        names = {
+            r["id"]: (r.get("vendor_business_name") or r.get("shop_name") or r.get("name") or "Vendor")
+            for r in rows
+        }
+
+    for o in items:
+        if not o.get("order_number"):
+            o["order_number"] = f"SC-{str(o.get('id') or '')[:6].upper()}"
+        vids = {it.get("vendor_id") for it in (o.get("items") or []) if it.get("vendor_id")}
+        if not o.get("vendor_id") and len(vids) == 1:
+            o["vendor_id"] = next(iter(vids))
+        if not o.get("vendor_name") and o.get("vendor_id"):
+            o["vendor_name"] = names.get(o["vendor_id"])
+        # Legacy docs predate the wallet/COD split fields.
+        if o.get("wallet_paid") is None:
+            paid_via = (o.get("paid_via") or "wallet").lower()
+            o["wallet_paid"] = 0.0 if paid_via == "cod" else float(o.get("total") or 0)
+        if o.get("cod_due") is None:
+            o["cod_due"] = round(float(o.get("total") or 0) - float(o.get("wallet_paid") or 0), 2)
+        o["vendor_count"] = len(vids) or 1
     return items
+
+
+@router.post("/orders/{order_id}/chat-vendor")
+async def chat_vendor_for_order(order_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Jun 2026 — One-tap "Ask this seller" from My Orders.
+
+    A completed purchase is itself proof of relationship, so we skip the
+    chat-request handshake and open (or reuse) a direct thread between the
+    buyer and the order's vendor. Returns `{ thread_id }`.
+    """
+    o = await db.orders.find_one({"id": order_id, "user_id": user["id"]}, {"_id": 0})
+    if not o:
+        raise HTTPException(status_code=404, detail="Order not found")
+    vendor_id = o.get("vendor_id") or next(
+        (it.get("vendor_id") for it in (o.get("items") or []) if it.get("vendor_id")), None,
+    )
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="This order has no seller to chat with.")
+    if vendor_id == user["id"]:
+        raise HTTPException(status_code=400, detail="You can't chat with yourself.")
+    vendor = await db.users.find_one({"id": vendor_id}, {"_id": 0, "id": 1})
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Seller account not found.")
+
+    from routes.chat import _find_or_create_thread
+    thread = await _find_or_create_thread(user["id"], vendor_id)
+    return {"thread_id": thread.get("id"), "vendor_id": vendor_id}
 
 
 @router.post("/orders/{order_id}/cancel")
@@ -182,17 +251,25 @@ async def cancel_my_order(order_id: str, user: Dict[str, Any] = Depends(get_curr
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
     await db.orders.update_one({"id": order_id}, {"$set": {"status": "cancelled", "cancelled_at": ts, "cancelled_by": "user"}})
-    # Refund wallet if applicable
-    if (o.get("paid_via") or "").lower() == "wallet" and (o.get("total") or 0) > 0:
-        await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": float(o["total"])}})
+    # Refund the wallet-funded portion (full total for wallet orders,
+    # `wallet_paid` slice for Wallet+COD combos, nothing for pure COD).
+    paid_via = (o.get("paid_via") or "").lower()
+    if paid_via == "wallet":
+        refund_amt = float(o.get("total") or 0)
+    elif paid_via == "wallet_cod":
+        refund_amt = float(o.get("wallet_paid") or 0)
+    else:
+        refund_amt = 0.0
+    if refund_amt > 0:
+        await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": refund_amt}})
         try:
             import uuid as _u
             await db.transactions.insert_one({
                 "id": str(_u.uuid4()), "user_id": user["id"], "type": "refund",
-                "amount": float(o["total"]), "status": "success",
-                "description": f"Refund for cancelled order #{order_id[:8].upper()}",
+                "amount": refund_amt, "status": "success",
+                "description": f"Refund for cancelled order {o.get('order_number') or ('#' + order_id[:8].upper())}",
                 "order_id": order_id, "created_at": ts,
             })
         except Exception:
             pass
-    return {"ok": True, "status": "cancelled"}
+    return {"ok": True, "status": "cancelled", "refunded": round(refund_amt, 2)}

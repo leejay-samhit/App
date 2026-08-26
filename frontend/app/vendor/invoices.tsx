@@ -228,7 +228,7 @@ export default function VendorInvoices() {
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}><Feather name="arrow-left" size={20} color={colors.textMain} /></TouchableOpacity>
-        <Text style={styles.title}>Invoices</Text>
+        <Text style={[styles.title, { fontSize: 15, flex: 1 }]} numberOfLines={1}>Shop order &amp; Store sale Invoices</Text>
       </View>
       {/* Jul 2026 — Channel filter (POS / Online / All) */}
       <View style={{ flexDirection: "row", marginHorizontal: spacing.screen, backgroundColor: colors.surfaceMuted, borderRadius: 99, padding: 4, gap: 2, marginBottom: 8 }}>

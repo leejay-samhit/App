@@ -53,7 +53,7 @@ export default function VendorSalesHistory() {
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}><Feather name="arrow-left" size={20} color={colors.textMain} /></TouchableOpacity>
-        <Text style={styles.title}>Sales history</Text>
+        <Text style={styles.title}>Store sale history</Text>
         <View style={{ flex: 1 }} />
         <TouchableOpacity onPress={() => router.push("/vendor/pos" as any)} style={styles.newBtn}><Feather name="plus" size={14} color="#fff" /><Text style={{ color: "#fff", fontWeight: "700", marginLeft: 4 }}>New</Text></TouchableOpacity>
       </View>

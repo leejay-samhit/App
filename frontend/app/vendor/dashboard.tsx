@@ -213,8 +213,8 @@ export default function VendorDashboard() {
               {[
                 { key: "orders", label: "Shop orders", icon: "package", path: "/vendor/orders", primary: true },
                 { key: "pos", label: "New sale", icon: "shopping-cart", path: "/vendor/pos" },
-                { key: "sales", label: "POS sales", icon: "list", path: "/vendor/sales" },
-                { key: "invoices", label: "Invoices", icon: "file-text", path: "/vendor/invoices" },
+                { key: "sales", label: "Store sale", icon: "list", path: "/vendor/sales" },
+                { key: "invoices", label: "All invoices", icon: "file-text", path: "/vendor/invoices" },
                 { key: "cash", label: "Cash", icon: "dollar-sign", path: "/vendor/cash" },
                 { key: "analytics", label: "Analytics", icon: "bar-chart-2", path: "/vendor/analytics" },
                 { key: "settings", label: "POS settings", icon: "settings", path: "/vendor/settings" },
@@ -271,27 +271,37 @@ export default function VendorDashboard() {
             <Feather name="chevron-right" size={18} color={colors.primary} />
           </TouchableOpacity>
           <FadeSlideIn>
-          <View style={styles.statsGrid}>            {/* Jul 2026 — Tappable earnings cards → open a drill-down modal
-                with per-row detail (online + POS combined) and date filters. */}
-            <TouchableOpacity activeOpacity={0.8} style={{ flexBasis: "48%" }} onPress={() => openEarnings("today")} testID="stat-today-earn">
+          <View style={styles.statsGrid}>
+            {/* Jun 2026 — Even 2-column grid: every cell is the same
+                flex-basis + min-height so the boxes align perfectly.
+                Earnings + order cells are tappable drill-downs. */}
+            <TouchableOpacity activeOpacity={0.8} style={styles.statCell} onPress={() => openEarnings("today")} testID="stat-today-earn">
               <StatCard icon="trending-up" label="TODAY EARNINGS" value={formatINR(stats.today_earnings)} color="#1F6B44" />
             </TouchableOpacity>
-            <StatCard icon="package" label="TODAY ORDERS" value={String(stats.today_orders)} color="#1F5E9E" />
-            <TouchableOpacity activeOpacity={0.8} style={{ flexBasis: "48%" }} onPress={() => openEarnings("lifetime")} testID="stat-life-earn">
+            <TouchableOpacity activeOpacity={0.8} style={styles.statCell} onPress={() => router.push("/vendor/orders" as any)} testID="stat-today-orders">
+              <StatCard icon="package" label="TODAY ORDERS" value={String(stats.today_orders)} color="#1F5E9E" />
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.8} style={styles.statCell} onPress={() => openEarnings("lifetime")} testID="stat-life-earn">
               <StatCard icon="tag" label="LIFETIME EARNINGS" value={formatINR(stats.total_earnings)} color={colors.primary} />
             </TouchableOpacity>
-            <StatCard icon="shopping-cart" label="LIFETIME SALES" value={formatINR(stats.total_sales)} color="#7A4A0E" />
-            <StatCard icon="box" label="PRODUCTS" value={`${stats.published_count}/${stats.products_count}`} color="#1F5E9E" />
-            <StatCard icon="credit-card" label="WALLET" value={formatINR(stats.wallet_balance)} color="#1F6B44" />
+            <View style={styles.statCell}>
+              <StatCard icon="shopping-cart" label="LIFETIME SALES" value={formatINR(stats.total_sales)} color="#7A4A0E" />
+            </View>
+            <View style={styles.statCell}>
+              <StatCard icon="box" label="PRODUCTS" value={`${stats.published_count}/${stats.products_count}`} color="#1F5E9E" />
+            </View>
+            <View style={styles.statCell}>
+              <StatCard icon="credit-card" label="WALLET" value={formatINR(stats.wallet_balance)} color="#1F6B44" />
+            </View>
           </View>
           </FadeSlideIn>
-          {/* Jul 2026 — Per-channel breakdown pill (Online + POS/New Sales) */}
+          {/* Per-channel breakdown pill (Shop orders + Store sale) */}
           <FadeSlideIn delay={60}>
           <View style={styles.channelRow}>
             <View style={styles.channelPill}>
               <Feather name="globe" size={12} color="#1D4ED8" />
               <View style={{ flex: 1 }}>
-                <Text style={styles.channelPillLabel}>ONLINE SHOP</Text>
+                <Text style={styles.channelPillLabel}>SHOP ORDERS</Text>
                 <Text style={styles.channelPillValue}>{formatINR(stats.online_total || 0)}</Text>
                 <Text style={styles.channelPillMeta}>{stats.online_orders_all || 0} order{(stats.online_orders_all || 0) === 1 ? "" : "s"}</Text>
               </View>
@@ -299,7 +309,7 @@ export default function VendorDashboard() {
             <View style={[styles.channelPill, { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" }]}>
               <Feather name="printer" size={12} color="#047857" />
               <View style={{ flex: 1 }}>
-                <Text style={[styles.channelPillLabel, { color: "#047857" }]}>NEW SALES · POS</Text>
+                <Text style={[styles.channelPillLabel, { color: "#047857" }]}>STORE SALE</Text>
                 <Text style={styles.channelPillValue}>{formatINR(stats.pos_total || 0)}</Text>
                 <Text style={styles.channelPillMeta}>{stats.pos_orders_all || 0} invoice{(stats.pos_orders_all || 0) === 1 ? "" : "s"}</Text>
               </View>
@@ -622,7 +632,7 @@ export default function VendorDashboard() {
                   testID={`earn-ch-${c || "all"}`}
                 >
                   <Text style={{ fontSize: 11, fontWeight: "800", color: earningsChannel === c ? colors.primaryFg : colors.textMain, letterSpacing: 0.4 }}>
-                    {c === "" ? "ALL CHANNELS" : c === "online" ? "ONLINE" : "POS · NEW"}
+                    {c === "" ? "ALL CHANNELS" : c === "online" ? "SHOP ORDERS" : "STORE SALE"}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -695,7 +705,7 @@ export default function VendorDashboard() {
                     <Text style={{
                       fontSize: 9, fontWeight: "800", letterSpacing: 0.6,
                       color: item.channel === "online" ? "#1D4ED8" : "#047857",
-                    }}>{item.channel === "online" ? "ONLINE" : "POS"}</Text>
+                    }}>{item.channel === "online" ? "SHOP" : "STORE"}</Text>
                   </View>
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <Text style={styles.earnProduct} numberOfLines={2}>{item.product_name}</Text>
@@ -751,8 +761,9 @@ const styles = StyleSheet.create({
   tab: { paddingVertical: 12, paddingHorizontal: 16, marginRight: 8, borderBottomWidth: 2, borderBottomColor: "transparent" },
   tabActive: { borderBottomColor: colors.primary },
   tabText: { fontSize: 13, fontWeight: "700", color: colors.textMuted },
-  statsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  statCard: { width: "47%", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14 },
+  statsGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10 },
+  statCell: { width: "48.5%" },
+  statCard: { width: "100%", minHeight: 108, justifyContent: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14 },
   // Jul 2026 — Per-channel breakdown pills below the stats grid
   channelRow: { flexDirection: "row", gap: 10, marginTop: 12 },
   channelPill: {

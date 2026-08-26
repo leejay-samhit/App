@@ -3573,7 +3573,8 @@ async def admin_update_settings(payload: SettingsUpdate, admin: Dict[str, Any] =
 async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, Any] = Depends(get_current_user)):
     """Place an order. Body:
       {
-        "payment_method": "wallet" | "cod",
+        "payment_method": "wallet" | "cod" | "wallet_cod",
+        "wallet_amount": 250.0,        # only for "wallet_cod"
         "shipping_address": {
             "name": "...",
             "phone": "...",
@@ -3591,8 +3592,8 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     stock so we don't oversell.
     """
     payment_method = str((payload or {}).get("payment_method") or "wallet").strip().lower()
-    if payment_method not in ("wallet", "cod"):
-        raise HTTPException(status_code=400, detail="Unsupported payment_method. Use 'wallet' or 'cod'.")
+    if payment_method not in ("wallet", "cod", "wallet_cod"):
+        raise HTTPException(status_code=400, detail="Unsupported payment_method. Use 'wallet', 'cod' or 'wallet_cod'.")
     raw_addr = (payload or {}).get("shipping_address") or {}
     # Defensive: some legacy clients may send shipping_address as a string
     # instead of an object. Treat anything non-dict as missing.
@@ -3628,7 +3629,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     if len(shipping_address["pincode"]) < 5:
         raise HTTPException(status_code=400, detail="Pincode must be at least 5 digits.")
 
-    if user.get("wallet_frozen") and payment_method == "wallet":
+    if user.get("wallet_frozen") and payment_method in ("wallet", "wallet_cod"):
         raise HTTPException(status_code=403, detail="Wallet is frozen. Pick COD or contact support.")
     items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
     if not items:
@@ -3764,7 +3765,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     total = 0.0
     settings = await get_settings()
     vendor_pct = float(settings.get("vendor_commission_pct") or 70)
-    vendor_payouts: Dict[str, float] = {}  # vendor_id -> total credit
+    vendor_payouts: Dict[str, float] = {}  # vendor_id -> total credit (legacy, unused post-split)
 
     # ---------------- ATOMIC STOCK DECREMENT (multi-product) ----------------
     # We decrement stock per line BEFORE wallet debit. If any line fails (out of
@@ -3832,64 +3833,154 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             )
         raise
 
-    # ATOMIC wallet debit — guards against rapid double-clicks creating duplicate orders.
-    # Only succeeds if balance still >= total at the moment of update.
-    # SKIPPED for cash-on-delivery — the cash is collected by the courier.
+    # ── Jun 2026 — MULTI-VENDOR SPLIT + WALLET/COD COMBO ─────────────
+    # Every checkout is now split into ONE order document per vendor so
+    # each seller owns an independent status thread, order number,
+    # delivery ETA and cancellation window.  A shared `group_id` ties
+    # the sibling orders back to the single customer checkout.
+    #
+    # Payment is resolved once for the whole basket and then allocated
+    # across the sub-orders in cart order:
+    #   • "wallet"     → wallet_paid = line total, cod_due = 0
+    #   • "cod"        → wallet_paid = 0,          cod_due = line total
+    #   • "wallet_cod" → wallet covers `wallet_amount`, cash covers rest
+    LEGACY_VENDOR_KEY = "__no_vendor__"
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for it in enriched:
+        groups.setdefault(it.get("vendor_id") or LEGACY_VENDOR_KEY, []).append(it)
+
+    # Resolve how much of the basket the wallet should cover.
     if payment_method == "wallet":
+        wallet_target = total
+    elif payment_method == "cod":
+        wallet_target = 0.0
+    else:  # wallet_cod
+        try:
+            wallet_target = float((payload or {}).get("wallet_amount") or 0)
+        except Exception:
+            wallet_target = 0.0
+        wallet_target = max(0.0, min(round(wallet_target, 2), total))
+        if wallet_target <= 0:
+            payment_method = "cod"
+        elif wallet_target >= total - 0.009:
+            payment_method = "wallet"
+            wallet_target = total
+
+    if wallet_target > 0:
+        # ATOMIC debit — guards against rapid double-clicks creating
+        # duplicate orders. Only succeeds if the balance still covers it.
         debit_res = await db.users.update_one(
-            {"id": user["id"], "wallet_balance": {"$gte": total}},
-            {"$inc": {"wallet_balance": -total}},
+            {"id": user["id"], "wallet_balance": {"$gte": wallet_target}},
+            {"$inc": {"wallet_balance": -wallet_target}},
         )
         if debit_res.modified_count == 0:
-            # Wallet debit failed AFTER stock was decremented — must restore stock.
             for d in decremented:
-                await db.products.update_one(
-                    {"id": d["product_id"]},
-                    {"$inc": {"stock": d["qty"]}},
-                )
-            raise HTTPException(status_code=400, detail=f"Insufficient wallet balance. Need ₹{total:.0f}")
+                await db.products.update_one({"id": d["product_id"]}, {"$inc": {"stock": d["qty"]}})
+            raise HTTPException(status_code=400, detail=f"Insufficient wallet balance. Need ₹{wallet_target:.0f}")
 
-    order_id = str(uuid.uuid4())
-    order = {
-        "id": order_id,
-        "user_id": user["id"],
-        "items": enriched,
-        "total": total,
-        "status": "placed",
-        "paid_via": payment_method,  # "wallet" or "cod"
-        "payment_status": ("paid" if payment_method == "wallet" else "pending_cod"),
-        "shipping_address": shipping_address,
-        "created_at": now_utc().isoformat(),
-    }
-    await db.orders.insert_one(order)
-    await db.cart_items.delete_many({"user_id": user["id"]})
-    try:
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": user["id"],
-            "type": "order",
-            "amount": -total,
-            "status": "success",
-            "description": f"Order #{order_id[:8]} ({len(enriched)} items)",
-            "order_id": order_id,
-            "created_at": now_utc().isoformat(),
-        })
-    except DuplicateKeyError:
-        pass  # idempotent — entry already exists for this order
+    group_id = str(uuid.uuid4())
+    group_ref = group_id[:6].upper()
+    split_count = len(groups)
+    ts_now = now_utc().isoformat()
 
-    # Credit admin's shopping_margin bucket with the platform share total
-    # COD orders defer this until delivery — credit only on wallet-paid orders
-    # so admin's "earned" only reflects money actually collected. COD orders
-    # will credit on status → "delivered" via _settle_order_commission.
-    # NOTE (June 2026): platform shop margin is now controlled by the
-    # `shop_margin_enabled` setting. When False (default), margin stays with
-    # the vendor and nothing flows to the admin System Wallet.
+    # Warm the vendor-name cache (one lookup per vendor).
+    for vkey in list(groups.keys()):
+        if vkey != LEGACY_VENDOR_KEY:
+            await _vendor_name(vkey)
+
     settings_now = await get_settings()
     shop_margin_on = bool(settings_now.get("shop_margin_enabled", False))
-    platform_total = round(sum(float(it.get("platform_share") or 0) for it in enriched), 2)
-    if shop_margin_on and platform_total > 0 and payment_method == "wallet":
-        admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-        if admin_doc:
+    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()}) if shop_margin_on else None
+
+    created_orders: List[Dict[str, Any]] = []
+    wallet_left = round(wallet_target, 2)
+    for idx, (vkey, vitems) in enumerate(groups.items(), start=1):
+        sub_total = round(sum(float(i["line_total"]) for i in vitems), 2)
+        wallet_paid = round(min(wallet_left, sub_total), 2)
+        cod_due = round(sub_total - wallet_paid, 2)
+        wallet_left = round(wallet_left - wallet_paid, 2)
+
+        if cod_due <= 0.009:
+            cod_due = 0.0
+            sub_paid_via, sub_pay_status = "wallet", "paid"
+        elif wallet_paid <= 0.009:
+            wallet_paid = 0.0
+            sub_paid_via, sub_pay_status = "cod", "pending_cod"
+        else:
+            sub_paid_via, sub_pay_status = "wallet_cod", "partial_cod"
+
+        order_id = str(uuid.uuid4())
+        order_number = f"SC-{group_ref}" + (f"-{idx}" if split_count > 1 else "")
+        vendor_id = None if vkey == LEGACY_VENDOR_KEY else vkey
+        order = {
+            "id": order_id,
+            "order_number": order_number,
+            "group_id": group_id,
+            "split_index": idx,
+            "split_count": split_count,
+            "user_id": user["id"],
+            "vendor_id": vendor_id,
+            "vendor_name": _vendor_name_cache.get(vkey) if vendor_id else None,
+            "items": vitems,
+            "total": sub_total,
+            "wallet_paid": wallet_paid,
+            "cod_due": cod_due,
+            "status": "placed",
+            "paid_via": sub_paid_via,
+            "payment_status": sub_pay_status,
+            "shipping_address": shipping_address,
+            "created_at": ts_now,
+        }
+        await db.orders.insert_one(dict(order))
+        created_orders.append(order)
+
+        # Buyer ledger entry (only wallet money actually moved).
+        if wallet_paid > 0:
+            try:
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": user["id"],
+                    "type": "order",
+                    "amount": -wallet_paid,
+                    "status": "success",
+                    "description": f"Order {order_number} ({len(vitems)} items)",
+                    "order_id": order_id,
+                    "created_at": ts_now,
+                })
+            except DuplicateKeyError:
+                pass
+
+        # Vendor sales ledger rows (one per line item, scoped to sub-order).
+        for it in vitems:
+            if not it.get("vendor_id"):
+                continue
+            await db.vendor_sales.insert_one({
+                "id": str(uuid.uuid4()),
+                "vendor_id": it["vendor_id"],
+                "order_id": order_id,
+                "order_number": order_number,
+                "group_id": group_id,
+                "buyer_id": user["id"],
+                "buyer_email": user.get("email"),
+                "product_id": it["product_id"],
+                "product_name": it["name"],
+                "qty": it["qty"],
+                "line_total": it["line_total"],
+                "vendor_share": it["vendor_share"],
+                "platform_share": it["platform_share"],
+                "commission_pct": vendor_pct,
+                "created_at": ts_now,
+            })
+
+        # Platform margin + vendor payout are credited immediately ONLY
+        # when the sub-order is fully prepaid from the wallet.  Anything
+        # carrying a cash-on-delivery balance defers until delivery is
+        # confirmed (settled in PATCH /admin/orders/{id}/status).
+        if sub_paid_via != "wallet":
+            continue
+
+        platform_total = round(sum(float(i.get("platform_share") or 0) for i in vitems), 2)
+        if shop_margin_on and platform_total > 0 and admin_doc:
             await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
             try:
                 await db.transactions.insert_one({
@@ -3898,69 +3989,80 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                     "type": "shop_commission",
                     "amount": platform_total,
                     "status": "success",
-                    "description": f"Shop margin from order #{order_id[:8]}",
+                    "description": f"Shop margin from order {order_number}",
                     "order_id": order_id,
                     "source_user_name": user.get("name"),
-                    "created_at": now_utc().isoformat(),
+                    "created_at": ts_now,
                 })
             except DuplicateKeyError:
                 pass
 
-    # Credit vendor wallets and write vendor sales ledger entries
-    for it in enriched:
-        if not it.get("vendor_id"):
-            continue
-        await db.vendor_sales.insert_one({
-            "id": str(uuid.uuid4()),
-            "vendor_id": it["vendor_id"],
-            "order_id": order_id,
-            "buyer_id": user["id"],
-            "buyer_email": user.get("email"),
-            "product_id": it["product_id"],
-            "product_name": it["name"],
-            "qty": it["qty"],
-            "line_total": it["line_total"],
-            "vendor_share": it["vendor_share"],
-            "platform_share": it["platform_share"],
-            "commission_pct": vendor_pct,
-            "created_at": now_utc().isoformat(),
-        })
-    # Sept 2026 — Wallet-only immediate credit; COD orders defer this
-    # until the delivery handler (`_settle_order_commission`) so the
-    # vendor doesn't get paid before cash actually arrives.  Previously
-    # the loop always ran, causing a double-credit + 500 on COD delivery
-    # (duplicate key `uniq_user_type_order`).
-    if payment_method == "wallet":
-      for vid, amount in vendor_payouts.items():
-        # Sept 2026 (Slangcart · Bank tally = referral money only) —
-        # Owner asked to stop mixing vendor-shop earnings into the
-        # `wallet_balance` field (which represents referral money).
-        # Vendor shop earnings still live in `db.vendor_sales` + a new
-        # `vendor_earnings` bucket on the user doc so the Vendor Panel
-        # dashboards continue to work.
-        await db.users.update_one({"id": vid}, {"$inc": {"vendor_earnings": amount}})
-        try:
-            await db.transactions.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": vid,
-                "type": "vendor_sale",
-                "amount": amount,
-                "status": "success",
-                "description": f"Vendor share credited from order #{order_id[:8]}",
-                "order_id": order_id,
-                "created_at": now_utc().isoformat(),
-                "wallet_impact": "vendor_earnings_only",  # tag for auditors
-            })
-        except DuplicateKeyError:
-            pass
-        try:
-            await _create_notification(vid, "vendor", "New sale!", f"₹{amount:.0f} credited from order #{order_id[:8]}.")
-        except Exception:
-            pass
+        if vendor_id:
+            vendor_amount = round(sum(float(i.get("vendor_share") or 0) for i in vitems), 2)
+            if vendor_amount > 0:
+                # Sept 2026 — shop earnings stay OFF `wallet_balance`
+                # (that field represents referral money only).
+                await db.users.update_one({"id": vendor_id}, {"$inc": {"vendor_earnings": vendor_amount}})
+                try:
+                    await db.transactions.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "user_id": vendor_id,
+                        "type": "vendor_sale",
+                        "amount": vendor_amount,
+                        "status": "success",
+                        "description": f"Vendor share credited from order {order_number}",
+                        "order_id": order_id,
+                        "created_at": ts_now,
+                        "wallet_impact": "vendor_earnings_only",
+                    })
+                except DuplicateKeyError:
+                    pass
+                try:
+                    await _create_notification(vendor_id, "vendor", "New sale!", f"₹{vendor_amount:.0f} credited from order {order_number}.")
+                except Exception:
+                    pass
 
-    await _create_notification(user["id"], "order", "Order placed!", f"Your order of ₹{int(total)} has been placed.")
-    order.pop("_id", None)
-    return order
+    # Vendors with a cash balance still need a heads-up about the order.
+    for o in created_orders:
+        if o.get("vendor_id") and o["paid_via"] != "wallet":
+            try:
+                await _create_notification(
+                    o["vendor_id"], "vendor", "New order received",
+                    f"Order {o['order_number']} · ₹{o['total']:.0f} ({o['paid_via'].upper().replace('_', '+')}).",
+                )
+            except Exception:
+                pass
+
+    await db.cart_items.delete_many({"user_id": user["id"]})
+
+    wallet_total_used = round(sum(float(o["wallet_paid"]) for o in created_orders), 2)
+    cod_total_due = round(sum(float(o["cod_due"]) for o in created_orders), 2)
+    await _create_notification(
+        user["id"], "order",
+        "Order placed!" if split_count == 1 else f"{split_count} orders placed!",
+        f"Your order of ₹{int(total)} has been placed."
+        + (f" ₹{int(cod_total_due)} due on delivery." if cod_total_due > 0 else ""),
+    )
+
+    first = created_orders[0]
+    return {
+        # Multi-vendor payload — one entry per seller.
+        "orders": created_orders,
+        "group_id": group_id,
+        "split_count": split_count,
+        "grand_total": total,
+        "wallet_paid": wallet_total_used,
+        "cod_due": cod_total_due,
+        # Legacy top-level fields (older clients read these directly).
+        "id": first["id"],
+        "order_number": first["order_number"],
+        "total": total,
+        "status": "placed",
+        "paid_via": payment_method,
+        "items": enriched,
+        "shipping_address": shipping_address,
+        "created_at": ts_now,
+    }
 
 
 # GET /orders/me extracted to /app/backend/routes/cart.py during Phase 2B refactor.
@@ -5512,7 +5614,7 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
     items = order.get("items") or []
     if (payload.status == "delivered"
             and prev_status != "delivered"
-            and paid_via == "cod"
+            and paid_via in ("cod", "wallet_cod")
             and not order.get("commission_settled")):
         # 1) Mark order paid + settled so we never double-credit
         await db.orders.update_one(
@@ -5593,6 +5695,23 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                 "order_id": order_id,
                 "created_at": now_utc().isoformat(),
             })
+        elif paid_via == "wallet_cod":
+            # Jun 2026 — Wallet+COD combo: only the wallet-funded slice
+            # was actually collected, so refund exactly that. The cash
+            # portion was never taken, so nothing to give back.
+            refund_amt = round(float(order.get("wallet_paid") or 0), 2)
+            if refund_amt > 0:
+                await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": refund_amt}})
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": order["user_id"],
+                    "type": "refund",
+                    "amount": refund_amt,
+                    "status": "credited",
+                    "description": f"Order {order.get('order_number') or ('#' + order_id[:8])} cancelled — wallet portion refunded",
+                    "order_id": order_id,
+                    "created_at": now_utc().isoformat(),
+                })
 
         # ── Reverse the LEDGER credits booked at order placement ─────────
         # For wallet-paid orders we DID credit shop_commission + vendor_share
@@ -5603,7 +5722,7 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         # and we reverse the same way.
         should_reverse_commission = (
             paid_via == "wallet"
-            or (paid_via == "cod" and order.get("commission_settled"))
+            or (paid_via in ("cod", "wallet_cod") and order.get("commission_settled"))
         )
         if should_reverse_commission:
             platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
@@ -7860,6 +7979,20 @@ async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
 
     # ── Online sales (vendor_sales collection — one row per line item) ─
     online_rows = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).to_list(20000)
+
+    # Jun 2026 — EXCLUDE cancelled / refunded orders from the sales math.
+    # `vendor_sales` rows are kept for audit even after a cancellation, so
+    # counting them made Today/Lifetime earnings overstate reality.
+    order_ids = list({s.get("order_id") for s in online_rows if s.get("order_id")})
+    dead_order_ids: set = set()
+    if order_ids:
+        dead_rows = await db.orders.find(
+            {"id": {"$in": order_ids}, "status": {"$in": ["cancelled", "refunded", "returned"]}},
+            {"_id": 0, "id": 1},
+        ).to_list(len(order_ids))
+        dead_order_ids = {r["id"] for r in dead_rows}
+    online_rows = [s for s in online_rows if s.get("order_id") not in dead_order_ids]
+
     online_total = sum(float(s.get("line_total") or 0) for s in online_rows)
     online_today = sum(
         float(s.get("line_total") or 0)
@@ -7871,14 +8004,22 @@ async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
         if s.get("order_id") and (s.get("created_at") or "").startswith(today_iso)
     })
 
-    # ── POS sales (vendor_pos_sales — one row per invoice) ────────────
-    pos_rows = await db.vendor_pos_sales.find(
-        {"vendor_id": vendor["id"], "status": {"$ne": "cancelled"}},
-        {"_id": 0},
+    # ── Store Sale / Cloud POS (db.offline_sales — one row per invoice) ─
+    # Jun 2026 BUGFIX: this used to read `db.vendor_pos_sales`, a
+    # collection the POS module never writes to, so "NEW SALES · POS"
+    # always rendered ₹0 / 0 invoices. The POS writes completed invoices
+    # to `offline_sales` with the money under `totals.grand_total`.
+    pos_rows = await db.offline_sales.find(
+        {"vendor_id": vendor["id"], "status": "completed"},
+        {"_id": 0, "created_at": 1, "totals": 1},
     ).to_list(20000)
-    pos_total = sum(float(s.get("total") or 0) for s in pos_rows)
+
+    def _pos_amount(s: Dict[str, Any]) -> float:
+        return float((s.get("totals") or {}).get("grand_total") or 0)
+
+    pos_total = sum(_pos_amount(s) for s in pos_rows)
     pos_today = sum(
-        float(s.get("total") or 0)
+        _pos_amount(s)
         for s in pos_rows if (s.get("created_at") or "").startswith(today_iso)
     )
     pos_orders_all = len(pos_rows)
@@ -7950,7 +8091,18 @@ async def vendor_my_earnings(
 
     if channel in (None, "", "online", "both"):
         rows = await db.vendor_sales.find({"vendor_id": vendor["id"]}, {"_id": 0}).sort("created_at", -1).to_list(20000)
+        # Jun 2026 — drop rows belonging to cancelled / refunded orders.
+        oids = list({s.get("order_id") for s in rows if s.get("order_id")})
+        dead: set = set()
+        if oids:
+            dead_rows = await db.orders.find(
+                {"id": {"$in": oids}, "status": {"$in": ["cancelled", "refunded", "returned"]}},
+                {"_id": 0, "id": 1},
+            ).to_list(len(oids))
+            dead = {r["id"] for r in dead_rows}
         for s in rows:
+            if s.get("order_id") in dead:
+                continue
             if from_date or to_date:
                 if not _in_range((s.get("created_at") or "")[:10]):
                     continue
@@ -7958,6 +8110,7 @@ async def vendor_my_earnings(
                 "channel": "online",
                 "id": s.get("id"),
                 "order_id": s.get("order_id"),
+                "order_number": s.get("order_number"),
                 "created_at": s.get("created_at"),
                 "product_name": s.get("product_name") or "Product",
                 "qty": int(s.get("qty") or 1) or 1,
@@ -7966,8 +8119,9 @@ async def vendor_my_earnings(
             })
 
     if channel in (None, "", "pos", "both"):
-        rows = await db.vendor_pos_sales.find(
-            {"vendor_id": vendor["id"], "status": {"$ne": "cancelled"}},
+        # Jun 2026 BUGFIX — Store Sale rows live in `offline_sales`.
+        rows = await db.offline_sales.find(
+            {"vendor_id": vendor["id"], "status": "completed"},
             {"_id": 0},
         ).sort("created_at", -1).to_list(20000)
         for s in rows:
@@ -7978,18 +8132,18 @@ async def vendor_my_earnings(
             summary = ", ".join(
                 f"{(it.get('name') or 'Item')} × {int(it.get('qty') or 1)}"
                 for it in items[:3]
-            ) or "POS Sale"
+            ) or "Store Sale"
             if len(items) > 3:
                 summary += f" +{len(items) - 3} more"
             pos_out.append({
                 "channel": "pos",
                 "id": s.get("id"),
-                "invoice_no": s.get("invoice_number") or s.get("invoice_no"),
+                "invoice_no": s.get("invoice_no") or s.get("invoice_number"),
                 "created_at": s.get("created_at"),
                 "product_name": summary,
                 "qty": sum(int(it.get("qty") or 1) for it in items),
-                "line_total": round(float(s.get("total") or 0), 2),
-                "customer_name": s.get("customer_name") or "Walk-in",
+                "line_total": round(float((s.get("totals") or {}).get("grand_total") or 0), 2),
+                "customer_name": (s.get("customer") or {}).get("name") or "Walk-in",
             })
 
     merged = sorted(online_out + pos_out, key=lambda x: x.get("created_at") or "", reverse=True)
@@ -8150,11 +8304,14 @@ async def vendor_my_sales(
             grouped[oid] = {
                 "id": s.get("id"),
                 "order_id": oid,
+                "order_number": parent.get("order_number") or s.get("order_number") or f"SC-{str(oid)[:6].upper()}",
                 "user_id": s.get("buyer_id"),
                 "created_at": s.get("created_at") or parent.get("created_at"),
                 "status": parent.get("status") or "placed",
                 "items": [],
                 "total": 0.0,
+                "cod_due": round(float(parent.get("cod_due") or 0), 2),
+                "wallet_paid": round(float(parent.get("wallet_paid") or 0), 2),
                 "buyer_name": buyer.get("name") or s.get("buyer_email") or "Customer",
                 "buyer_email": buyer.get("email") or s.get("buyer_email"),
                 "buyer_phone": buyer.get("phone"),
@@ -8175,7 +8332,7 @@ async def vendor_my_sales(
     # channel in one list (per user directive: "showing value Zero and
     # not showing Product details — should display both online and new
     # sales").  POS rows are already order-shaped (one row per invoice).
-    pos_rows = await db.vendor_pos_sales.find(
+    pos_rows = await db.offline_sales.find(
         {"vendor_id": vendor["id"]},
         {"_id": 0},
     ).to_list(20000)
@@ -8188,21 +8345,22 @@ async def vendor_my_sales(
             "image_url": it.get("image_url") or "",
             "line_total": float(it.get("line_total") or (float(it.get("price") or 0) * int(it.get("qty") or 1))),
         } for it in items]
+        cust = s.get("customer") or {}
         out.append({
             "id": s.get("id"),
             "order_id": s.get("id"),
             "user_id": None,
             "created_at": s.get("created_at"),
-            "status": "delivered" if s.get("status") != "cancelled" else "cancelled",
+            "status": "delivered" if s.get("status") == "completed" else "cancelled",
             "items": shaped_items,
-            "total": float(s.get("total") or 0),
-            "buyer_name": s.get("customer_name") or "Walk-in customer",
-            "buyer_email": s.get("customer_email"),
-            "buyer_phone": s.get("customer_phone"),
-            "paid_via": (s.get("payment_method") or "cash").lower(),
+            "total": round(float((s.get("totals") or {}).get("grand_total") or 0), 2),
+            "buyer_name": cust.get("name") or "Walk-in customer",
+            "buyer_email": cust.get("email"),
+            "buyer_phone": cust.get("phone"),
+            "paid_via": ((s.get("payments") or [{}])[0].get("mode") or "cash").lower(),
             "payment_status": "paid",
             "channel": "pos",
-            "invoice_no": s.get("invoice_number") or s.get("invoice_no"),
+            "invoice_no": s.get("invoice_no") or s.get("invoice_number"),
         })
 
     # Filter by status if requested

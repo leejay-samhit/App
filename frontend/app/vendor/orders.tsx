@@ -33,6 +33,10 @@ import { downloadOrdersCsv, ExportOrderLike } from "../../src/exportOrdersCsv";
 type VendorSale = {
   id: string;
   order_id?: string;
+  // Jun 2026 — human order number + wallet/COD split from the split checkout
+  order_number?: string;
+  cod_due?: number;
+  wallet_paid?: number;
   user_id?: string;
   created_at: string;
   status: string;
@@ -265,7 +269,7 @@ export default function VendorOrders() {
               <View style={styles.card} testID={`vorder-${orderId}`}>
                 <View style={styles.cardTop}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.orderId}>#{orderId.slice(0, 8).toUpperCase()}</Text>
+                    <Text style={styles.orderId}>{item.order_number || `#${orderId.slice(0, 8).toUpperCase()}`}</Text>
                     <Text style={styles.orderDate}>{new Date(item.created_at).toLocaleString()}</Text>
                     {item.buyer_name ? (
                       <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 4 }}>
@@ -300,6 +304,19 @@ export default function VendorOrders() {
                   <Text style={styles.totalLabel}>Order total</Text>
                   <Text style={styles.totalValue}>{formatINR(item.total || 0)}</Text>
                 </View>
+                {/* Jun 2026 — Wallet+COD combos: tell the rider exactly how
+                    much cash to collect (0 means fully prepaid). */}
+                {Number(item.cod_due || 0) > 0 && ["placed", "shipped"].includes(item.status) ? (
+                  <View style={styles.codRow}>
+                    <Feather name="dollar-sign" size={12} color="#92400E" />
+                    <Text style={styles.codRowText}>
+                      Collect {formatINR(Number(item.cod_due))} in cash
+                      {Number(item.wallet_paid || 0) > 0
+                        ? ` · ${formatINR(Number(item.wallet_paid))} already paid online`
+                        : ""}
+                    </Text>
+                  </View>
+                ) : null}
 
                 {/* Dec 2026 — Customer delivery address + Google Maps CTA.
                     Only rendered for online orders (POS has no shipping
@@ -461,7 +478,7 @@ export default function VendorOrders() {
           <TouchableOpacity activeOpacity={1} style={styles.modalSheet} onPress={() => { /* stopPropagation */ }}>
             <View style={styles.modalGrabber} />
             <Text style={styles.modalTitle}>Delivery information</Text>
-            <Text style={styles.modalSub}>Order #{(editingOrder?.order_id || editingOrder?.id || "").slice(0, 8).toUpperCase()}</Text>
+            <Text style={styles.modalSub}>Order {editingOrder?.order_number || `#${(editingOrder?.order_id || editingOrder?.id || "").slice(0, 8).toUpperCase()}`}</Text>
 
             <View style={styles.fieldBlock}>
               <Text style={styles.fieldLabel}>Estimated delivery (ETA)</Text>
@@ -569,6 +586,9 @@ const styles = StyleSheet.create({
   itemQty: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   lineTotal: { fontSize: 12, fontWeight: "800", color: colors.textMain },
   totalRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  codRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, paddingVertical: 8, paddingHorizontal: 10, borderRadius: 10, backgroundColor: "#FEF3C7", borderWidth: 1, borderColor: "#FDE68A" },
+  codRowText: { flex: 1, fontSize: 11, fontWeight: "800", color: "#92400E" },
+
   totalLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
   totalValue: { fontSize: 16, fontWeight: "800", color: colors.primary },
   actionsBlock: { marginTop: 12, gap: 10 },
