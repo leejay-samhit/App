@@ -2665,19 +2665,27 @@ async def admin_create_product(p: ProductCreate, admin: Dict[str, Any] = Depends
 async def admin_list_products(
     vendor_id: Optional[str] = None,
     vendor_q: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 60,
+    offset: int = 0,
     _: Dict[str, Any] = Depends(require_admin),
 ):
     """Admin product list with vendor name enrichment + filters.
 
-    Jul 2026 upgrade:
-      • Every product doc is augmented with `vendor_name` / `vendor_email`
-        (looked up from `users`) so the admin table can show WHOSE product
-        it is at-a-glance.
-      • `?vendor_id=` — exact match on the vendor owning the product.
-      • `?vendor_q=`  — case-insensitive search across vendor name /
-        vendor business name / vendor email; matched vendor ids are then
-        AND-ed into the product query.
+    Jun 2026 (scalability fix):
+      • PAGINATED (default 60/page, up to 300).  Old endpoint tried to
+        return up to 2000 products with FULL docs (base64 images
+        included) → 500 error at ~150 products.  Now uses the same
+        slim projection as the public list endpoint and pages results.
+      • Base64 image URLs are rewritten to lazy-loaded thumbnails so
+        the grid can render instantly regardless of catalog size.
+
+    Vendor enrichment stays as a single batched lookup.  Full text
+    search via `?q=` uses the same regex across name/brand/category.
     """
+    limit = max(1, min(300, int(limit)))
+    offset = max(0, int(offset))
+
     prod_query: Dict[str, Any] = {}
     if vendor_id:
         prod_query["vendor_id"] = vendor_id
@@ -2689,12 +2697,51 @@ async def admin_list_products(
                 {"id": 1},
             )
         ]
-        # If no vendor matched, return empty list rather than everything.
         if not vend_ids:
-            return []
+            return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
         prod_query["vendor_id"] = {"$in": vend_ids}
 
-    items = await db.products.find(prod_query, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    if q and q.strip():
+        import re as _re
+        needle = _re.escape(q.strip())
+        text_or = {"$or": [
+            {"name": {"$regex": needle, "$options": "i"}},
+            {"brand": {"$regex": needle, "$options": "i"}},
+            {"category": {"$regex": needle, "$options": "i"}},
+            {"sub_category": {"$regex": needle, "$options": "i"}},
+            {"tags": {"$regex": needle, "$options": "i"}},
+        ]}
+        prod_query = {"$and": [prod_query, text_or]} if prod_query else text_or
+
+    # Same slim projection used by the public list — drops base64 images
+    # + reviews/questions/interested_users so the wire payload stays
+    # small even for 10k+ products.
+    LIST_PROJ = {
+        "_id": 0,
+        "images": 0,
+        "description": 0,
+        "specifications": 0,
+        "interested_users": 0,
+        "reviews": 0,
+        "questions": 0,
+    }
+
+    total = await db.products.count_documents(prod_query)
+    items = await (
+        db.products.find(prod_query, LIST_PROJ)
+        .sort("created_at", -1)
+        .skip(offset)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+    # Rewrite base64 image_url to lazy thumbnail endpoint so the wire
+    # payload doesn't balloon on data:image URIs.
+    for p in items:
+        img = p.get("image_url") or ""
+        if isinstance(img, str) and img.startswith("data:"):
+            p["image_url"] = f"/api/products/{p.get('id')}/image?w=360&q=72"
+            p["has_inline_image"] = True
 
     # Enrich with vendor name / email in a single batched lookup.
     vend_ids_present = [p.get("vendor_id") for p in items if p.get("vendor_id")]
@@ -2713,7 +2760,14 @@ async def admin_list_products(
             p["vendor_email"] = vv.get("email")
         elif not p.get("vendor_name"):
             p["vendor_name"] = "Admin catalog"
-    return items
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + len(items)) < total,
+    }
 
 
 @api_router.get("/admin/vendors")

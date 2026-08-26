@@ -31,7 +31,6 @@ export default function ShopCategoryScreen() {
   const [hasLayout, setHasLayout] = useState<boolean | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
-  const [addingId, setAddingId] = useState<string | null>(null);
   // Aug 2026 — Bumped on every pull-to-refresh; passed down to
   // ShopLayoutRenderer so it re-fetches its admin-managed blocks live.
   const [refreshTick, setRefreshTick] = useState(0);
@@ -141,6 +140,10 @@ export default function ShopCategoryScreen() {
 
   const [cartCount, setCartCount] = useState<number>(0);
   const [addedFlash, setAddedFlash] = useState<string>("");
+  // Jun 2026 — Per-product qty map read from the cart. Enables the
+  // Add/-N+ stepper UI on product cards so users can tune quantity
+  // inline without navigating to the cart.
+  const [cartQty, setCartQty] = useState<Record<string, number>>({});
 
   // Dec 2026 — Refresh the top-right cart badge whenever we mount or
   // after a successful add-to-cart.
@@ -150,24 +153,57 @@ export default function ShopCategoryScreen() {
       const items = r.data?.items || [];
       const n = items.reduce((a: number, it: any) => a + (Number(it.qty) || 1), 0);
       setCartCount(n);
+      // Build the per-product qty map for the stepper UI.
+      const qmap: Record<string, number> = {};
+      items.forEach((it: any) => {
+        const pid = it.product_id || it?.product?.id;
+        if (pid) qmap[pid] = Number(it.qty) || 0;
+      });
+      setCartQty(qmap);
     } catch {/* silent */}
   }, []);
 
   useEffect(() => { refreshCartCount(); }, [refreshCartCount]);
 
+  // Jun 2026 — Optimistic add.  Bump the local qty first so the UI
+  // reacts instantly, then reconcile with the server.  Errors roll
+  // back the increment so we never lie to the user.
   const onAddToCart = async (p: Product) => {
-    if (addingId) return;
-    setAddingId(p.id);
+    const prev = cartQty[p.id] || 0;
+    setCartQty((m) => ({ ...m, [p.id]: prev + 1 }));
+    setCartCount((c) => c + 1);
     try {
       await api.post("/cart/add", { product_id: p.id, qty: 1 });
-      // Dec 2026 — No more blocking popup.  Refresh the badge and
-      // flash a tiny inline confirmation strip that fades out on its
-      // own; user keeps browsing without a tap-to-dismiss dance.
-      refreshCartCount();
       setAddedFlash(`Added • ${p.name.slice(0, 32)}`);
       setTimeout(() => setAddedFlash(""), 1600);
-    } catch (e) { Alert.alert("Couldn't add", formatApiError(e)); }
-    finally { setAddingId(null); }
+      // Reconcile silently in the background so counts stay authoritative.
+      refreshCartCount();
+    } catch (e) {
+      // Rollback on failure
+      setCartQty((m) => ({ ...m, [p.id]: prev }));
+      setCartCount((c) => Math.max(0, c - 1));
+      Alert.alert("Couldn't add", formatApiError(e));
+    }
+  };
+
+  // Jun 2026 — Decrement product qty inline (stepper minus button).
+  // Uses /cart/adjust so we can pass negative deltas — /cart/add's
+  // validator rejects qty<=0 to prevent bad callers.  Server deletes
+  // the row automatically when qty drops to 0.
+  const onDecrement = async (p: Product) => {
+    const prev = cartQty[p.id] || 0;
+    if (prev <= 0) return;
+    const next = prev - 1;
+    setCartQty((m) => ({ ...m, [p.id]: next }));
+    setCartCount((c) => Math.max(0, c - 1));
+    try {
+      await api.post("/cart/adjust", { product_id: p.id, delta: -1 });
+      refreshCartCount();
+    } catch (e) {
+      setCartQty((m) => ({ ...m, [p.id]: prev }));
+      setCartCount((c) => c + 1);
+      Alert.alert("Couldn't update", formatApiError(e));
+    }
   };
 
   return (
@@ -336,21 +372,36 @@ export default function ShopCategoryScreen() {
                     <View style={styles.gridFooter}>
                       <Text style={styles.gridPrice}>{formatINR(p.price)}</Text>
                       {inStock ? (
-                        <TouchableOpacity
-                          style={[styles.addBtn, addingId === p.id && { opacity: 0.6 }]}
-                          onPress={() => onAddToCart(p)}
-                          disabled={addingId === p.id}
-                          testID={`add-${p.id}`}
-                        >
-                          {addingId === p.id
-                            ? <ActivityIndicator color="#fff" size="small" />
-                            : (
-                              <>
-                                <Feather name="shopping-bag" size={12} color="#fff" />
-                                <Text style={styles.addBtnText}>Add</Text>
-                              </>
-                            )}
-                        </TouchableOpacity>
+                        cartQty[p.id] && cartQty[p.id] > 0 ? (
+                          <View style={styles.qtyStepper} testID={`qty-${p.id}`}>
+                            <TouchableOpacity
+                              onPress={() => onDecrement(p)}
+                              style={styles.qtyBtn}
+                              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+                              testID={`dec-${p.id}`}
+                            >
+                              <Feather name="minus" size={12} color="#fff" />
+                            </TouchableOpacity>
+                            <Text style={styles.qtyNum}>{cartQty[p.id]}</Text>
+                            <TouchableOpacity
+                              onPress={() => onAddToCart(p)}
+                              style={styles.qtyBtn}
+                              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+                              testID={`inc-${p.id}`}
+                            >
+                              <Feather name="plus" size={12} color="#fff" />
+                            </TouchableOpacity>
+                          </View>
+                        ) : (
+                          <TouchableOpacity
+                            style={styles.addBtn}
+                            onPress={() => onAddToCart(p)}
+                            testID={`add-${p.id}`}
+                          >
+                            <Feather name="plus" size={12} color="#fff" />
+                            <Text style={styles.addBtnText}>Add</Text>
+                          </TouchableOpacity>
+                        )
                       ) : (
                         <View style={[styles.addBtn, { backgroundColor: "#B91C1C" }]}>
                           <Text style={styles.addBtnText}>SOLD OUT</Text>
@@ -416,6 +467,24 @@ const styles = StyleSheet.create({
   gridFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary, minHeight: 28 },
   addBtnText: { fontSize: 11, fontWeight: "800", color: "#fff", letterSpacing: 0.3 },
+  // Jun 2026 — Inline qty stepper.  Replaces the "Add" button when the
+  // item is already in the cart so users can nudge quantity without
+  // navigating to the cart page.
+  qtyStepper: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: colors.primary,
+    borderRadius: 999, paddingHorizontal: 3, paddingVertical: 2,
+    minHeight: 28, gap: 2,
+  },
+  qtyBtn: {
+    width: 22, height: 22, borderRadius: 11,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.18)",
+  },
+  qtyNum: {
+    fontSize: 12, fontWeight: "900", color: "#fff",
+    minWidth: 18, textAlign: "center", letterSpacing: 0.3,
+  },
   // Sept 2026 — Sub-category chip strip at top of the category screen.
   subChip: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, minHeight: 34 },
   subChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },

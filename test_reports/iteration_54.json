@@ -1,0 +1,35 @@
+{
+  "summary": "Iter 54 — Re-verified the qty-stepper decrement fix ONLY. BACKEND (5/5 pytest PASSED): POST /api/cart/adjust behaves exactly per spec — delta=0 → 400; delta=-1 on qty>=2 returns {ok:true, qty:N-1}; delta=-1 on qty=1 returns {ok:true, qty:0, removed:true}; delta=+1 on missing row creates the row and returns {ok:true, qty:1}; delta=-1 on missing row returns 400. Cart row is deleted from Mongo when qty falls to 0 (verified via GET /api/cart count==0). FRONTEND: On /shop-category/General with testbuyer + delivery pincode 517644, tapped Add → +1 → +1 (UI shows 1→2→3) then − → − (UI shows 3→2→1). Zero Alert dialogs, no UI snap-back, and every backend GET /api/cart in between reported the exact expected qty (3, 2, 1). Screenshot iter54_final_qty1.png confirms stepper shows '1' and cart badge shows '1' at the end.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter54_cart_adjust.py",
+    "/app/test_reports/pytest/iteration54_cart_adjust.xml",
+    "/app/test_reports/iter54_final_qty1.png"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "backend/models.py:297-302 — New CartAdjust(product_id:str, delta:int) is clean; the docstring correctly documents the non-zero requirement and the route enforces it at line 60-61 of routes/cart.py so the contract stays consistent between schema-level and handler-level validation.",
+    "backend/routes/cart.py:54-88 — cart_adjust handles all four branches (delta=0, missing+positive→insert, missing+negative→400, existing→$set/delete). Uses $set instead of $inc after computing new_qty in Python which is fine here because the read-modify-write is preceded by a find_one guarded by the composite index on (user_id, product_id) already in place. No race window that matters for a single-user stepper.",
+    "frontend/app/(tabs)/shop-category/[name].tsx:189-207 — onDecrement now calls /cart/adjust with delta:-1 (line 200), matching the new backend contract. Optimistic UI + rollback pattern on failure is intact; the code correctly returns early on prev<=0 so the minus button is a no-op when the row is already gone."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter54_cart_adjust.py (new)",
+    "/app/test_reports/pytest/iteration54_cart_adjust.xml (new)",
+    "/app/test_reports/iteration_54.json (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (5/5 iter54_cart_adjust)",
+    "frontend": "100% (qty stepper 1→2→3→2→1 with correct backend sync, no alert, no snap-back)"
+  },
+  "seed_data_creation": "Clean-up-only: /api/cart/clear called before + after each backend test and before the Playwright run so tests are idempotent. No user or product data mutated.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The iter54 fix is confirmed working. If regression testing is needed later, `pytest /app/backend/tests/test_iter54_cart_adjust.py -v` is idempotent and uses testbuyer@test.com/Test@1234 (still valid) plus support@slangcart.com/3)Ywxtic. Frontend uses TouchableOpacity which needs PointerEvent('pointerdown')+PointerEvent('pointerup') on RN Web (page.click() alone won't fire onPress) — see the script in this iteration for the pattern.",
+  "rca_of_issue": "N/A — fix verified. Root cause from iter 53 was that FE decrement path used POST /cart/add with qty=-1 which was rejected by Pydantic CartItem.qty:Field(gt=0). Fix (main agent) added a separate CartAdjust model with delta:int and a POST /cart/adjust route that: (a) rejects delta=0, (b) treats positive delta as an add for new rows, (c) rejects negative delta on missing rows, (d) deletes row when new_qty<=0. Frontend switched onDecrement to /cart/adjust {delta:-1}. Both layers verified end-to-end."
+}

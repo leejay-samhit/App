@@ -294,6 +294,14 @@ class CartItem(BaseModel):
     qty: int = Field(gt=0)
 
 
+class CartAdjust(BaseModel):
+    """Increment / decrement cart qty by a non-zero delta.
+    Positive = add, negative = decrement.  Zero rejected so callers use
+    /cart/remove for full removal."""
+    product_id: str
+    delta: int = Field(..., description="Non-zero integer; positive to add, negative to decrement")
+
+
 class CartRemove(BaseModel):
     product_id: str
 

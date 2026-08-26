@@ -1,0 +1,69 @@
+{
+  "summary": "Iteration 53 — Slangcart perf/UX fixes verification. Backend 17/17 pytest PASSED: /api/admin/products is now paginated (default limit=60, capped 300), slim projection (no base64 anywhere, no images/description/specifications/reviews/questions/interested_users), response size <200KB, ≤ 3 s. /api/products?q= free-text search returns paginated envelope with matches. /api/cart uses batched find + slim projection + no base64 and responds in <500 ms. FRONTEND: /admin/products loads in ~5 s with 5 real products (no 500 error). /admin/shop-layout: switching between Home → Groceries (category) → Groceries › Fruits (subcategory) scope tabs works with NO force-close (verified after seeding a Groceries/Fruits shop_category tree). Shop-category qty stepper: tapping Add turns the button into a -N+ stepper with cart badge updating, increment 1→2 works. **CRITICAL BUG FOUND**: DECREMENT from qty≥2 fails — the FE calls POST /cart/add with qty=-1, but backend models.CartItem enforces qty:int = Field(gt=0), returning HTTP 422. Only qty=1→0 works (uses /cart/remove).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/cart/add",
+        "issue": "The frontend qty stepper decrement path (shop-category/[name].tsx line 202: `api.post('/cart/add', { product_id: p.id, qty: -1 })`) is rejected with 422 because backend models.CartItem (backend/models.py:294) enforces `qty: int = Field(gt=0)`. Result: decrementing quantity in the stepper works ONLY for qty 1→0 (which uses /cart/remove). Every other decrement (2→1, 3→2, etc.) silently 422s; the FE catch-block rolls the UI back to the previous qty and pops an Alert. The stepper's minus button appears functional in the UI (optimistic update) but does not actually reduce cart quantity.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "shop-category/[name].tsx qty stepper",
+        "issue": "Decrement (-) button for cart quantity is broken for qty≥2 due to backend /cart/add gt=0 validator (see backend critical). User taps -, UI briefly drops the number then snaps back with an Alert.",
+        "testID": "dec-<product_id>",
+        "priority": "CRITICAL"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Shop-category qty stepper decrement",
+        "issue": "FE decrement uses `POST /cart/add {qty:-1}` expecting Mongo $inc to accept negatives; backend Pydantic CartItem model rejects qty<=0 before ever reaching Mongo. Either loosen the CartItem validator (allow non-zero ints and rely on /cart/remove for qty→0), OR add a dedicated PATCH /cart/{product_id} endpoint and switch the FE call.",
+        "affected_testIDs": ["dec-<product_id>", "qty-<product_id>"]
+      }
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter53_perf_fixes.py",
+    "/app/test_reports/pytest/iteration53.xml",
+    "/app/test_reports/iter53_04_admin_products.png",
+    "/app/test_reports/iter53_06_shoplayout_categories.png",
+    "/app/test_reports/iter53_07_shoplayout_groceries.png",
+    "/app/test_reports/iter53_08_shoplayout_fruits.png",
+    "/app/test_reports/iter53_15_added_qty1.png",
+    "/app/test_reports/iter53_21_qty2.png"
+  ],
+  "action_items": [
+    "CRITICAL — Fix the qty stepper decrement path. Two options: (a) In /app/backend/models.py:294 relax `qty: int = Field(gt=0)` to allow non-zero (e.g. drop the constraint, let the FE guarantee sign) OR add a new field `delta: int` with no gt-constraint; (b) In /app/frontend/app/(tabs)/shop-category/[name].tsx onDecrement, drop the negative /cart/add call and instead call `/cart/remove` followed by `/cart/add` with the new qty, OR introduce a PATCH /cart/{product_id} endpoint. Option (a) is a one-line fix and keeps the existing UI flow.",
+    "Update /app/memory/test_credentials.md — the users referenced there (leejay@gmail.com, knasar786@gmail.com, brightkittu@slangcart.com) do NOT exist in the current DB. Only support@slangcart.com works. The current test DB has testbuyer@test.com / testvendor@test.com whose passwords were reset to Test@1234 by this test harness so future iterations can log them in.",
+    "Consider trimming /app/backend/server.py — still ~9,800 lines, well past the 700-line ceiling. The /admin/products block is now clean and could be moved into /app/backend/routes/admin_products.py alongside the already-carved-out cart.py and products_public.py."
+  ],
+  "critical_code_review_comments": [
+    "backend/models.py:294 — CartItem.qty uses Field(gt=0) which makes it impossible to $inc-decrement via the same endpoint. Frontend already ships code assuming negatives are OK (see shop-category/[name].tsx:202). This is a design contract mismatch.",
+    "frontend/src/use-double-tap-exit.ts:60 — useBackToInitialTab returns early on !android, so it's a NO-OP on web and iOS. That is correct, but note it cannot be verified in the web preview — only via a native Android build. Code inspection confirms the hook is well-formed.",
+    "frontend/app/admin/shop-layout.tsx — All 5 `categories.map((c) => ...)` sites (lines 380, 894, 1145, 1199, 1259) correctly render `c.name` for key and `c.label` for the display text. NO object-as-text render. Fix confirmed by static review + live UI traversal through all 3 scope-tab modes with a seeded Groceries/Fruits tree.",
+    "backend/routes/cart.py:66-98 — Elegant batched find({id: {$in:pids}}) with a projection that trims images/description/specifications/reviews/questions/interested_users. Rewrites data: URIs to /api/products/{id}/image?w=240&q=70. This is exactly the shape asked for and matches the admin/products slim-projection contract.",
+    "backend/server.py:2664-2770 — /api/admin/products returns the paginated envelope with vendor-name enrichment via a batched vendor lookup. Slim projection identical to public. Response time verified <3 s (17/17 tests passed).",
+    "backend/routes/products_public.py:231-243 — /products?q= supports name, description, brand, category, sub_category, subcategory, tags with case-insensitive regex. Envelope shape auto-switches to paginated when q is present (line 300). Solid implementation."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter53_perf_fixes.py (new)",
+    "/app/test_reports/pytest/iteration53.xml (new)",
+    "/app/test_reports/iteration_53.json (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (17/17)",
+    "frontend": "6/7 flows pass — Add & Increment work, admin/products & admin/shop-layout & scope switching all pass; qty stepper DECREMENT for qty≥2 fails (backend 422)"
+  },
+  "seed_data_creation": "1) Reset password for testbuyer@test.com and testvendor@test.com to Test@1234 (via direct DB update — bcrypt hash) so pytest could log in. 2) Seeded then DELETED a Groceries → Fruits shop_categories tree to exercise the shop-layout categories.map render fix. 3) Set browser localStorage keys @app/deliveryPincode=517644 + @app/deliveryCoords for the shop-category flow. 4) All cart_items for testbuyer cleared at teardown.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/test_iter53_perf_fixes.py -v` any time — it's idempotent and safe (auto-clears the testbuyer cart in fixtures). The test credentials in /app/memory/test_credentials.md are STALE — those users don't exist in this DB. Working accounts: support@slangcart.com/3)Ywxtic (admin), testbuyer@test.com/Test@1234 (user), testvendor@test.com/Test@1234 (vendor at pincode 517644). Only one published product exists (Test Widget, category='General', vendor=testvendor). Frontend TouchableOpacity onPress cannot be triggered via `page.click()` in Playwright — you MUST dispatch PointerEvent('pointerdown') → PointerEvent('pointerup') via `page.evaluate` (see iteration_53 script). Standard fill() also fails on RN Web TextInputs — use `click()` + `page.keyboard.type()` instead.",
+  "rca_of_issue": "**Bug: qty stepper decrement broken.** REPRO — log in as testbuyer, set delivery pincode 517644, open /shop-category/General, tap Add on Test Widget (qty=1), tap the + button to go to qty=2, then tap the − button expecting qty=1. Observed: UI briefly shows 1, then snaps back to 2 with an Alert. Backend log/response: HTTP 422 with `Input should be greater than 0 (gt=0)` from Pydantic. CAUSE — /app/frontend/app/(tabs)/shop-category/[name].tsx:202 sends `POST /cart/add {product_id, qty: -1}` for the non-terminal decrement path, but /app/backend/models.py:294 declares `class CartItem: qty: int = Field(gt=0)`. Pydantic rejects the payload before the handler runs so the intended Mongo `$inc: {qty: -1}` never fires. FIX — pick ONE of: (a) relax models.CartItem.qty to allow any int and let the handler decide; (b) introduce PATCH /cart/{product_id} for delta updates; or (c) FE workaround: on decrement, POST /cart/remove then POST /cart/add with next qty. Option (a) is the least invasive."
+}

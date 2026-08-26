@@ -65,3 +65,18 @@ See `/app/memory/test_credentials.md`
 - Fixed Android hardware-back closing app on Dashboard/Chat/Profile/Wallet/Network — now navigates back to Shop tab.
 - Fixed Admin Shop Layout force-close on subcategory selection (categories.map object-rendering bug).
 - Added `q` search param on /api/products backed by pincode/vendor-eligibility filter so Shop search finds products beyond first-paint set.
+
+
+## Jun 2026 Batch — Perf, Cart Stepper, Layout Crash
+### Backend
+- `/api/admin/products` paginated + slim projection (drops base64 images) — was crashing at ~150 products.
+- `/api/cart` batched product fetch, slim projection — was 5-10s on N+1 loops.
+- `/api/products?q=` free-text search.
+- New `/api/cart/adjust {product_id, delta}` — supports negative deltas for stepper decrement.
+
+### Frontend
+- Shop-category product cards: qty stepper (− N +) replaces Add when in cart.  Optimistic updates.
+- Admin products loader updated for paginated envelope.
+- Admin shop-layout: fixed 3 categories.map object-render crashes on subcategory tabs.
+- Android hardware-back on non-shop tab roots navigates to /shop instead of exiting.
+

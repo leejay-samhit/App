@@ -96,19 +96,24 @@ export default function AdminProducts() {
 
   const load = useCallback(async () => {
     try {
-      const params: Record<string, string> = {};
+      const params: Record<string, string> = { limit: "200" };
       if (vendorFilter?.id) params.vendor_id = vendorFilter.id;
       // /admin/products doesn't include interested_count yet; fetch from public
       // /products too and merge for the count display. Admin keeps full access
       // (incl. unpublished items via /admin/products).
       const [admin, pub] = await Promise.all([
-        api.get<Product[]>("/admin/products", { params }),
+        api.get<any>("/admin/products", { params }),
         api.get<any>("/products").catch(() => ({ data: [] })),
       ]);
+      // Jun 2026 — /admin/products now returns { items, total, ... }.
+      // Legacy fallback still handles the old array shape.
+      const adminList: Product[] = Array.isArray(admin.data)
+        ? admin.data
+        : (admin.data?.items || []);
       const pubList: any[] = Array.isArray(pub.data) ? pub.data : (pub.data?.items || []);
       const countMap = new Map<string, number>();
       pubList.forEach((p: any) => countMap.set(p.id, p.interested_count || 0));
-      setItems(admin.data.map((p) => ({ ...p, interested_count: countMap.get(p.id) || 0 })));
+      setItems(adminList.map((p) => ({ ...p, interested_count: countMap.get(p.id) || 0 })));
     } catch (e) {
       Alert.alert("Error", formatApiError(e));
     } finally {

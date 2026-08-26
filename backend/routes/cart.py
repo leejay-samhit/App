@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from core.db import db
 from core.security import get_current_user
 from core.utils import now_utc
-from models import CartItem, CartRemove
+from models import CartItem, CartAdjust, CartRemove
 
 router = APIRouter()
 
@@ -51,20 +51,88 @@ async def cart_add(payload: CartItem, user: Dict[str, Any] = Depends(get_current
     return {"ok": True}
 
 
+@router.post("/cart/adjust")
+async def cart_adjust(payload: CartAdjust, user: Dict[str, Any] = Depends(get_current_user)):
+    """Jun 2026 — Inline qty stepper.  Accepts any non-zero delta (± int)
+    so the shop product cards can decrement without re-designing the
+    /cart/add validator.  If the resulting qty ≤ 0 the row is deleted so
+    the client sees a clean stepper→Add transition."""
+    if payload.delta == 0:
+        raise HTTPException(status_code=400, detail="delta must be non-zero")
+    existing = await db.cart_items.find_one(
+        {"user_id": user["id"], "product_id": payload.product_id},
+    )
+    if not existing:
+        if payload.delta < 0:
+            raise HTTPException(status_code=400, detail="Cart row does not exist")
+        # Positive delta → treat as an add for a brand-new row.
+        product = await db.products.find_one({"id": payload.product_id}, {"_id": 0, "id": 1})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        await db.cart_items.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "product_id": payload.product_id,
+            "qty": payload.delta,
+            "created_at": now_utc().isoformat(),
+        })
+        return {"ok": True, "qty": payload.delta}
+    new_qty = int(existing.get("qty", 0)) + payload.delta
+    if new_qty <= 0:
+        await db.cart_items.delete_one({"user_id": user["id"], "product_id": payload.product_id})
+        return {"ok": True, "qty": 0, "removed": True}
+    await db.cart_items.update_one(
+        {"user_id": user["id"], "product_id": payload.product_id},
+        {"$set": {"qty": new_qty}},
+    )
+    return {"ok": True, "qty": new_qty}
+
+
 @router.get("/cart")
 async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
     """Return enriched cart: each row carries the product detail + line_total.
-    Cart icon badge on the Shop tab reads from `count`."""
+    Cart icon badge on the Shop tab reads from `count`.
+
+    Jun 2026 (scale fix):
+      • Uses ONE batched find({id: {$in: [...]}}) instead of N find_one()
+        loops (per-item RTT was killing cart open time).
+      • Only projects list-safe fields — base64 images are excluded so a
+        5-item cart can't ship 5 MB over the wire.  image_url is rewritten
+        to the lazy thumbnail endpoint if it was a data: URI.
+    """
     items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
+    if not items:
+        return {"items": [], "total": 0.0, "count": 0}
+
+    pids = list({it.get("product_id") for it in items if it.get("product_id")})
+    # Slim projection — drop the heavy fields that a cart row never needs.
+    proj = {
+        "_id": 0,
+        "images": 0,
+        "description": 0,
+        "specifications": 0,
+        "interested_users": 0,
+        "reviews": 0,
+        "questions": 0,
+    }
+    prod_map: Dict[str, Dict[str, Any]] = {}
+    async for p in db.products.find({"id": {"$in": pids}}, proj):
+        # Rewrite base64 image URLs to the thumbnail endpoint so the cart
+        # doesn't drag a full 500 KB data URI over per line.
+        img = p.get("image_url") or ""
+        if isinstance(img, str) and img.startswith("data:"):
+            p["image_url"] = f"/api/products/{p.get('id')}/image?w=240&q=70"
+        prod_map[p["id"]] = p
+
     enriched = []
     total = 0.0
     for it in items:
-        product = await db.products.find_one({"id": it["product_id"]}, {"_id": 0})
+        product = prod_map.get(it.get("product_id"))
         if product:
-            line_total = product["price"] * it["qty"]
+            line_total = float(product.get("price", 0)) * float(it.get("qty", 0))
             total += line_total
             enriched.append({**it, "product": product, "line_total": line_total})
-    return {"items": enriched, "total": total, "count": sum(i["qty"] for i in items)}
+    return {"items": enriched, "total": total, "count": sum(int(i.get("qty", 0)) for i in items)}
 
 
 @router.post("/cart/remove")
