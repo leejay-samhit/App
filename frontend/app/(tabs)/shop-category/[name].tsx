@@ -1,19 +1,20 @@
 // Dynamic Category Page — fully rendered from admin-managed `shop_layout`
 // blocks where scope="category" and scope_category=<name>. Falls back to a
 // plain product grid filtered by category if no admin layout exists.
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Image, ActivityIndicator, Alert } from "react-native";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { api, formatApiError, resolveImageUrl } from "../../../src/api";
-import { colors, radii, spacing, formatINR } from "../../../src/theme";
+import { colors, radii, spacing } from "../../../src/theme";
 import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
 import { useAuth } from "../../../src/auth";
 import { useDeliveryLocation } from "../../../src/use-delivery-location";
 import { useSwipePager } from "../../../src/use-swipe-pager";
+import { useShopCart } from "../../../src/use-shop-cart";
+import { ProductGridCard, productGridStyles } from "../../../src/product-grid-card";
 import { NoVendorsHero } from "../../../src/no-vendors-hero";
-import { FadeSlideIn, ProductCardSkeleton } from "../../../src/anim";
+import { ProductCardSkeleton } from "../../../src/anim";
 import { cachedGet } from "../../../src/cachedGet";
 
 type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; sub_category?: string; vendor_id?: string | null };
@@ -29,7 +30,6 @@ export default function ShopCategoryScreen() {
   // pages honour the same strict location gate as the main shop.
   const { pincode: deliveryPincode, coords: deliveryCoords, hasLocation } = useDeliveryLocation();
   const [refreshing, setRefreshing] = useState(false);
-  const [hasLayout, setHasLayout] = useState<boolean | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
   // Aug 2026 — Bumped on every pull-to-refresh; passed down to
@@ -61,16 +61,9 @@ export default function ShopCategoryScreen() {
     //   • Subcategory chip tap is 100% client-side (see filtered useMemo
     //     below) — zero network round-trip.
     if (!options?.silent) setLoadingProducts(true);
-    // Layout — 10 min TTL
-    const layParams: Record<string, any> = { scope: "category", category };
-    if (deliveryPincode) layParams.pincode = deliveryPincode;
-    cachedGet<{ items: any[] }>("/shop-layout", {
-      ttlMs: 600_000,
-      params: layParams,
-      onFresh: (fresh) => setHasLayout((fresh?.items || []).length > 0),
-    }).then((cached) => {
-      if (cached) setHasLayout((cached?.items || []).length > 0);
-    });
+    // NOTE (Jun 2026): we used to also fetch /shop-layout here just to set a
+    // `hasLayout` flag that nothing read. <ShopLayoutRenderer> fetches its own
+    // blocks, so that was a duplicate request on every category open — removed.
 
     // Skip products fetch entirely when no location signals — hero card
     // handles the empty state.
@@ -157,73 +150,9 @@ export default function ShopCategoryScreen() {
 
   useEffect(() => { load(); }, [load]);
 
-  const [cartCount, setCartCount] = useState<number>(0);
-  const [addedFlash, setAddedFlash] = useState<string>("");
-  // Jun 2026 — Per-product qty map read from the cart. Enables the
-  // Add/-N+ stepper UI on product cards so users can tune quantity
-  // inline without navigating to the cart.
-  const [cartQty, setCartQty] = useState<Record<string, number>>({});
-
-  // Dec 2026 — Refresh the top-right cart badge whenever we mount or
-  // after a successful add-to-cart.
-  const refreshCartCount = useCallback(async () => {
-    try {
-      const r = await api.get<any>("/cart");
-      const items = r.data?.items || [];
-      const n = items.reduce((a: number, it: any) => a + (Number(it.qty) || 1), 0);
-      setCartCount(n);
-      // Build the per-product qty map for the stepper UI.
-      const qmap: Record<string, number> = {};
-      items.forEach((it: any) => {
-        const pid = it.product_id || it?.product?.id;
-        if (pid) qmap[pid] = Number(it.qty) || 0;
-      });
-      setCartQty(qmap);
-    } catch {/* silent */}
-  }, []);
-
-  useEffect(() => { refreshCartCount(); }, [refreshCartCount]);
-
-  // Jun 2026 — Optimistic add.  Bump the local qty first so the UI
-  // reacts instantly, then reconcile with the server.  Errors roll
-  // back the increment so we never lie to the user.
-  const onAddToCart = async (p: Product) => {
-    const prev = cartQty[p.id] || 0;
-    setCartQty((m) => ({ ...m, [p.id]: prev + 1 }));
-    setCartCount((c) => c + 1);
-    try {
-      await api.post("/cart/add", { product_id: p.id, qty: 1 });
-      setAddedFlash(`Added • ${p.name.slice(0, 32)}`);
-      setTimeout(() => setAddedFlash(""), 1600);
-      // Reconcile silently in the background so counts stay authoritative.
-      refreshCartCount();
-    } catch (e) {
-      // Rollback on failure
-      setCartQty((m) => ({ ...m, [p.id]: prev }));
-      setCartCount((c) => Math.max(0, c - 1));
-      Alert.alert("Couldn't add", formatApiError(e));
-    }
-  };
-
-  // Jun 2026 — Decrement product qty inline (stepper minus button).
-  // Uses /cart/adjust so we can pass negative deltas — /cart/add's
-  // validator rejects qty<=0 to prevent bad callers.  Server deletes
-  // the row automatically when qty drops to 0.
-  const onDecrement = async (p: Product) => {
-    const prev = cartQty[p.id] || 0;
-    if (prev <= 0) return;
-    const next = prev - 1;
-    setCartQty((m) => ({ ...m, [p.id]: next }));
-    setCartCount((c) => Math.max(0, c - 1));
-    try {
-      await api.post("/cart/adjust", { product_id: p.id, delta: -1 });
-      refreshCartCount();
-    } catch (e) {
-      setCartQty((m) => ({ ...m, [p.id]: prev }));
-      setCartCount((c) => c + 1);
-      Alert.alert("Couldn't update", formatApiError(e));
-    }
-  };
+  // Jun 2026 — Shared cart controller (same optimistic add / stepper
+  // behaviour as search results and the home grid).
+  const { cartCount, cartQty, addedFlash, addToCart: onAddToCart, decrement: onDecrement } = useShopCart();
 
   // Jun 2026 — SWIPE NAVIGATION.  A left/right flick walks a single
   // conceptual list: [All, sub-1, sub-2, …] for the current category.
@@ -258,7 +187,8 @@ export default function ShopCategoryScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.headerRow}>        <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
+      <View style={styles.headerRow}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
@@ -360,6 +290,12 @@ export default function ShopCategoryScreen() {
           refreshTick={refreshTick}
           onProductPress={(id) => router.push(`/product/${id}` as any)}
           onCategoryPress={(c) => router.push(`/shop-category/${encodeURIComponent(c)}` as any)}
+          // Jun 2026 — Add buttons inside admin layout blocks were dead here
+          // (the prop was never passed). Wired to the shared cart controller.
+          onAddToCart={(id) => {
+            const p = products.find((x) => x.id === id);
+            if (p) onAddToCart(p);
+          }}
         />
 
         {/* Product grid — Dec 2026: ALWAYS renders below the admin's
@@ -405,63 +341,18 @@ export default function ShopCategoryScreen() {
               );
             }
             return (
-              <View style={styles.gridWrap}>
-                {filtered.map((p, idx) => {
-              const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
-              return (
-                <FadeSlideIn key={p.id} delay={Math.min(idx, 8) * 40} style={styles.gridCard as any}>
-                <View style={[!inStock && { opacity: 0.55 }]}>
-                  <TouchableOpacity activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>
-                    <Image source={{ uri: resolveImageUrl(p.image_url) }} style={styles.gridImg} resizeMode="cover" />
-                  </TouchableOpacity>
-                  <View style={{ padding: 10 }}>
-                    <TouchableOpacity activeOpacity={0.85} onPress={() => router.push(`/product/${p.id}` as any)}>
-                      <Text style={styles.gridName} numberOfLines={2}>{p.name}</Text>
-                    </TouchableOpacity>
-                    <View style={styles.gridFooter}>
-                      <Text style={styles.gridPrice}>{formatINR(p.price)}</Text>
-                      {inStock ? (
-                        cartQty[p.id] && cartQty[p.id] > 0 ? (
-                          <View style={styles.qtyStepper} testID={`qty-${p.id}`}>
-                            <TouchableOpacity
-                              onPress={() => onDecrement(p)}
-                              style={styles.qtyBtn}
-                              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-                              testID={`dec-${p.id}`}
-                            >
-                              <Feather name="minus" size={12} color="#fff" />
-                            </TouchableOpacity>
-                            <Text style={styles.qtyNum}>{cartQty[p.id]}</Text>
-                            <TouchableOpacity
-                              onPress={() => onAddToCart(p)}
-                              style={styles.qtyBtn}
-                              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-                              testID={`inc-${p.id}`}
-                            >
-                              <Feather name="plus" size={12} color="#fff" />
-                            </TouchableOpacity>
-                          </View>
-                        ) : (
-                          <TouchableOpacity
-                            style={styles.addBtn}
-                            onPress={() => onAddToCart(p)}
-                            testID={`add-${p.id}`}
-                          >
-                            <Feather name="plus" size={12} color="#fff" />
-                            <Text style={styles.addBtnText}>Add</Text>
-                          </TouchableOpacity>
-                        )
-                      ) : (
-                        <View style={[styles.addBtn, { backgroundColor: "#B91C1C" }]}>
-                          <Text style={styles.addBtnText}>SOLD OUT</Text>
-                        </View>
-                      )}
-                    </View>
-                  </View>
-                </View>
-                </FadeSlideIn>
-              );
-            })}
+              <View style={productGridStyles.wrap}>
+                {filtered.map((p, idx) => (
+                  <ProductGridCard
+                    key={p.id}
+                    product={p}
+                    qty={cartQty[p.id] || 0}
+                    index={idx}
+                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
+                    onAdd={onAddToCart}
+                    onDecrement={onDecrement}
+                  />
+                ))}
               </View>
             );
           })()
@@ -510,32 +401,6 @@ const styles = StyleSheet.create({
   },
   addedFlashText: { fontSize: 11, fontWeight: "700", color: "#fff", letterSpacing: 0.2 },
 
-  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
-  gridCard: { flexBasis: "48%", flexGrow: 0, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
-  gridImg: { width: "100%", aspectRatio: 1.05, backgroundColor: colors.surfaceMuted },
-  gridName: { fontSize: 12, fontWeight: "700", color: colors.textMain, minHeight: 30, lineHeight: 15 },
-  gridPrice: { fontSize: 14, fontWeight: "900", color: colors.primary },
-  gridFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
-  addBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary, minHeight: 28 },
-  addBtnText: { fontSize: 11, fontWeight: "800", color: "#fff", letterSpacing: 0.3 },
-  // Jun 2026 — Inline qty stepper.  Replaces the "Add" button when the
-  // item is already in the cart so users can nudge quantity without
-  // navigating to the cart page.
-  qtyStepper: {
-    flexDirection: "row", alignItems: "center",
-    backgroundColor: colors.primary,
-    borderRadius: 999, paddingHorizontal: 3, paddingVertical: 2,
-    minHeight: 28, gap: 2,
-  },
-  qtyBtn: {
-    width: 22, height: 22, borderRadius: 11,
-    alignItems: "center", justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.18)",
-  },
-  qtyNum: {
-    fontSize: 12, fontWeight: "900", color: "#fff",
-    minWidth: 18, textAlign: "center", letterSpacing: 0.3,
-  },
   // Sept 2026 — Sub-category chip strip at top of the category screen.
   subChip: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, minHeight: 34 },
   subChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },

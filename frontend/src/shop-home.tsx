@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, TextInput,
-  ActivityIndicator, FlatList, Platform, useWindowDimensions,
+  ActivityIndicator, Platform,
   Modal, Pressable, RefreshControl, Linking,
 } from "react-native";
 import * as Location from "expo-location";
@@ -25,7 +25,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 // Aug 2026 — removed useSafeAreaInsets to prevent double-padding gap.
 // Parent screens already handle safe-area via <SafeAreaView edges={["top"]}>.
-import { api, formatApiError, resolveImageUrl } from "./api";
+import { api, formatApiError } from "./api";
 import { colors, spacing } from "./theme";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
 import {
@@ -36,6 +36,8 @@ import {
 import { useAuth } from "./auth";
 import { NoVendorsHero } from "./no-vendors-hero";
 import { FadeSlideIn, ProductCardSkeleton } from "./anim";
+import { useShopCart } from "./use-shop-cart";
+import { ProductGridCard, productGridStyles } from "./product-grid-card";
 import { LocationBanner } from "./location-banner";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -55,18 +57,6 @@ type Product = {
 };
 
 // ── Pure helpers ─────────────────────────────────────────────────────────
-const formatINR = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
-const seededRating = (id: string) => {
-  // Stable pseudo-rating so the same product always shows the same stars.
-  let h = 0; for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
-  return Number((3.8 + ((Math.abs(h) % 12) / 10)).toFixed(1)); // 3.8 – 4.9
-};
-const seededDiscount = (id: string) => {
-  let h = 0; for (let i = 0; i < id.length; i++) h = (h * 17 + id.charCodeAt(i)) | 0;
-  return 10 + (Math.abs(h) % 50); // 10 – 59 %
-};
-const productImage = (p: Product) =>
-  resolveImageUrl((p.images && p.images[0]) || (p as any).image_data_url || p.image_url || null);
 
 // Hardcoded category circles per spec — used as fallback when the
 // admin-managed /api/shop-categories endpoint is unreachable. In normal
@@ -106,15 +96,6 @@ function CatIcon({ icon, pack, size, color }: { icon: string; pack: CatIconPack;
   return <Feather name={icon as any} size={size} color={color} />;
 }
 
-// Popular Categories — bigger tiles, curated.
-const POPULAR_CATEGORIES = [
-  { key: "Sarees",      label: "Sarees",      sub: "From ₹299",    icon: "feather",  color: "#FCE7F3" },
-  { key: "Men",         label: "Men's wear",  sub: "Trending",     icon: "user",     color: "#DBEAFE" },
-  { key: "Electronics", label: "Electronics", sub: "Top deals",    icon: "cpu",      color: "#E0E7FF" },
-  { key: "Home",        label: "Home",        sub: "New arrivals", icon: "home",     color: "#FFEDD5" },
-  { key: "Beauty",      label: "Beauty",      sub: "Up to 70% off",icon: "heart",    color: "#FEE2E2" },
-];
-
 // ── ShopHome ─────────────────────────────────────────────────────────────
 export function ShopHome({
   cartCount = 0,
@@ -139,7 +120,6 @@ export function ShopHome({
   // already wrap ShopHome in <SafeAreaView edges={["top"]}> which reserves
   // the status-bar space; adding `insets.top` on top of that produced a
   // visible empty gap.  Header now uses a tiny 4-pixel padding only.
-  const { width } = useWindowDimensions();
   // UPDATE 1 (June 2026) — Hide the current vendor's own products.
   const { user } = useAuth();
   const currentUserId = user?.id || null;
@@ -153,7 +133,6 @@ export function ShopHome({
   const [search, setSearch] = useState("");
   const [searchSubmitted, setSearchSubmitted] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("all");
-  const [bannerIdx, setBannerIdx] = useState(0);
   // "More" tap opens an all-categories sheet
   const [allCatModalOpen, setAllCatModalOpen] = useState(false);
   // Admin-managed shop categories (fetched from /api/shop-categories).
@@ -164,6 +143,12 @@ export function ShopHome({
   // (Shop ⇄ Services ⇄ Dashboard …), so the home screen deliberately does
   // NOT claim them — categories are chosen by tapping a circle.
   const catStripRef = useRef<ScrollView | null>(null);
+  // Jun 2026 — Search results and the home category grid now render the SAME
+  // ProductGridCard as the category screen, wired to the same cart
+  // controller. Previously search results used a flashier card with invented
+  // discount/rating/review numbers and NO add button, so nothing could be
+  // added to the cart from a search.
+  const { cartQty, addedFlash, addToCart, decrement } = useShopCart();
 
   // ── Delivery address (live reverse-geocoded from user coords) ─────────
   // Jul 2026 — Shop is now LOCATION-FIRST.  We require GPS on mount and
@@ -386,110 +371,6 @@ export function ShopHome({
     return arr;
   }, [products, activeCategory, search]);
 
-  const dealsOfTheDay = useMemo(() => filteredProducts.slice(0, 12), [filteredProducts]);
-  const bestSellers = useMemo(() => {
-    // Cheap heuristic: products with the most "interested_count" first.
-    return [...filteredProducts]
-      .sort((a, b) => (b.interested_count || 0) - (a.interested_count || 0))
-      .slice(0, 12);
-  }, [filteredProducts]);
-
-  // ── Banner slides (single banner area, 2 slides for the dots) ────────
-  const banners = useMemo(() => ([
-    {
-      key: "fresh",
-      title: "Fresh Styles for Every You",
-      subtitle: "Up to 60% Off",
-      cta: "Shop Now",
-      target: "/shop-category/Clothes",
-      gradient: ["#0D7C56", "#10B981"],
-    },
-    {
-      key: "tech",
-      title: "Smart Picks for Smart Lives",
-      subtitle: "Electronics under ₹999",
-      cta: "Explore",
-      target: "/shop-category/Electronics",
-      gradient: ["#0F766E", "#22D3EE"],
-    },
-  ]), []);
-
-  // ── Tiny helper renderers ─────────────────────────────────────────────
-  const ProductCard = useCallback(({ p, badge, compact }: { p: Product; badge?: string; compact?: boolean }) => {
-    const img = productImage(p);
-    const disc = seededDiscount(p.id);
-    const mrp = Math.round(p.price * (100 / (100 - disc)));
-    const rating = p.rating || seededRating(p.id);
-    const W = compact ? 150 : 168;
-    return (
-      <TouchableOpacity
-        activeOpacity={0.82}
-        onPress={() => router.push(`/product/${p.id}` as any)}
-        style={[styles.pCard, { width: W }]}
-        testID={`home-product-${p.id}`}
-      >
-        <View style={styles.pImageWrap}>
-          {img ? (
-            <Image source={{ uri: img }} style={styles.pImage} resizeMode="cover" />
-          ) : (
-            <View style={[styles.pImage, styles.pImagePlaceholder]}>
-              <Feather name="image" size={28} color={colors.textMuted} />
-            </View>
-          )}
-          <View style={styles.pDiscountBadge}>
-            <Text style={styles.pDiscountText}>-{disc}%</Text>
-          </View>
-          <TouchableOpacity
-            style={styles.pHeart}
-            onPress={() => router.push(`/product/${p.id}` as any)}
-            hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-          >
-            <Feather name="heart" size={14} color="#EF4444" />
-          </TouchableOpacity>
-          {badge ? (
-            <View style={styles.pTopBadge}>
-              <Feather name="award" size={10} color="#92400E" />
-              <Text style={styles.pTopBadgeText}>{badge}</Text>
-            </View>
-          ) : null}
-        </View>
-        <View style={styles.pBody}>
-          <Text style={styles.pName} numberOfLines={2}>{p.name}</Text>
-          <View style={styles.pPriceRow}>
-            <Text style={styles.pPrice}>{formatINR(p.price)}</Text>
-            <Text style={styles.pMrp}>{formatINR(mrp)}</Text>
-          </View>
-          <View style={styles.pRatingRow}>
-            <View style={styles.pRatingChip}>
-              <Text style={styles.pRatingText}>{rating}</Text>
-              <Feather name="star" size={9} color="#fff" />
-            </View>
-            <Text style={styles.pRatingCount}>·  {12 + (Math.abs(p.id.length) % 40)}k reviews</Text>
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  }, [router]);
-
-  const SectionHeader = useCallback(({ icon, title, onViewAll }: { icon: any; title: string; onViewAll?: () => void }) => (
-    <View style={styles.sectionHeader}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Feather name={icon} size={16} color={colors.primary} />
-        <Text style={styles.sectionTitle}>{title}</Text>
-      </View>
-      {onViewAll ? (
-        <TouchableOpacity onPress={onViewAll} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Text style={styles.viewAll}>View All</Text>
-        </TouchableOpacity>
-      ) : null}
-    </View>
-  ), []);
-
-  // Active banner gradient. RN doesn't ship gradients out-of-the-box; we
-  // approximate with a solid colour from the slide's palette so we don't
-  // need to install a new dependency. Looks great with the white bg.
-  const activeBanner = banners[bannerIdx % banners.length];
-
   // Jul 2026 — Location gate.  We show a full-screen "Enable location to
   // browse products" screen when we haven't captured GPS yet.  Users
   // hydrating from a cached location fall through immediately (they've
@@ -698,6 +579,12 @@ export function ShopHome({
         }
       >
         <LocationBanner />
+        {addedFlash ? (
+          <View style={styles.addedFlash} pointerEvents="none">
+            <Feather name="check-circle" size={13} color="#fff" />
+            <Text style={styles.addedFlashText} numberOfLines={1}>{addedFlash}</Text>
+          </View>
+        ) : null}
         {searchSubmitted && search.trim() ? (
           // ── SEARCH RESULTS VIEW ─────────────────────────────────────
           <View style={{ paddingHorizontal: spacing.screen, paddingTop: spacing.screen }}>
@@ -729,18 +616,19 @@ export function ShopHome({
                 </TouchableOpacity>
               </View>
             ) : (
-              <FlatList
-                data={filteredProducts}
-                keyExtractor={(p) => `result-${p.id}`}
-                numColumns={2}
-                scrollEnabled={false}
-                columnWrapperStyle={{ gap: 12, marginBottom: 12 }}
-                renderItem={({ item }) => (
-                  <View style={{ flex: 1 }}>
-                    <ProductCard p={item} />
-                  </View>
-                )}
-              />
+              <View style={productGridStyles.wrap}>
+                {filteredProducts.map((item, idx) => (
+                  <ProductGridCard
+                    key={`result-${item.id}`}
+                    product={item as any}
+                    qty={cartQty[item.id] || 0}
+                    index={idx}
+                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
+                    onAdd={addToCart}
+                    onDecrement={decrement}
+                  />
+                ))}
+              </View>
             )}
           </View>
         ) : (
@@ -905,18 +793,19 @@ export function ShopHome({
                 </View>
               )
             ) : (
-              <FlatList
-                data={filteredProducts}
-                keyExtractor={(p) => `cat-${p.id}`}
-                numColumns={2}
-                scrollEnabled={false}
-                columnWrapperStyle={{ gap: 12, marginBottom: 12 }}
-                renderItem={({ item }) => (
-                  <View style={{ flex: 1 }}>
-                    <ProductCard p={item} />
-                  </View>
-                )}
-              />
+              <View style={productGridStyles.wrap}>
+                {filteredProducts.map((item, idx) => (
+                  <ProductGridCard
+                    key={`cat-${item.id}`}
+                    product={item as any}
+                    qty={cartQty[item.id] || 0}
+                    index={idx}
+                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
+                    onAdd={addToCart}
+                    onDecrement={decrement}
+                  />
+                ))}
+              </View>
             )}
           </View>
         ) : (
@@ -934,10 +823,14 @@ export function ShopHome({
                 if (!c) router.push(`${categoryRoutePrefix}/shop` as any);
                 else router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c)}` as any);
               }}
-              onAddToCart={async (id) => {
-                try {
-                  await api.post("/cart", { product_id: id, quantity: 1 });
-                } catch (e) { /* eslint-disable-next-line no-console */ console.warn("add to cart failed:", formatApiError(e)); }
+              // Jun 2026 BUGFIX: this used to POST /cart {quantity} — an
+              // endpoint that doesn't exist (it's /cart/add {qty}) — so the
+              // Add buttons inside admin layout blocks silently did nothing.
+              // Now routed through the same cart controller as every other
+              // product card.
+              onAddToCart={(id) => {
+                const p = products.find((x) => x.id === id);
+                if (p) addToCart(p);
               }}
             />
           </FadeSlideIn>
@@ -1251,69 +1144,21 @@ const styles = StyleSheet.create({
   bannerDotActive: { width: 18, backgroundColor: colors.primary },
 
   // Section headers
-  sectionHeader: {
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    paddingHorizontal: spacing.screen, marginTop: 18, marginBottom: 8,
-  },
   // Horizontal list common padding — same `spacing.screen` rail as the
   // section headers above (so the card aligns to the title), with the
   // canonical gridGap as inter-card spacing.
   hList: { paddingHorizontal: spacing.screen, paddingVertical: 4, gap: spacing.gridGap - 4 },
-  sectionTitle: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
-  viewAll: { fontSize: 12, fontWeight: "800", color: colors.primary },
 
-  // Horizontal list common padding
-  hList: { paddingHorizontal: spacing.screen, paddingVertical: 4 },
-
-  // Product card
-  pCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    borderWidth: 1, borderColor: colors.border + "AA",
-    overflow: "hidden",
-    ...Platform.select({
-      ios: { shadowColor: "#0F2A1D", shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 } },
-      android: { elevation: 1 },
-    }),
+  // Jun 2026 — "Added to cart" confirmation strip, shown after tapping Add
+  // on a search result or the home category grid.
+  addedFlash: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    alignSelf: "center", marginTop: 8,
+    backgroundColor: colors.primary,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    maxWidth: "90%",
   },
-  pImageWrap: { width: "100%", aspectRatio: 1, position: "relative", backgroundColor: "#F3F4F6" },
-  pImage: { width: "100%", height: "100%" },
-  pImagePlaceholder: { alignItems: "center", justifyContent: "center" },
-  pDiscountBadge: {
-    position: "absolute", top: 8, left: 8,
-    paddingHorizontal: 7, paddingVertical: 3,
-    borderRadius: 6,
-    backgroundColor: "#EF4444",
-  },
-  pDiscountText: { color: "#fff", fontSize: 10, fontWeight: "900", letterSpacing: 0.3 },
-  pHeart: {
-    position: "absolute", top: 8, right: 8,
-    width: 26, height: 26, borderRadius: 13,
-    backgroundColor: "#ffffffEE",
-    alignItems: "center", justifyContent: "center",
-  },
-  pTopBadge: {
-    position: "absolute", bottom: 8, left: 8,
-    flexDirection: "row", alignItems: "center", gap: 3,
-    paddingHorizontal: 7, paddingVertical: 3,
-    borderRadius: 6,
-    backgroundColor: "#FEF3C7",
-  },
-  pTopBadgeText: { fontSize: 9.5, fontWeight: "900", color: "#92400E", letterSpacing: 0.2 },
-  pBody: { padding: 10, gap: 4 },
-  pName: { fontSize: 12.5, color: colors.textMain, fontWeight: "700", lineHeight: 16 },
-  pPriceRow: { flexDirection: "row", alignItems: "baseline", gap: 6 },
-  pPrice: { fontSize: 14.5, color: colors.textMain, fontWeight: "900" },
-  pMrp: { fontSize: 11, color: colors.textMuted, textDecorationLine: "line-through" },
-  pRatingRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 },
-  pRatingChip: {
-    flexDirection: "row", alignItems: "center", gap: 3,
-    paddingHorizontal: 5, paddingVertical: 1.5,
-    borderRadius: 4,
-    backgroundColor: "#0F8B5C",
-  },
-  pRatingText: { fontSize: 10, fontWeight: "900", color: "#fff" },
-  pRatingCount: { fontSize: 10, color: colors.textMuted, fontWeight: "600" },
+  addedFlashText: { fontSize: 11, fontWeight: "800", color: "#fff", letterSpacing: 0.2 },
 
   // Popular category card
   popCatCard: {

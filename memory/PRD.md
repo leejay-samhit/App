@@ -309,3 +309,78 @@ The buyer Dashboard renders blank below the earnings card on react-native-web
 because the Reanimated `entering={FadeInDown…}` blocks stay at opacity 0.
 Verified identical with `animation: "shift"` removed and on a direct page
 load. Works on device.
+
+
+## Jun 2026 — One Product Card Everywhere + Add-to-Cart from Search (Iter 59)
+
+User report: "Shop when users search the product all the products showing
+different features -33% 4.4* 48k reviews but in categories and sub categories
+showing different view — apply only one type of product displayment, as per
+that categories-wise view is good. Also when search, after product display,
+unable to add items in the cart. Use every existing resource and remove
+unwanted thing app could perform faster."
+
+### New shared primitives
+- **`src/product-grid-card.tsx`** — `ProductGridCard` + `productGridStyles.wrap`.
+  THE product card for the shop: square image, 2-line name, price, and either
+  an "Add" pill, an inline −/+ stepper (when already in the cart) or a
+  SOLD OUT chip. Extracted from the category screen (the look the user liked).
+- **`src/use-shop-cart.ts`** — `useShopCart()` returning
+  `{ cartCount, cartQty, addedFlash, refresh, addToCart, decrement }`.
+  Optimistic adds with rollback on failure; `+` → `POST /cart/add`,
+  `−` → `POST /cart/adjust { delta: -1 }` (because `/cart/add` rejects qty<=0
+  and the server deletes the row at 0).
+
+### Unified surfaces
+Search results, the shop-home in-screen category grid and the category
+screen all render `ProductGridCard` wired to `useShopCart`. Search results
+previously used a DIFFERENT, flashier card with **fabricated** numbers
+(`seededDiscount` → "-33%", `seededRating` → "4.4★",
+`12 + (id.length % 40) + "k reviews"`) and, critically, **no Add button at
+all** — which is exactly why nothing could be added to the cart from a search.
+
+### Cart bugs fixed
+1. **Search results had no Add control.** Fixed by the unification above.
+2. **`ShopLayoutRenderer` Add buttons were dead in two places.**
+   - shop-home posted `POST /cart { product_id, quantity: 1 }` — an endpoint
+     that does not exist (the real one is `POST /cart/add { product_id, qty }`)
+     and the failure was swallowed by a `console.warn`.
+   - the category screen never passed `onAddToCart` at all.
+   Both now route through the shared cart controller.
+3. Added an "Added • <product>" confirmation strip to the shop home / search
+   grid (the category screen already had one) so a tap gives visible feedback.
+
+### Dead code / perf cleanup (net −301 lines)
+Removed from `src/shop-home.tsx`: `seededRating`, `seededDiscount`,
+`productImage`, local `formatINR`, `POPULAR_CATEGORIES`, `dealsOfTheDay`,
+`bestSellers`, the old `ProductCard`, `SectionHeader`, the whole
+`banners`/`activeBanner` block, `bannerIdx` state, `useWindowDimensions`,
+`FlatList`/`resolveImageUrl` imports, a duplicate `hList` style key and ~21
+orphaned `p*`/`section*` styles.
+Removed from `app/(tabs)/shop-category/[name].tsx`: the local cart state and
+handlers (now the hook), the inline card + its 11 styles, the dead
+`hasLayout` state and — importantly — **a duplicate `GET /shop-layout`
+request that fired on every category open just to set that unread flag**
+(`ShopLayoutRenderer` already fetches its own blocks). Plus unused
+`useRef` / `Image` / `ActivityIndicator` / `Alert` / `api` / `formatApiError`
+/ `resolveImageUrl` / `formatINR` / `FadeSlideIn` imports.
+
+### Native crash risk fixed
+`<View style={styles.headerRow}>        <TouchableOpacity …` — an earlier
+edit in this session collapsed a newline, leaving 8 literal spaces as a text
+child of a `<View>`. That logs `Unexpected text node: A text node cannot be a
+child of a <View>` on web and **crashes on native RN**. Newline restored;
+warning count went 6 → 0.
+
+### Verified
+Search "widget" → 2 products on the clean card with no fake badges; Add →
+stepper, + → 2, − → 1, all confirmed against `GET /cart`; category screen
+hydrates the stepper for items already in the cart; optimistic rollback
+restores the Add button when `/cart/add` is aborted; admin layout-block Add
+adds to the cart on the category screen; text-node warnings gone.
+
+### Known pre-existing (web-preview only, NOT from this change)
+Reanimated `entering={FadeInDown/FadeSlideIn}` stays at opacity 0 on
+react-native-web, so `ShopLayoutRenderer` on shop-home and the buyer
+Dashboard below the earnings card render blank in the web preview. Works on
+device / Expo Go. Same root cause both places.
