@@ -226,12 +226,15 @@ export default function AdminShopLayoutScreen() {
         if (!(itemScope === "category" && (b as any).scope_category === scopeCategory)) return false;
       }
       if (pin) {
-        const sp = String((b as any).scope_pincode || "").trim();
-        // A pincode filter matches when the block's scope_pincode either
-        // equals the search OR starts-with the search (so typing "5176"
-        // matches every block scoped to 5176xx).
-        if (!sp) return false;
-        return sp === pin || sp.startsWith(pin);
+        // Jun 2026 — Multi-pincode aware. A block matches when ANY of its
+        // target pincodes equals or starts with the search (so typing
+        // "5176" matches every block scoped to 5176xx).
+        const pins: string[] = [
+          ...(Array.isArray((b as any).scope_pincodes) ? (b as any).scope_pincodes.map(String) : []),
+          String((b as any).scope_pincode || ""),
+        ].map((s) => s.trim()).filter(Boolean);
+        if (!pins.length) return false;
+        return pins.some((sp) => sp === pin || sp.startsWith(pin));
       }
       return true;
     });
@@ -243,11 +246,14 @@ export default function AdminShopLayoutScreen() {
   const distinctPincodes = useMemo(() => {
     const set = new Set<string>();
     items.forEach((b: any) => {
-      const s = String(b?.scope_pincode || "").trim();
       const bScope = b?.scope || "home";
       if (scope === "home" && !(bScope === "home" || !bScope)) return;
       if (scope === "category" && !(bScope === "category" && b?.scope_category === scopeCategory)) return;
-      if (s) set.add(s);
+      const pins: string[] = [
+        ...(Array.isArray(b?.scope_pincodes) ? b.scope_pincodes.map(String) : []),
+        String(b?.scope_pincode || ""),
+      ].map((s) => s.trim()).filter(Boolean);
+      pins.forEach((p) => set.add(p));
     });
     return Array.from(set).sort();
   }, [items, scope, scopeCategory]);
@@ -556,6 +562,11 @@ function BlockCard({
   const sizable = (b.block_type === "background" || b.block_type === "content_box" || b.block_type === "banner_slider");
   const linkedProduct = b.product_id ? products.find((p) => p.id === b.product_id) : null;
   const thumbUrl = b.image_data_url || (b.items && b.items[0]?.image_data_url) || "";
+  // Jun 2026 — Multi-pincode targets (falls back to the legacy single field).
+  const targetPins: string[] = Array.from(new Set([
+    ...(Array.isArray((b as any).scope_pincodes) ? (b as any).scope_pincodes.map(String) : []),
+    String((b as any).scope_pincode || ""),
+  ].map((s) => s.trim()).filter(Boolean)));
 
   return (
     <View style={[styles.card, isDragging && styles.cardDragging]} testID={`block-${b.id}`}>
@@ -581,6 +592,15 @@ function BlockCard({
           {b.data_source && b.data_source !== "manual" ? (
             <View style={[styles.statusPill, { backgroundColor: "#EEF2FF" }]}>
               <Text style={[styles.statusText, { color: "#3730A3" }]}>{(b.data_source || "manual").toUpperCase()}</Text>
+            </View>
+          ) : null}
+          {/* Jun 2026 — Multi-pincode targeting badge. */}
+          {targetPins.length ? (
+            <View style={[styles.statusPill, { backgroundColor: "#FEF3C7", flexDirection: "row", alignItems: "center", gap: 3 }]}>
+              <Feather name="map-pin" size={9} color="#92400E" />
+              <Text style={[styles.statusText, { color: "#92400E" }]}>
+                {targetPins.length === 1 ? targetPins[0] : `${targetPins.length} PINCODES`}
+              </Text>
             </View>
           ) : null}
         </View>
@@ -667,9 +687,16 @@ function BlockFormModal({
   const [type, setType] = useState<BlockType>("banner_slider");
   const [scope, setScope] = useState<"home" | "category">(defaultScope);
   const [scopeCategory, setScopeCategory] = useState(defaultScopeCategory);
-  // Nov 2026 — Optional pincode-scoped layout.  When set, this block
-  // only renders for customers whose delivery pincode matches.
-  const [scopePincode, setScopePincode] = useState<string>("");
+  // Jun 2026 — MULTI-pincode targeting. A block can now be aimed at
+  // several pincodes at once; empty list = renders everywhere.
+  const [scopePincodes, setScopePincodes] = useState<string[]>([]);
+  const [pincodeDraft, setPincodeDraft] = useState<string>("");
+  const addPincode = useCallback(() => {
+    const p = pincodeDraft.trim();
+    if (p.length !== 6) return;
+    setScopePincodes((prev) => (prev.includes(p) ? prev : [...prev, p]));
+    setPincodeDraft("");
+  }, [pincodeDraft]);
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [body, setBody] = useState("");
@@ -723,7 +750,12 @@ function BlockFormModal({
     setType((block?.block_type as BlockType) || "banner_slider");
     setScope((block as any)?.scope || defaultScope);
     setScopeCategory((block as any)?.scope_category || defaultScopeCategory);
-    setScopePincode((block as any)?.scope_pincode || "");
+    setScopePincodes(
+      Array.isArray((block as any)?.scope_pincodes) && (block as any).scope_pincodes.length
+        ? (block as any).scope_pincodes.map(String)
+        : ((block as any)?.scope_pincode ? [String((block as any).scope_pincode)] : []),
+    );
+    setPincodeDraft("");
     setTitle(block?.title || "");
     setSubtitle(block?.subtitle || "");
     setBody(block?.body || "");
@@ -812,7 +844,8 @@ function BlockFormModal({
       const payload: any = {
         block_type: type,
         scope, scope_category: scope === "category" ? scopeCategory : "",
-        scope_pincode: (scopePincode || "").trim(),
+        scope_pincode: (scopePincodes[0] || "").trim(),
+        scope_pincodes: scopePincodes,
         title: title.trim(), subtitle: subtitle.trim(), body: body.trim(),
         cta_label: ctaLabel.trim(),
         image_data_url: imageDataUrl,
@@ -906,19 +939,55 @@ function BlockFormModal({
               </>
             ) : null}
 
-            {/* Nov 2026 — Pincode targeting (optional).  Leave blank
-                to render the block on every pincode. */}
-            <Text style={styles.label}>Show only in pincode (optional)</Text>
-            <TextInput
-              value={scopePincode}
-              onChangeText={(v) => setScopePincode(v.replace(/\D/g, "").slice(0, 6))}
-              placeholder="e.g. 517644 — leave blank for all areas"
-              placeholderTextColor={colors.textMuted}
-              style={styles.input}
-              keyboardType="number-pad"
-              maxLength={6}
-              testID="block-scope-pincode"
-            />
+            {/* Jun 2026 — MULTI-pincode targeting.  Add as many pincodes as
+                the campaign covers; leave the list empty to render the
+                block in every area. */}
+            <Text style={styles.label}>Target pincodes (optional)</Text>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <TextInput
+                value={pincodeDraft}
+                onChangeText={(v) => setPincodeDraft(v.replace(/\D/g, "").slice(0, 6))}
+                onSubmitEditing={addPincode}
+                placeholder="Type a 6-digit pincode"
+                placeholderTextColor={colors.textMuted}
+                style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                keyboardType="number-pad"
+                maxLength={6}
+                testID="block-scope-pincode"
+              />
+              <TouchableOpacity
+                onPress={addPincode}
+                disabled={pincodeDraft.length !== 6}
+                style={[styles.pinAddBtn, pincodeDraft.length !== 6 && { opacity: 0.4 }]}
+                testID="block-add-pincode"
+              >
+                <Feather name="plus" size={16} color={colors.primaryFg} />
+                <Text style={styles.pinAddBtnText}>Add</Text>
+              </TouchableOpacity>
+            </View>
+            {scopePincodes.length ? (
+              <View style={styles.pinChipRow}>
+                {scopePincodes.map((p) => (
+                  <TouchableOpacity
+                    key={p}
+                    onPress={() => setScopePincodes((prev) => prev.filter((x) => x !== p))}
+                    style={styles.pinTargetChip}
+                    testID={`block-pin-chip-${p}`}
+                  >
+                    <Text style={styles.pinTargetChipText}>{p}</Text>
+                    <Feather name="x" size={12} color={colors.primary} />
+                  </TouchableOpacity>
+                ))}
+                <TouchableOpacity onPress={() => setScopePincodes([])} style={styles.pinClearBtn} testID="block-clear-pincodes">
+                  <Text style={styles.pinClearText}>Clear all</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+            <Text style={styles.pinHelp}>
+              {scopePincodes.length
+                ? `Shows only to customers in ${scopePincodes.length} pincode${scopePincodes.length === 1 ? "" : "s"}.`
+                : "No pincodes added — this block shows in every area."}
+            </Text>
 
             {/* Block type */}
             <Text style={styles.label}>Block type</Text>
@@ -1465,6 +1534,16 @@ const styles = StyleSheet.create({
   miniLabel: { fontSize: 10, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.8, marginTop: 8, marginBottom: 4 },
   hint: { fontSize: 11, color: colors.textMuted, marginTop: 6, fontStyle: "italic" },
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: colors.textMain },
+  // Jun 2026 — Multi-pincode targeting controls
+  pinAddBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 16, borderRadius: 12, backgroundColor: colors.primary, minHeight: 46, justifyContent: "center" },
+  pinAddBtnText: { fontSize: 13, fontWeight: "800", color: colors.primaryFg },
+  pinChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 10 },
+  pinTargetChip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.primary },
+  pinTargetChipText: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
+  pinClearBtn: { paddingHorizontal: 10, paddingVertical: 7 },
+  pinClearText: { fontSize: 11, fontWeight: "800", color: colors.textMuted },
+  pinHelp: { fontSize: 11, color: colors.textMuted, marginTop: 8, fontWeight: "600" },
+
   imagePicker: { width: "100%", aspectRatio: 16 / 9, borderRadius: 14, borderWidth: 1.5, borderColor: colors.border, borderStyle: "dashed", overflow: "hidden", backgroundColor: colors.surfaceMuted },
   imagePickerEmpty: { flex: 1, alignItems: "center", justifyContent: "center", gap: 4 },
   imagePickerHint: { fontSize: 13, color: colors.textMain, fontWeight: "700", marginTop: 4 },

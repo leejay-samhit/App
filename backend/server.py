@@ -5605,6 +5605,11 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         raise HTTPException(status_code=404, detail="Order not found")
     prev_status = order.get("status")
     await db.orders.update_one({"id": order_id}, {"$set": {"status": payload.status}})
+    # Jun 2026 — Stamp the delivery moment so the vendor's "cash collected
+    # today" figure keys off when the cash actually changed hands, not when
+    # the order was placed.
+    if payload.status == "delivered" and prev_status != "delivered":
+        await db.orders.update_one({"id": order_id}, {"$set": {"delivered_at": now_utc().isoformat()}})
 
     # ── COD delivery → settle commission + vendor wallets ────────────────
     # COD orders DEFER the admin commission credit and vendor wallet credit
@@ -8025,6 +8030,30 @@ async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
     pos_orders_all = len(pos_rows)
     pos_orders_today = len([s for s in pos_rows if (s.get("created_at") or "").startswith(today_iso)])
 
+    # ── Cash-to-collect summary (Jun 2026) ────────────────────────────
+    # Wallet+COD and pure-COD orders carry a `cod_due` balance the rider
+    # must collect. Vendors asked for a daily figure so the shop's cash
+    # drawer can be reconciled at closing time.
+    cod_rows = await db.orders.find(
+        {"vendor_id": vendor["id"], "cod_due": {"$gt": 0}},
+        {"_id": 0, "cod_due": 1, "status": 1, "created_at": 1, "delivered_at": 1},
+    ).to_list(20000)
+    cod_pending_total = sum(
+        float(o.get("cod_due") or 0) for o in cod_rows
+        if (o.get("status") or "") in ("placed", "shipped")
+    )
+    cod_pending_count = len([o for o in cod_rows if (o.get("status") or "") in ("placed", "shipped")])
+    cod_collected_today = sum(
+        float(o.get("cod_due") or 0) for o in cod_rows
+        if (o.get("status") or "") == "delivered"
+        and str(o.get("delivered_at") or o.get("created_at") or "").startswith(today_iso)
+    )
+    cod_collected_today_count = len([
+        o for o in cod_rows
+        if (o.get("status") or "") == "delivered"
+        and str(o.get("delivered_at") or o.get("created_at") or "").startswith(today_iso)
+    ])
+
     products_count = await db.products.count_documents({"vendor_id": vendor["id"]})
     published_count = await db.products.count_documents({"vendor_id": vendor["id"], "is_published": True})
 
@@ -8047,6 +8076,14 @@ async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
         "products_count": products_count,
         "published_count": published_count,
         "wallet_balance": round(float(vendor.get("wallet_balance") or 0), 2),
+        # Jun 2026 — Cash-to-collect summary so vendors can tally their
+        # drawer at closing time. `cod_pending_*` is money still out with
+        # riders (placed/shipped), `cod_collected_today` is cash actually
+        # taken in today (orders delivered today with a cash balance).
+        "cod_pending_total": round(cod_pending_total, 2),
+        "cod_pending_count": cod_pending_count,
+        "cod_collected_today": round(cod_collected_today, 2),
+        "cod_collected_today_count": cod_collected_today_count,
     }
 
 

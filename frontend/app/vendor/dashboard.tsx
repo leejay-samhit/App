@@ -16,6 +16,9 @@ type Stats = {
   // Jul 2026 — Per-channel breakdown for the earnings drill-down.
   online_total?: number; online_today?: number; online_orders_all?: number; online_orders_today?: number;
   pos_total?: number; pos_today?: number; pos_orders_all?: number; pos_orders_today?: number;
+  // Jun 2026 — Daily cash reconciliation figures.
+  cod_pending_total?: number; cod_pending_count?: number;
+  cod_collected_today?: number; cod_collected_today_count?: number;
 };
 type EarningRow = {
   channel: "online" | "pos";
@@ -315,6 +318,49 @@ export default function VendorDashboard() {
               </View>
             </View>
           </View>
+          </FadeSlideIn>
+          {/* Jun 2026 — DELIVERY CASH SUMMARY.  Vendors reconcile their
+              drawer at closing time, so we surface both the cash already
+              taken in today and what's still out with riders. */}
+          <FadeSlideIn delay={90}>
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => router.push("/vendor/orders" as any)}
+            style={styles.cashCard}
+            testID="cash-summary-card"
+          >
+            <View style={styles.cashHeader}>
+              <Feather name="dollar-sign" size={14} color="#92400E" />
+              <Text style={styles.cashTitle}>CASH TO COLLECT</Text>
+              <Feather name="chevron-right" size={16} color="#92400E" />
+            </View>
+            <View style={styles.cashRow}>
+              <View style={styles.cashCell}>
+                <Text style={styles.cashLabel}>COLLECTED TODAY</Text>
+                <Text style={styles.cashValueDone} testID="cash-collected-today">
+                  {formatINR(stats.cod_collected_today || 0)}
+                </Text>
+                <Text style={styles.cashMeta}>
+                  {stats.cod_collected_today_count || 0} delivered
+                </Text>
+              </View>
+              <View style={styles.cashDivider} />
+              <View style={[styles.cashCell, { alignItems: "flex-end" }]}>
+                <Text style={styles.cashLabel}>STILL OUT WITH RIDERS</Text>
+                <Text style={styles.cashValuePending} testID="cash-pending">
+                  {formatINR(stats.cod_pending_total || 0)}
+                </Text>
+                <Text style={styles.cashMeta}>
+                  {stats.cod_pending_count || 0} order{(stats.cod_pending_count || 0) === 1 ? "" : "s"}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.cashHint}>
+              {(stats.cod_pending_total || 0) > 0
+                ? `Collect ${formatINR(stats.cod_pending_total || 0)} more to close the day clean`
+                : "All cash orders settled — nothing pending 🎉"}
+            </Text>
+          </TouchableOpacity>
           </FadeSlideIn>
           <FadeSlideIn delay={120}>
           <TouchableOpacity onPress={onAddProduct} style={styles.primaryBtn} testID="vendor-add-cta">
@@ -762,6 +808,18 @@ const styles = StyleSheet.create({
   tabActive: { borderBottomColor: colors.primary },
   tabText: { fontSize: 13, fontWeight: "700", color: colors.textMuted },
   statsGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10 },
+  // Jun 2026 — Delivery cash summary card
+  cashCard: { marginTop: 10, padding: 14, borderRadius: radii.card, backgroundColor: "#FFFBEB", borderWidth: 1, borderColor: "#FDE68A" },
+  cashHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 12 },
+  cashTitle: { flex: 1, fontSize: 10, fontWeight: "900", color: "#92400E", letterSpacing: 1.2 },
+  cashRow: { flexDirection: "row", alignItems: "flex-start" },
+  cashCell: { flex: 1, gap: 3 },
+  cashDivider: { width: 1, alignSelf: "stretch", backgroundColor: "#FDE68A", marginHorizontal: 10 },
+  cashLabel: { fontSize: 9, fontWeight: "800", color: "#A16207", letterSpacing: 0.7 },
+  cashValueDone: { fontSize: 20, fontWeight: "900", color: "#047857", letterSpacing: -0.5 },
+  cashValuePending: { fontSize: 20, fontWeight: "900", color: "#B45309", letterSpacing: -0.5 },
+  cashMeta: { fontSize: 10, fontWeight: "700", color: "#A16207" },
+  cashHint: { fontSize: 11, fontWeight: "700", color: "#92400E", marginTop: 12, textAlign: "center" },
   statCell: { width: "48.5%" },
   statCard: { width: "100%", minHeight: 108, justifyContent: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14 },
   // Jul 2026 — Per-channel breakdown pills below the stats grid

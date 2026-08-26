@@ -194,8 +194,35 @@ export default function OrdersScreen() {
             const walletPaid = Number(item.wallet_paid || 0);
             const stepIdx = STEPS.indexOf((item.status || "placed") as any);
             const cancelled = (item.status || "") === "cancelled";
+            // Jun 2026 — GROUP HEADER. Sibling orders from one checkout are
+            // adjacent in this newest-first list, so we stamp a summary row
+            // above the first card of each multi-seller group.
+            const isGroupStart = (item.split_count || 1) > 1
+              && (index === 0 || filtered[index - 1]?.group_id !== item.group_id);
+            const group = isGroupStart
+              ? filtered.filter((o) => o.group_id === item.group_id)
+              : [];
             return (
               <FadeSlideIn delay={Math.min(index, 6) * 40}>
+              {isGroupStart ? (
+                <View style={styles.groupHeader} testID={`order-group-${item.group_id}`}>
+                  <View style={styles.groupIcon}>
+                    <Feather name="layers" size={13} color={colors.primary} />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.groupTitle}>
+                      1 checkout · {item.split_count} sellers
+                    </Text>
+                    <Text style={styles.groupSub}>
+                      {formatINR(group.reduce((a, o) => a + Number(o.total || 0), 0))} total
+                      {" · "}each seller ships and updates separately
+                    </Text>
+                  </View>
+                  <Text style={styles.groupCount}>
+                    {group.length}/{item.split_count}
+                  </Text>
+                </View>
+              ) : null}
               <View style={styles.card} testID={`order-${item.id}`}>
                 {/* Seller row — the anchor of every card now that a single
                     checkout splits into one order per vendor. */}
@@ -530,6 +557,12 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 16, fontWeight: "700", color: colors.textMain, marginTop: 12 },
   emptyText: { fontSize: 13, color: colors.textMuted, textAlign: "center" },
   card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14, marginBottom: 10 },
+  // Jun 2026 — "1 checkout · N sellers" group summary row
+  groupHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8, padding: 12, borderRadius: 14, backgroundColor: colors.brand100, borderWidth: 1, borderColor: colors.primary },
+  groupIcon: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
+  groupTitle: { fontSize: 13, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
+  groupSub: { fontSize: 10, fontWeight: "700", color: colors.textMuted, marginTop: 2 },
+  groupCount: { fontSize: 12, fontWeight: "900", color: colors.primary },
   // Jun 2026 — Redesigned order card
   sellerRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   sellerAvatar: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },

@@ -1,8 +1,8 @@
 // Dynamic Category Page — fully rendered from admin-managed `shop_layout`
 // blocks where scope="category" and scope_category=<name>. Falls back to a
 // plain product grid filtered by category if no admin layout exists.
-import { useEffect, useState, useCallback, useMemo } from "react";
-import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Image, ActivityIndicator, Alert } from "react-native";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, Image, ActivityIndicator, Alert, PanResponder } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -43,6 +43,11 @@ export default function ShopCategoryScreen() {
   // once we've resolved the parent by name).  Falls back to the distinct
   // `product.sub_category` values if the admin hasn't split the tree yet.
   const [adminSubs, setAdminSubs] = useState<{ id: string; name: string }[]>([]);
+  // Jun 2026 — Sibling categories at the same tree depth, used by the
+  // left/right swipe gesture to hop between categories without going back.
+  const [siblings, setSiblings] = useState<string[]>([]);
+  // Transient toast naming whatever the swipe just landed on.
+  const [swipeHint, setSwipeHint] = useState<string>("");
 
   const load = useCallback(async (options?: { silent?: boolean }) => {
     // Dec 2026 — Latency killer.  Previously each mount fired 3 sequential
@@ -128,6 +133,21 @@ export default function ShopCategoryScreen() {
       const node = walk(tree.items || [], category);
       const subs = (node?.children || []).map((c: any) => ({ id: c.id, name: c.name }));
       setAdminSubs(subs);
+
+      // Jun 2026 — Find the list this category belongs to (its parent's
+      // children, or the tree root) so swiping can move to the neighbour.
+      const findSiblings = (nodes: any[]): string[] | null => {
+        const t = category.trim().toLowerCase();
+        if (nodes.some((n) => (n.name || "").trim().toLowerCase() === t)) {
+          return nodes.map((n) => String(n.name || "")).filter(Boolean);
+        }
+        for (const n of nodes) {
+          const found = findSiblings(n.children || []);
+          if (found) return found;
+        }
+        return null;
+      };
+      setSiblings(findSiblings(tree.items || []) || []);
     };
     cachedGet<{ items: any[] }>("/shop-categories/tree", {
       ttlMs: 600_000,
@@ -206,16 +226,77 @@ export default function ShopCategoryScreen() {
     }
   };
 
+  // Jun 2026 — SWIPE NAVIGATION.  A left/right flick walks a single
+  // conceptual list: [All, sub-1, sub-2, …] for the current category.
+  // Sub-category hops are instant (client-side filter, zero network), and
+  // once you flick past either end you land on the neighbouring sibling
+  // category — so browsing the whole catalogue never needs a back-tap.
+  const subNames = useMemo<string[]>(() => (
+    adminSubs.length > 0
+      ? adminSubs.map((s) => s.name)
+      : Array.from(new Set(products.map((p) => (p.sub_category || "").trim()).filter(Boolean)))
+          .sort((a, b) => a.localeCompare(b))
+  ), [adminSubs, products]);
+
+  const flashHint = useCallback((label: string) => {
+    setSwipeHint(label);
+    setTimeout(() => setSwipeHint(""), 1400);
+  }, []);
+
+  const swipeStep = useCallback((dir: 1 | -1) => {
+    const chain = ["", ...subNames];
+    const nextIdx = chain.indexOf(selectedSub) + dir;
+    if (nextIdx >= 0 && nextIdx < chain.length) {
+      setSelectedSub(chain[nextIdx]);
+      flashHint(chain[nextIdx] || `All of ${category}`);
+      return;
+    }
+    const ci = siblings.findIndex((s) => s.trim().toLowerCase() === category.trim().toLowerCase());
+    const neighbour = ci >= 0 ? siblings[ci + dir] : undefined;
+    if (neighbour) {
+      router.replace(`/shop-category/${encodeURIComponent(neighbour)}` as any);
+    }
+  }, [subNames, selectedSub, siblings, category, router, flashHint]);
+
+  // A PanResponder (rather than a gesture-handler Fling) so the swipe works
+  // identically on iOS, Android and the web preview, and only claims the
+  // touch when the movement is clearly horizontal — vertical scrolling of
+  // the product grid is untouched.
+  const swipeRef = useRef(swipeStep);
+  swipeRef.current = swipeStep;
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 24 && Math.abs(g.dy) < 24,
+      onPanResponderRelease: (_e, g) => {
+        if (g.dx <= -60) swipeRef.current(1);
+        else if (g.dx >= 60) swipeRef.current(-1);
+      },
+    }),
+  ).current;
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.headerRow}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
+      <View style={styles.headerRow}>        <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerEyebrow}>CATEGORY</Text>
+          <Text style={styles.headerEyebrow}>
+            {siblings.length > 1 || subNames.length > 0 ? "SWIPE ↔ CATEGORY" : "CATEGORY"}
+          </Text>
           <Text style={styles.headerTitle} numberOfLines={1}>{category || "All"}</Text>
         </View>
+        {/* Jun 2026 — Explicit prev/next arrows mirror the swipe gesture so
+            the same navigation is discoverable and reachable one-handed. */}
+        {siblings.length > 1 || subNames.length > 0 ? (
+          <View style={styles.navArrows}>
+            <TouchableOpacity onPress={() => swipeStep(-1)} style={styles.navArrowBtn} testID="cat-prev">
+              <Feather name="chevron-left" size={18} color={colors.textMain} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => swipeStep(1)} style={styles.navArrowBtn} testID="cat-next">
+              <Feather name="chevron-right" size={18} color={colors.textMain} />
+            </TouchableOpacity>
+          </View>
+        ) : null}
         <TouchableOpacity onPress={() => router.push("/cart")} style={styles.iconBtn} testID="cat-cart-btn">
           <Feather name="shopping-cart" size={18} color={colors.textMain} />
           {cartCount > 0 ? (
@@ -233,6 +314,15 @@ export default function ShopCategoryScreen() {
         </View>
       ) : null}
 
+      {/* Jun 2026 — Swipe feedback toast (mirrors the add-to-cart strip). */}
+      {swipeHint ? (
+        <View style={styles.swipeHint} pointerEvents="none">
+          <Feather name="chevrons-right" size={13} color="#fff" />
+          <Text style={styles.addedFlashText} numberOfLines={1}>{swipeHint}</Text>
+        </View>
+      ) : null}
+
+      <View style={{ flex: 1 }} {...panResponder.panHandlers}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: 80 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setRefreshTick(t => t + 1); load(); }} tintColor={colors.primary} />}
@@ -248,10 +338,7 @@ export default function ShopCategoryScreen() {
           // Nov 2026 — Prefer admin-managed subcategory list (real tree).
           // Fall back to distinct product.sub_category values if the
           // admin hasn't structured the tree yet.
-          const subs: string[] = adminSubs.length > 0
-            ? adminSubs.map((s) => s.name)
-            : Array.from(new Set(products.map((p) => (p.sub_category || "").trim()).filter(Boolean)))
-                .sort((a, b) => a.localeCompare(b));
+          const subs = subNames;
           if (subs.length === 0) return null;
           return (
             <ScrollView
@@ -419,6 +506,7 @@ export default function ShopCategoryScreen() {
         )}
         </View>
       </ScrollView>
+      </View>
     </SafeAreaView>
   );
 }
@@ -429,6 +517,9 @@ const styles = StyleSheet.create({
   iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   headerEyebrow: { fontSize: 10, letterSpacing: 1.6, color: colors.textMuted, fontWeight: "800" },
   headerTitle: { fontSize: 20, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4 },
+  // Jun 2026 — Prev/next category arrows (mirror of the swipe gesture)
+  navArrows: { flexDirection: "row", gap: 4 },
+  navArrowBtn: { width: 34, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   center: { paddingVertical: 40, alignItems: "center" },
   hint: { fontSize: 11, color: colors.textMuted, marginVertical: 10, fontStyle: "italic", textAlign: "center" },
   emptyCard: { backgroundColor: colors.surface, borderRadius: radii.card, padding: 28, alignItems: "center", borderWidth: 1, borderColor: colors.border, gap: 6 },
@@ -459,6 +550,16 @@ const styles = StyleSheet.create({
     maxWidth: "90%",
   },
   addedFlashText: { fontSize: 11, fontWeight: "700", color: "#fff", letterSpacing: 0.2 },
+  // Jun 2026 — Swipe-navigation toast (darker so it reads as navigation,
+  // not a cart confirmation).
+  swipeHint: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    alignSelf: "center", marginTop: 4, marginBottom: 2,
+    backgroundColor: colors.textMain,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    maxWidth: "90%",
+  },
+
   gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   gridCard: { flexBasis: "48%", flexGrow: 0, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
   gridImg: { width: "100%", aspectRatio: 1.05, backgroundColor: colors.surfaceMuted },

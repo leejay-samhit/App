@@ -79,6 +79,12 @@ class ShopLayoutBlockIn(BaseModel):
     # pincode restriction (block renders for all customers on the
     # given scope).
     scope_pincode: Optional[str] = ""
+    # Jun 2026 — MULTI-pincode targeting.  Supersedes the single
+    # `scope_pincode` above (which is kept for backward compatibility with
+    # every block created before this change).  A block renders when the
+    # customer's pincode appears in this list.  Empty list + empty
+    # `scope_pincode` = global block (renders everywhere).
+    scope_pincodes: Optional[List[str]] = None
     # core
     title: Optional[str] = ""
     subtitle: Optional[str] = ""
@@ -123,6 +129,7 @@ class ShopLayoutBlockPatch(BaseModel):
     scope: Optional[str] = None
     scope_category: Optional[str] = None
     scope_pincode: Optional[str] = None
+    scope_pincodes: Optional[List[str]] = None
     title: Optional[str] = None
     subtitle: Optional[str] = None
     body: Optional[str] = None
@@ -190,6 +197,11 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
     doc.setdefault("show_view_all", False)
     doc.setdefault("view_all_link", "")
     doc.setdefault("category_ids", [])
+    # Jun 2026 — Multi-pincode backfill: legacy blocks only carry the single
+    # `scope_pincode`, so surface it as a one-item list for the admin UI.
+    if not doc.get("scope_pincodes"):
+        legacy_pin = str(doc.get("scope_pincode") or "").strip()
+        doc["scope_pincodes"] = [legacy_pin] if legacy_pin else []
     # Aug 2026 — image_fit + per-slide image_fit backfill for legacy docs.
     doc.setdefault("image_fit", "cover")
     for it in doc.get("items") or []:
@@ -229,11 +241,14 @@ def _scope_filter(scope: Optional[str], category: Optional[str], pincode: Option
             q["scope"] = "category"
             if category:
                 q["scope_category"] = category
-    # Jul 2026 → Nov 2026 upgrade — Pincode-scoped layout blocks.
+    # Jun 2026 → MULTI-pincode targeting.  A block can now carry a LIST of
+    # pincodes in `scope_pincodes`; the legacy single `scope_pincode` field
+    # is still honoured so pre-existing blocks keep working untouched.
     #
     # Semantics for the PUBLIC /shop-layout endpoint:
-    #   • When the customer's pincode IS known, we OR-in blocks whose
-    #     `scope_pincode` matches AND global (blank scope_pincode) blocks.
+    #   • When the customer's pincode IS known, we return blocks that list
+    #     that pincode (in either field) PLUS global blocks (both fields
+    #     empty).
     #   • When the customer's pincode is UNKNOWN (missing or empty), we
     #     ONLY return the global blocks — pincode-targeted campaigns
     #     must never leak to customers whose location we can't verify.
@@ -243,30 +258,51 @@ def _scope_filter(scope: Optional[str], category: Optional[str], pincode: Option
     #
     # Admin view bypasses this and can see everything (with the option
     # to explicitly filter by pincode).
+    global_only = {
+        "$and": [
+            {"$or": [
+                {"scope_pincode": {"$in": ["", None]}},
+                {"scope_pincode": {"$exists": False}},
+            ]},
+            {"$or": [
+                {"scope_pincodes": {"$in": [[], None]}},
+                {"scope_pincodes": {"$exists": False}},
+            ]},
+        ],
+    }
     pin_filter: Dict[str, Any] = {}
     if pincode:
         pin_filter = {
             "$or": [
                 {"scope_pincode": pincode},
-                {"scope_pincode": ""},
-                {"scope_pincode": None},
-                {"scope_pincode": {"$exists": False}},
+                # Mongo matches a scalar against every element of an array.
+                {"scope_pincodes": pincode},
+                global_only,
             ],
         }
     elif not admin_view:
-        pin_filter = {
-            "$or": [
-                {"scope_pincode": ""},
-                {"scope_pincode": None},
-                {"scope_pincode": {"$exists": False}},
-            ],
-        }
+        pin_filter = global_only
     if pin_filter:
         if q:
             q = {"$and": [q, pin_filter]}
         else:
             q = pin_filter
     return q
+
+
+def _norm_pincodes(values: Optional[List[str]], legacy: Optional[str] = None) -> List[str]:
+    """Normalise a multi-pincode target list.
+
+    Jun 2026 — Keeps only 6-digit numeric pincodes, de-dupes while
+    preserving admin ordering, caps at 50. The legacy single
+    `scope_pincode` is folded in so old blocks upgrade transparently.
+    """
+    out: List[str] = []
+    for raw in list(values or []) + ([legacy] if legacy else []):
+        p = "".join(ch for ch in str(raw or "") if ch.isdigit())
+        if len(p) == 6 and p not in out:
+            out.append(p)
+    return out[:50]
 
 
 def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
@@ -276,6 +312,7 @@ def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
         "scope": (body.scope if body.scope in ALLOWED_SCOPES else "home"),
         "scope_category": (body.scope_category or "").strip(),
         "scope_pincode": (body.scope_pincode or "").strip(),
+        "scope_pincodes": _norm_pincodes(body.scope_pincodes, body.scope_pincode),
         "title": (body.title or "").strip(),
         "subtitle": (body.subtitle or "").strip(),
         "body": (body.body or "").strip(),
@@ -335,6 +372,15 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "product_id" in payload:
         v = payload["product_id"]
         updates["product_id"] = (str(v).strip() if v else None) or None
+    # Jun 2026 — Multi-pincode targeting. When the client sends the list we
+    # rewrite BOTH fields so the legacy single-pincode readers stay correct.
+    if "scope_pincodes" in payload and payload["scope_pincodes"] is not None:
+        pins = _norm_pincodes(payload["scope_pincodes"])
+        updates["scope_pincodes"] = pins
+        updates["scope_pincode"] = pins[0] if len(pins) == 1 else ""
+    elif "scope_pincode" in payload and payload["scope_pincode"] is not None:
+        pins = _norm_pincodes(None, payload["scope_pincode"])
+        updates["scope_pincodes"] = pins
     if "sort_order" in payload and payload["sort_order"] is not None:
         updates["sort_order"] = int(payload["sort_order"])
     if "active" in payload and payload["active"] is not None:

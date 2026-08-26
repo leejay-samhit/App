@@ -159,3 +159,57 @@ See `/app/memory/test_credentials.md`
 - Frontend verified via Playwright: slider auto-max ₹450→₹0, chips, footer
   split, order cards, invoice modal, Ask-this-seller → /chat/<id>, vendor
   dashboard STORE SALE ₹300/1 invoice, TODAY ORDERS → /vendor/orders.
+
+
+## Jun 2026 Batch — Multi-Pincode Banners, Swipe Nav, Cash Summary, Group Orders (Iter 56)
+
+### 1. Multi-pincode banner targeting
+- `shop_layout` blocks now carry `scope_pincodes: string[]` alongside the
+  legacy single `scope_pincode` (kept so every pre-existing block keeps
+  working). `_norm_pincodes()` keeps only 6-digit numeric values, de-dupes
+  preserving admin order and caps at 50.
+- `_scope_filter()` matches a customer when their pincode appears in EITHER
+  field; a block is "global" only when BOTH are empty. Blocks with targets
+  are still hidden from customers whose location is unknown.
+- Legacy docs are back-filled on read (`scope_pincodes = [scope_pincode]`).
+- Admin UI: the single pincode input is now a chip builder — type a pincode
+  → Add → removable chips + "Clear all", with a live "Shows only to
+  customers in N pincodes." hint. Block cards show a `map-pin` badge reading
+  the pincode (single) or "N PINCODES" (multi). The list filter + distinct
+  pincode chips are multi-pincode aware.
+
+### 2. Swipe between categories
+- `shop-category/[name].tsx` now walks one conceptual list:
+  `[All, sub-1, sub-2, …]` for the current category. A horizontal swipe
+  (PanResponder, `|dx| > 60` with `|dy| < 24` so vertical scrolling is
+  untouched) steps through sub-categories instantly (client-side filter,
+  zero network) and, once past either end, hops to the neighbouring
+  SIBLING category resolved from `/shop-categories/tree`.
+- Explicit `cat-prev` / `cat-next` chevrons in the header mirror the same
+  `swipeStep()` code path so the navigation is discoverable and testable.
+- A dark toast names whatever the swipe landed on.
+
+### 3. Delivery cash summary (vendors)
+- `GET /vendor/me/stats` adds `cod_pending_total`, `cod_pending_count`,
+  `cod_collected_today`, `cod_collected_today_count` computed from orders
+  with `cod_due > 0` (pending = placed/shipped, collected = delivered today).
+- `PATCH /admin/orders/{id}/status` now stamps `delivered_at` on the
+  placed→delivered transition so "collected today" keys off when the cash
+  actually changed hands.
+- Vendor dashboard gets an amber "CASH TO COLLECT" card: Collected Today vs
+  Still Out With Riders, tapping through to `/vendor/orders`.
+
+### 4. Group order view
+- `orders.tsx` injects a "1 checkout · N sellers" summary row above the
+  first card of each multi-seller group (siblings are adjacent in the
+  newest-first list), showing the combined total and an N/N progress count.
+
+### Verified
+- Multi-pincode: block targeting 517644+517640 shows for both, hidden for
+  500001 and for unknown-location customers; legacy single-pincode block
+  still shows for its own pincode.
+- Swipe: Electronics → Fashion → Grocery → back to Fashion via the arrows
+  (identical code path as the gesture).
+- Cash summary: ₹60 collected today / ₹300 still out, 4 orders.
+- Group header: "1 checkout · 2 sellers · ₹450 total · 2/2" above
+  SC-929938-1 and SC-929938-2.
