@@ -213,3 +213,40 @@ See `/app/memory/test_credentials.md`
 - Cash summary: ₹60 collected today / ₹300 still out, 4 orders.
 - Group header: "1 checkout · 2 sellers · ₹450 total · 2/2" above
   SC-929938-1 and SC-929938-2.
+
+
+## Jun 2026 — Home Screen Swipe (Iter 57)
+
+`src/shop-home.tsx` now supports the same left/right glide as the category
+screen, but entirely in place:
+
+- Conceptual list `catChain = ["all", …admin categories]`. A horizontal
+  flick steps through it, setting `activeCategory`, which renders the
+  existing in-screen filtered product grid from already-loaded products —
+  **zero network calls**, so gliding across the shop is instant.
+- Implemented with `PanResponder` on a wrapper around the home ScrollView.
+  It only claims the touch when `|dx| > 24 && |dy| < 24` (release threshold
+  `|dx| > 60`), so vertical scrolling and the horizontal category strip keep
+  working. Verified: a vertical drag does NOT change the category.
+- The category strip auto-scrolls (`catStripRef.scrollTo`) so the newly
+  active chip stays in view and stays highlighted, mirroring the swipe.
+- A dark toast (`swipeHint`) names whatever the swipe landed on
+  ("All categories" for the reset position).
+
+### Testing note (important for future agents)
+`PanResponder` on react-native-web does NOT respond to Playwright
+`page.mouse.*` events — you must dispatch real touch events over CDP:
+```python
+client = await page.context.new_cdp_session(page)
+await client.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": 330, "y": 520}]})
+# …touchMove xN…  then {"type": "touchEnd", "touchPoints": []}
+```
+Also: after `page.goto(...)` the Slangcart splash overlay sits on top of the
+app and swallows touches — navigate INSIDE the app (tap through) when
+testing gestures, otherwise the gesture silently never fires.
+
+### Verified
+- Home: All → Electronics → Fashion → Grocery on successive left flicks,
+  right flick back to Fashion, vertical drag leaves the category unchanged.
+- Category screen (navigated in-app, no splash): left flick on Electronics
+  with no sub-categories hopped to the Fashion sibling as designed.
