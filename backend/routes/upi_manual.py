@@ -423,6 +423,11 @@ async def approve_manual_payment(
                             "id": str(uuid.uuid4()),
                             "user_id": admin["id"],
                             "type": "gst_collected",
+                            # Tagged so Group 3 (GST Ledger) can exclude it —
+                            # entry GST is DERIVED for Razorpay joinings only
+                            # (June-2026 business rule).
+                            "gst_kind": "registration_entry",
+                            "related_signup_id": fresh["id"],
                             "amount": registration_gst,
                             "status": "success",
                             "description": f"GST {int(REFERRAL_GST_PCT)}% on registration fee · UPI manual · {fresh.get('name') or fresh.get('email')}",

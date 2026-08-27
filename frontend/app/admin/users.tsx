@@ -24,6 +24,8 @@ import { useAuth } from "../../src/auth";
 import { useInfiniteList } from "../../src/use-infinite-list";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { formatActiveAgo } from "../../src/location";
+import { downloadText } from "../../src/download";
+import { SourceTabs } from "../../src/source-tabs";
 
 // Phase: User-source unification (2026-05-27). Human-readable labels for
 // the three creation paths. Used by the New User modal dropdown and the
@@ -34,6 +36,14 @@ const SOURCE_LABELS: Record<string, string> = {
   razorpay:     "Razorpay gateway",
   upi_manual:   "UPI manual transfer",
   unknown:      "Unknown source",
+};
+
+// Per-source badge styling for the roster rows + category tabs.
+const SOURCE_META: Record<string, { short: string; icon: any; color: string }> = {
+  razorpay:     { short: "RAZORPAY",   icon: "credit-card", color: "#0369A1" },
+  upi_manual:   { short: "UPI MANUAL", icon: "smartphone",  color: "#7C3AED" },
+  offline_cash: { short: "OFFLINE",    icon: "tag",         color: "#B45309" },
+  unknown:      { short: "UNKNOWN",    icon: "help-circle", color: "#6B7280" },
 };
 
 // Standard registration fee — used purely to render the GST hint inside the
@@ -49,6 +59,7 @@ type AdminUser = {
   referral_code: string;
   referred_by: string | null;
   registration_paid: boolean;
+  registration_source?: string | null;
   direct_referrals_count: number;
   wallet_balance: number;
   total_earned: number;
@@ -112,9 +123,19 @@ export default function AdminUsers() {
   // Phase 1 Session C — infinite scrolling for the user roster.
   // Server-side `q` re-evaluates the result set whenever the debounced
   // search changes; the hook auto-resets to page 0 on each new key.
+  // Join-source category tab (June-2026): razorpay / upi_manual /
+  // offline_cash / unpaid — resolved server-side so the counts are true DB
+  // figures, not "whatever happened to be on the loaded page".
+  const [sourceTab, setSourceTab] = useState<string>("all");
+  const [sourceCounts, setSourceCounts] = useState<Record<string, number> | null>(null);
+  const [exporting, setExporting] = useState(false);
+
   const list = useInfiniteList<AdminUser>("/admin/users", {
     pageSize: 20,
-    params: debouncedSearch ? { q: debouncedSearch } : {},
+    params: {
+      ...(debouncedSearch ? { q: debouncedSearch } : {}),
+      ...(sourceTab !== "all" ? { source: sourceTab } : {}),
+    },
   });
   const users = list.items;          // <-- alias so existing JSX keeps reading `users`
   const filtered = users;            // server-side filtering — client filter no longer needed
@@ -135,11 +156,51 @@ export default function AdminUsers() {
       const s = await api.get<Stats>("/admin/stats");
       setStats(s.data);
     } catch { /* stats are nice-to-have */ }
+    try {
+      const c = await api.get<Record<string, number>>("/admin/users/source-counts");
+      setSourceCounts(c.data);
+    } catch { /* counts are nice-to-have */ }
     await list.reload();
     setRefreshing(false);
   }, [list]);
 
   useFocusEffect(useCallback(() => { load(); /* eslint-disable-next-line */ }, []));
+
+  const sourceTabsData = [
+    { key: "all",          label: "All",         icon: "users" as any,        count: sourceCounts?.all },
+    { key: "razorpay",     label: "Razorpay",    icon: "credit-card" as any,  count: sourceCounts?.razorpay },
+    { key: "upi_manual",   label: "UPI manual",  icon: "smartphone" as any,   count: sourceCounts?.upi_manual },
+    { key: "offline_cash", label: "Offline",     icon: "tag" as any,          count: sourceCounts?.offline_cash },
+    { key: "unpaid",       label: "Not approved", icon: "clock" as any,       count: sourceCounts?.unpaid },
+  ].filter((t) => t.key !== "unknown");
+
+  const onDownloadUsers = async () => {
+    setExporting(true);
+    try {
+      const res = await api.get("/admin/export/users", {
+        params: sourceTab !== "all" ? { source: sourceTab } : {},
+        responseType: "text",
+      });
+      const csv = typeof res.data === "string" ? res.data : "";
+      const stamp = new Date().toISOString().slice(0, 10);
+      const out = await downloadText({
+        filename: `users-${sourceTab}-${stamp}.csv`,
+        content: "\uFEFF" + csv,
+        mimeType: "text/csv",
+      });
+      if (out.ok) {
+        const lines = Math.max(0, csv.trim().split("\n").length - 1);
+        Alert.alert(
+          "Download ready",
+          `${lines} user${lines === 1 ? "" : "s"} exported.${out.method === "browser" ? "\n\nCheck your browser's Downloads folder." : ""}`,
+        );
+      }
+    } catch {
+      Alert.alert("Download failed", "Please try again.");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   if (loading && users.length === 0) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
 
@@ -199,16 +260,37 @@ export default function AdminUsers() {
               <Text style={styles.treeBtnText}>  View network tree (upline · downline)</Text>
               <Feather name="chevron-right" size={16} color={colors.primary} style={{ marginLeft: "auto" }} />
             </TouchableOpacity>
-            <View style={styles.searchWrap}>
-              <Feather name="search" size={16} color={colors.textMuted} style={{ marginLeft: 12 }} />
-              <TextInput
-                value={search}
-                onChangeText={setSearch}
-                placeholder="Search by name, email or code"
-                placeholderTextColor={colors.textMuted}
-                style={styles.searchInput}
-                testID="admin-users-search"
-              />
+            <SourceTabs
+              tabs={sourceTabsData}
+              value={sourceTab}
+              onChange={setSourceTab}
+              testIDPrefix="users-source"
+            />
+            <View style={styles.searchRow}>
+              <View style={styles.searchWrap}>
+                <Feather name="search" size={16} color={colors.textMuted} style={{ marginLeft: 12 }} />
+                <TextInput
+                  value={search}
+                  onChangeText={setSearch}
+                  placeholder="Search by name, email or code"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.searchInput}
+                  testID="admin-users-search"
+                />
+              </View>
+              <TouchableOpacity
+                onPress={onDownloadUsers}
+                disabled={exporting}
+                style={styles.downloadBtn}
+                testID="admin-users-download"
+              >
+                {exporting ? <ActivityIndicator color={colors.primaryFg} size="small" /> : (
+                  <>
+                    <Feather name="download" size={14} color={colors.primaryFg} />
+                    <Text style={styles.downloadBtnText}>CSV</Text>
+                  </>
+                )}
+              </TouchableOpacity>
             </View>
             <Text style={styles.sectionLabel}>
               {filtered.length} USER{filtered.length === 1 ? "" : "S"}
@@ -245,6 +327,15 @@ export default function AdminUsers() {
                 <Feather name="users" size={11} color={colors.textMuted} style={{ marginLeft: 8 }} />
                 <Text style={styles.userMetaText}>{item.direct_referrals_count} directs</Text>
               </View>
+              {item.registration_paid ? (() => {
+                const m = SOURCE_META[item.registration_source || "unknown"] || SOURCE_META.unknown;
+                return (
+                  <View style={[styles.srcBadge, { backgroundColor: m.color + "18", borderColor: m.color + "44" }]}>
+                    <Feather name={m.icon} size={9} color={m.color} />
+                    <Text style={[styles.srcBadgeText, { color: m.color }]}>{m.short}</Text>
+                  </View>
+                );
+              })() : null}
               {item.location_sharing && item.service_location?.coordinates ? (
                 <TouchableOpacity
                   onPress={(e) => {
@@ -623,8 +714,14 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
                 testID="edit-role-switch"
               />
             </View>
-            <View style={modalStyles.row}>
-              <Text style={modalStyles.label}>Registration paid</Text>
+            <View style={[modalStyles.row, { alignItems: "flex-start" }]}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={modalStyles.label}>Admin Approved</Text>
+                <Text style={modalStyles.labelHint}>
+                  Approves this account for login only. No referral commission is credited to the
+                  upline and no registration revenue is recorded.
+                </Text>
+              </View>
               <Switch
                 value={registrationPaid}
                 onValueChange={setRegistrationPaid}
@@ -1094,7 +1191,12 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
   statHintRow: { flexDirection: "row", alignItems: "center", gap: 2, marginTop: 6 },
   statHint: { fontSize: 10, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
-  searchWrap: { flexDirection: "row", alignItems: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16, gap: 8 },
+  searchRow: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginBottom: 16 },
+  downloadBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 14, minHeight: 44, borderRadius: 12, backgroundColor: colors.primary },
+  downloadBtnText: { fontSize: 12, fontWeight: "800", color: colors.primaryFg },
+  srcBadge: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: 4, marginTop: 4, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, borderWidth: 1 },
+  srcBadgeText: { fontSize: 9, fontWeight: "900", letterSpacing: 0.5 },
+  searchWrap: { flex: 1, flexDirection: "row", alignItems: "center", minHeight: 44, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, gap: 8 },
   newUserBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 14, marginBottom: 16 },
   newUserBtnText: { color: colors.primaryFg, fontSize: 14, fontWeight: "800" },
   treeBtn: {
@@ -1145,6 +1247,7 @@ const modalStyles = StyleSheet.create({
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: colors.textMain },
   row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 10, paddingHorizontal: 4 },
   label: { fontSize: 14, color: colors.textMain, fontWeight: "600" },
+  labelHint: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 16 },
   msg: { fontSize: 13, marginTop: 12, textAlign: "center" },
   saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 14, borderRadius: radii.button, marginTop: 16 },
   saveBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 15 },

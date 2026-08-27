@@ -36,6 +36,10 @@ from core.utils import now_utc, audit_log as _audit_log
 
 router = APIRouter()
 
+# Entry-GST percentage on customer-facing joining fees (GST-inclusive math:
+# ₹118 gross → ₹18 GST). Mirrors server.REFERRAL_GST_PCT.
+GST_PCT = 18.0
+
 
 # ────────────────────────────────────────────────────────────────────
 # TXN-NNNNNN sequential ID generator (Group A — Transaction Ledger)
@@ -194,11 +198,32 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     user_wallet_balance = float((user_balance_agg or [{}])[0].get("sum") or 0)
 
     # ── Group 3 — GST Ledger ──────────────────────────────────────────
-    gst_collected_agg = await db.transactions.aggregate([
-        {"$match": {"type": "gst_collected", "status": "success"}},
+    # Business rule (June-2026): the ₹18-of-₹118 ENTRY GST is recognised
+    # ONLY for Razorpay-gateway joinings (real gateway collection with an
+    # auto-generated payment id). UPI-manual / offline-cash / admin-marked
+    # joinings are NOT shown in the GST ledger.
+    #
+    # The entry GST is DERIVED from Group-1 razorpay registration revenue
+    # (fee × 18/118) — no extra ledger rows, no double counting. Legacy
+    # `gst_collected` txns that represent entry GST are tagged
+    # `gst_kind="registration_entry"` and excluded from the sum below;
+    # what remains is service / POS / other GST.
+    razorpay_reg_amount = float(reg_by_source.get("razorpay", {}).get("amount") or 0)
+    registration_gst = round(razorpay_reg_amount * (GST_PCT / (100.0 + GST_PCT)), 2)
+
+    other_gst_agg = await db.transactions.aggregate([
+        {"$match": {
+            "type": "gst_collected",
+            "status": "success",
+            "gst_kind": {"$ne": "registration_entry"},
+            # Defensive: legacy rows written before the tag existed.
+            "description": {"$not": {"$regex": "registration|direct signup", "$options": "i"}},
+        }},
         {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
     ]).to_list(1)
-    gst_collected = float((gst_collected_agg or [{}])[0].get("sum") or 0)
+    other_gst = float((other_gst_agg or [{}])[0].get("sum") or 0)
+
+    gst_collected = round(registration_gst + other_gst, 2)
 
     gst_paid_agg = await db.expenses.aggregate([
         {"$match": {"category": "gst_paid", "status": "approved"}},
@@ -366,6 +391,12 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "collected": round(gst_collected, 2),
             "paid":      round(gst_paid, 2),
             "payable":   gst_payable,
+            # Sub-split so admin sees WHERE the GST came from.
+            "registration_gst":        registration_gst,
+            "registration_gst_base":   round(razorpay_reg_amount, 2),
+            "registration_count":      int(reg_by_source.get("razorpay", {}).get("count") or 0),
+            "other_gst":               round(other_gst, 2),
+            "note": "Entry GST (18/118) counted for Razorpay gateway joinings only.",
         },
         "group_4_platform_fee": {
             "collected": round(platform_fee_revenue, 2),
@@ -488,15 +519,48 @@ async def admin_finance_group_transactions(
         return {"title": "Group 2 · User Liability Wallet", "subtotal": round(subtotal, 2), "items": [_shape_txn(r) for r in rows]}
 
     # ── Group 3 — GST Ledger ─────────────────────────────────────────
+    # Entry GST is DERIVED per Razorpay joining (fee × 18/118) so every
+    # gateway registration shows up as its own GST line. Non-entry GST
+    # (service / POS) rows come straight from the ledger. `gst_paid`
+    # expenses are shown as negative settlements.
     if group_id == "group_3_gst":
+        reg_rows = await db.transactions.aggregate([
+            {"$match": {"type": "registration_fee", "status": {"$in": PAID}}},
+            {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "_u"}},
+            {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+            {"$match": {"_u.registration_source": "razorpay"}},
+            {"$sort": {"created_at": -1}},
+            {"$limit": limit},
+        ], allowDiskUse=True).to_list(limit)
+        items = []
+        for r in reg_rows:
+            u = r.get("_u") or {}
+            gross = float(r.get("amount") or 0)
+            gst = round(gross * (GST_PCT / (100.0 + GST_PCT)), 2)
+            items.append({
+                "id":         r.get("id"),
+                "display_id": f"GST-{str(r.get('id') or '').replace('-', '')[-6:].upper()}",
+                "type":       "gst_collected · registration",
+                "amount":     gst,
+                "status":     "success",
+                "source":     "razorpay",
+                "user_id":    r.get("user_id"),
+                "description": (
+                    f"Entry GST 18% on ₹{gross:g} joining · {u.get('name') or u.get('email') or '—'}"
+                    f" · {u.get('referral_code') or ''}"
+                ),
+                "created_at": r.get("paid_at") or r.get("created_at"),
+            })
         rows = await db.transactions.find({
             "type": "gst_collected",
             "status": {"$in": PAID},
+            "gst_kind": {"$ne": "registration_entry"},
+            "description": {"$not": {"$regex": "registration|direct signup", "$options": "i"}},
         }).sort("created_at", -1).limit(limit).to_list(limit)
         gst_paid_exps = await db.expenses.find({
             "category": "gst_paid", "status": "approved",
         }).sort("created_at", -1).limit(limit).to_list(limit)
-        items = [_shape_txn(r) for r in rows]
+        items += [_shape_txn(r) for r in rows]
         for e in gst_paid_exps:
             e.pop("_id", None)
             items.append({

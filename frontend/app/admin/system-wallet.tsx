@@ -108,7 +108,11 @@ type NetWorth = {
     reversed?: number;
   };
   group_2_liability: { total_reward_credits: number; total_withdrawals_settled: number; available_user_balance: number };
-  group_3_gst: { collected: number; paid: number; payable: number };
+  group_3_gst: {
+    collected: number; paid: number; payable: number;
+    registration_gst?: number; registration_gst_base?: number;
+    registration_count?: number; other_gst?: number; note?: string;
+  };
   group_4_platform_fee: { collected: number };
   group_5_expenses: { total: number };
   group_6_pending_withdrawals: { pending_amount: number };
@@ -172,6 +176,26 @@ export default function AdminSystemWallet() {
   const [refundComments, setRefundComments] = useState("");
   const [refundAction, setRefundAction] = useState<"soft_delete" | "remove_referral">("soft_delete");
   const [refundSubmitting, setRefundSubmitting] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      const [{ data }, bd, sb, nw] = await Promise.all([
+        api.get("/admin/system-wallet"),
+        api.get<Breakdown>("/admin/system-wallet/breakdown").catch(() => ({ data: null as any })),
+        api.get("/admin/system-wallet/source-breakdown").catch(() => ({ data: null as any })),
+        api.get<NetWorth>("/admin/finance/net-worth").catch(() => ({ data: null as any })),
+      ]);
+      setData(data);
+      setBreakdown(bd.data || null);
+      setSourceBreakdown(sb.data || null);
+      setNetWorth(nw.data || null);
+    } catch (e) {
+      console.warn(e);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
   const closeRefund = () => {
     setRefundOpen(false); setRefundQuery(""); setRefundResults(null);
     setRefundTarget(null); setRefundPreview(null);
@@ -376,26 +400,6 @@ export default function AdminSystemWallet() {
     try { await downloadInvoicePdf(invoiceTxnId, invoiceNumber); }
     finally { setInvoiceBusy(false); }
   }, [invoiceTxnId, invoiceNumber]);
-
-  const load = useCallback(async () => {
-    try {
-      const [{ data }, bd, sb, nw] = await Promise.all([
-        api.get("/admin/system-wallet"),
-        api.get<Breakdown>("/admin/system-wallet/breakdown").catch(() => ({ data: null as any })),
-        api.get("/admin/system-wallet/source-breakdown").catch(() => ({ data: null as any })),
-        api.get<NetWorth>("/admin/finance/net-worth").catch(() => ({ data: null as any })),
-      ]);
-      setData(data);
-      setBreakdown(bd.data || null);
-      setSourceBreakdown(sb.data || null);
-      setNetWorth(nw.data || null);
-    } catch (e) {
-      console.warn(e);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -604,9 +608,18 @@ export default function AdminSystemWallet() {
             </NwGroup>
 
             <NwGroup icon="percent" title="Group 3 · GST Ledger" color="#EF4444" onPress={() => openGroup("group_3_gst")}>
+              <NwRow
+                label={`↳ Joining GST · Razorpay (${netWorth.group_3_gst.registration_count ?? 0} payments)`}
+                value={netWorth.group_3_gst.registration_gst ?? 0}
+              />
+              <NwRow label="↳ Other GST (services · POS)" value={netWorth.group_3_gst.other_gst ?? 0} />
               <NwRow label="GST collected"          value={netWorth.group_3_gst.collected} />
               <NwRow label="GST paid (expenses)"    value={netWorth.group_3_gst.paid} />
               <NwRow label="GST payable to govt"    value={netWorth.group_3_gst.payable} bold />
+              <Text style={styles.nwNote}>
+                18/118 entry GST is counted for Razorpay gateway joinings only. UPI-manual,
+                offline/cash and admin-approved joinings are excluded.
+              </Text>
             </NwGroup>
 
             <NwGroup icon="briefcase" title="Group 4 · Platform Fee Ledger" color="#8B5CF6" onPress={() => openGroup("group_4_platform_fee")}>
@@ -1762,6 +1775,7 @@ const styles = StyleSheet.create({
   nwHeroLabel: { fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "800" },
   nwHeroValue: { fontSize: 32, fontWeight: "800", color: colors.primaryFg, marginTop: 6, letterSpacing: -0.5 },
   nwHeroFormula: { fontSize: 11, color: "rgba(255,255,255,0.78)", marginTop: 6, lineHeight: 16 },
+  nwNote: { fontSize: 10.5, color: colors.textMuted, lineHeight: 15, marginTop: 8 },
   // Components grid showing how Net Worth is computed
   nwComponentsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 14 },
   nwCompCol:    { flexBasis: "31%", flexGrow: 1, backgroundColor: "rgba(255,255,255,0.13)", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6 },

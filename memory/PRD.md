@@ -384,3 +384,73 @@ Reanimated `entering={FadeInDown/FadeSlideIn}` stays at opacity 0 on
 react-native-web, so `ShopLayoutRenderer` on shop-home and the buyer
 Dashboard below the earnings card render blank in the web preview. Works on
 device / Expo Go. Same root cause both places.
+
+---
+
+## Aug-2026 · Registration-fee revenue categorisation, CSV exports, GST maths
+
+### Bugs fixed
+1. **"Registration Fee Revenue showing 1 user only"** — `/admin/transactions`
+   filtered by `type` CLIENT-side over a single 20-row page. Now filtered
+   SERVER-side: `GET /api/admin/transactions?type=&source=&q=&limit=&offset=`
+   (aggregation `$lookup` on users → `registration_source`). Offline/cash and
+   UPI-manual joinings are visible again.
+2. **`/admin/system-wallet` red screen** — `Cannot access 'load' before
+   initialization` (TDZ: `load` was referenced in `useCallback` dep arrays
+   ~200 lines before its declaration). `const load = useCallback` hoisted
+   above `closeRefund`.
+
+### New endpoints
+- `GET /api/admin/transactions/summary?type=&q=` → `{total:{count,amount},
+  by_source:{razorpay,upi_manual,offline_cash,unknown}}` (whole result set,
+  not the loaded page) — drives the category tabs.
+- `GET /api/admin/users?source=razorpay|upi_manual|offline_cash|unpaid`
+- `GET /api/admin/users/source-counts`
+- `GET /api/admin/export/registration-fees?source=` → CSV (reference,
+  paid_on, name, member_id, email, phone, join_source, amount,
+  gst_18_inclusive, net_excl_gst, status, razorpay ids, utr, sponsor).
+- `GET /api/admin/export/users?source=` → richer CSV with `join_source` +
+  `admin_approved` columns.
+
+### GST business rule (owner decision, Aug-2026)
+Entry GST = `fee × 18/118` is recognised **only for Razorpay-gateway
+joinings**. UPI-manual / offline-cash / admin-approved joinings are NOT in the
+GST ledger. Implementation is **derived** (no new ledger rows → zero risk of
+double-count or wallet drift):
+- `routes/finance.py` Group 3 = `registration_gst` (derived from Group-1
+  razorpay registration revenue) + `other_gst` (service/POS `gst_collected`
+  rows, EXCLUDING rows tagged `gst_kind:"registration_entry"` or whose
+  description matches /registration|direct signup/i).
+- Group-3 drilldown emits one synthetic `18.00` line per razorpay joining.
+- `gst_payable` remains a liability subtracted in Company Net Worth.
+- All entry-GST txn writers now tag `gst_kind:"registration_entry"`
+  (`_credit_no_ref_signup_to_admin`, offline-create, `routes/upi_manual.py`).
+
+### "Admin Approved" (was "Registration paid")
+`PATCH /api/admin/users/{id}` with `registration_paid:true` now also stamps
+`commission_triggered:true`, `admin_approved_only:true`, `admin_approved_at/by`
+and writes an audit row — **guaranteeing no referral commission is ever paid
+to the upline and no revenue row is created** for manually-approved accounts.
+
+### Short references
+`_short_txn_ref()` → `REG-4F9K2P` / `GST-…` / `PAY-…` / `WDL-…` (prefix map
+per txn type). Shown in the list rows and the detail sheet ("Reference").
+
+### Frontend
+- New `src/source-tabs.tsx` — shared category pill bar (label + count),
+  used by `/admin/transactions` and `/admin/users`.
+- `/admin/transactions?type=registration_fee`: tabs (All/Razorpay/UPI
+  manual/Offline), search, CSV button, per-row source badge + short ref +
+  phone + member ID + gateway ref.
+- `/admin/users`: tabs (All/Razorpay/UPI manual/Offline/Not approved) with
+  DB counts, CSV button, per-row source badge; edit slide renamed to
+  **Admin Approved** with the "no commission / no revenue" note.
+- `/admin/system-wallet` Group 3 now shows "↳ Joining GST · Razorpay (N
+  payments)", "↳ Other GST (services · POS)" and the exclusion note.
+
+### Verified
+16/16 pytest in `backend/tests/test_iter_jan2026_reg_revenue.py`
+(report `test_reports/iteration_60.json`). Preview seed:
+`backend/tests/seed_reg_revenue.py` (3 razorpay + 2 upi_manual + 2 offline
+users, 30 filler payouts) → summary 7/₹826, razorpay 3/₹354, GST ₹54.
+Screens verified in web preview after the TDZ fix.

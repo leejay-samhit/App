@@ -707,6 +707,13 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
             "id": str(uuid.uuid4()),
             "user_id": admin_user["id"],
             "type": "gst_collected",
+            # ── GST classification (June-2026) ───────────────────────────
+            # `registration_entry` = the ₹18-of-₹118 GST embedded in a
+            # joining fee. Group 3 (GST Ledger) DERIVES this figure from
+            # Razorpay-sourced registrations only, so these rows are tagged
+            # and EXCLUDED from the ledger sum to avoid double-counting.
+            "gst_kind": "registration_entry",
+            "related_signup_id": joiner["id"],
             "amount": gst,
             "status": "success",
             "description": (
@@ -2036,6 +2043,7 @@ async def admin_list_users(
     limit: int = 0,
     offset: int = 0,
     q: Optional[str] = None,
+    source: Optional[str] = None,
 ):
     """Admin user roster.
 
@@ -2045,8 +2053,10 @@ async def admin_list_users(
     • q (opt-in): server-side substring filter on name/email/phone/referral_code
       — case-insensitive. Lets the FE search the whole roster (not just the
       currently-loaded page) which becomes critical once we paginate.
+    • source (opt-in): razorpay | upi_manual | offline_cash | unpaid — how the
+      user joined (June-2026 categorisation request).
     """
-    mongo_q: Dict[str, Any] = {}
+    mongo_q: Dict[str, Any] = _users_source_query(source)
     if q and q.strip():
         # Anchored regex on indexed fields — Mongo uses ix_users_* when available
         # and falls back to a collscan otherwise (still fast for <100k users).
@@ -2063,6 +2073,34 @@ async def admin_list_users(
         cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
         return await cursor.to_list(min(limit, 200))
     return await cursor.to_list(5000)
+
+
+def _users_source_query(source: Optional[str]) -> Dict[str, Any]:
+    """Mongo filter for the join-source category tabs on Admin → Users.
+
+    `unpaid`  → not yet marked paid/approved by anyone
+    `razorpay` / `upi_manual` / `offline_cash` → paid via that channel
+    """
+    if not source or source == "all":
+        return {}
+    if source == "unpaid":
+        return {"registration_paid": {"$ne": True}}
+    if source == "unknown":
+        return {
+            "registration_paid": True,
+            "registration_source": {"$nin": ["razorpay", "upi_manual", "offline_cash"]},
+        }
+    return {"registration_paid": True, "registration_source": source}
+
+
+@api_router.get("/admin/users/source-counts")
+async def admin_users_source_counts(_: Dict[str, Any] = Depends(require_admin)):
+    """Counts for the Admin → Users category tabs (all / razorpay / upi_manual
+    / offline_cash / unknown / unpaid)."""
+    out: Dict[str, int] = {"all": await db.users.count_documents({})}
+    for key in ("razorpay", "upi_manual", "offline_cash", "unknown", "unpaid"):
+        out[key] = await db.users.count_documents(_users_source_query(key))
+    return out
 
 
 # ------------------ Admin: referral tree views ------------------
@@ -2506,41 +2544,114 @@ async def admin_withdrawals_digest(_: Dict[str, Any] = Depends(require_admin_rol
     }
 
 
+# ── Short, human-trackable transaction references (June-2026) ─────────
+# Admin asked for reference numbers that are SHORT and tell you WHAT the
+# row is at a glance. Format: <KIND>-<6 chars>, e.g. REG-4F9K2P (joining
+# fee), GST-91B3C7, PAY-77AA10 (referral payout), WDL-… (withdrawal).
+_TXN_REF_PREFIX: Dict[str, str] = {
+    "registration_fee":       "REG",
+    "gst_collected":          "GST",
+    "platform_fee_collected": "PLF",
+    "referral_payout":        "PAY",
+    "direct_signup_credit":   "DSC",
+    "cascade_overflow":       "OVF",
+    "fee_residual":           "RES",
+    "l1_funding":             "L1F",
+    "withdrawal":             "WDL",
+    "system_deposit":         "DEP",
+    "order_payment":          "ORD",
+    "service_booking":        "SRV",
+    "service_margin":         "SRM",
+    "shopping_margin":        "SHM",
+    "refund":                 "RFD",
+    "reversal":               "REV",
+    "adjustment":             "ADJ",
+    "manual_adjustment":      "ADJ",
+    "wallet_transfer":        "TRF",
+    "transfer_in":            "TIN",
+    "transfer_out":           "TOU",
+}
+
+
+def _short_txn_ref(t: Dict[str, Any]) -> str:
+    """`REG-4F9K2P` style short reference — stable per transaction."""
+    prefix = _TXN_REF_PREFIX.get(t.get("type") or "", "TXN")
+    seed = str(t.get("display_id") or t.get("id") or "").replace("-", "").upper()
+    return f"{prefix}-{seed[-6:]}" if seed else prefix
+
+
+# Canonical registration sources surfaced in the admin UI.
+REGISTRATION_SOURCES = ("razorpay", "upi_manual", "offline_cash", "unknown")
+
+
 @api_router.get("/admin/transactions")
 async def admin_transactions(
     _: Dict[str, Any] = Depends(require_admin),
     include_pending: bool = False,
     limit: int = 0,
     offset: int = 0,
+    type: Optional[str] = None,
+    source: Optional[str] = None,
+    q: Optional[str] = None,
 ):
     """Admin transaction feed. By default hides pre-payment / failed registration
     rows so the wallet & revenue figures match. Pass ?include_pending=true to
     surface them for support / debugging.
 
-    Pagination opt-in via limit (1..200) + offset. When paginated, user
-    enrichment only runs for the current page — significant speed-up.
-    Each row is enriched with `user_name` (from users collection) and `reference_number`
-    auto-derived if missing — UTR for bank transactions, TXN-{shortid} for in-app moves.
-    """
-    q: Dict[str, Any] = {}
-    if not include_pending:
-        q["status"] = {"$nin": ["created", "failed"]}
-    cursor = db.transactions.find(q, {"_id": 0}).sort("created_at", -1)
-    if limit and limit > 0:
-        items = await cursor.skip(max(0, offset)).limit(min(limit, 200)).to_list(min(limit, 200))
-    else:
-        items = await cursor.to_list(5000)
+    Server-side filters (June-2026 fix): `type` (e.g. registration_fee),
+    `source` (razorpay | upi_manual | offline_cash | unknown — resolved from
+    the linked user's `registration_source`) and `q` (name / email / member id
+    / reference substring). Previously the type filter ran CLIENT-side on a
+    20-row page, which made the "Registration fee revenue" screen show only
+    the handful of matching rows that happened to be in the latest page.
 
-    # Build a one-shot user_id → name map to avoid N+1 lookups
-    user_ids = {t.get("user_id") for t in items if t.get("user_id")}
-    users_map: Dict[str, str] = {}
-    if user_ids:
-        async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0, "id": 1, "name": 1, "email": 1, "referral_code": 1}):
-            users_map[u["id"]] = u
+    Pagination opt-in via limit (1..200) + offset.
+    Each row is enriched with `user_name`, `registration_source`, and a SHORT
+    trackable `short_ref` (REG-XXXXXX / GST-XXXXXX / …).
+    """
+    match: Dict[str, Any] = {}
+    if not include_pending:
+        match["status"] = {"$nin": ["created", "failed"]}
+    if type:
+        match["type"] = type
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": match},
+        {"$sort": {"created_at": -1}},
+        {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "_u"}},
+        {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {
+            "_src": {"$ifNull": ["$_u.registration_source", {"$ifNull": ["$source", "unknown"]}]},
+        }},
+    ]
+    if source:
+        if source == "unknown":
+            pipeline.append({"$match": {"_src": {"$nin": ["razorpay", "upi_manual", "offline_cash"]}}})
+        else:
+            pipeline.append({"$match": {"_src": source}})
+    if q and q.strip():
+        import re as _re
+        safe = _re.escape(q.strip())
+        rx = {"$regex": safe, "$options": "i"}
+        pipeline.append({"$match": {"$or": [
+            {"_u.name": rx}, {"_u.email": rx}, {"_u.phone": rx}, {"_u.referral_code": rx},
+            {"reference_number": rx}, {"razorpay_payment_id": rx}, {"description": rx},
+        ]}})
+
+    page = min(limit, 200) if limit and limit > 0 else 5000
+    if limit and limit > 0 and offset:
+        pipeline.append({"$skip": max(0, offset)})
+    pipeline.append({"$limit": page})
+
+    rows = await db.transactions.aggregate(pipeline, allowDiskUse=True).to_list(page)
 
     enriched = []
-    for t in items:
-        u = users_map.get(t.get("user_id") or "", {})
+    for t in rows:
+        t.pop("_id", None)
+        u = t.pop("_u", None) or {}
+        src = t.pop("_src", None) or "unknown"
+        if src not in REGISTRATION_SOURCES:
+            src = "unknown"
         ref = (
             t.get("reference_number")
             or t.get("razorpay_payment_id")
@@ -2578,7 +2689,8 @@ async def admin_transactions(
                 level_str = f" · Level {int(t['level'])}"
             except Exception:
                 pass
-        ref_str = f" · Ref {ref}" if ref else ""
+        short_ref = _short_txn_ref(t)
+        ref_str = f" · Ref {short_ref}"
         # Status label
         status_lbl = (t.get("status") or "").upper()
         rich = f"{type_human}{level_str} · ₹{abs(float(t.get('amount') or 0)):.2f} · {actor}{ref_str} · {status_lbl}"
@@ -2586,12 +2698,65 @@ async def admin_transactions(
             **t,
             "user_name": u.get("name"),
             "user_email": u.get("email"),
+            "user_phone": u.get("phone"),
             "user_referral_code": u.get("referral_code"),
+            "registration_source": src,
             "reference_number": ref,
+            "short_ref": short_ref,
             "description": existing_desc or rich,
             "invoice_line": rich,  # Always populated, even when description exists
         })
     return enriched
+
+
+@api_router.get("/admin/transactions/summary")
+async def admin_transactions_summary(
+    _: Dict[str, Any] = Depends(require_admin),
+    type: Optional[str] = None,
+    include_pending: bool = False,
+    q: Optional[str] = None,
+):
+    """Totals + per-source split for the whole filtered result set (NOT just
+    the loaded page). Powers the category tabs on the Registration-fee
+    revenue screen so the counts/amounts are always the true DB figures.
+    """
+    match: Dict[str, Any] = {}
+    if not include_pending:
+        match["status"] = {"$nin": ["created", "failed"]}
+    if type:
+        match["type"] = type
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": match},
+        {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "_u"}},
+        {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {
+            "_src": {"$ifNull": ["$_u.registration_source", {"$ifNull": ["$source", "unknown"]}]},
+        }},
+    ]
+    if q and q.strip():
+        import re as _re
+        safe = _re.escape(q.strip())
+        rx = {"$regex": safe, "$options": "i"}
+        pipeline.append({"$match": {"$or": [
+            {"_u.name": rx}, {"_u.email": rx}, {"_u.phone": rx}, {"_u.referral_code": rx},
+            {"reference_number": rx}, {"razorpay_payment_id": rx}, {"description": rx},
+        ]}})
+    pipeline.append({"$group": {"_id": "$_src", "count": {"$sum": 1}, "amount": {"$sum": "$amount"}}})
+    rows = await db.transactions.aggregate(pipeline, allowDiskUse=True).to_list(50)
+
+    by_source: Dict[str, Dict[str, Any]] = {s: {"count": 0, "amount": 0.0} for s in REGISTRATION_SOURCES}
+    total_count, total_amount = 0, 0.0
+    for r in rows:
+        key = r["_id"] if r["_id"] in REGISTRATION_SOURCES else "unknown"
+        by_source[key]["count"] += int(r.get("count") or 0)
+        by_source[key]["amount"] = round(by_source[key]["amount"] + float(r.get("amount") or 0), 2)
+        total_count += int(r.get("count") or 0)
+        total_amount += float(r.get("amount") or 0)
+    return {
+        "type": type,
+        "total": {"count": total_count, "amount": round(total_amount, 2)},
+        "by_source": by_source,
+    }
 
 
 @api_router.get("/admin/stats")
@@ -2902,6 +3067,25 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot demote the last admin")
     await db.users.update_one({"id": user_id}, {"$set": update})
+    # ── "Admin Approved" toggle (June-2026) ───────────────────────────
+    # Renamed from "Registration paid" in the UI. Flipping it ON approves
+    # the account ONLY — it must NEVER move money or credit the upline.
+    # We stamp `commission_triggered=True` so no later flow can fire the
+    # L1..L10 cascade for this manually-approved account, and we do NOT
+    # write a registration_fee revenue row (no money was received).
+    if update.get("registration_paid") is True and not target.get("registration_paid"):
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {
+                "commission_triggered": True,
+                "admin_approved_only": True,
+                "admin_approved_at": now_utc().isoformat(),
+                "admin_approved_by": admin.get("email") or admin.get("id"),
+            }},
+        )
+        await _audit_log(admin, "user.admin_approved", "user", user_id, {
+            "note": "Admin Approved toggle — no referral commission, no revenue row",
+        })
     fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     await _create_notification(user_id, "account", "Account updated", "Your account details were updated by admin.")
     if sensitive_fields & set(update.keys()):
@@ -4681,6 +4865,8 @@ async def admin_create_user(
                 "id": str(uuid.uuid4()),
                 "user_id": admin["id"],  # GST entry belongs on the admin/system wallet ledger
                 "type": "gst_collected",
+                "gst_kind": "registration_entry",
+                "related_signup_id": user_id,
                 "amount": registration_gst,
                 "status": "success",
                 "description": f"GST {int(REFERRAL_GST_PCT)}% on registration fee · offline · {payload.name}",
@@ -6270,15 +6456,91 @@ def _to_csv(rows: List[Dict[str, Any]], fields: List[str]) -> str:
     writer = csv.writer(buf)
     writer.writerow(fields)
     for r in rows:
-        writer.writerow([str(r.get(f, "")) for f in fields])
+        writer.writerow(["" if r.get(f) is None else str(r.get(f)) for f in fields])
     return buf.getvalue()
 
 
 @api_router.get("/admin/export/{kind}")
-async def admin_export(kind: str, admin: Dict[str, Any] = Depends(require_admin)):
+async def admin_export(
+    kind: str,
+    admin: Dict[str, Any] = Depends(require_admin),
+    source: Optional[str] = None,
+):
     if kind == "users":
-        rows = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(10000)
-        fields = ["id", "name", "email", "phone", "role", "referral_code", "referred_by", "wallet_balance", "total_earned", "registration_paid", "is_blocked", "kyc_status", "created_at"]
+        rows = await db.users.find(
+            _users_source_query(source), {"_id": 0, "password_hash": 0},
+        ).sort("created_at", -1).to_list(20000)
+        # Human-readable join source + approval columns (June-2026 request).
+        SRC_LABEL = {
+            "razorpay": "Razorpay gateway",
+            "upi_manual": "UPI manual transfer",
+            "offline_cash": "Offline / cash",
+        }
+        for r in rows:
+            paid = bool(r.get("registration_paid"))
+            src = r.get("registration_source")
+            r["join_source"] = SRC_LABEL.get(src or "", "Unknown source") if paid else "Not paid yet"
+            r["admin_approved"] = "Yes" if paid else "No"
+        fields = [
+            "id", "name", "email", "phone", "role", "referral_code", "referred_by",
+            "join_source", "admin_approved", "approval_status", "paid_at",
+            "direct_referrals_count", "wallet_balance", "total_earned",
+            "upi_id", "bank_account", "ifsc", "account_holder",
+            "is_blocked", "kyc_status", "created_at",
+        ]
+    elif kind in ("registration-fees", "registration_fees"):
+        # Full Registration-fee revenue list (all sources or one category).
+        match: Dict[str, Any] = {
+            "type": "registration_fee",
+            "status": {"$nin": ["created", "failed"]},
+        }
+        pipeline: List[Dict[str, Any]] = [
+            {"$match": match},
+            {"$sort": {"created_at": -1}},
+            {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "_u"}},
+            {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+            {"$addFields": {"_src": {"$ifNull": ["$_u.registration_source", {"$ifNull": ["$source", "unknown"]}]}}},
+        ]
+        if source and source not in ("all",):
+            if source == "unknown":
+                pipeline.append({"$match": {"_src": {"$nin": ["razorpay", "upi_manual", "offline_cash"]}}})
+            else:
+                pipeline.append({"$match": {"_src": source}})
+        pipeline.append({"$limit": 20000})
+        raw = await db.transactions.aggregate(pipeline, allowDiskUse=True).to_list(20000)
+        SRC_LABEL = {
+            "razorpay": "Razorpay gateway",
+            "upi_manual": "UPI manual transfer",
+            "offline_cash": "Offline / cash",
+        }
+        rows = []
+        for t in raw:
+            u = t.get("_u") or {}
+            gross = float(t.get("amount") or 0)
+            gst = round(gross * (REFERRAL_GST_PCT / (100.0 + REFERRAL_GST_PCT)), 2)
+            rows.append({
+                "reference": _short_txn_ref(t),
+                "paid_on": t.get("paid_at") or t.get("created_at"),
+                "name": u.get("name"),
+                "member_id": u.get("referral_code"),
+                "email": u.get("email"),
+                "phone": u.get("phone"),
+                "join_source": SRC_LABEL.get(t.get("_src") or "", "Unknown source"),
+                "amount": f"{gross:.2f}",
+                "gst_18_inclusive": f"{gst:.2f}",
+                "net_excl_gst": f"{round(gross - gst, 2):.2f}",
+                "status": t.get("status"),
+                "razorpay_payment_id": t.get("razorpay_payment_id") or "",
+                "razorpay_order_id": t.get("razorpay_order_id") or "",
+                "utr_bank_ref": t.get("reference_number") or u.get("razorpay_utr") or "",
+                "sponsor_code": u.get("referred_by") or "",
+                "description": t.get("description") or "",
+            })
+        fields = [
+            "reference", "paid_on", "name", "member_id", "email", "phone", "join_source",
+            "amount", "gst_18_inclusive", "net_excl_gst", "status",
+            "razorpay_payment_id", "razorpay_order_id", "utr_bank_ref", "sponsor_code", "description",
+        ]
     elif kind == "transactions":
         rows = await db.transactions.find({}, {"_id": 0}).to_list(10000)
         fields = ["id", "user_id", "type", "amount", "status", "description", "created_at"]
