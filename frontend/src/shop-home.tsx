@@ -170,7 +170,10 @@ export function ShopHome({
   // controller. Previously search results used a flashier card with invented
   // discount/rating/review numbers and NO add button, so nothing could be
   // added to the cart from a search.
-  const { cartQty, addedFlash, addToCart, decrement } = useShopCart();
+  // Jun 2026 — use the hook's OWN live count for the header badge. The
+  // `cartCount` prop comes from the Shop tab, which only re-fetches on tab
+  // focus, so the badge stayed stale right after an in-block "+" tap.
+  const { cartCount: liveCartCount, cartQty, addedFlash, addToCart, decrement } = useShopCart();
 
   // ── Delivery address (live reverse-geocoded from user coords) ─────────
   // Jul 2026 — Shop is now LOCATION-FIRST.  We require GPS on mount and
@@ -549,8 +552,8 @@ export function ShopHome({
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Feather name="shopping-cart" size={19} color={colors.primaryFg} />
-              {cartCount > 0 ? (
-                <View style={[styles.iconBadge, { backgroundColor: "#F59E0B" }]}><Text style={styles.iconBadgeText}>{cartCount > 9 ? "9+" : cartCount}</Text></View>
+              {Math.max(liveCartCount, cartCount) > 0 ? (
+                <View style={[styles.iconBadge, { backgroundColor: "#F59E0B" }]}><Text style={styles.iconBadgeText}>{Math.max(liveCartCount, cartCount) > 9 ? "9+" : Math.max(liveCartCount, cartCount)}</Text></View>
               ) : null}
             </TouchableOpacity>
           </View>
@@ -919,8 +922,13 @@ export function ShopHome({
               // Now routed through the same cart controller as every other
               // product card.
               onAddToCart={(id) => {
+                // Jun 2026 BUGFIX — the "+" on a layout-block card did
+                // NOTHING when that product wasn't inside the screen's own
+                // (location-limited) `products` list: `find` returned
+                // undefined and we silently bailed. Cart add only needs the
+                // id, so fall back to a stub.
                 const p = products.find((x) => x.id === id);
-                if (p) addToCart(p);
+                addToCart(p || ({ id, name: "Item" } as any));
               }}
               onBlocksResolved={setLayoutBlockCount}
             />

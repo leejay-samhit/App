@@ -261,6 +261,9 @@ type ApiCategory = {
   color: string;
   sort_order: number;
   active: boolean;
+  /** Hierarchy — main categories have depth 0 / no parent. */
+  depth?: number;
+  parent_id?: string | null;
 };
 
 function CategoryCirclesBlock({
@@ -312,15 +315,33 @@ function CategoryCirclesBlock({
   //      with "everything else" without repeating.
   const explicit = Array.isArray(block.category_ids) && block.category_ids.length > 0;
   const filteredCats = (apiCats || []).filter((c) => {
+    // Jun 2026 — MAIN categories only. Sub-categories used to appear as
+    // circles too, so the navigator was a long list of leaf labels the
+    // customer had no context for. They're still reachable from inside
+    // their parent category screen.
+    const depth = Number((c as any).depth || 0);
+    const isMain = depth === 0 && !(c as any).parent_id;
+    if (!isMain) return false;
     if (explicit) return (block.category_ids as string[]).includes(c.id);
     if (excludeCategoryIds && excludeCategoryIds.has(c.id)) return false;
     return true;
   });
 
+  // Jun 2026 — PER-BLOCK image override.
+  // The admin can give a category a different picture inside THIS block
+  // without touching the master image in /admin/shop-categories (so the
+  // same category can be merchandised differently on Home vs a campaign
+  // block). Overrides live in `block.items` keyed by category name.
+  const overrideByName = new Map<string, string>();
+  (block.items || []).forEach((it) => {
+    const k = (it.label || "").trim().toLowerCase();
+    if (k && it.image_data_url) overrideByName.set(k, it.image_data_url);
+  });
+
   // Build a unified items list: prefer API categories.
   const apiItems = filteredCats.map<LayoutItem & { _pack?: string; _icon?: string }>((c) => ({
     label: c.name,
-    image_data_url: c.image_url || "",
+    image_data_url: overrideByName.get(c.name.trim().toLowerCase()) || c.image_url || "",
     color: c.color,
     link_type: "category" as const,
     link_value: c.name,
@@ -491,6 +512,12 @@ function FlashSaleBlock({
 }: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void }) {
   const countdown = useCountdown(block.flash_sale_ends_at);
   const bg = block.bg_color || "#FFF1F2";
+  // Jun 2026 — a finished flash sale used to sit on the shop home showing
+  // "Sale ended", which is dead space that hurts conversion. Once the timer
+  // runs out the whole block disappears from the customer's shop (the block
+  // is NOT deleted server-side, so the admin can simply set a new end time
+  // and it comes straight back).
+  if (countdown?.expired) return null;
   return (
     <View style={[styles.flashWrap, { backgroundColor: bg }]}>
       <View style={styles.flashHeader}>
@@ -511,8 +538,6 @@ function FlashSaleBlock({
             <Text style={styles.flashTimerSep}>:</Text>
             <View style={styles.flashTimerBox}><Text style={styles.flashTimerText}>{String(countdown.s).padStart(2, "0")}</Text></View>
           </View>
-        ) : countdown?.expired ? (
-          <Text style={styles.flashEnded}>Sale ended</Text>
         ) : null}
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
@@ -939,7 +964,8 @@ function SpotlightBlock({
 
       <TouchableOpacity
         style={styles.spotHeader}
-        activeOpacity={0.85}
+        activeOpacity={target ? 0.85 : 1}
+        disabled={!target}
         onPress={() => onViewAll?.(target)}
         testID={`spotlight-open-${block.id}`}
       >
@@ -958,12 +984,17 @@ function SpotlightBlock({
         >
           {block.title || "Featured"}
         </Text>
-        <View style={[styles.spotCta, { backgroundColor: block.button_color || "#fff" }]}>
-          <Text style={[styles.spotCtaText, { color: block.button_text_color || colors.primary }]}>
-            {block.cta_label || "View more"}
-          </Text>
-          <Feather name="arrow-right" size={13} color={block.button_text_color || colors.primary} />
-        </View>
+        {/* The CTA only appears when the admin actually set a "View more"
+            target — otherwise it looked broken (tap did nothing because the
+            customer is already on the shop home). */}
+        {target ? (
+          <View style={[styles.spotCta, { backgroundColor: block.button_color || "#fff" }]}>
+            <Text style={[styles.spotCtaText, { color: block.button_text_color || colors.primary }]}>
+              {block.cta_label || "View more"}
+            </Text>
+            <Feather name="arrow-right" size={13} color={block.button_text_color || colors.primary} />
+          </View>
+        ) : null}
       </TouchableOpacity>
 
       {strip.length > 0 ? (
@@ -1408,7 +1439,6 @@ const styles = StyleSheet.create({
   flashTimerBox: { backgroundColor: "#111827", paddingHorizontal: 6, paddingVertical: 3, borderRadius: 6, minWidth: 28, alignItems: "center" },
   flashTimerText: { color: "#fff", fontSize: 12, fontWeight: "900", letterSpacing: 0.4 },
   flashTimerSep: { color: "#111827", fontWeight: "900" },
-  flashEnded: { fontSize: 11, fontWeight: "800", color: colors.textMuted, fontStyle: "italic" },
   // Flash sale card — Jun 2026: 132 dp (was 110) so the photo actually
   // sells the discount on a 6-inch phone.
   flashCard: { width: 132, backgroundColor: "#fff", borderRadius: SHOP_CARD_RADIUS, overflow: "hidden" },

@@ -572,6 +572,23 @@ export function RichProductEditor({
     setCustomCategory(!!e.category && !isPresetCat(e.category));
   }, [visible, existing?.id]);
 
+  // Jun 2026 — Cover picker is now MULTI-select.
+  // Owner report: "vendor can only select 1 image for the main photo; if
+  // they choose 5, put the rest in the gallery — and the picked image
+  // doesn't show until the form is closed and reopened."
+  //   • First picked photo becomes the cover.
+  //   • Every extra photo is appended to the gallery (max 10 total).
+  const pickCoverAndGallery = async () => {
+    const { pickAndFitImages } = await import("./image-fitter");
+    const room = Math.max(1, 11 - galleryImages.length);
+    const picked = await pickAndFitImages("product_image", room);
+    if (!picked.length) return;
+    setImageUrl(picked[0]);
+    if (picked.length > 1) {
+      setGalleryImages((prev) => [...prev, ...picked.slice(1)].slice(0, 10));
+    }
+  };
+
   const onPickCover = async () => {
     // June 2026 — allow the vendor to either take a fresh photo with the
     // camera OR pick one from the gallery.  Previously only gallery was
@@ -581,8 +598,7 @@ export function RichProductEditor({
       // Web has no reliable camera capture — go straight to gallery.
       setPicking(true);
       try {
-        const data = await pickAndCompressImage({ aspect: [4, 3], width: 900 });
-        if (data) setImageUrl(data);
+        await pickCoverAndGallery();
       } catch (e) {
         Alert.alert("Image pick failed", formatApiError(e));
       } finally { setPicking(false); }
@@ -626,8 +642,7 @@ export function RichProductEditor({
           onPress: async () => {
             setPicking(true);
             try {
-              const data = await pickAndCompressImage({ aspect: [4, 3], width: 900 });
-              if (data) setImageUrl(data);
+              await pickCoverAndGallery();
             } catch (e) {
               Alert.alert("Image pick failed", formatApiError(e));
             } finally { setPicking(false); }

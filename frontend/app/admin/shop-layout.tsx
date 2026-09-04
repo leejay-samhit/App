@@ -752,6 +752,7 @@ function BlockFormModal({
   const [shopCats, setShopCats] = useState<Array<{
     id: string; name: string; image_url?: string | null;
     color: string; icon_pack: string; icon_name: string; active: boolean;
+    depth?: number; parent_id?: string | null;
   }>>([]);
   // UI
   const [saving, setSaving] = useState(false);
@@ -869,6 +870,28 @@ function BlockFormModal({
 
   const usesItems = ["banner_slider", "brand_slider", "offer_cards"].includes(type);
   const usesDynamicCategories = type === "category_circles";
+  // Jun 2026 — Category Circles are a MAIN-category navigator only.
+  const mainShopCats = useMemo(
+    () => shopCats.filter((c) => Number(c.depth || 0) === 0 && !c.parent_id),
+    [shopCats],
+  );
+  // Per-block image override, stored in `items` keyed by category name, so
+  // the master image in /admin/shop-categories is never touched.
+  const circleOverride = (name: string) =>
+    (items.find((it) => (it.label || "").trim().toLowerCase() === name.trim().toLowerCase())?.image_data_url) || "";
+  const setCircleOverride = (name: string, url: string) => {
+    setItems((prev) => {
+      const idx = prev.findIndex((it) => (it.label || "").trim().toLowerCase() === name.trim().toLowerCase());
+      if (idx >= 0) {
+        const n = [...prev];
+        if (url) n[idx] = { ...n[idx], image_data_url: url };
+        else n.splice(idx, 1);
+        return n;
+      }
+      if (!url) return prev;
+      return [...prev, { label: name, subtitle: "", image_data_url: url, link_type: "category", link_value: name, color: "" }];
+    });
+  };
   const usesProducts = ["product_grid", "horizontal_slider", "flash_sale", "spotlight"].includes(type);
   const usesSingleProduct = type === "content_box" || type === "background";
   const usesImage = type === "background" || type === "spotlight";
@@ -916,7 +939,8 @@ function BlockFormModal({
         data_source: usesProducts ? dataSource : "manual",
         product_count: usesProducts ? Math.max(1, Math.min(500, parseInt(productCount, 10) || 10)) : 10,
         category_filter: usesProducts ? categoryFilter : "",
-        items: usesItems ? items : [],
+        // category_circles reuses `items` to carry per-block image overrides.
+        items: (usesItems || type === "category_circles") ? items : [],
         flash_sale_ends_at: type === "flash_sale" ? flashEndsAt : "",
         products_per_row: type === "product_grid" ? Math.max(1, Math.min(4, parseInt(productsPerRow, 10) || 2)) : 2,
         show_view_all: usesViewMore ? showViewAll : false,
@@ -1067,16 +1091,16 @@ function BlockFormModal({
                   <Text style={styles.dynamicCatTitle}>Which categories in this circle?</Text>
                 </View>
                 <Text style={styles.dynamicCatBody}>
-                  Tap categories below to include them.{"\n"}
+                  Tap categories below to include them. Only MAIN categories appear as circles — sub-categories stay inside their parent screen.{"\n"}
                   <Text style={{ fontWeight: "800" }}>Leave empty</Text> to auto-show every category that isn&apos;t already used in another circle block on this scope.
                 </Text>
 
                 {/* Multi-select grid of active shop_categories */}
-                {shopCats.length === 0 ? (
+                {mainShopCats.length === 0 ? (
                   <Text style={[styles.hint, { marginTop: 8 }]}>Loading categories…</Text>
                 ) : (
                   <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                    {shopCats.map((c) => {
+                    {mainShopCats.map((c) => {
                       const isSelected = categoryIds.includes(c.id);
                       const isInactive = !c.active;
                       return (
@@ -1113,6 +1137,44 @@ function BlockFormModal({
                     })}
                   </View>
                 )}
+
+                {/* Jun 2026 — Per-block image override for the SELECTED
+                    categories. Changing it here only affects THIS block;
+                    /admin/shop-categories keeps the master image. */}
+                {categoryIds.length > 0 ? (
+                  <View style={{ marginTop: 12, gap: 8 }}>
+                    <Text style={styles.dynamicCatTitle}>Image for this block only</Text>
+                    {mainShopCats.filter((c) => categoryIds.includes(c.id)).map((c) => {
+                      const ov = circleOverride(c.name);
+                      return (
+                        <View key={`ov-${c.id}`} style={styles.ovRow}>
+                          <TouchableOpacity
+                            onPress={() => pickImage((url) => setCircleOverride(c.name, url), "category_circles", "cover")}
+                            style={styles.ovThumb}
+                            testID={`circle-img-${c.id}`}
+                          >
+                            {ov || c.image_url ? (
+                              <Image source={{ uri: ov || (c.image_url as string) }} style={{ width: "100%", height: "100%", borderRadius: 8 }} resizeMode="cover" />
+                            ) : (
+                              <Feather name="image" size={14} color={colors.textMuted} />
+                            )}
+                          </TouchableOpacity>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={styles.ovName} numberOfLines={1}>{c.name}</Text>
+                            <Text style={styles.ovHint} numberOfLines={1}>
+                              {ov ? "Custom image for this block" : "Using the main shop image — tap to change"}
+                            </Text>
+                          </View>
+                          {ov ? (
+                            <TouchableOpacity onPress={() => setCircleOverride(c.name, "")} style={styles.actionMicro} testID={`circle-img-reset-${c.id}`}>
+                              <Feather name="rotate-ccw" size={12} color={colors.textMain} />
+                            </TouchableOpacity>
+                          ) : null}
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : null}
 
                 {/* Summary + shortcuts */}
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
@@ -1844,6 +1906,18 @@ const styles = StyleSheet.create({
     minHeight: 56,
   },
   pickThumb: { width: 40, height: 40, borderRadius: 8, backgroundColor: colors.surfaceMuted },
+  // Category-circle per-block image override rows
+  ovRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    backgroundColor: colors.surface, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.border, padding: 8, minHeight: 56,
+  },
+  ovThumb: {
+    width: 40, height: 40, borderRadius: 8, backgroundColor: colors.surfaceMuted,
+    alignItems: "center", justifyContent: "center",
+  },
+  ovName: { fontSize: 12.5, fontWeight: "800", color: colors.textMain },
+  ovHint: { fontSize: 10.5, color: colors.textMuted, marginTop: 2 },
   pickMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   productRowText: { fontSize: 14, fontWeight: "700", color: colors.textMain },
   // Category-circles "interlinked" info banner shown in the form for the

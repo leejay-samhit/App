@@ -535,7 +535,18 @@ async def list_products_by_source(
 
     q: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
     if category:
-        q["category"] = category
+        # Jun 2026 BUGFIX — the admin's category picker lists the whole
+        # hierarchy, so a Shop-Layout block scoped to a SUB-category
+        # ("Vegetables", "Mobiles") matched nothing here: we only compared
+        # the top-level `category` field. Now we match either level, and
+        # case-insensitively, because vendors type these labels by hand.
+        import re as _re
+        rx = {"$regex": f"^{_re.escape(category)}$", "$options": "i"}
+        q = {"$and": [q, {"$or": [
+            {"category": rx},
+            {"sub_category": rx},
+            {"subcategory": rx},
+        ]}]}
 
     # Jul 2026 — apply vendor-in-zone filter identical to /products
     if have_pincode or have_coords:

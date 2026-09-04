@@ -110,7 +110,18 @@ export default function VendorDashboard() {
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
 
   const onAddProduct = () => { setEditing({ id: "", name: "", price: 0, stock: 100, image_url: "", description: "", category: "", is_published: true }); setEditorOpen(true); };
-  const onEditProduct = (p: Product) => { setEditing({ ...p }); setEditorOpen(true); };
+  const onEditProduct = async (p: Product) => {
+    // Jun 2026 — the product LIST is now slim (no base64 cover, no gallery)
+    // so the dashboard loads fast. Pull the full document before opening the
+    // editor, otherwise the vendor would see an empty cover / gallery and
+    // wipe their photos on save.
+    setEditing({ ...p });
+    setEditorOpen(true);
+    try {
+      const r = await api.get<any>(`/vendor/me/products/${p.id}`);
+      if (r.data?.id) setEditing(r.data);
+    } catch { /* keep the slim row — cover shows as the thumbnail URL */ }
+  };
 
   const onDeleteProduct = (p: Product) => {
     Alert.alert("Delete product?", `\"${p.name}\" will be removed permanently.`, [

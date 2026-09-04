@@ -293,8 +293,10 @@ export default function ShopCategoryScreen() {
           // Jun 2026 — Add buttons inside admin layout blocks were dead here
           // (the prop was never passed). Wired to the shared cart controller.
           onAddToCart={(id) => {
+            // Jun 2026 BUGFIX — see shop-home: never bail when the product
+            // isn't in this screen's list; the cart only needs the id.
             const p = products.find((x) => x.id === id);
-            if (p) onAddToCart(p);
+            onAddToCart(p || ({ id, name: "Item" } as any));
           }}
         />
 

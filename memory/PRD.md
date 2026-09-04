@@ -545,3 +545,103 @@ patch had landed in the wrong function) is fixed and re-tested green.
 4. Smart-search suggestions in Add Product (item-wise unique, import price/images)
 5. Vendor POS invoice ↔ web sync, cash summary, GST & tax return
 6. Tablet (12") shop images + hero card alignment
+
+---
+
+## Jun 2026 — Phase 2 batch (iterations 62 & 63) ✅
+
+### Fixed / built
+- **Vendor product images missing in Admin bin** — root cause: `GET
+  /api/products/{id}/image` 404'd whenever `is_published` was False, and
+  vendor products are unpublished until approved. Publish gate removed.
+  Admin product list also now surfaces gallery-only products (aggregation
+  adds a `_gallery_n` count without shipping the base64 array).
+- **Gallery multi-select** — new `pickAndFitImages()` in
+  `src/image-fitter.ts`; wired into admin products + rich product editor.
+- **Product detail** — cover image now leads the gallery (was last) and
+  relative thumb URLs are resolved.
+- **Smart search** — new `GET /api/products/search-suggest` groups by
+  lower-cased product name and returns a price band + `vendor_count`.
+  Shop-home has a debounced typeahead dropdown; results still list every
+  published vendor listing.
+- **Admin Products** — new `POST /api/admin/products/publish-all`
+  (`{vendor_id?, publish}`) + "Publish all / Unpublish all" buttons with a
+  confirm modal.
+- **POS cash summary** — all POS day windows are now IST-based
+  (`_ist_day_bounds`); cash-summary adds `total_collected` + `bills`. The
+  vendor Cash screen sends the LOCAL date, not the UTC one.
+- **Tablet / 12-inch** — the fake centred "phone frame" wrapper in
+  `app/_layout.tsx` is deleted; product grid columns, layout-block
+  columns and banner height all derive from `useWindowDimensions()`.
+  Form screens (login/register) use a 560 px centred column.
+- **Product grid 1-per-row bug** — percentage basis + pixel `gap` summed
+  over 100%. All grids are now pure-percentage cells.
+
+### Shop Layout spec (owner list)
+- NEW **Spotlight** block: full-width immersive card ≈1/3 of the phone
+  screen, product chip strip, CTA that only shows when a target is set.
+- Brand slider: taps navigate, bigger tiles, label under the logo.
+- Announcement strip: leading ⚡ icon removed.
+- Product grid: Manual source only, no subtitle, no wishlist heart, shows
+  ALL manually-picked products (`product_count` no longer caps manual).
+- Horizontal slider: Manual + Category only, no subtitle, price + Add row.
+- Content box: image is now 72 % of the card.
+- Flash sale: Manual only, date+time picker with presets.
+- Multi-product picker: search, per-vendor chips, select-all/clear,
+  thumbnails. `product_count` / `product_ids` caps raised 50 → 500.
+- Category screen: dead band above the grid removed, section heading
+  added, client-side guard so only that category's blocks render.
+- Cold-cache bug: freshly fetched layout was overwritten with `[]`.
+
+## Jun 2026 — Phase 1 of the 16-item owner list (iteration 64) ✅
+
+- **Layout-block "+" never added to cart** — `products.find()` returned
+  undefined for products outside the screen's own list and we bailed. Now
+  falls back to an id-only stub. Header badge uses the live `useShopCart`
+  count so it updates instantly (mobile + tablet).
+- **Category / sub-category blocks showed no products** —
+  `/products/by-source` matched only the top-level `category` field, and
+  case-sensitively. Now matches `category` / `sub_category` /
+  `subcategory`, case-insensitive.
+- **Vendor cover image** — single-select → multi-select; first pick becomes
+  the cover, the rest append to the gallery (cap 10), preview paints
+  immediately.
+- **Admin → System Wallet Treasury** — "Add Direct-Added Money (UTR)"
+  button, its modal and `submitDeposit()` removed (never reflected in bank
+  tally / net worth).
+- **Flash sale auto-hide** — expired blocks render nothing (server doc is
+  preserved, so a new end time brings it straight back).
+- **Category Circles** — MAIN categories only; per-block image override
+  stored in `block.items` keyed by category name, so the master image in
+  /admin/shop-categories is untouched.
+- **Vendor dashboard slow + Cloudflare "could not parse response"** — root
+  cause: `GET /api/vendor/me/products` returned every base64 cover plus the
+  full `images[]` gallery (20-40 MB for 150 SKUs). List is now slim
+  (`gallery_count`, thumbnail URLs, no `images`) and a new
+  `GET /api/vendor/me/products/{id}` serves the full doc to the editor.
+
+### Verified
+`backend/tests/test_iter64_phase1_bugs.py` 10/10 + Playwright:
+cart badge 1→4 live, /cart persists, spotlight CTA → /shop-category/General,
+UTR button gone, treasury intact. Report `test_reports/iteration_64.json`.
+
+### Remaining phases (owner-approved order)
+2. Shop-Layout blocks styled for tablet; instant product-page open (no
+   white screen); swipe polish (no green splash flash, lighter gesture,
+   category highlight follows the screen).
+3. Product variants — Fashion sizes with the correct chart per product type
+   (shoes/slippers UK-EU numbers, apparel S-XXL, inches where relevant) with
+   per-size stock/price; mobiles RAM/ROM with price deltas.
+4. Backup & restore — vendor-only Products export/import (clone a shop's
+   catalogue into another vendor login, then edit qty/price/delete), plus a
+   full A-to-Z app backup file (users, products, sales, invoices, chat,
+   service, wallet maths) with wipe-replace / merge chosen at upload.
+5. Maps & server — vendor Delivery Radius edit not saving; customer
+   "Deliver to" map missing pincodes the vendor radius map captures (make
+   both use one engine).
+
+### Notes for the next agent
+- Owner's `lee@gmail.com` vendor login does NOT exist in the preview DB
+  (production only). Use `testvendor@test.com / Test@1234`.
+- Owner runs a separate PRODUCTION deployment — always ask whether a
+  reported bug is in PREVIEW or PRODUCTION.

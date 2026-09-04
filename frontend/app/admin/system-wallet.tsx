@@ -323,13 +323,7 @@ export default function AdminSystemWallet() {
   const [bucketSubtotal, setBucketSubtotal] = useState<number>(0);
   const [bucketLoading, setBucketLoading] = useState(false);
 
-  // Deposit modal state (Direct-Added bucket)
-  const [depositOpen, setDepositOpen] = useState(false);
-  const [amount, setAmount] = useState("");
-  const [utr, setUtr] = useState("");
-  const [bankRef, setBankRef] = useState("");
-  const [remarks, setRemarks] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  // (Deposit modal state removed Jun 2026 with the UTR flow.)
 
   // Account-tally withdraw modal — debits the System Wallet when admin uses
   // platform money for personal/business reasons. Properly audit-logged.
@@ -422,24 +416,8 @@ export default function AdminSystemWallet() {
 
   const runReconcile = useCallback(() => { /* deprecated 2026-06-01 */ }, []);
 
-  const submitDeposit = async () => {    const amt = Number(amount);
-    if (!amt || amt <= 0) return Alert.alert("Amount required");
-    if (!utr.trim() || utr.trim().length < 4) return Alert.alert("UTR / reference number required");
-    setSubmitting(true);
-    try {
-      await api.post("/admin/system-wallet/deposit", {
-        amount: amt,
-        utr: utr.trim(),
-        bank_ref: bankRef.trim() || null,
-        remarks: remarks.trim() || null,
-      });
-      setDepositOpen(false);
-      setAmount(""); setUtr(""); setBankRef(""); setRemarks("");
-      await load();
-      Alert.alert("Deposited", `₹${amt} added to Direct-Added bucket.`);
-    } catch (e) { Alert.alert("Failed", formatApiError(e)); }
-    finally { setSubmitting(false); }
-  };
+  // submitDeposit() removed Jun 2026 along with the "Add Direct-Added
+  // Money (UTR)" button and its modal.
 
   const activeBucketMeta = useMemo(
     () => BUCKETS.find((x) => x.key === activeBucket) || null,
@@ -676,10 +654,12 @@ export default function AdminSystemWallet() {
         ) : null}
 
 
-        <TouchableOpacity style={styles.depositBtn} onPress={() => setDepositOpen(true)}>
-          <Feather name="plus-circle" size={18} color={colors.primaryFg} />
-          <Text style={styles.depositBtnText}>Add Direct-Added Money (UTR)</Text>
-        </TouchableOpacity>
+        {/* Jun 2026 — "Add Direct-Added Money (UTR)" button REMOVED per
+            owner request: money posted from here never reflected in the
+            bank-balance tally or the company net-worth figure, so it made
+            the Treasury numbers untrustworthy. Nothing else on this screen
+            changed; the Direct-Added bucket itself still reports whatever
+            was posted before. */}
         <Text style={styles.helpText}>Only Direct-Added funds can be posted to user wallets.</Text>
 
         <TouchableOpacity
@@ -835,28 +815,9 @@ export default function AdminSystemWallet() {
         </View>
       </Modal>
 
-      {/* ───────── UTR Deposit modal ───────── */}
-      <Modal visible={depositOpen} transparent animationType="slide" onRequestClose={() => setDepositOpen(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.modalBg}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>Add Direct-Added Money</Text>
-            <Text style={styles.modalSub}>UTR-verified bank deposit. Goes to Direct-Added bucket; from there you can credit user wallets.</Text>
-            <Text style={styles.label}>Amount (₹)</Text>
-            <TextInput style={styles.input} value={amount} onChangeText={setAmount} placeholder="10000" placeholderTextColor={colors.textMuted} keyboardType="numeric" />
-            <Text style={styles.label}>UTR / Bank reference</Text>
-            <TextInput style={styles.input} value={utr} onChangeText={setUtr} placeholder="e.g. UTR123456789012" placeholderTextColor={colors.textMuted} autoCapitalize="characters" />
-            <Text style={styles.label}>Bank ref (optional)</Text>
-            <TextInput style={styles.input} value={bankRef} onChangeText={setBankRef} placeholder="HDFC IMPS" placeholderTextColor={colors.textMuted} />
-            <Text style={styles.label}>Remarks (optional)</Text>
-            <TextInput style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]} value={remarks} onChangeText={setRemarks} placeholder="Source / purpose" placeholderTextColor={colors.textMuted} multiline />
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
-              <TouchableOpacity style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} onPress={() => setDepositOpen(false)}><Text style={{ fontWeight: "700", color: colors.textMain }}>Cancel</Text></TouchableOpacity>
-              <TouchableOpacity style={[styles.modalBtn, { backgroundColor: colors.primary }, submitting && { opacity: 0.6 }]} onPress={submitDeposit} disabled={submitting}>{submitting ? <ActivityIndicator color="#fff" /> : <Text style={{ fontWeight: "800", color: "#fff" }}>Deposit</Text>}</TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+      {/* UTR Deposit modal removed Jun 2026 together with its trigger
+         button — direct-added money never reflected in the bank tally or
+         net worth, so the whole flow is gone. */}
 
       {/* ───────── Account-Tally Withdraw modal ───────── */}
       <Modal visible={tallyOpen} transparent animationType="slide" onRequestClose={() => setTallyOpen(false)}>

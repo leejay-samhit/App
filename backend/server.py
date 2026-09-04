@@ -8640,8 +8640,46 @@ async def vendor_my_earnings(
 
 @api_router.get("/vendor/me/products")
 async def vendor_my_products(vendor: Dict[str, Any] = Depends(require_vendor)):
-    items = await db.products.find({"vendor_id": vendor["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    """Jun 2026 — SLIM list.
+
+    This used to return every product document in full, including the
+    base64 `image_url` AND the whole `images[]` gallery. A vendor with 150
+    SKUs was therefore downloading 20-40 MB on every dashboard open, which
+    is exactly the "vendor panel loading very slow / Cloudflare could not
+    parse the response" report: the edge times out or truncates the body.
+
+    We now drop `images` entirely and swap inline base64 covers for the
+    on-demand thumbnail endpoint. The editor pulls the full document from
+    GET /vendor/me/products/{id} when it opens a product.
+    """
+    items = await db.products.aggregate([
+        {"$match": {"vendor_id": vendor["id"]}},
+        {"$sort": {"created_at": -1}},
+        {"$limit": 1000},
+        {"$addFields": {"_gallery_n": {"$size": {"$ifNull": ["$images", []]}}}},
+        {"$project": {"_id": 0, "images": 0, "image_data_url": 0}},
+    ]).to_list(1000)
+    for p in items:
+        img = p.get("image_url") or ""
+        gallery_n = int(p.pop("_gallery_n", 0) or 0)
+        p["gallery_count"] = gallery_n
+        if (isinstance(img, str) and img.startswith("data:")) or (not img and gallery_n > 0):
+            p["image_url"] = f"/api/products/{p.get('id')}/image?w=240&q=70"
+            p["has_inline_image"] = True
     return items
+
+
+@api_router.get("/vendor/me/products/{product_id}")
+async def vendor_my_product_detail(product_id: str, vendor: Dict[str, Any] = Depends(require_vendor)):
+    """Full document for ONE of the vendor's own products (cover + gallery).
+
+    Companion to the slim list above — the product editor calls this so it
+    still has the real base64 images to show and re-save.
+    """
+    doc = await db.products.find_one({"id": product_id, "vendor_id": vendor["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return doc
 
 
 @api_router.post("/vendor/me/products")
