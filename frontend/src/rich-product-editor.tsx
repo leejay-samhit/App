@@ -20,6 +20,9 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "./api";
 import { colors, radii } from "./theme";
+import {
+  VariantEditor, VariantState, emptyVariantState, variantPayload, variantStateFrom,
+} from "./variant-editor";
 import { useAuth } from "./auth";
 import { BarcodeScannerModal, type ScannerTarget } from "./barcode-scanner-modal";
 
@@ -196,6 +199,8 @@ export function RichProductEditor({
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [stock, setStock] = useState("100");
+  // Jun 2026 — size / RAM-ROM options (see src/variant-editor.tsx)
+  const [variantState, setVariantState] = useState<VariantState>(emptyVariantState);
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState("");
   const [imageUrl, setImageUrl] = useState("");
@@ -529,6 +534,7 @@ export function RichProductEditor({
     setName(existing?.name || "");
     setPrice(existing?.price ? String(existing.price) : "");
     setStock(existing?.stock != null ? String(existing.stock) : "100");
+    setVariantState(variantStateFrom(existing));
     setDescription(existing?.description || "");
     setCategory(existing?.category || "");
     setImageUrl(existing?.image_url || "");
@@ -1204,6 +1210,9 @@ export function RichProductEditor({
         image_url: imageUrl,
         description: description.trim(),
         stock: isNaN(stockN) ? 0 : stockN,
+        // Sizes / RAM-ROM. The server recomputes `stock` as the sum of the
+        // options and `price` as the cheapest buyable one.
+        ...variantPayload(variantState),
         category: category.trim() || undefined,
         brand: brand.trim(),
         sub_features: subFeatures.filter((s) => s.trim()),
@@ -1430,7 +1439,27 @@ export function RichProductEditor({
               <Text style={modalStyles.fieldLabel}>Price (₹)</Text>
               <TextInput value={price} onChangeText={setPrice} keyboardType="decimal-pad" style={modalStyles.input} testID="product-price" />
               <Text style={modalStyles.fieldLabel}>Stock</Text>
-              <TextInput value={stock} onChangeText={setStock} keyboardType="number-pad" style={modalStyles.input} testID="product-stock" />
+              <TextInput
+                value={variantState.rows.length ? String(variantState.rows.reduce((a, r) => a + (Number(r.stock) || 0), 0)) : stock}
+                onChangeText={setStock}
+                editable={variantState.rows.length === 0}
+                keyboardType="number-pad"
+                style={[modalStyles.input, variantState.rows.length > 0 && { opacity: 0.6 }]}
+                testID="product-stock"
+              />
+              {variantState.rows.length > 0 ? (
+                <Text style={sectionStyles.helpText}>
+                  Calculated from your size options below.
+                </Text>
+              ) : null}
+
+              {/* Sizes / RAM-ROM options — sits between Price/Stock and
+                  Category exactly as the owner asked. */}
+              <VariantEditor
+                value={variantState}
+                onChange={setVariantState}
+                basePrice={Number(price) || 0}
+              />
               <Text style={modalStyles.fieldLabel}>Category</Text>
               <View style={sectionStyles.chipRow}>
                 {categoryChips.map((opt) => {
@@ -2210,6 +2239,7 @@ const sectionStyles = StyleSheet.create({
   freeImgBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.primary + "08" },
   freeImgBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
   freeImgBtnHint: { fontSize: 10, color: colors.textMuted, marginLeft: "auto" },
+  helpText: { fontSize: 10.5, color: colors.textMuted, marginTop: 4, lineHeight: 15 },
   freeImgSearchBtn: { width: 48, borderRadius: 12, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
   freeImgError: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: "#FEE2E2", borderWidth: 1, borderColor: "#FCA5A5" },
   freeImgCell: { width: "31%", aspectRatio: 1, borderRadius: 10, overflow: "hidden", backgroundColor: colors.surfaceMuted, borderWidth: 2, borderColor: "transparent", position: "relative" },

@@ -684,15 +684,30 @@ function ProductGridBlock({
                       style={[styles.gridPrice, { fontSize: 15 * fontMul, flex: 1 }]}
                       numberOfLines={1}
                     >{formatINR(p.price)}</Text>
-                    <TouchableOpacity
-                      onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
-                      disabled={!inStock}
-                      style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
-                      testID={`grid-add-${p.id}`}
-                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                    >
-                      <Feather name="plus" size={14} color="#fff" />
-                    </TouchableOpacity>
+                    {/* Jun 2026 — products with sizes open the picker
+                        instead of blind-adding (the API rejects a sizeless
+                        add, which used to look like a dead button). */}
+                    {(p as any).has_variants ? (
+                      <TouchableOpacity
+                        onPress={(e: any) => { e.stopPropagation?.(); onProductPress?.(p.id); }}
+                        disabled={!inStock}
+                        style={[styles.addCartBtn, { paddingHorizontal: 9, width: undefined }, !inStock && { opacity: 0.5 }]}
+                        testID={`grid-select-${p.id}`}
+                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      >
+                        <Text style={{ color: "#fff", fontSize: 10, fontWeight: "900" }}>SELECT</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
+                        disabled={!inStock}
+                        style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
+                        testID={`grid-add-${p.id}`}
+                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      >
+                        <Feather name="plus" size={14} color="#fff" />
+                      </TouchableOpacity>
+                    )}
                   </View>
                 </View>
               </TouchableOpacity>
@@ -744,15 +759,27 @@ function HorizontalSliderBlock({
                   the strip has the same height and a 1-tap buy action. */}
               <View style={styles.hFooter}>
                 <Text style={styles.hPrice} numberOfLines={1}>{formatINR(p.price)}</Text>
-                <TouchableOpacity
-                  onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
-                  disabled={!inStock}
-                  style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
-                  testID={`hslide-add-${p.id}`}
-                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                >
-                  <Feather name="plus" size={14} color="#fff" />
-                </TouchableOpacity>
+                {(p as any).has_variants ? (
+                  <TouchableOpacity
+                    onPress={(e: any) => { e.stopPropagation?.(); onProductPress?.(p.id); }}
+                    disabled={!inStock}
+                    style={[styles.addCartBtn, { paddingHorizontal: 9, width: undefined }, !inStock && { opacity: 0.5 }]}
+                    testID={`hslide-select-${p.id}`}
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  >
+                    <Text style={{ color: "#fff", fontSize: 10, fontWeight: "900" }}>SELECT</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
+                    disabled={!inStock}
+                    style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
+                    testID={`hslide-add-${p.id}`}
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  >
+                    <Feather name="plus" size={14} color="#fff" />
+                  </TouchableOpacity>
+                )}
               </View>
             </TouchableOpacity>
           );

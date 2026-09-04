@@ -645,3 +645,71 @@ UTR button gone, treasury intact. Report `test_reports/iteration_64.json`.
   (production only). Use `testvendor@test.com / Test@1234`.
 - Owner runs a separate PRODUCTION deployment — always ask whether a
   reported bug is in PREVIEW or PRODUCTION.
+
+## Jun 2026 — Phase 3: PRODUCT VARIANTS (iteration 65) ✅
+
+Owner choices: 1a stock per variant · 2c both price modes · 3 all charts ·
+4a size required + size guide · 5 no uploaded chart image.
+
+### Data model (products)
+```
+variant_chart       "" | apparel | footwear_uk | footwear_eu | footwear_kids
+                    | waist_in | kids_age | free_size | ram_rom | custom
+variant_price_mode  "extra" (base + delta) | "absolute" (full price each)
+variants            [{id,label,sku,stock,price_extra,price_abs,price,active}]
+has_variants        bool
+base_price          the price the vendor typed (so "extra" deltas survive edits)
+stock               DERIVED = sum of active variant stock
+price               DERIVED = cheapest BUYABLE variant  → shop shows "from ₹X"
+```
+Keeping `stock` / `price` derived means every existing stock badge, low-stock
+warning, price filter, POS screen and out-of-stock query works untouched.
+
+### Backend
+- `core/variants.py` (NEW) — chart catalogue (9 charts with real measurement
+  tables), `normalize_variants` (de-dups labels, drops blanks, clamps
+  negative stock), `apply_variants_to_payload`, `find_variant`,
+  `effective_line_price`.
+- `GET /api/product-variant-charts` — server is the single source of truth so
+  app / admin / web can't drift.
+- Vendor + admin product create/update run the normaliser.
+- `GET /api/products/{id}` ships `variants[{id,label,price,stock,in_stock}]`
+  (sold-out options included, flagged) plus `variant_guide`.
+- List endpoints expose `has_variants` / `variant_count` only (no heavy array).
+- Cart rows are keyed by (user, product, variant). Adding without a size →
+  400 `variant_required` **with the option list**; sold-out → friendly 400.
+  `/cart/remove` with a variant removes one row, without removes all.
+- Checkout decrements `variants.$.stock` AND the product total in ONE
+  conditional update (oversell-proof) and rolls both back on failure. Order
+  items carry `variant_id` + `variant_label` + the variant price.
+
+### Frontend
+- `src/variant-editor.tsx` (NEW) — chart chips → price-mode chips → tap the
+  sizes you stock → per-row stock & price, with a live "customers will see
+  this size guide" preview. Sits between Stock and Category in the product
+  editor; the product Stock field becomes read-only and shows the computed sum.
+- Product page: SELECT SIZE card (sold-out struck through + untappable),
+  headline price "from ₹499" → the picked option's price, qty capped at the
+  variant's stock, Add-to-Cart blocked until a size is chosen, and a Size
+  guide sheet with the measurement table (selected row highlighted).
+- Cart: green size pill per line, variant unit price, per-variant remove.
+- Shop cards: variant products show **SELECT** (opens the picker) instead of
+  a "+" that the API would reject — on the shared card, Product Grid blocks
+  and Horizontal Slider blocks.
+
+### Verified
+`backend/tests/test_iter65_variants_phase3.py` 16/16 (incl. absolute mode,
+base-price recompute, de-dup, oversell race, rollback) + browser: size
+selector, sold-out strike, ₹549 flip, size guide, cart XL pill, SELECT card
+button, and a real COD checkout taking XL 2→0 / total 10→8 with
+`variant_label: "XL"` on the order line. Report `test_reports/iteration_65.json`.
+
+### Still to build (owner-approved order)
+- **Phase 2** — Shop-Layout blocks styled for tablet; instant product-page
+  open (no white screen); swipe polish (no green splash flash, lighter
+  gesture, category highlight follows the screen).
+- **Phase 4** — vendor-only Products export/import (clone a catalogue into
+  another vendor login, then edit qty/price/delete) + full A-to-Z app backup
+  with wipe-replace / merge chosen at upload.
+- **Phase 5** — vendor Delivery Radius edit not saving; customer "Deliver to"
+  map missing pincodes the vendor radius map captures (one shared engine).

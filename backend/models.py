@@ -93,6 +93,14 @@ class ProductCreate(BaseModel):
     serial_number: Optional[str] = ""
     imei_1: Optional[str] = ""
     imei_2: Optional[str] = ""
+    # ── Variants (Jun 2026) — size / RAM-ROM options with their own
+    # stock and price. See core/variants.py for the chart catalogue.
+    #   variant_chart      "apparel" | "footwear_uk" | "ram_rom" | ...
+    #   variant_price_mode "extra" (base + delta) | "absolute" (full price)
+    #   variants           [{id,label,sku,stock,price_extra|price_abs,active}]
+    variant_chart: Optional[str] = ""
+    variant_price_mode: Optional[str] = "extra"
+    variants: Optional[List[Dict[str, Any]]] = None
 
 
 class ProductUpdate(BaseModel):
@@ -126,6 +134,15 @@ class ProductUpdate(BaseModel):
     serial_number: Optional[str] = None
     imei_1: Optional[str] = None
     imei_2: Optional[str] = None
+
+    # ── Variants (Jun 2026) — size / RAM-ROM options with their own
+    # stock and price. See core/variants.py for the chart catalogue.
+    #   variant_chart      "apparel" | "footwear_uk" | "ram_rom" | ...
+    #   variant_price_mode "extra" (base + delta) | "absolute" (full price)
+    #   variants           [{id,label,sku,stock,price_extra|price_abs,active}]
+    variant_chart: Optional[str] = None
+    variant_price_mode: Optional[str] = None
+    variants: Optional[List[Dict[str, Any]]] = None
 
 
 class BrandingPayload(BaseModel):
@@ -294,6 +311,9 @@ class SettingsUpdate(BaseModel):
 class CartItem(BaseModel):
     product_id: str
     qty: int = Field(gt=0)
+    # Jun 2026 — which size / RAM-ROM option. Required for products that
+    # have variants; ignored for everything else.
+    variant_id: Optional[str] = None
 
 
 class CartAdjust(BaseModel):
@@ -302,10 +322,12 @@ class CartAdjust(BaseModel):
     /cart/remove for full removal."""
     product_id: str
     delta: int = Field(..., description="Non-zero integer; positive to add, negative to decrement")
+    variant_id: Optional[str] = None
 
 
 class CartRemove(BaseModel):
     product_id: str
+    variant_id: Optional[str] = None
 
 
 class KYCSubmit(BaseModel):

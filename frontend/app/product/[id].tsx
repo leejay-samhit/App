@@ -22,11 +22,19 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 
 /* ─── Types ─── */
 type StyledText = { text?: string; bold?: boolean; font_size?: number | null; align?: "left" | "center" | "right" };
+/** One size / RAM-ROM option as served by GET /api/products/{id}. */
+type VariantOpt = { id: string; label: string; price: number; stock: number; in_stock: boolean };
+
 type Product = {
   id: string; name: string; price: number; image_url?: string; image_data_url?: string;
   description?: string; stock?: number; is_in_stock?: boolean; category?: string;
   brand?: string; vendor_id?: string;
   sub_features?: string[]; images?: string[];
+  // Jun 2026 — variants
+  variants?: VariantOpt[];
+  has_variants?: boolean;
+  variant_chart?: string;
+  variant_guide?: { label: string; unit: string; columns: string[]; guide: string[][] } | null;
   price_summary?: StyledText; protection_summary?: StyledText; warranty_summary?: StyledText; delivery_summary?: StyledText;
   attrs_brand?: string; attrs_os?: string; attrs_ram?: string; attrs_cpu_model?: string; attrs_cpu_speed?: string; attrs_storage?: string;
   extra_attrs?: Record<string, string>;
@@ -55,6 +63,10 @@ export default function ProductDetailScreen() {
   const heroScrollRef = useRef<ScrollView>(null);
   const { width: windowWidth } = useWindowDimensions();
   const [qty, setQty] = useState(1);
+  // Jun 2026 — variants
+  const [variantId, setVariantId] = useState<string | null>(null);
+  const [sizeError, setSizeError] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [saved, setSaved] = useState(false);
   const [activeSpecTab, setActiveSpecTab] = useState(0);
@@ -101,7 +113,17 @@ export default function ProductDetailScreen() {
     </SafeAreaView>
   );
 
-  const inStock = product.is_in_stock ?? (product.stock || 0) > 0;
+  // ── Jun 2026 — Variants (size / RAM-ROM) ───────────────────────────────
+  // Products with options are unbuyable until the customer picks one, and
+  // the price / stock / subtotal all follow the selection.
+  const variants: VariantOpt[] = Array.isArray(product.variants) ? product.variants : [];
+  const hasVariants = variants.length > 0;
+  const selected = hasVariants ? (variants.find((v) => v.id === variantId) || null) : null;
+  const unitPrice = selected ? selected.price : product.price;
+  const maxQty = selected ? selected.stock : (product.stock || 99);
+  const inStock = hasVariants
+    ? variants.some((v) => v.in_stock)
+    : (product.is_in_stock ?? (product.stock || 0) > 0);
   // Jun 2026 fix — the COVER image (`image_url`) used to be pushed to the END
   // of the gallery, so slide 1 was a random gallery photo instead of the cover
   // the vendor chose.  Cover now leads; duplicates are de-duped; relative
@@ -119,9 +141,19 @@ export default function ProductDetailScreen() {
 
   const onAddToCart = async (alsoBuy: boolean = false) => {
     if (adding) return;
+    if (hasVariants && !selected) {
+      // Nudge instead of failing: highlight the picker and scroll to it.
+      setSizeError(true);
+      Alert.alert("Choose a size", "Please select a size before adding this item.");
+      return;
+    }
     setAdding(true);
     try {
-      await api.post("/cart/add", { product_id: product.id, qty });
+      await api.post("/cart/add", {
+        product_id: product.id,
+        qty,
+        ...(selected ? { variant_id: selected.id } : {}),
+      });
       if (alsoBuy) router.push("/checkout" as any);
       else Alert.alert("Added to cart", `${qty} × ${product.name}`, [
         { text: "Keep shopping", style: "cancel" },
@@ -306,7 +338,12 @@ export default function ProductDetailScreen() {
 
           {/* Price + rating row */}
           <View style={styles.priceRow}>
-            <Text style={styles.price}>{formatINR(product.price)}</Text>
+            {/* Jun 2026 — headline price follows the chosen size; before a
+                size is picked we show "from ₹X" (the cheapest option) so
+                the customer is never surprised at checkout. */}
+            <Text style={styles.price}>
+              {hasVariants && !selected ? `from ${formatINR(product.price)}` : formatINR(unitPrice)}
+            </Text>
             {reviewStats.total > 0 ? (
               <View style={styles.ratingChip}>
                 <Feather name="star" size={11} color="#F59E0B" />
@@ -321,6 +358,61 @@ export default function ProductDetailScreen() {
           <StyledBlock icon="award" label="WARRANTY" block={product.warranty_summary} />
           <StyledBlock icon="truck" label="ESTIMATED DELIVERY" block={product.delivery_summary} />
 
+          {/* ── Size / option picker (Jun 2026) ────────────────────────
+              Out-of-stock options are struck through and unselectable so a
+              customer can never order a size the vendor doesn't have. The
+              "Size guide" sheet shows real measurements (chest / length in
+              inches, foot length in cm) — the #1 reason shoppers abandon
+              fashion carts is fit uncertainty. */}
+          {hasVariants ? (
+            <View style={[styles.sizeCard, sizeError && !selected && { borderColor: "#DC2626" }]}>
+              <View style={styles.sizeHeadRow}>
+                <Text style={styles.qtyLabel}>
+                  {product.variant_chart === "ram_rom" ? "RAM / STORAGE" : "SELECT SIZE"}
+                </Text>
+                {product.variant_guide?.guide?.length ? (
+                  <TouchableOpacity onPress={() => setGuideOpen(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} testID="size-guide-open">
+                    <Text style={styles.sizeGuideLink}>Size guide</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+              <View style={styles.sizeWrap}>
+                {variants.map((v) => {
+                  const isSel = selected?.id === v.id;
+                  return (
+                    <TouchableOpacity
+                      key={v.id}
+                      disabled={!v.in_stock}
+                      onPress={() => { setVariantId(v.id); setQty(1); setSizeError(false); }}
+                      style={[
+                        styles.sizeChip,
+                        isSel && styles.sizeChipSel,
+                        !v.in_stock && styles.sizeChipOOS,
+                      ]}
+                      testID={`size-${v.id}`}
+                    >
+                      <Text style={[
+                        styles.sizeChipText,
+                        isSel && { color: colors.primaryFg },
+                        !v.in_stock && styles.sizeChipTextOOS,
+                      ]}>{v.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              {selected ? (
+                <Text style={styles.sizeMeta}>
+                  {formatINR(selected.price)}
+                  {selected.stock <= 5 ? `  ·  only ${selected.stock} left` : "  ·  in stock"}
+                </Text>
+              ) : (
+                <Text style={[styles.sizeMeta, sizeError && { color: "#DC2626", fontWeight: "800" }]}>
+                  {sizeError ? "Pick a size to continue" : "Pick a size to see its price and stock"}
+                </Text>
+              )}
+            </View>
+          ) : null}
+
           {/* Qty stepper */}
           {inStock ? (
             <View style={styles.qtyCard}>
@@ -328,10 +420,10 @@ export default function ProductDetailScreen() {
               <View style={styles.qtyRow}>
                 <TouchableOpacity onPress={() => setQty((q) => Math.max(1, q - 1))} style={[styles.qtyBtn, qty <= 1 && { opacity: 0.4 }]} disabled={qty <= 1}><Feather name="minus" size={16} color={colors.textMain} /></TouchableOpacity>
                 <Text style={styles.qtyText}>{qty}</Text>
-                <TouchableOpacity onPress={() => setQty((q) => Math.min(product.stock || 99, q + 1))} style={[styles.qtyBtn, qty >= (product.stock || 99) && { opacity: 0.4 }]} disabled={qty >= (product.stock || 99)}><Feather name="plus" size={16} color={colors.textMain} /></TouchableOpacity>
+                <TouchableOpacity onPress={() => setQty((q) => Math.min(maxQty || 99, q + 1))} style={[styles.qtyBtn, qty >= (maxQty || 99) && { opacity: 0.4 }]} disabled={qty >= (maxQty || 99)}><Feather name="plus" size={16} color={colors.textMain} /></TouchableOpacity>
                 <View style={{ flex: 1 }} />
                 <Text style={styles.qtySubLabel}>Subtotal</Text>
-                <Text style={styles.qtySubAmount}>{formatINR(product.price * qty)}</Text>
+                <Text style={styles.qtySubAmount}>{formatINR(unitPrice * qty)}</Text>
               </View>
             </View>
           ) : null}
@@ -501,6 +593,45 @@ export default function ProductDetailScreen() {
       </View>
 
       {/* Ask Vendor modal */}
+      {/* Size-guide sheet — real measurements so shoppers order the right
+          fit instead of guessing (Jun 2026). */}
+      <Modal visible={guideOpen} transparent animationType="slide" onRequestClose={() => setGuideOpen(false)}>
+        <Pressable style={styles.sheetOverlay} onPress={() => setGuideOpen(false)}>
+          <Pressable style={styles.guideSheet} onPress={() => {}}>
+            <View style={styles.guideHead}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.guideTitle}>Size guide</Text>
+                <Text style={styles.guideSub} numberOfLines={1}>{product.variant_guide?.label || ""}</Text>
+              </View>
+              <TouchableOpacity onPress={() => setGuideOpen(false)} style={styles.iconBtn} testID="size-guide-close">
+                <Feather name="x" size={20} color={colors.textMain} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={{ maxHeight: 420 }} contentContainerStyle={{ paddingBottom: 16 }}>
+              <View style={[styles.guideRow, styles.guideRowHead]}>
+                {(product.variant_guide?.columns || []).map((c) => (
+                  <Text key={`gc-${c}`} style={[styles.guideCell, styles.guideCellHead]} numberOfLines={2}>{c}</Text>
+                ))}
+              </View>
+              {(product.variant_guide?.guide || []).map((row, ri) => {
+                const isSel = selected && String(row[0]).toLowerCase() === selected.label.toLowerCase();
+                return (
+                  <View key={`gr-${ri}`} style={[styles.guideRow, isSel && { backgroundColor: colors.brand100 }]}>
+                    {row.map((cell, ci) => (
+                      <Text key={`gcell-${ri}-${ci}`} style={[styles.guideCell, ci === 0 && { fontWeight: "800" }]}>{cell}</Text>
+                    ))}
+                  </View>
+                );
+              })}
+              <Text style={styles.guideNote}>
+                Measurements are of the garment, in {product.variant_guide?.unit === "cm" ? "centimetres" : "inches"}.
+                If you are between two sizes we recommend the larger one.
+              </Text>
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <Modal visible={askOpen} transparent animationType="slide" onRequestClose={() => setAskOpen(false)}>
         <Pressable style={styles.modalOverlay} onPress={() => setAskOpen(false)}>
           <Pressable style={styles.modalSheet} onPress={(e) => e.stopPropagation()}>
@@ -728,6 +859,42 @@ const styles = StyleSheet.create({
   ratingChipText: { fontSize: 11, fontWeight: "800", color: "#92400E" },
   summaryBlock: { backgroundColor: colors.surface, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.border },
   summaryLabel: { fontSize: 9, fontWeight: "900", letterSpacing: 1.2, color: colors.primary },
+  // ── Jun 2026 — Size / option picker + size-guide sheet ──────────────
+  sizeCard: {
+    marginTop: 8, padding: 12, backgroundColor: colors.surface,
+    borderRadius: 14, borderWidth: 1, borderColor: colors.border,
+  },
+  sizeHeadRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  sizeGuideLink: { fontSize: 12, fontWeight: "800", color: colors.primary, textDecorationLine: "underline" },
+  sizeWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  sizeChip: {
+    minWidth: 48, minHeight: 44, paddingHorizontal: 14,
+    alignItems: "center", justifyContent: "center",
+    borderRadius: 10, borderWidth: 1.5, borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  sizeChipSel: { backgroundColor: colors.primary, borderColor: colors.primary },
+  sizeChipOOS: { backgroundColor: colors.surfaceMuted, borderColor: colors.border, opacity: 0.55 },
+  sizeChipText: { fontSize: 13.5, fontWeight: "800", color: colors.textMain },
+  sizeChipTextOOS: { color: colors.textMuted, textDecorationLine: "line-through" },
+  sizeMeta: { fontSize: 12, color: colors.textMuted, marginTop: 10, fontWeight: "600" },
+  sheetOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
+  guideSheet: {
+    backgroundColor: colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 24,
+  },
+  guideHead: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10 },
+  guideTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain },
+  guideSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  guideRow: {
+    flexDirection: "row", alignItems: "center",
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+    paddingVertical: 10, gap: 6,
+  },
+  guideRowHead: { backgroundColor: colors.surfaceMuted, borderTopLeftRadius: 8, borderTopRightRadius: 8, paddingHorizontal: 6 },
+  guideCell: { flex: 1, fontSize: 12, color: colors.textMain, textAlign: "center" },
+  guideCellHead: { fontSize: 10.5, fontWeight: "900", color: colors.textMuted, letterSpacing: 0.3 },
+  guideNote: { fontSize: 11.5, color: colors.textMuted, marginTop: 14, lineHeight: 17 },
   qtyCard: { marginTop: 8, padding: 12, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border },
   qtyLabel: { fontSize: 10, fontWeight: "800", letterSpacing: 1, color: colors.textMuted, marginBottom: 8 },
   qtyRow: { flexDirection: "row", alignItems: "center", gap: 8 },

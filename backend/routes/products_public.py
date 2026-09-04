@@ -101,6 +101,13 @@ def _slim_list_item(p: Dict[str, Any]) -> Dict[str, Any]:
         # the sweet spot between perceptual quality and payload size.
         p["image_url"] = f"/api/products/{p.get('id')}/image?w=360&q=72"
         p["has_inline_image"] = True
+    # Jun 2026 — list cards need to know a product HAS sizes so the "+"
+    # opens the size picker instead of blind-adding, and so the price can
+    # read "from ₹499". The heavy `variants` array itself is dropped.
+    variants = p.pop("variants", None) or []
+    active = [v for v in variants if isinstance(v, dict) and v.get("active", True)]
+    p["has_variants"] = len(active) > 0
+    p["variant_count"] = len(active)
     return _shape_product(p)
 
 
@@ -405,6 +412,18 @@ async def _eligible_vendor_ids(
 # ─────────────────────────────────────────────────────────────────────
 async def _vendors_within_radius(lat: float, lng: float) -> set:
     return await _eligible_vendor_ids(lat=lat, lng=lng)
+
+
+@router.get("/product-variant-charts")
+async def product_variant_charts():
+    """Size / option chart catalogue for the vendor + admin product forms.
+
+    Jun 2026 — served from the SERVER (core/variants.py) so the mobile app,
+    the admin panel and the web build can never drift out of sync on which
+    sizes exist or what the measurement table says.
+    """
+    from core.variants import charts_payload
+    return charts_payload()
 
 
 @router.get("/products/search-suggest")
@@ -776,6 +795,34 @@ async def get_product(product_id: str):
     p.setdefault("extra_attrs", {})
     p.setdefault("spec_tabs", [])
     p.setdefault("whats_in_box", [])
+    # ── Jun 2026 — Variants (sizes / RAM-ROM) ─────────────────────────────
+    # Ship each option with its final selling price already computed and the
+    # matching measurement chart, so the product page can render the size
+    # selector + "Size guide" sheet without a second round-trip.
+    from core.variants import CHARTS, variant_price
+    p.setdefault("variants", [])
+    p.setdefault("variant_chart", "")
+    p.setdefault("variant_price_mode", "extra")
+    base = float(p.get("base_price") or p.get("price") or 0)
+    mode = str(p.get("variant_price_mode") or "extra")
+    live = []
+    for v in (p.get("variants") or []):
+        if not v.get("active", True):
+            continue
+        live.append({
+            "id": v.get("id"),
+            "label": v.get("label"),
+            "price": round(float(v.get("price") or 0) or variant_price(v, base, mode), 2),
+            "stock": int(v.get("stock") or 0),
+            "in_stock": int(v.get("stock") or 0) > 0,
+        })
+    p["variants"] = live
+    p["has_variants"] = len(live) > 0
+    chart = CHARTS.get(str(p.get("variant_chart") or ""))
+    p["variant_guide"] = {
+        "label": chart["label"], "unit": chart["unit"],
+        "columns": chart["columns"], "guide": chart["guide"],
+    } if chart else None
     return _shape_product(p)
 
 

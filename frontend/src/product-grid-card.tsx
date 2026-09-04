@@ -29,6 +29,8 @@ export type GridProduct = {
   image_url?: string;
   stock?: number;
   is_in_stock?: boolean;
+  /** Jun 2026 — true when the product has sizes / RAM-ROM options. */
+  has_variants?: boolean;
 };
 
 type Props = {
@@ -88,6 +90,18 @@ export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, i
               <View style={[styles.addBtn, { backgroundColor: "#B91C1C" }]}>
                 <Text style={styles.addBtnText}>SOLD OUT</Text>
               </View>
+            ) : p.has_variants ? (
+              /* Jun 2026 — a product with sizes can't be blind-added: the
+                 customer has to choose one, so the button opens the product
+                 page (where the size picker lives) instead of failing. */
+              <TouchableOpacity
+                onPress={() => onOpen(p)}
+                style={styles.addBtn}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                testID={`pick-size-${p.id}`}
+              >
+                <Text style={styles.addBtnText}>SELECT</Text>
+              </TouchableOpacity>
             ) : qty > 0 ? (
               <View style={styles.stepper} testID={`qty-${p.id}`}>
                 <TouchableOpacity

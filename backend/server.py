@@ -2855,7 +2855,9 @@ async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
 @api_router.post("/admin/products")
 async def admin_create_product(p: ProductCreate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     from core.image_compress import compress_product_payload
+    from core.variants import apply_variants_to_payload
     payload = compress_product_payload(p.dict())
+    payload = apply_variants_to_payload(payload, float(payload.get("price") or 0))
     doc = {"id": str(uuid.uuid4()), **payload, "created_at": now_utc().isoformat()}
     await db.products.insert_one(doc)
     doc.pop("_id", None)
@@ -3076,7 +3078,16 @@ async def admin_update_product(product_id: str, payload: ProductUpdate, admin: D
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
     from core.image_compress import compress_product_payload
+    from core.variants import apply_variants_to_payload
     update = compress_product_payload(update)
+    # Base price for "extra" mode = the price in THIS update if the vendor
+    # changed it, otherwise the stored base/current price.
+    _base = float(
+        update.get("price")
+        if update.get("price") is not None
+        else (target.get("base_price") or target.get("price") or 0)
+    )
+    update = apply_variants_to_payload(update, _base)
     await db.products.update_one({"id": product_id}, {"$set": update})
     # Dec 2026 — Bust shop caches so customers see the publish/edit
     # change on their very next /products call (was up to 60s delay).
@@ -4175,29 +4186,67 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     # stock or insufficient stock), we roll back every successful decrement so
     # nobody is left holding the bag. This prevents overselling under concurrent
     # checkouts.
-    decremented: List[Dict[str, Any]] = []  # [{product_id, qty}]
+    decremented: List[Dict[str, Any]] = []  # [{product_id, qty, variant_id}]
+    from core.variants import effective_line_price as _variant_price, find_variant as _find_variant
     try:
         for it in items:
             product = await db.products.find_one({"id": it["product_id"]}, {"_id": 0})
             if not product:
                 raise HTTPException(status_code=400, detail=f"Product no longer exists: {it['product_id']}")
             qty = int(it.get("qty") or 1)
-            # Atomic conditional decrement — only succeeds when stock >= qty.
-            res = await db.products.update_one(
-                {"id": product["id"], "stock": {"$gte": qty}},
-                {"$inc": {"stock": -qty}},
-            )
-            if res.modified_count == 0:
-                # Refresh stock for a friendly error message
-                fresh = await db.products.find_one({"id": product["id"]}, {"_id": 0, "stock": 1, "name": 1})
-                avail = int((fresh or {}).get("stock") or 0)
+            # ── Jun 2026 — variant-aware stock ──────────────────────────
+            # For products with sizes / RAM-ROM options the authoritative
+            # stock sits on the VARIANT. We decrement the matching array
+            # element AND the product total in one conditional update, so
+            # two shoppers can't buy the last size-L at the same time.
+            variant = _find_variant(product, it.get("variant_id"))
+            active_variants = [v for v in (product.get("variants") or []) if v.get("active", True)]
+            if active_variants and not variant:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"'{product.get('name')}' is out of stock (only {avail} left, you wanted {qty})",
+                    detail=f"'{product.get('name')}' needs a size / option — please re-pick it in your cart.",
                 )
-            decremented.append({"product_id": product["id"], "qty": qty})
+            if variant:
+                res = await db.products.update_one(
+                    {
+                        "id": product["id"],
+                        "variants": {"$elemMatch": {"id": variant.get("id"), "stock": {"$gte": qty}}},
+                    },
+                    {"$inc": {"variants.$.stock": -qty, "stock": -qty}},
+                )
+                if res.modified_count == 0:
+                    fresh = await db.products.find_one({"id": product["id"]}, {"_id": 0, "variants": 1, "name": 1})
+                    fv = _find_variant(fresh or {}, variant.get("id")) or {}
+                    avail = int(fv.get("stock") or 0)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"'{product.get('name')}' — {variant.get('label')} is out of stock "
+                            f"(only {avail} left, you wanted {qty})"
+                        ),
+                    )
+            else:
+                # Atomic conditional decrement — only succeeds when stock >= qty.
+                res = await db.products.update_one(
+                    {"id": product["id"], "stock": {"$gte": qty}},
+                    {"$inc": {"stock": -qty}},
+                )
+                if res.modified_count == 0:
+                    # Refresh stock for a friendly error message
+                    fresh = await db.products.find_one({"id": product["id"]}, {"_id": 0, "stock": 1, "name": 1})
+                    avail = int((fresh or {}).get("stock") or 0)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"'{product.get('name')}' is out of stock (only {avail} left, you wanted {qty})",
+                    )
+            decremented.append({
+                "product_id": product["id"],
+                "qty": qty,
+                "variant_id": (variant or {}).get("id"),
+            })
 
-            line_total = product["price"] * qty
+            unit_price = _variant_price(product, variant)
+            line_total = round(unit_price * qty, 2)
             total += line_total
             vendor_id = product.get("vendor_id")
             vendor_share = 0.0
@@ -4209,7 +4258,11 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             enriched.append({
                 "product_id": product["id"],
                 "name": product["name"],
-                "price": product["price"],
+                "price": unit_price,
+                # Jun 2026 — remember which size / option was bought so the
+                # invoice, vendor packing slip and returns all agree.
+                "variant_id": (variant or {}).get("id") or None,
+                "variant_label": (variant or {}).get("label") or "",
                 # Dec 2026 — image_url is optional on modern products
                 # (multi-image `images[]` array is the new source of truth).
                 # Fall back to the first images[] entry or an empty string
@@ -4229,11 +4282,18 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             raise HTTPException(status_code=400, detail="Cart total invalid")
     except HTTPException:
         # Roll back all successful stock decrements before re-raising
+        # (variant rows put the stock back on BOTH the option and the total).
         for d in decremented:
-            await db.products.update_one(
-                {"id": d["product_id"]},
-                {"$inc": {"stock": d["qty"]}},
-            )
+            if d.get("variant_id"):
+                await db.products.update_one(
+                    {"id": d["product_id"], "variants.id": d["variant_id"]},
+                    {"$inc": {"variants.$.stock": d["qty"], "stock": d["qty"]}},
+                )
+            else:
+                await db.products.update_one(
+                    {"id": d["product_id"]},
+                    {"$inc": {"stock": d["qty"]}},
+                )
         raise
 
     # ── Jun 2026 — MULTI-VENDOR SPLIT + WALLET/COD COMBO ─────────────
@@ -4278,7 +4338,13 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         )
         if debit_res.modified_count == 0:
             for d in decremented:
-                await db.products.update_one({"id": d["product_id"]}, {"$inc": {"stock": d["qty"]}})
+                if d.get("variant_id"):
+                    await db.products.update_one(
+                        {"id": d["product_id"], "variants.id": d["variant_id"]},
+                        {"$inc": {"variants.$.stock": d["qty"], "stock": d["qty"]}},
+                    )
+                else:
+                    await db.products.update_one({"id": d["product_id"]}, {"$inc": {"stock": d["qty"]}})
             raise HTTPException(status_code=400, detail=f"Insufficient wallet balance. Need ₹{wallet_target:.0f}")
 
     group_id = str(uuid.uuid4())
@@ -8689,7 +8755,12 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
     if not (p.name or "").strip():
         raise HTTPException(status_code=400, detail="Name is required")
     from core.image_compress import compress_product_payload
+    from core.variants import apply_variants_to_payload
     payload = compress_product_payload(p.dict())
+    # Jun 2026 — variants own the stock/price. `apply_variants_to_payload`
+    # rewrites `stock` (sum of options) and `price` (cheapest buyable
+    # option) so every existing badge / filter / POS screen keeps working.
+    payload = apply_variants_to_payload(payload, float(payload.get("price") or 0))
     doc = {
         "id": str(uuid.uuid4()),
         **{k: v for k, v in payload.items() if k != "vendor_id"},
@@ -8745,7 +8816,14 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
     # Dec 2026 — Compress any image fields present in the update
     # (Pillow, ≤1280 px, JPEG q=82).  Safe no-op for non-image updates.
     from core.image_compress import compress_product_payload
+    from core.variants import apply_variants_to_payload
     update = compress_product_payload(update)
+    _base = float(
+        update.get("price")
+        if update.get("price") is not None
+        else (target.get("base_price") or target.get("price") or 0)
+    )
+    update = apply_variants_to_payload(update, _base)
     await db.products.update_one({"id": product_id}, {"$set": update})
     try:
         from routes.products_public import bust_products_public_caches

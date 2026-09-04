@@ -20,9 +20,50 @@ from fastapi import APIRouter, Depends, HTTPException
 from core.db import db
 from core.security import get_current_user
 from core.utils import now_utc
+from core.variants import effective_line_price, find_variant
 from models import CartItem, CartAdjust, CartRemove
 
 router = APIRouter()
+
+
+# ── Variant helpers (Jun 2026) ──────────────────────────────────────────
+# A cart ROW is now keyed by (user, product, variant). Two sizes of the same
+# shirt are two independent rows with their own qty, price and stock check.
+# `variant_id: None` is stored as "" so the Mongo key is stable.
+def _row_key(user_id: str, product_id: str, variant_id) -> dict:
+    return {
+        "user_id": user_id,
+        "product_id": product_id,
+        "variant_id": str(variant_id or ""),
+    }
+
+
+async def _resolve_variant(product: dict, variant_id, qty_wanted: int):
+    """Validate the chosen option against the product. Returns the variant
+    dict (or None for a plain product) and raises a friendly 400 when the
+    customer skipped the size picker or picked a sold-out size."""
+    variants = [v for v in (product.get("variants") or []) if v.get("active", True)]
+    if not variants:
+        return None
+    v = find_variant(product, variant_id)
+    if not v or not v.get("active", True):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "variant_required",
+                "message": f"Please choose a size / option for '{product.get('name')}'.",
+                "options": [
+                    {"id": x.get("id"), "label": x.get("label"), "stock": x.get("stock", 0)}
+                    for x in variants
+                ],
+            },
+        )
+    if int(v.get("stock") or 0) < qty_wanted:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{product.get('name')}' — {v.get('label')} has only {int(v.get('stock') or 0)} left.",
+        )
+    return v
 
 
 @router.post("/cart/add")
@@ -32,23 +73,21 @@ async def cart_add(payload: CartItem, user: Dict[str, Any] = Depends(get_current
     product = await db.products.find_one({"id": payload.product_id}, {"_id": 0})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
-    existing = await db.cart_items.find_one(
-        {"user_id": user["id"], "product_id": payload.product_id},
-    )
+    key = _row_key(user["id"], payload.product_id, payload.variant_id)
+    existing = await db.cart_items.find_one(key)
+    want = int(existing.get("qty", 0)) + payload.qty if existing else payload.qty
+    variant = await _resolve_variant(product, payload.variant_id, want)
     if existing:
-        await db.cart_items.update_one(
-            {"user_id": user["id"], "product_id": payload.product_id},
-            {"$inc": {"qty": payload.qty}},
-        )
+        await db.cart_items.update_one(key, {"$inc": {"qty": payload.qty}})
     else:
         await db.cart_items.insert_one({
             "id": str(uuid.uuid4()),
-            "user_id": user["id"],
-            "product_id": payload.product_id,
+            **key,
+            "variant_label": (variant or {}).get("label", ""),
             "qty": payload.qty,
             "created_at": now_utc().isoformat(),
         })
-    return {"ok": True}
+    return {"ok": True, "variant_label": (variant or {}).get("label", "")}
 
 
 @router.post("/cart/adjust")
@@ -59,32 +98,33 @@ async def cart_adjust(payload: CartAdjust, user: Dict[str, Any] = Depends(get_cu
     the client sees a clean stepper→Add transition."""
     if payload.delta == 0:
         raise HTTPException(status_code=400, detail="delta must be non-zero")
-    existing = await db.cart_items.find_one(
-        {"user_id": user["id"], "product_id": payload.product_id},
-    )
+    key = _row_key(user["id"], payload.product_id, payload.variant_id)
+    existing = await db.cart_items.find_one(key)
     if not existing:
         if payload.delta < 0:
             raise HTTPException(status_code=400, detail="Cart row does not exist")
         # Positive delta → treat as an add for a brand-new row.
-        product = await db.products.find_one({"id": payload.product_id}, {"_id": 0, "id": 1})
+        product = await db.products.find_one({"id": payload.product_id}, {"_id": 0})
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
+        variant = await _resolve_variant(product, payload.variant_id, payload.delta)
         await db.cart_items.insert_one({
             "id": str(uuid.uuid4()),
-            "user_id": user["id"],
-            "product_id": payload.product_id,
+            **key,
+            "variant_label": (variant or {}).get("label", ""),
             "qty": payload.delta,
             "created_at": now_utc().isoformat(),
         })
         return {"ok": True, "qty": payload.delta}
     new_qty = int(existing.get("qty", 0)) + payload.delta
     if new_qty <= 0:
-        await db.cart_items.delete_one({"user_id": user["id"], "product_id": payload.product_id})
+        await db.cart_items.delete_one(key)
         return {"ok": True, "qty": 0, "removed": True}
-    await db.cart_items.update_one(
-        {"user_id": user["id"], "product_id": payload.product_id},
-        {"$set": {"qty": new_qty}},
-    )
+    if payload.delta > 0:
+        product = await db.products.find_one({"id": payload.product_id}, {"_id": 0})
+        if product:
+            await _resolve_variant(product, payload.variant_id, new_qty)
+    await db.cart_items.update_one(key, {"$set": {"qty": new_qty}})
     return {"ok": True, "qty": new_qty}
 
 
@@ -129,16 +169,34 @@ async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
     for it in items:
         product = prod_map.get(it.get("product_id"))
         if product:
-            line_total = float(product.get("price", 0)) * float(it.get("qty", 0))
+            # Jun 2026 — price comes from the chosen size / RAM-ROM option
+            # when the product has variants.
+            variant = find_variant(product, it.get("variant_id"))
+            unit = effective_line_price(product, variant)
+            line_total = round(unit * float(it.get("qty", 0)), 2)
             total += line_total
-            enriched.append({**it, "product": product, "line_total": line_total})
+            enriched.append({
+                **it,
+                "product": product,
+                "unit_price": unit,
+                "variant_label": (variant or {}).get("label", it.get("variant_label") or ""),
+                "variant_stock": int((variant or {}).get("stock") or 0) if variant else None,
+                "line_total": line_total,
+            })
     return {"items": enriched, "total": total, "count": sum(int(i.get("qty", 0)) for i in items)}
 
 
 @router.post("/cart/remove")
 async def cart_remove(payload: CartRemove, user: Dict[str, Any] = Depends(get_current_user)):
-    """Drop a product from the cart entirely (regardless of qty)."""
-    await db.cart_items.delete_one({"user_id": user["id"], "product_id": payload.product_id})
+    """Drop a cart row entirely (regardless of qty).
+
+    Jun 2026 — when no `variant_id` is supplied we remove EVERY option of
+    that product, which is what the cart screen's swipe-to-delete means.
+    """
+    if payload.variant_id:
+        await db.cart_items.delete_one(_row_key(user["id"], payload.product_id, payload.variant_id))
+    else:
+        await db.cart_items.delete_many({"user_id": user["id"], "product_id": payload.product_id})
     return {"ok": True}
 
 

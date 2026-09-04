@@ -23,6 +23,11 @@ type CartLine = {
   qty: number;
   product: { name: string; price: number; image_url: string };
   line_total: number;
+  // Jun 2026 — which size / RAM-ROM option this row is for
+  variant_id?: string;
+  variant_label?: string;
+  unit_price?: number;
+  variant_stock?: number | null;
 };
 
 export default function CartScreen() {
@@ -42,7 +47,7 @@ export default function CartScreen() {
       // Defensive: if backend total comes back as 0/undefined for any reason, compute it
       // locally from the line_totals so the user never sees an incorrect ₹0 with items present.
       const localTotal = safeItems.reduce((sum, it) => {
-        const lt = typeof it.line_total === "number" ? it.line_total : (it.product?.price || 0) * (it.qty || 0);
+        const lt = typeof it.line_total === "number" ? it.line_total : ((it.unit_price ?? it.product?.price) || 0) * (it.qty || 0);
         return sum + (lt || 0);
       }, 0);
       setTotal(Number(data.total) > 0 ? Number(data.total) : localTotal);
@@ -55,9 +60,10 @@ export default function CartScreen() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const remove = async (productId: string) => {
+  const remove = async (productId: string, variantId?: string) => {
     try {
-      await api.post("/cart/remove", { product_id: productId });
+      // Pass the variant so removing "Size L" doesn't wipe "Size M" too.
+      await api.post("/cart/remove", { product_id: productId, variant_id: variantId || null });
       await load();
     } catch (e) {
       Alert.alert("Error", formatApiError(e));
@@ -108,17 +114,26 @@ export default function CartScreen() {
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
           >
             {items.map((it) => (
-              <View key={it.id} style={styles.line} testID={`cart-line-${it.product_id}`}>
+              <View key={it.id} style={styles.line} testID={`cart-line-${it.product_id}${it.variant_id ? `-${it.variant_id}` : ""}`}>
                 <Image source={{ uri: resolveImageUrl(it.product.image_url) }} style={styles.image} />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.lineName} numberOfLines={2}>{it.product.name}</Text>
-                  <View style={styles.qtyPill}>
-                    <Text style={styles.qtyPillText}>Qty {it.qty}</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <View style={styles.qtyPill}>
+                      <Text style={styles.qtyPillText}>Qty {it.qty}</Text>
+                    </View>
+                    {/* Jun 2026 — show the chosen size / RAM-ROM so the
+                        shopper can confirm the fit before paying. */}
+                    {it.variant_label ? (
+                      <View style={styles.variantPill}>
+                        <Text style={styles.variantPillText}>{it.variant_label}</Text>
+                      </View>
+                    ) : null}
                   </View>
-                  <Text style={styles.lineUnit}>{formatINR(it.product.price)} each</Text>
+                  <Text style={styles.lineUnit}>{formatINR(it.unit_price ?? it.product.price)} each</Text>
                 </View>
                 <View style={{ alignItems: "flex-end", justifyContent: "space-between" }}>
-                  <TouchableOpacity onPress={() => remove(it.product_id)} testID={`cart-remove-${it.product_id}`} style={styles.removeBtn}>
+                  <TouchableOpacity onPress={() => remove(it.product_id, it.variant_id)} testID={`cart-remove-${it.product_id}`} style={styles.removeBtn}>
                     <Feather name="x" size={14} color={colors.textMuted} />
                   </TouchableOpacity>
                   <Text style={styles.lineTotal}>{formatINR(it.line_total)}</Text>
@@ -195,6 +210,11 @@ const styles = StyleSheet.create({
   image: { width: 72, height: 72, borderRadius: 12, backgroundColor: colors.surfaceMuted },
   lineName: { fontSize: 13, fontWeight: "700", color: colors.textMain, marginBottom: 6 },
   qtyPill: { alignSelf: "flex-start", backgroundColor: colors.surfaceMuted, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
+  variantPill: {
+    backgroundColor: colors.primary, borderRadius: 999,
+    paddingHorizontal: 8, paddingVertical: 3,
+  },
+  variantPillText: { fontSize: 10.5, fontWeight: "900", color: colors.primaryFg, letterSpacing: 0.3 },
   qtyPillText: { fontSize: 10, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.4 },
   lineUnit: { fontSize: 11, color: colors.textMuted, marginTop: 6, fontWeight: "600" },
   lineTotal: { fontSize: 15, fontWeight: "800", color: colors.primary },

@@ -1,0 +1,44 @@
+{
+  "summary": "Phase 3 (Product Variants) — backend 16/16 pytest PASS (extra + absolute price modes, base-price recompute, variant-only stock recompute, dedupe/blank/negative-clamp, public detail w/ variant_guide, list w/o variants[], variant_required 400, sold-out 400, two-variants-two-rows, adjust beyond stock 400, variant-aware remove, checkout decrement, and oversell prevention). Frontend product page variant UI verified: 'from ₹499' headline, all 4 size chips (S/M/L/XL) with testIDs, L sold-out struck-through + non-tappable, 'Pick a size' guard on Add-to-Cart, size-guide sheet with Chest/Length/Shoulder table. XL price update to ₹549 and cart-with-variant flow could not be verified through automation because the login form submission did not advance from /login in the headless preview (2 <input>s filled + submit button clicked, but URL stayed /login and downstream requests 401'd). Cart pill test and vendor variant-editor flows were NOT run — recommend E1 self-test or headed browser retest.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "buyer login via /login in headless preview", "issue": "Playwright filled 2 inputs and clicked the login button but the app did not navigate away from /login (URL unchanged, subsequent /api requests returned 401). This blocked the cart-variant-pill and post-add flows. Suspect the submit button needs a specific testID or the form uses a two-step (OTP) path in this build. Not a variants bug — carryover from earlier iterations.", "affected_testIDs": ["login-submit-button"]}
+    ],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "Style props", "issue": "'shadow*' style props deprecated warning on many screens — migrate to boxShadow. Reference: multiple RN-Web components."},
+      {"component": "props.pointerEvents", "issue": "props.pointerEvents deprecated — move to style.pointerEvents."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter65_variants_phase3.py",
+    "/app/test_reports/pytest/iter65_variants.xml",
+    "/app/test_reports/iter65_product_initial.png",
+    "/app/test_reports/iter65_xl_selected.png",
+    "/app/test_reports/iter65_size_guide.png",
+    "/app/test_reports/iter65_cart.png"
+  ],
+  "action_items": [
+    "E1 self-test in a real browser (or headed Playwright): (d) tap XL and confirm headline & Quantity subtotal both switch to ₹549 and 'only 4 left' shows; (e) qty stepper cap = variant stock (4), not product total (12); (g) Add-to-Cart succeeds after picking XL; cart line shows green XL pill + each = ₹549; removing one size leaves other rows intact.",
+    "E1 self-test vendor editor at /vendor/dashboard → header + button: verify (a) 9 variant-chart-<key> chips, (b) footwear_uk shows 5..12 with variant-opt-8 + hint 'Shoes, sandals, slippers (adult)', (c) extra/absolute mode toggle switches column header, (d) selecting options creates variant-stock-<label>/variant-price-<label> rows with computed sell price (base 999 + 100 = ₹1099), (e) product Stock field becomes read-only with computed sum, (f) custom label add, (g) row delete, (h) chart-change clears rows, (i) no horizontal overflow at 390x844, (j) re-open of existing variant product rehydrates chart/mode/rows.",
+    "E1 self-test SELECT/pick-size behavior on shop cards: testIDs pick-size-<id>, grid-select-<id>, hslide-select-<id> should open PDP (not blind-add) for variant products; non-variant '+' button still works.",
+    "Consider adding data-testid='login-submit-button' (or aria-label) to the login CTA so future automation can drive login end-to-end.",
+    "RN-Web deprecation warnings ('shadow*', 'props.pointerEvents') — schedule a migration pass."
+  ],
+  "critical_code_review_comments": [
+    "core/variants.py is clean, well-documented, and correctly handles both price modes, cheapest-buyable price selection, sold-out fallback, negative clamp, blank-label drop, and duplicate-label dedup — all verified by pytest.",
+    "cart.py _resolve_variant returns friendly 400 with detail.code='variant_required' + options list — matches spec exactly.",
+    "products_public.get_product enriches variants with in_stock flag AND keeps sold-out rows visible — matches spec.",
+    "server.py checkout uses variants.$.stock atomic decrement with matched-stock predicate ({$gte: qty}) and rollback loop — verified oversell impossible in sequential run; a true concurrent race (threads) would need a stress test but the atomic pattern is correct."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter65_variants_phase3.py (NEW)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "5/7 checked variant UI checks pass; cart+vendor-editor unverified due to login blocker"},
+  "seed_data_creation": "PATCHed the seeded 'Cotton Round-Neck Tee' (id c3682e31-86a6-4d22-b42e-ff6618219b9a) to restore XL stock=4 so UI 'only N left' assertion has non-zero data. Reset testbuyer2@test.com password to Test@1234 via admin reset-password so the oversell race test could log in.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend Phase 3 variants surface is FULLY covered by pytest at /app/backend/tests/test_iter65_variants_phase3.py — reuse it. Cotton Round-Neck Tee (c3682e31-86a6-4d22-b42e-ff6618219b9a) has S=3, M=5, L=0 (sold out), XL=4 (stock restored). testbuyer2@test.com/Test@1234 is now usable. Login form submit did not advance in headless mode — try recording the login step differently or add a testID to the submit button."
+}
