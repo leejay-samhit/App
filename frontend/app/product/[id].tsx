@@ -16,7 +16,7 @@ import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import { api, formatApiError } from "../../src/api";
+import { api, formatApiError, resolveImageUrl } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 
@@ -102,11 +102,19 @@ export default function ProductDetailScreen() {
   );
 
   const inStock = product.is_in_stock ?? (product.stock || 0) > 0;
-  const gallery: string[] = [
-    ...(product.images || []).filter(Boolean),
-    ...(product.image_data_url ? [product.image_data_url] : []),
+  // Jun 2026 fix — the COVER image (`image_url`) used to be pushed to the END
+  // of the gallery, so slide 1 was a random gallery photo instead of the cover
+  // the vendor chose.  Cover now leads; duplicates are de-duped; relative
+  // `/api/products/.../image` paths are resolved against the backend base so
+  // lazy-loaded thumbnails actually render.
+  const gallery: string[] = Array.from(new Set([
     ...(product.image_url ? [product.image_url] : []),
-  ].slice(0, 10);
+    ...(product.image_data_url ? [product.image_data_url] : []),
+    ...(product.images || []).filter(Boolean),
+  ]))
+    .map((u) => resolveImageUrl(u))
+    .filter(Boolean)
+    .slice(0, 10);
   const breadcrumb = [product.category, product.brand || product.attrs_brand, vendor?.name].filter(Boolean) as string[];
 
   const onAddToCart = async (alsoBuy: boolean = false) => {

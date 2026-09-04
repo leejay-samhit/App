@@ -639,13 +639,16 @@ export function RichProductEditor({
   };
 
   const onAddGalleryImage = async () => {
-    if (galleryImages.length >= 10) {
+    const room = 10 - galleryImages.length;
+    if (room <= 0) {
       Alert.alert("Limit reached", "You can upload up to 10 gallery images.");
       return;
     }
     try {
-      const data = await pickAndCompressImage({ aspect: [1, 1], width: 1000 });
-      if (data) setGalleryImages([...galleryImages, data]);
+      // Jun 2026 — multi-select: pick several gallery photos in one pass.
+      const { pickAndFitImages } = await import("./image-fitter");
+      const picked = await pickAndFitImages("product_image", room);
+      if (picked.length) setGalleryImages([...galleryImages, ...picked].slice(0, 10));
     } catch (e) {
       Alert.alert("Image pick failed", formatApiError(e));
     }

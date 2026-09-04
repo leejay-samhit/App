@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 60 verifies the new Aug-2026 ₹118 SUBSCRIPTION / free-tier flow end-to-end. BACKEND (5/5 tests passed, /app/backend/tests/test_iter60_subscription.py): POST /payment/skip-subscription flips subscription_skipped=true for an unpaid user (verified via /auth/me) and returns already_paid=true for a paid user without mutating state; POST /withdrawals returns 'Complete registration payment first' for a free-tier user and creates no transactions; PATCH /admin/users/{id} {registration_paid:true} on a free user sets registration_paid=true, registration_source=offline_cash, paid_at, admin_approved_only=true, commission_triggered=true, subscription_skipped=false, creates EXACTLY ONE registration_fee txn (amount=118, status=paid, source=offline_cash), creates NO referral_payout/direct_signup_credit/gst_collected rows, leaves sponsor wallet_balance + total_earned unchanged, is idempotent (2nd PATCH does NOT create another fee txn), and /admin/transactions/summary?type=registration_fee.by_source.offline_cash rose by exactly 1 count / ₹118. /admin/finance/net-worth.group_3_gst.registration_gst stayed unchanged (RAZORPAY-derived only) and master.net_worth still equals bank_tally_net + pending_collections − user_wallet_balance − pending_withdrawals − gst_payable (formula verified). /admin/users/source-counts returns unpaid ≥ 1 with our free-tier user present. FRONTEND (verified in the 390x844 web preview): registering a brand-new user via POST /api/auth/register and injecting the returned token into localStorage routed the user straight to /payment; the screen shows the SUBSCRIPTION eyebrow, ₹118 amount, 'Complete your registration with ₹118' hero copy, ALL 8 benefits (Instant 50% cashback, Real-time priority support, Zero ads, Better shopping experience, Our priority customer, Unlimited cashback, Withdraw to your bank, One payment lifetime free), the 'Pay ₹118' button AND the 'Continue without subscription' testID=skip-subscription button. Tapping skip → skip-cancel/skip-confirm confirm sheet appears → 'Continue free' lands on /shop and re-opening / lands on /shop (never /payment again). /wallet shows subscription-locked with 'Activate for ₹118' CTA; /dashboard hides the Total Earnings card and shows the purple 'Activate subscription · ₹118' subscribe-banner; /profile shows the same banner; tapping the banner navigates to /payment (verified via mouse.click at coords — force=true click on the TouchableOpacity did NOT fire, minor RN-Web quirk, works with real touch/mouse). Paid user freetier1@test.com: NO subscribe-banner anywhere, wallet renders normally, Total Earnings card renders on dashboard. Admin /admin/users: SourceTabs testIDs users-source-all/razorpay/upi_manual/offline_cash/unpaid present, 'No subscription' tab shows count 14 and after selecting only 'NO SUB' badges appear (no '₹118 PAID'). Admin user-edit slide for freetier1 renders the 'Paid status' pill (testID edit-paid-status) showing '₹118 PAID' plus the 'Admin Approved' switch and the disclaimer note. Regression: /admin/transactions?type=registration_fee still shows the source tabs + CSV button (verified visually — screenshot shows 'All 9 · RAZORPAY 3 · UPI MANUAL' tabs + CSV) and /admin/system-wallet renders with Group 3 GST rows (no red screen). NOTE: freetier1@test.com is now the paid credential — leejay@gmail.com from the review request does NOT exist in the DB (adjusted test creds accordingly).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter60_subscription.py",
+    "/app/test_reports/pytest/iter60_subscription.xml",
+    "/app/test_reports/iter60_payment_screen.png",
+    "/app/test_reports/iter60_skip_confirm.png",
+    "/app/test_reports/iter60_shop_after_skip.png",
+    "/app/test_reports/iter60_wallet_locked.png",
+    "/app/test_reports/iter60_dashboard_banner.png",
+    "/app/test_reports/iter60_profile_banner.png",
+    "/app/test_reports/iter60_paid_dashboard.png",
+    "/app/test_reports/iter60_paid_wallet.png",
+    "/app/test_reports/iter60_paid_profile.png",
+    "/app/test_reports/iter60_admin_users.png",
+    "/app/test_reports/iter60_admin_unpaid_tab.png",
+    "/app/test_reports/iter60_admin_edit_paid.png",
+    "/app/test_reports/iter60_admin_tx.png",
+    "/app/test_reports/iter60_admin_sysw.png"
+  ],
+  "action_items": [
+    "OPTIONAL: sync memory/test_credentials.md — the review request cited leejay@gmail.com / Just@4me as the paid test user, but that account does NOT exist in the DB. Testing swapped in freetier1@test.com / Just@4me (already listed under 'Aug-2026 · Subscription (₹118) free-tier test accounts'). If leejay@gmail.com is meant to exist, please seed it; otherwise update the review-request template to reference freetier1 / testbuyer.",
+    "Test agent registered ~5 new free-tier users (test_iter60_*@example.com) via POST /api/auth/register during UI + backend runs and admin-approved 1 of them (created 1 offline_cash registration_fee txn worth ₹118). NOT cleaned up per your 'Do NOT wipe the DB' instruction — feel free to purge test_iter60_* rows if you want."
+  ],
+  "critical_code_review_comments": [
+    "SubscribeBanner (src/subscription.tsx) TouchableOpacity onPress does not fire via Playwright page.click(force=True) on RN-Web — page.mouse.click at coords DOES trigger it. Everything works on real device / native touch; this is a Playwright quirk, not a real bug. Flagging so future test agents use page.mouse.click for banner nav verification.",
+    "test_credentials.md and the review-request template mention leejay@gmail.com but the user is not present in the DB (only freetier1/2, testbuyer/2, testvendor/2, brightkittu, knasar786, seed.* remain). Either seed leejay or update the template."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter60_subscription.py (NEW — 5 pytest cases covering skip-subscription, free-tier withdrawal gate, admin-approved offline_cash idempotency + summary + net-worth, source-counts unpaid bucket)"
+  ],
+  "success_rate": {
+    "backend": "100% (5/5 pytest cases passed)",
+    "frontend": "100% (payment hero + 8 benefits + skip flow + free-tier gating on wallet/dashboard/profile + paid-user unaffected + admin unpaid tab/NO SUB badges + admin edit paid-status pill + admin/tx CSV + admin/system-wallet — all verified)"
+  },
+  "seed_data_creation": "Created ~5 new users test_iter60_*@example.com via /api/auth/register during UI + backend runs. Admin-approved 1 of them → 1 new offline_cash registration_fee txn (₹118). No other DB mutations. NOT cleaned up (per 'Do NOT wipe the DB').",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Login credential landscape: leejay@gmail.com does NOT exist — use freetier1@test.com / Just@4me for a PAID user or testbuyer@test.com / Test@1234 (also paid, higher wallet). Admin: support@slangcart.com / 3)Ywxtic. freetier2@test.com / Just@4me is the already-subscription-skipped free user. To test the /payment screen on the web preview reliably: (a) POST /api/auth/register with User-Agent 'Mozilla/5.0 curl' header (naked User-Agent triggers a 403 middleware block), (b) inject the returned token into localStorage under keys 'auth_token' + 'auth_refresh_token', (c) goto '/' — index.tsx will route unpaid+!skipped users to /payment automatically. Playwright page.click(force=True) on the profile SubscribeBanner does NOT trigger onPress on RN-Web; use page.mouse.click(cx, cy) at bounding-box centre instead. The Slangcart splash overlay class-token to poll is 'r-bottom-1p0dtai' (see iter 58/59 notes) — 3-4s wait_for_timeout after page.goto is enough on this preview. Free-tier gating testIDs: subscribe-banner (dashboard/profile/shop), subscription-locked (wallet), subscription-locked-cta, skip-subscription, skip-cancel, skip-confirm. Admin source-tab testIDs: users-source-{all|razorpay|upi_manual|offline_cash|unpaid}. Admin edit paid pill: edit-paid-status; Admin Approved switch: edit-paid-switch (existing).",
+  "rca_of_issue": "No open bug this iteration. The originally reported user pain (new user stuck at /payment even after admin approval) is fully addressed by the new flow: (1) POST /payment/skip-subscription flips subscription_skipped=true so index.tsx routes the user to /shop on every subsequent launch; (2) PATCH /admin/users/{id} {registration_paid:true} now flips subscription_skipped=false + admin_approved_only=true + commission_triggered=true and records ₹118 as an offline_cash registration_fee txn with NO referral cascade and NO GST — so an admin marking a free user paid gives them full paid privileges without leaking money into the referral tree. Verified end-to-end via 5 backend pytest cases + 3 Playwright browser runs on the preview URL."
+}

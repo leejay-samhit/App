@@ -407,6 +407,94 @@ async def _vendors_within_radius(lat: float, lng: float) -> set:
     return await _eligible_vendor_ids(lat=lat, lng=lng)
 
 
+@router.get("/products/search-suggest")
+async def search_suggest(
+    q: str = Query(..., min_length=1, description="Partial product name typed by the customer"),
+    pincode: Optional[str] = Query(None),
+    lat: Optional[float] = Query(None),
+    lng: Optional[float] = Query(None),
+    limit: int = Query(10, ge=1, le=25),
+):
+    """Jun 2026 — Smart-search typeahead.
+
+    The shop search box previously showed ZERO suggestions: the customer had
+    to submit a full query and hope for hits.  Worse, when several vendors
+    list the SAME product the raw result set repeated the name once per
+    vendor, so a 6-suggestion dropdown could be one product six times.
+
+    This endpoint groups by the lower-cased product NAME, so each suggestion
+    is a distinct product with:
+      • `vendor_count`  — how many vendors near you carry it
+      • `min_price` / `max_price` — the price band across those vendors
+      • `image`         — thumbnail URL of one representative listing
+    Tapping a suggestion should run the normal `/products?q=<name>` search,
+    which still lists EVERY published vendor listing for that product.
+
+    Location-aware: honours the same pincode / radius vendor eligibility
+    rules as `/products` so we never suggest something nobody can deliver.
+    """
+    needle = (q or "").strip()
+    if not needle:
+        return {"items": [], "query": ""}
+
+    import re as _re
+    rx = {"$regex": _re.escape(needle), "$options": "i"}
+    match: Dict[str, Any] = {"$and": [
+        {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]},
+        {"$or": [{"name": rx}, {"brand": rx}, {"category": rx}, {"sub_category": rx}, {"tags": rx}]},
+    ]}
+
+    have_pincode = bool(pincode)
+    have_coords = (lat is not None and lng is not None)
+    if have_pincode or have_coords:
+        vendor_ids = await _eligible_vendor_ids(
+            pincode=pincode,
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
+        )
+        location_or: List[Dict[str, Any]] = []
+        if vendor_ids:
+            location_or.append({"vendor_id": {"$in": list(vendor_ids)}})
+        if have_pincode:
+            location_or.append({"store_pincode": pincode})
+            location_or.append({"delivery_pincodes": pincode})
+        if not location_or:
+            return {"items": [], "query": needle}
+        match["$and"].append({"$or": location_or})
+
+    rows = await db.products.aggregate([
+        {"$match": match},
+        {"$group": {
+            "_id": {"$toLower": {"$ifNull": ["$name", ""]}},
+            "name": {"$first": "$name"},
+            "brand": {"$first": "$brand"},
+            "category": {"$first": "$category"},
+            "cover_id": {"$first": "$id"},
+            "min_price": {"$min": "$price"},
+            "max_price": {"$max": "$price"},
+            "listings": {"$sum": 1},
+            "vendors": {"$addToSet": "$vendor_id"},
+        }},
+        {"$sort": {"listings": -1, "name": 1}},
+        {"$limit": int(limit)},
+    ]).to_list(int(limit))
+
+    items = []
+    for r in rows:
+        vendors = [v for v in (r.get("vendors") or []) if v]
+        items.append({
+            "name": r.get("name") or "",
+            "brand": r.get("brand") or "",
+            "category": r.get("category") or "",
+            "min_price": round(float(r.get("min_price") or 0), 2),
+            "max_price": round(float(r.get("max_price") or 0), 2),
+            "listings": int(r.get("listings") or 0),
+            "vendor_count": len(vendors),
+            "image": f"/api/products/{r.get('cover_id')}/image?w=120&q=70",
+        })
+    return {"items": items, "query": needle}
+
+
 # IMPORTANT: this route MUST be declared BEFORE `/products/{product_id}` or
 # FastAPI's first-match routing will treat "by-source" as a product_id and
 # 404 the whole dynamic shop-layout pipeline. Same pattern as the previously
@@ -534,11 +622,18 @@ async def get_product_image(
     # Client ETag → 304 shortcut, saves the entire decode/resize.
     client_etag = request.headers.get("if-none-match") or ""
 
+    # Jun 2026 fix — this endpoint used to 404 whenever `is_published` was
+    # False.  Vendor-created products are ALWAYS unpublished until an admin
+    # approves them, so every vendor product thumbnail rendered as a broken
+    # image inside the Admin Products grid (which is exactly where the admin
+    # needs to SEE the photo before publishing).  Product ids are UUIDs and
+    # an image carries no private data, so we now serve bytes regardless of
+    # publish state.  Listing visibility is still gated by /products.
     p = await db.products.find_one(
         {"id": product_id},
-        {"_id": 0, "image_url": 1, "images": 1, "is_published": 1},
+        {"_id": 0, "image_url": 1, "images": 1},
     )
-    if not p or p.get("is_published") is False:
+    if not p:
         raise HTTPException(status_code=404, detail="Not found")
     src = ""
     if idx == 0:

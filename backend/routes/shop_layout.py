@@ -44,6 +44,11 @@ ALLOWED_TYPES = {
     "banner_slider", "product_grid", "horizontal_slider",
     "category_circles", "flash_sale", "offer_cards",
     "brand_slider", "announcement_strip",
+    # Jun 2026 — "Spotlight": a full-width immersive showcase card sized to
+    # ~1/3 of a 6-inch phone screen. Swipeable when the admin adds several
+    # slides; each slide can deep-link to a product, a category, or the
+    # block's own product list via "View more".
+    "spotlight",
 }
 ALLOWED_SCOPES = {"home", "category"}
 ALLOWED_DATA_SOURCES = {"manual", "trending", "new", "best", "category"}
@@ -332,9 +337,9 @@ def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
         "button_color": (body.button_color or "").strip(),
         "button_text_color": (body.button_text_color or "").strip(),
         "height": body.height if isinstance(body.height, int) else None,
-        "product_ids": [str(p) for p in (body.product_ids or [])][:50],
+        "product_ids": [str(p) for p in (body.product_ids or [])][:500],
         "data_source": (body.data_source if body.data_source in ALLOWED_DATA_SOURCES else "manual"),
-        "product_count": max(1, min(50, int(body.product_count or 10))),
+        "product_count": max(1, min(500, int(body.product_count or 10))),
         "layout_style": (body.layout_style if body.layout_style in ALLOWED_LAYOUT_STYLES else "grid"),
         "category_filter": (body.category_filter or "").strip(),
         "items": [i.dict() for i in (body.items or [])][:30],
@@ -404,14 +409,14 @@ def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
     if "product_ids" in payload and payload["product_ids"] is not None:
-        updates["product_ids"] = [str(p) for p in payload["product_ids"]][:50]
+        updates["product_ids"] = [str(p) for p in payload["product_ids"]][:500]
     if "data_source" in payload and payload["data_source"] is not None:
         ds = str(payload["data_source"]).strip().lower()
         if ds in ALLOWED_DATA_SOURCES:
             updates["data_source"] = ds
     if "product_count" in payload and payload["product_count"] is not None:
         try:
-            updates["product_count"] = max(1, min(50, int(payload["product_count"])))
+            updates["product_count"] = max(1, min(500, int(payload["product_count"])))
         except (TypeError, ValueError):
             pass
     if "layout_style" in payload and payload["layout_style"] is not None:

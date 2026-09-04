@@ -16,10 +16,11 @@ export default function Index() {
       // Admin's default landing tab is Shop (per product spec) — admin
       // sees the store from a customer's perspective on login.
       router.replace("/admin/shop");
-    } else if (!user.registration_paid) {
+    } else if (!user.registration_paid && !(user as any).subscription_skipped) {
+      // Subscription upsell first (Aug-2026). Once the user chooses
+      // "Continue without subscription" we never wall them again — they
+      // land on Shop like everyone else, with the upgrade banner shown.
       router.replace("/payment");
-    } else if (((user as any).approval_status || "approved") !== "approved") {
-      router.replace("/pending-approval" as any);
     } else {
       // Approved users land directly on the Shop tab so they can start
       // browsing immediately. Dashboard is one tap away via bottom nav.

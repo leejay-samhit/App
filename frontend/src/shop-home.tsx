@@ -25,8 +25,9 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 // Aug 2026 — removed useSafeAreaInsets to prevent double-padding gap.
 // Parent screens already handle safe-area via <SafeAreaView edges={["top"]}>.
-import { api, formatApiError } from "./api";
+import { api, formatApiError, resolveImageUrl } from "./api";
 import { colors, spacing } from "./theme";
+import { SubscribeBanner } from "./subscription";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
 import {
   getCurrentCoords,
@@ -55,6 +56,19 @@ type Product = {
   interested_count?: number;
   vendor_id?: string | null;
 };
+
+/** One grouped smart-search suggestion (see GET /api/products/search-suggest). */
+type SearchSuggestion = {
+  name: string;
+  brand?: string;
+  category?: string;
+  min_price: number;
+  max_price: number;
+  listings: number;
+  vendor_count: number;
+  image?: string;
+};
+
 
 // ── Pure helpers ─────────────────────────────────────────────────────────
 
@@ -132,6 +146,14 @@ export function ShopHome({
   const [refreshTick, setRefreshTick] = useState(0);
   const [search, setSearch] = useState("");
   const [searchSubmitted, setSearchSubmitted] = useState(false);
+  // Jun 2026 — Smart-search typeahead.  Grouped by product name so the
+  // same item sold by 6 vendors shows as ONE suggestion with a price band
+  // and a "N sellers" hint; submitting still lists every vendor listing.
+  const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([]);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  // How many admin shop-layout blocks resolved for this pincode (null = not
+  // yet known). 0 → we fall back to a plain "All products near you" grid.
+  const [layoutBlockCount, setLayoutBlockCount] = useState<number | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>("all");
   // "More" tap opens an all-categories sheet
   const [allCatModalOpen, setAllCatModalOpen] = useState(false);
@@ -303,6 +325,30 @@ export function ShopHome({
       console.warn("ShopHome /products failed:", formatApiError(e));
     } finally { setLoading(false); }
   }, [currentUserId, deliveryPincode, deliveryCoords, searchSubmitted, search]);
+
+  // Jun 2026 — Debounced typeahead. Fires 250 ms after the last keystroke
+  // once 2+ characters are typed. Location params keep suggestions to
+  // products a nearby vendor can actually deliver.
+  useEffect(() => {
+    const term = search.trim();
+    if (searchSubmitted || term.length < 2) { setSuggestions([]); setSuggestOpen(false); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const params: Record<string, any> = { q: term, limit: 8 };
+        if (deliveryPincode) params.pincode = deliveryPincode;
+        if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+        const r = await api.get<{ items: SearchSuggestion[] }>("/products/search-suggest", { params });
+        if (cancelled) return;
+        const items = r.data?.items || [];
+        setSuggestions(items);
+        setSuggestOpen(items.length > 0);
+      } catch {
+        if (!cancelled) { setSuggestions([]); setSuggestOpen(false); }
+      }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [search, searchSubmitted, deliveryPincode, deliveryCoords]);
 
   // Admin-managed categories — fetched in parallel with products.
   //
@@ -557,6 +603,46 @@ export function ShopHome({
             <Feather name="search" size={16} color={colors.primaryFg} />
           </TouchableOpacity>
         </View>
+
+        {/* Jun 2026 — Grouped suggestion dropdown. One row per distinct
+            product name (not per vendor listing), with the price band and
+            seller count across nearby vendors. Tapping runs the full
+            search, which lists EVERY published vendor listing. */}
+        {suggestOpen && !searchSubmitted ? (
+          <View style={styles.suggestPanel} testID="home-search-suggestions">
+            {suggestions.map((s, i) => (
+              <TouchableOpacity
+                key={`sg-${i}-${s.name}`}
+                style={[styles.suggestRow, i === suggestions.length - 1 && { borderBottomWidth: 0 }]}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setSearch(s.name);
+                  setSuggestOpen(false);
+                  setSearchSubmitted(true);
+                }}
+                testID={`home-suggest-${i}`}
+              >
+                {s.image ? (
+                  <Image source={{ uri: resolveImageUrl(s.image) }} style={styles.suggestThumb} resizeMode="cover" />
+                ) : (
+                  <View style={[styles.suggestThumb, { alignItems: "center", justifyContent: "center" }]}>
+                    <Feather name="package" size={14} color={colors.textMuted} />
+                  </View>
+                )}
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.suggestName} numberOfLines={1}>{s.name}</Text>
+                  <Text style={styles.suggestMeta} numberOfLines={1}>
+                    {s.min_price === s.max_price
+                      ? `₹${Math.round(s.min_price)}`
+                      : `₹${Math.round(s.min_price)} – ₹${Math.round(s.max_price)}`}
+                    {s.vendor_count > 1 ? ` · ${s.vendor_count} sellers` : s.brand ? ` · ${s.brand}` : ""}
+                  </Text>
+                </View>
+                <Feather name="arrow-up-left" size={14} color={colors.textMuted} />
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
       </View>
 
       <ScrollView
@@ -579,6 +665,10 @@ export function ShopHome({
         }
       >
         <LocationBanner />
+        {/* Free-tier upsell — hidden automatically for subscribed users. */}
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 10 }}>
+          <SubscribeBanner compact />
+        </View>
         {addedFlash ? (
           <View style={styles.addedFlash} pointerEvents="none">
             <Feather name="check-circle" size={13} color="#fff" />
@@ -832,8 +922,36 @@ export function ShopHome({
                 const p = products.find((x) => x.id === id);
                 if (p) addToCart(p);
               }}
+              onBlocksResolved={setLayoutBlockCount}
             />
           </FadeSlideIn>
+          {/* Jun 2026 — Fallback catalogue.  When an admin hasn't built any
+              shop-layout block for this pincode the home used to render
+              NOTHING but the search bar, even though nearby vendors had
+              stock. Now we show a plain "All products near you" grid. */}
+          {!loading && layoutBlockCount === 0 && products.length > 0 ? (
+            <View style={{ paddingHorizontal: spacing.screen, paddingTop: 4 }}>
+              <View style={styles.searchResultHeader}>
+                <Text style={styles.searchResultTitle}>All products near you</Text>
+                <Text style={styles.searchResultCount}>
+                  {products.length} product{products.length === 1 ? "" : "s"}
+                </Text>
+              </View>
+              <View style={productGridStyles.wrap}>
+                {products.map((item, idx) => (
+                  <ProductGridCard
+                    key={`near-${item.id}`}
+                    product={item as any}
+                    qty={cartQty[item.id] || 0}
+                    index={idx}
+                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
+                    onAdd={addToCart}
+                    onDecrement={decrement}
+                  />
+                ))}
+              </View>
+            </View>
+          ) : null}
           {/* Jul 2026 — "No vendors nearby" hero card.  When the customer's
               location has zero deliverable products AND the initial /products
               fetch has completed, show the hero below the (mostly empty)
@@ -1093,6 +1211,32 @@ const styles = StyleSheet.create({
     }),
   },
 
+  // Jun 2026 — Smart-search suggestion dropdown (grouped by product name)
+  suggestPanel: {
+    marginTop: 8,
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1, borderColor: colors.border,
+    overflow: "hidden",
+    ...Platform.select({
+      ios: { shadowColor: "#0F2A1D", shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 3 } },
+      android: { elevation: 3 },
+    }),
+  },
+  suggestRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+    minHeight: 52,
+  },
+  suggestThumb: {
+    width: 36, height: 36, borderRadius: 8,
+    backgroundColor: colors.surfaceMuted,
+  },
+  suggestName: { fontSize: 13.5, fontWeight: "700", color: colors.textMain },
+  suggestMeta: { fontSize: 11.5, color: colors.textMuted, marginTop: 2 },
+
+
   // 3. Category circles — same `spacing.screen` left/right rail as the
   // header / banner / grid below, so the row of circles is visually
   // anchored. Was 12 — felt too tight against the screen edge.
@@ -1209,7 +1353,7 @@ const styles = StyleSheet.create({
   //    after a category tap). Match the ProductCard footprint so the grid
   //    doesn't jump when real data swaps in.
   skelCard: {
-    width: "48%",
+    width: "46%",
     backgroundColor: colors.surface,
     borderRadius: 14,
     padding: 10,

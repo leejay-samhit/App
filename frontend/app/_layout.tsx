@@ -1,7 +1,7 @@
 import { Stack, router as expoRouter } from "expo-router";
 import { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
-import { Text, TextInput, View, useWindowDimensions, StyleSheet, Platform } from "react-native";
+import { Text, TextInput, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as SplashScreen from "expo-splash-screen";
@@ -13,7 +13,6 @@ import { ChatSettingsProvider } from "../src/chat-settings";
 import { LocationGate } from "../src/location-gate";
 import { SplashOverlay } from "../src/splash-overlay";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
-import { colors, TABLET_MIN_WIDTH, READABLE_MAX_WIDTH } from "../src/theme";
 import { registerForPush } from "../src/push";
 
 // ── Push notifications: module-scope wiring (required by playbook) ──
@@ -76,18 +75,18 @@ function GlobalFont({ children }: { children: React.ReactNode }) {
 // foldables / desktops. On phones the wrapper is a no-op. On desktop, renders
 // the mobile app inside a polished phone frame with shadow and rounded corners
 // so the preview looks like an actual Android device.
+// Jun 2026 tablet fix — the app used to be wrapped in a fake "Android phone
+// frame" (a ~504 px centred column on a dark backdrop) for every viewport
+// ≥ 900 px.  On a real 12-inch tablet that meant the whole shop rendered in a
+// narrow strip in the middle of the screen, with product images and hero /
+// banner cards squeezed and misaligned — exactly the bug the user reported.
+//
+// The frame is gone.  Screens now use the FULL width and the responsive
+// components (product grid columns, banner height, layout blocks) adapt via
+// useWindowDimensions().  On wide web viewports DesktopShell still supplies
+// the sidebar + top bar chrome.
 function TabletContainer({ children }: { children: React.ReactNode }) {
-  const { width } = useWindowDimensions();
-  const isTablet = width >= TABLET_MIN_WIDTH;
-  if (!isTablet) return <>{children}</>;
-  return (
-    <View style={styles.tabletOuter}>
-      <View style={styles.phoneFrame}>
-        <View style={styles.phoneNotch} />
-        <View style={styles.tabletInner}>{children}</View>
-      </View>
-    </View>
-  );
+  return <>{children}</>;
 }
 
 // Phase 3 Session A — Full-screen gate that swaps the entire app for a
@@ -211,47 +210,3 @@ function RootLayoutInner() {
     </GestureHandlerRootView>
   );
 }
-
-const styles = StyleSheet.create({
-  tabletOuter: {
-    flex: 1,
-    // Subtle gradient-ish dark background so the phone "floats"
-    backgroundColor: "#1F2A24",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 24,
-  },
-  // Polished Android phone frame around the readable column
-  phoneFrame: {
-    flex: 1,
-    width: "100%",
-    maxWidth: READABLE_MAX_WIDTH + 24,
-    backgroundColor: "#0B1411",
-    borderRadius: 38,
-    padding: 12,
-    paddingTop: 18,
-    overflow: "hidden",
-    // Cross-platform shadow: iOS shadow* / Android elevation / Web boxShadow
-    ...Platform.select({
-      ios: { shadowColor: "#000", shadowOpacity: 0.45, shadowRadius: 30, shadowOffset: { width: 0, height: 18 } },
-      android: { elevation: 16 },
-      default: { boxShadow: "0 18px 50px rgba(0,0,0,0.45)" } as any,
-    }),
-  },
-  // Subtle status-pill at the top of the frame to mimic Android camera notch
-  phoneNotch: {
-    width: 80,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#2A3A33",
-    alignSelf: "center",
-    marginBottom: 10,
-  },
-  tabletInner: {
-    flex: 1,
-    width: "100%",
-    backgroundColor: colors.background,
-    borderRadius: 28,
-    overflow: "hidden",
-  },
-});

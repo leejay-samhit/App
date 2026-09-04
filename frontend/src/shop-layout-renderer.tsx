@@ -11,7 +11,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, Image, TouchableOpacity, StyleSheet, ScrollView,
-  Dimensions, FlatList, Platform,
+  FlatList, Platform, useWindowDimensions,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { api, resolveImageUrl } from "./api";
@@ -26,7 +26,9 @@ export type BlockType =
   | "banner_slider" | "product_grid" | "horizontal_slider"
   | "category_circles" | "flash_sale" | "offer_cards"
   | "brand_slider" | "announcement_strip"
-  | "background" | "section_header" | "text" | "content_box";
+  | "background" | "section_header" | "text" | "content_box"
+  // Jun 2026 — full-width immersive showcase (~1/3 of a phone screen)
+  | "spotlight";
 
 export type LayoutItem = {
   label?: string;
@@ -107,17 +109,24 @@ type RendererProps = {
   onProductPress?: (productId: string) => void;
   onCategoryPress?: (category: string) => void;
   onAddToCart?: (productId: string) => void;
+  /** Called with the number of renderable blocks once the layout resolves. */
+  onBlocksResolved?: (count: number) => void;
   // Aug 2026 — parent bumps this counter to force a live re-fetch of admin
   // blocks (e.g. on pull-to-refresh or after an admin publish). Included in
   // the useEffect deps so the renderer re-runs its data load.
   refreshTick?: number;
 };
 
+/** Block types that render a list of products (need a product fetch). */
+const PRODUCT_BLOCK_TYPES: string[] = ["product_grid", "horizontal_slider", "flash_sale", "spotlight"];
+
 const SIZE_HEIGHT: Record<"small" | "medium" | "large", number> = {
   small: 130, medium: 180, large: 240,
 };
 
-const screenWidth = Dimensions.get("window").width;
+/* Jun 2026 — module-level width removed: every block now reads the live
+   window width via useWindowDimensions() so tablets / rotation / web
+   resize all lay out correctly. */
 
 /* ─────────────────────────── Skeleton loaders ─────────────────────────── */
 
@@ -152,11 +161,19 @@ function BannerSliderBlock({
   const items = block.items || [];
   // June 2026 Shop redesign — banner height clamped to spec range 180–220 dp.
   // Use the block's configured size when set; default to 200 dp.
+  //
+  // Jun 2026 tablet fix — `screenWidth` was read ONCE at module load, so
+  // rotating a tablet (or resizing the web window) left the banner at the
+  // old width.  It also kept the phone height cap of 220 dp on a ~1000 dp
+  // wide tablet, squashing the 1080×600 artwork into a 4.5:1 letterbox
+  // strip.  We now track the live window width and grow the banner height
+  // proportionally on wide screens.
+  const { width: winW } = useWindowDimensions();
   const heightRaw = resolveBlockHeight(block);
-  const height = Math.max(180, Math.min(220, heightRaw || 200));
-  // Slide width = inner width of the ContentContainer (16 dp padding each
-  // side). Banner must never overflow the container per spec.
-  const slideWidth = screenWidth - 32;
+  const slideWidth = winW - 32;
+  const height = winW >= 700
+    ? Math.min(380, Math.max(220, Math.round(slideWidth / 2.2)))
+    : Math.max(180, Math.min(220, heightRaw || 200));
   // Auto-advance every 4s
   useEffect(() => {
     if (items.length <= 1) return;
@@ -343,26 +360,58 @@ function CategoryCirclesBlock({
   );
 }
 
-/* ─────────────────────────── Block: Brand Slider ─────────────────────────── */
+/* ─────────────────────────── Block: Brand Slider ───────────────────────────
+ *
+ * Jun 2026 rework, per owner feedback:
+ *   • Tapping a tile did NOTHING — `link_type` / `link_value` were never
+ *     wired, so the product / category the admin picked was unreachable.
+ *   • Tiles were 90×50 dp — too small to read the logo or the label.
+ *   • The admin's title never rendered; now it shows UNDER the image with
+ *     a guaranteed 2-line clamp so long brand names stay legible.
+ */
 
-function BrandSliderBlock({ block }: { block: LayoutBlock }) {
+function BrandSliderBlock({
+  block, onProductPress, onCategoryPress,
+}: { block: LayoutBlock; onProductPress?: (id: string) => void; onCategoryPress?: (c: string) => void }) {
   const items = block.items || [];
   if (items.length === 0) return null;
   return (
     <View>
       {block.title ? <SectionTitle block={block} /> : null}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
-        {items.map((it, i) => (
-          <View key={`brand-${i}`} style={styles.brandTile}>
-            {it.image_data_url ? (
-              <Image source={{ uri: it.image_data_url }} style={styles.brandImg} resizeMode="contain" />
-            ) : (
-              <View style={[styles.brandImg, { alignItems: "center", justifyContent: "center" }]}>
-                <Text style={styles.brandText}>{it.label || "Brand"}</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingVertical: 6, paddingRight: 4 }}>
+        {items.map((it, i) => {
+          const tappable = Boolean(it.link_type && it.link_value);
+          return (
+            <TouchableOpacity
+              key={`brand-${i}`}
+              style={styles.brandTile}
+              activeOpacity={tappable ? 0.8 : 1}
+              disabled={!tappable}
+              testID={`brand-item-${i}`}
+              onPress={() => {
+                if (it.link_type === "product" && it.link_value) onProductPress?.(it.link_value);
+                else if (it.link_type === "category" && it.link_value) onCategoryPress?.(it.link_value);
+              }}
+            >
+              <View style={styles.brandImgWrap}>
+                {it.image_data_url ? (
+                  <Image
+                    source={{ uri: it.image_data_url }}
+                    style={styles.brandImg}
+                    resizeMode={it.image_fit === "cover" ? "cover" : "contain"}
+                  />
+                ) : (
+                  <View style={[styles.brandImg, { alignItems: "center", justifyContent: "center" }]}>
+                    <Feather name="award" size={22} color={colors.textMuted} />
+                  </View>
+                )}
               </View>
-            )}
-          </View>
-        ))}
+              {it.label ? (
+                <Text style={styles.brandLabel} numberOfLines={2}>{it.label}</Text>
+              ) : null}
+            </TouchableOpacity>
+          );
+        })}
       </ScrollView>
     </View>
   );
@@ -410,7 +459,8 @@ function AnnouncementStripBlock({ block }: { block: LayoutBlock }) {
   const fg = block.text_color || "#92400E";
   return (
     <View style={[styles.announceStrip, { backgroundColor: bg }]}>
-      <Feather name="zap" size={13} color={fg} />
+      {/* Jun 2026 — the leading ⚡ glyph was removed per owner request; the
+          strip is now message-only so admin copy controls the whole width. */}
       <Text style={[styles.announceText, { color: fg, textAlign: alignToTextAlign(block.text_align), flex: 1 }, block.font_size ? { fontSize: block.font_size } : null]}>
         {block.title || block.body || "Announcement"}
       </Text>
@@ -451,7 +501,7 @@ function FlashSaleBlock({
               {block.title || "Flash Sale"}
             </Text>
           </View>
-          {block.subtitle ? <Text style={styles.flashSub}>{block.subtitle}</Text> : null}
+          {/* Jun 2026 — subtitle removed from flash sale headers. */}
         </View>
         {countdown && !countdown.expired ? (
           <View style={styles.flashTimer}>
@@ -466,7 +516,7 @@ function FlashSaleBlock({
         ) : null}
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
-        {products.slice(0, block.product_count || 10).map((p) => (
+        {products.slice(0, (block.data_source || "manual") === "manual" ? products.length : (block.product_count || 10)).map((p) => (
           <TouchableOpacity key={p.id} style={styles.flashCard} activeOpacity={0.85} onPress={() => onProductPress?.(p.id)}>
             <View style={styles.flashCardImageWrap}>
               {pickImage(p) ? (
@@ -491,39 +541,42 @@ function FlashSaleBlock({
 function ProductGridBlock({
   block, products, onProductPress, onAddToCart, onViewAll,
 }: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void; onViewAll?: (target: string) => void }) {
+  // Jun 2026 tablet fix — hook MUST run before the early return.
+  const { width: winW } = useWindowDimensions();
   if (products.length === 0) return <SkeletonBlock height={160} />;
-  const perRow = Math.max(1, Math.min(4, block.products_per_row || 2));
-  // ── Nov 2026 — Responsive card sizing that respects the 4-column
-  // request from the admin without wrapping into a single column.
-  //
-  // Previous version used `flexBasis: 47.5%` (from gridCard) combined
-  // with a percent basisPct override AND a 16dp gap, which pushed the
-  // total row width over 100% at perRow ≥ 3 and forced each card onto
-  // its own row (the "going down by down" bug the user reported).
-  //
-  // We now compute the exact card width in points against the visible
-  // ContentContainer inner width and use a tighter gap (10dp) for
-  // dense layouts so the cards align edge-to-edge cleanly. This also
-  // means the image aspect ratio and price look identical across
-  // all four column configurations.
-  const PADDING = 16; // ContentContainer horizontal padding (each side)
-  const gap = perRow >= 3 ? 10 : perRow === 2 ? 12 : 0;
-  const availableWidth = screenWidth - PADDING * 2;
-  const cardWidth = Math.floor((availableWidth - gap * (perRow - 1)) / perRow);
-  const size = block.size || "medium";
-  // Aspect ratio of the image varies with card size — smaller cards get
-  // a slightly taller-than-square image, larger cards get square.
-  const aspect = size === "small" ? 1 : size === "large" ? 0.95 : 1.05;
+  const basePerRow = Math.max(1, Math.min(4, block.products_per_row || 2));
+  // On a 12-inch tablet the admin's "2 per row" produced ~480 dp wide cards
+  // with 500 dp tall images.  On wide screens we keep the same card size the
+  // design was drawn for (~210 dp) and fit as many columns as the width
+  // allows instead of stretching two giant cards across the row.
+  const perRow = winW >= 700
+    ? Math.min(6, Math.max(basePerRow, Math.floor((winW - 32) / 210)))
+    : basePerRow;
+
+  // ── Jun 2026 — PERCENTAGE grid (was pixel math) ─────────────────────────
+  // The previous version measured `winW - 32` and divided by perRow to get a
+  // pixel card width. That assumed the block was always 16 dp from each
+  // screen edge; inside a category screen (extra padding) the row overflowed
+  // and the LAST card wrapped away — the owner's "selected 4, only 3 show"
+  // report. Each cell is now an exact `100 / perRow` % with its own padding,
+  // so the row can never overflow regardless of the parent's padding.
+  const cellPct = `${100 / perRow}%`;
+  const gutter = perRow >= 3 ? 8 : 10;
+
+  // Manual blocks show EVERY product the admin picked. `product_count` only
+  // caps auto-sourced (trending / new / best / category) lists — previously a
+  // stale count of 3 silently hid the 4th manual product.
+  const isManual = (block.data_source || "manual") === "manual";
+  const limit = isManual ? products.length : (block.product_count || 12);
+
   const nameLines = perRow >= 3 ? 1 : 2;
   const fontMul = perRow >= 4 ? 0.82 : perRow >= 3 ? 0.9 : 1;
-  const cardPadding = perRow >= 4 ? 5 : perRow >= 3 ? 6 : 8;
-  const innerPadding = perRow >= 3 ? 6 : 10;
   return (
     <View>
       {(block.title || block.show_view_all) ? (
         <View style={styles.gridHeader}>
           <View style={{ flex: 1, minWidth: 0 }}>
-            {block.title ? <SectionTitle block={block} /> : null}
+            {block.title ? <SectionTitle block={block} hideSubtitle /> : null}
           </View>
           {block.show_view_all ? (
             <TouchableOpacity
@@ -538,94 +591,87 @@ function ProductGridBlock({
           ) : null}
         </View>
       ) : null}
-      <View style={[styles.gridWrap, { gap }]}>
-        {products.slice(0, block.product_count || 12).map((p) => {
+      <View style={[styles.gridWrap, { marginHorizontal: -gutter / 2 }]}>
+        {products.slice(0, limit).map((p) => {
           const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
           const stockQty = Number(p.stock || 0);
           const lowStock = inStock && stockQty > 0 && stockQty <= 5;
           return (
-            <TouchableOpacity
+            <View
               key={p.id}
-              style={[
-                styles.gridCard,
-                { width: cardWidth, padding: 0, flexBasis: undefined as any },
-                !inStock && { opacity: 0.7 },
-              ]}
-              activeOpacity={0.85}
-              onPress={() => onProductPress?.(p.id)}
-              testID={`grid-card-${p.id}`}
+              style={{ width: cellPct as any, maxWidth: cellPct as any, paddingHorizontal: gutter / 2, paddingBottom: gutter }}
             >
-              {/* Image — tighter aspect than before (0.95) so name + price
-                  + Add row have breathing room.  Discount / stock badges
-                  overlay in the corners. */}
-              <View style={[styles.gridImgWrap, { aspectRatio: 0.95 }]}>
-                {pickImage(p) ? (
-                  <Image source={{ uri: pickImage(p) }} style={styles.gridImg} resizeMode="cover" />
-                ) : (
-                  <View style={[styles.gridImg, { alignItems: "center", justifyContent: "center" }]}>
-                    <Feather name="image" size={22} color={colors.textMuted} />
-                  </View>
-                )}
-                {!inStock ? (
-                  <View style={styles.gridOOSBadge}><Text style={styles.gridOOSText}>SOLD OUT</Text></View>
-                ) : lowStock ? (
-                  <View style={[styles.gridOOSBadge, { backgroundColor: "#F59E0B" }]}>
-                    <Text style={styles.gridOOSText}>ONLY {stockQty}</Text>
-                  </View>
-                ) : null}
-                {/* Wishlist heart pill in the top-right corner */}
-                <View style={styles.wishBtn}>
-                  <Feather name="heart" size={13} color="#EF4444" />
+              <TouchableOpacity
+                style={[styles.gridCard, { width: "100%", padding: 0, flexBasis: undefined as any }, !inStock && { opacity: 0.7 }]}
+                activeOpacity={0.85}
+                onPress={() => onProductPress?.(p.id)}
+                testID={`grid-card-${p.id}`}
+              >
+                {/* Square image — matches the shop-wide product tile so every
+                    surface of the app reads as one catalogue. */}
+                <View style={[styles.gridImgWrap, { aspectRatio: 1 }]}>
+                  {pickImage(p) ? (
+                    <Image source={{ uri: pickImage(p) }} style={styles.gridImg} resizeMode="cover" />
+                  ) : (
+                    <View style={[styles.gridImg, { alignItems: "center", justifyContent: "center" }]}>
+                      <Feather name="image" size={22} color={colors.textMuted} />
+                    </View>
+                  )}
+                  {!inStock ? (
+                    <View style={styles.gridOOSBadge}><Text style={styles.gridOOSText}>SOLD OUT</Text></View>
+                  ) : lowStock ? (
+                    <View style={[styles.gridOOSBadge, { backgroundColor: "#F59E0B" }]}>
+                      <Text style={styles.gridOOSText}>ONLY {stockQty}</Text>
+                    </View>
+                  ) : null}
+                  {/* Jun 2026 — wishlist heart removed: it was decorative
+                      (no handler) and competed with the Add button for the
+                      customer's tap. One card, one goal: add to cart. */}
                 </View>
-              </View>
 
-              {/* Info block */}
-              <View style={{ paddingHorizontal: 10, paddingTop: 8, paddingBottom: 10 }}>
-                <Text
-                  style={[styles.gridName, {
-                    fontSize: 13 * fontMul,
-                    lineHeight: 17 * (perRow >= 3 ? 0.9 : 1),
-                    marginTop: 0,
-                    minHeight: nameLines === 1 ? 17 : 34,
-                  }]}
-                  numberOfLines={nameLines}
-                >{p.name}</Text>
-
-                {/* Stock line — visible in-stock hint / low-stock warning */}
-                <Text
-                  style={{
-                    fontSize: 10.5 * fontMul,
-                    color: !inStock ? "#DC2626" : lowStock ? "#B45309" : "#0F7A3C",
-                    fontWeight: "700",
-                    marginTop: 3,
-                    letterSpacing: 0.2,
-                  }}
-                  numberOfLines={1}
-                >
-                  {!inStock
-                    ? "Out of stock"
-                    : lowStock
-                    ? `Only ${stockQty} left`
-                    : "In stock"}
-                </Text>
-
-                <View style={[styles.gridFooter, { marginTop: 6, gap: 6 }]}>
+                {/* Info block */}
+                <View style={{ paddingHorizontal: 9, paddingTop: 8, paddingBottom: 9 }}>
                   <Text
-                    style={[styles.gridPrice, { fontSize: 15 * fontMul, flex: 1 }]}
+                    style={[styles.gridName, {
+                      fontSize: 13 * fontMul,
+                      lineHeight: 17 * (perRow >= 3 ? 0.9 : 1),
+                      marginTop: 0,
+                      minHeight: nameLines === 1 ? 17 : 34,
+                    }]}
+                    numberOfLines={nameLines}
+                  >{p.name}</Text>
+
+                  <Text
+                    style={{
+                      fontSize: 10.5 * fontMul,
+                      color: !inStock ? "#DC2626" : lowStock ? "#B45309" : "#0F7A3C",
+                      fontWeight: "700",
+                      marginTop: 3,
+                      letterSpacing: 0.2,
+                    }}
                     numberOfLines={1}
-                  >{formatINR(p.price)}</Text>
-                  <TouchableOpacity
-                    onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
-                    disabled={!inStock}
-                    style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
-                    testID={`grid-add-${p.id}`}
-                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                   >
-                    <Feather name="plus" size={14} color="#fff" />
-                  </TouchableOpacity>
+                    {!inStock ? "Out of stock" : lowStock ? `Only ${stockQty} left` : "In stock"}
+                  </Text>
+
+                  <View style={[styles.gridFooter, { marginTop: 6, gap: 6 }]}>
+                    <Text
+                      style={[styles.gridPrice, { fontSize: 15 * fontMul, flex: 1 }]}
+                      numberOfLines={1}
+                    >{formatINR(p.price)}</Text>
+                    <TouchableOpacity
+                      onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
+                      disabled={!inStock}
+                      style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
+                      testID={`grid-add-${p.id}`}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <Feather name="plus" size={14} color="#fff" />
+                    </TouchableOpacity>
+                  </View>
                 </View>
-              </View>
-            </TouchableOpacity>
+              </TouchableOpacity>
+            </View>
           );
         })}
       </View>
@@ -639,18 +685,22 @@ function HorizontalSliderBlock({
   block, products, onProductPress, onAddToCart,
 }: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void }) {
   if (products.length === 0) return <SkeletonBlock height={180} />;
+  // Manual blocks show every product the admin picked (see ProductGridBlock).
+  const isManual = (block.data_source || "manual") === "manual";
+  const limit = isManual ? products.length : (block.product_count || 10);
   return (
     <View>
-      {block.title ? <SectionTitle block={block} /> : null}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4, paddingRight: 4 }}>
-        {products.slice(0, block.product_count || 10).map((p) => {
+      {block.title ? <SectionTitle block={block} hideSubtitle /> : null}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingVertical: 6, paddingRight: 4 }}>
+        {products.slice(0, limit).map((p) => {
           const inStock = (p.is_in_stock ?? (p.stock || 0) > 0);
           return (
             <TouchableOpacity
               key={p.id}
-              style={[styles.hCard, !inStock && { opacity: 0.55 }]}
+              style={[styles.hCard, !inStock && { opacity: 0.6 }]}
               activeOpacity={0.85}
               onPress={() => onProductPress?.(p.id)}
+              testID={`hslide-card-${p.id}`}
             >
               <View style={styles.hImgWrap}>
                 {pickImage(p) ? (
@@ -660,9 +710,25 @@ function HorizontalSliderBlock({
                     <Feather name="image" size={20} color={colors.textMuted} />
                   </View>
                 )}
+                {!inStock ? (
+                  <View style={styles.gridOOSBadge}><Text style={styles.gridOOSText}>SOLD OUT</Text></View>
+                ) : null}
               </View>
               <Text style={styles.hName} numberOfLines={2}>{p.name}</Text>
-              <Text style={styles.hPrice}>{formatINR(p.price)}</Text>
+              {/* Jun 2026 — price + Add on one aligned row so every card in
+                  the strip has the same height and a 1-tap buy action. */}
+              <View style={styles.hFooter}>
+                <Text style={styles.hPrice} numberOfLines={1}>{formatINR(p.price)}</Text>
+                <TouchableOpacity
+                  onPress={(e: any) => { e.stopPropagation?.(); onAddToCart?.(p.id); }}
+                  disabled={!inStock}
+                  style={[styles.addCartBtn, !inStock && { opacity: 0.5 }]}
+                  testID={`hslide-add-${p.id}`}
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                >
+                  <Feather name="plus" size={14} color="#fff" />
+                </TouchableOpacity>
+              </View>
             </TouchableOpacity>
           );
         })}
@@ -673,7 +739,7 @@ function HorizontalSliderBlock({
 
 /* ─────────────────────────── Block: Section Header ─────────────────────────── */
 
-function SectionTitle({ block }: { block: LayoutBlock }) {
+function SectionTitle({ block, hideSubtitle = false }: { block: LayoutBlock; hideSubtitle?: boolean }) {
   return (
     <View>
       <Text style={[
@@ -682,7 +748,10 @@ function SectionTitle({ block }: { block: LayoutBlock }) {
         block.font_size ? { fontSize: block.font_size } : null,
         block.text_align ? { textAlign: alignToTextAlign(block.text_align) } : null,
       ]}>{block.title}</Text>
-      {block.subtitle ? <Text style={styles.sectionTitleSub}>{block.subtitle}</Text> : null}
+      {/* Jun 2026 — product sections (grid / slider / flash sale) no longer
+          show a subtitle: it stole vertical space and pushed the last row of
+          products out of view. */}
+      {block.subtitle && !hideSubtitle ? <Text style={styles.sectionTitleSub}>{block.subtitle}</Text> : null}
     </View>
   );
 }
@@ -770,13 +839,19 @@ function ContentBoxBlock({
   const size = (block.size as "small" | "medium" | "large") || "medium";
   const height = block.height || SIZE_HEIGHT[size];
   if (p) {
+    // Jun 2026 — the image used to get `height - 100`, which on a "small"
+    // block left a ~60 dp letterbox strip: the hero product was unreadable.
+    // The photo is now the star (square-ish, 72% of the card) and the
+    // name / price / CTA sit in a compact footer underneath.
+    const imgHeight = Math.max(180, Math.round(height * 0.72));
     return (
       <TouchableOpacity
-        style={[styles.productCard, { minHeight: height }]}
+        style={[styles.productCard, { minHeight: imgHeight + 96 }]}
         onPress={() => onProductPress?.(p.id)}
         activeOpacity={0.85}
+        testID={`content-box-${p.id}`}
       >
-        <View style={[styles.productImageWrap, { height: Math.max(100, height - 100) }]}>
+        <View style={[styles.productImageWrap, { height: imgHeight }]}>
           {pickImage(p) ? (
             <Image source={{ uri: pickImage(p) }} style={styles.productImage} resizeMode="cover" />
           ) : (
@@ -816,10 +891,122 @@ function ContentBoxBlock({
   );
 }
 
+/* ─────────────────────────── Block: Spotlight ───────────────────────────
+ *
+ * Jun 2026 — NEW block type requested by the owner.
+ *
+ * Brief: "a block that covers the mobile view — roughly 1/3 of the shop
+ * home screen — like a horizontal slider but rectangular and immersive, to
+ * pull the customer INSIDE the products / a category, with View more."
+ *
+ * Design:
+ *   • Full-width rectangular hero, height = 34 % of the window height,
+ *     clamped to 240–340 dp so a 6-inch phone gets ~1/3 of the screen and
+ *     a tablet doesn't get a billboard.
+ *   • Optional background artwork (block image, or the first product photo)
+ *     with a dark scrim so the copy always reads.
+ *   • Bottom row = a horizontally-swipeable strip of product chips (photo +
+ *     price). Tapping a chip opens that product.
+ *   • Tapping the hero body → the block's "View more" target (a category, or
+ *     the whole shop). Same for the CTA pill.
+ */
+
+function SpotlightBlock({
+  block, products, onProductPress, onViewAll,
+}: {
+  block: LayoutBlock; products: Product[];
+  onProductPress?: (id: string) => void;
+  onViewAll?: (target: string) => void;
+}) {
+  const { height: winH } = useWindowDimensions();
+  // ~1/3 of the phone screen, clamped so the header + product strip always
+  // fit exactly (no dead band between the CTA and the chips).
+  const heroHeight = block.height || Math.max(288, Math.min(348, Math.round(winH * 0.34)));
+  const cover = block.image_data_url || pickImage(products[0]);
+  const strip = products.slice(0, 12);
+  const target = block.view_all_link || block.category_filter || "";
+
+  return (
+    <View style={[styles.spotWrap, { height: heroHeight, backgroundColor: block.bg_color || colors.primary }]}>
+      {cover ? (
+        <Image
+          source={{ uri: cover }}
+          style={StyleSheet.absoluteFill as any}
+          resizeMode={block.image_fit === "contain" ? "contain" : "cover"}
+        />
+      ) : null}
+      <View style={styles.spotScrim} />
+
+      <TouchableOpacity
+        style={styles.spotHeader}
+        activeOpacity={0.85}
+        onPress={() => onViewAll?.(target)}
+        testID={`spotlight-open-${block.id}`}
+      >
+        {block.subtitle ? (
+          <Text style={[styles.spotEyebrow, block.text_color ? { color: block.text_color } : null]} numberOfLines={1}>
+            {block.subtitle.toUpperCase()}
+          </Text>
+        ) : null}
+        <Text
+          style={[
+            styles.spotTitle,
+            block.text_color ? { color: block.text_color } : null,
+            block.font_size ? { fontSize: block.font_size } : null,
+          ]}
+          numberOfLines={2}
+        >
+          {block.title || "Featured"}
+        </Text>
+        <View style={[styles.spotCta, { backgroundColor: block.button_color || "#fff" }]}>
+          <Text style={[styles.spotCtaText, { color: block.button_text_color || colors.primary }]}>
+            {block.cta_label || "View more"}
+          </Text>
+          <Feather name="arrow-right" size={13} color={block.button_text_color || colors.primary} />
+        </View>
+      </TouchableOpacity>
+
+      {strip.length > 0 ? (
+        // Fixed strip height so the chips never get vertically squashed by
+        // the parent's fixed hero height.
+        <View style={{ height: 174 }}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.spotStrip}
+          >
+            {strip.map((p) => (
+              <TouchableOpacity
+                key={`spot-${p.id}`}
+                style={styles.spotChip}
+                activeOpacity={0.85}
+                onPress={() => onProductPress?.(p.id)}
+                testID={`spotlight-product-${p.id}`}
+              >
+                <View style={styles.spotChipImgWrap}>
+                  {pickImage(p) ? (
+                    <Image source={{ uri: pickImage(p) }} style={styles.spotChipImg} resizeMode="cover" />
+                  ) : (
+                    <View style={[styles.spotChipImg, { alignItems: "center", justifyContent: "center" }]}>
+                      <Feather name="image" size={16} color={colors.textMuted} />
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.spotChipName} numberOfLines={1}>{p.name}</Text>
+                <Text style={styles.spotChipPrice} numberOfLines={1}>{formatINR(p.price)}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 /* ─────────────────────────── Main Renderer ─────────────────────────── */
 
 export function ShopLayoutRenderer({
-  scope = "home", category, pincode, lat, lng, onProductPress, onCategoryPress, onAddToCart, refreshTick,
+  scope = "home", category, pincode, lat, lng, onProductPress, onCategoryPress, onAddToCart, refreshTick, onBlocksResolved,
 }: RendererProps) {
   const [blocks, setBlocks] = useState<LayoutBlock[] | null>(null);
   const [productsById, setProductsById] = useState<Record<string, Product>>({});
@@ -845,6 +1032,15 @@ export function ShopLayoutRenderer({
         // backend can filter to pincode-scoped layout blocks + global
         // blocks that apply to any pincode.
         if (pincode) params.pincode = pincode;
+        // Jun 2026 BUGFIX — cold-cache layout wipe.
+        //
+        // `cachedGet` returns the STALE copy immediately (null on a cold
+        // start) and calls `onFresh` when the network copy lands. The code
+        // below then did `setBlocks(bRes?.items || [])` — so on a first-ever
+        // open the freshly-fetched blocks were overwritten with `[]` and the
+        // customer saw a shop with NO admin layout at all until the next
+        // app open. We now remember the fresh payload and prefer it.
+        let freshBlocks: LayoutBlock[] | null = null;
         const applyLayout = (bData: { items?: LayoutBlock[] } | null) => {
           if (cancelled) return null;
           return bData?.items || [];
@@ -856,7 +1052,7 @@ export function ShopLayoutRenderer({
             params,
             onFresh: (fresh) => {
               const items = applyLayout(fresh);
-              if (items) setBlocks(items);
+              if (items) { freshBlocks = items; setBlocks(items); }
             },
           }),
           // Jul 2026 — pass lat/lng + strict_location so the layout
@@ -874,7 +1070,7 @@ export function ShopLayoutRenderer({
           }),
         ]);
         if (cancelled) return;
-        const blocks: LayoutBlock[] = bRes?.items || [];
+        const blocks: LayoutBlock[] = freshBlocks || bRes?.items || [];
         const pData = pRes.data;
         const pListRaw: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
         // UPDATE 1 — Drop the current vendor's own products before caching.
@@ -882,49 +1078,13 @@ export function ShopLayoutRenderer({
         const map: Record<string, Product> = {};
         pList.forEach((p) => { map[p.id] = p; });
         setProductsById(map);
-        // Pre-fetch products for any block using a non-manual data source
-        const dataPromises: Promise<void>[] = [];
-        const cacheUpdates: Record<string, Product[]> = {};
-        for (const b of blocks) {
-          if (!b.active) continue;
-          const usesProducts = ["product_grid", "horizontal_slider", "flash_sale"].includes(b.block_type);
-          if (!usesProducts) continue;
-          const ds = b.data_source || "manual";
-          if (ds === "manual") {
-            const ids = b.product_ids || [];
-            const arr = ids.map((id) => map[id]).filter(Boolean) as Product[];
-            cacheUpdates[b.id] = arr;
-          } else {
-            dataPromises.push((async () => {
-              try {
-                const r = await api.get<any>("/products/by-source", {
-                  params: {
-                    source: ds,
-                    limit: b.product_count || 10,
-                    ...(b.category_filter ? { category: b.category_filter } : (category ? { category } : {})),
-                    // Jul 2026 — enforce delivery zone on layout-block products too.
-                    ...(pincode ? { pincode } : {}),
-                    ...(lat !== undefined && lng !== undefined ? { lat, lng } : {}),
-                    strict_location: "true",
-                  },
-                });
-                const data = r.data;
-                const arr: Product[] = Array.isArray(data) ? data : (data?.items || []);
-                cacheUpdates[b.id] = excludeOwn(arr);
-              } catch {
-                cacheUpdates[b.id] = [];
-              }
-            })());
-          }
-        }
-        await Promise.all(dataPromises);
-        if (cancelled) return;
-        // Critical: commit BOTH the layout AND the product cache in the same
-        // render tick. This avoids the "empty blocks flash" the user saw —
-        // previously blocks rendered first (empty product lists), then the
-        // by-source calls filled them in over the next 500-1500ms which
-        // looked like the layout was missing or broken.
-        setSourceCache(cacheUpdates);
+        // Jun 2026 — manual blocks no longer need a pre-computed cache: the
+        // renderer maps `product_ids` → `productsById` at render time. That
+        // removes an ordering bug where the cache was built from an EMPTY
+        // block list (the layout arrived a beat later via `onFresh`), leaving
+        // every manual grid / spotlight showing zero products.
+        // Auto-sourced blocks are fetched by a dedicated effect below, once
+        // we actually know which blocks exist.
         setBlocks(blocks);
       } catch {
         if (!cancelled) setBlocks([]);
@@ -943,9 +1103,62 @@ export function ShopLayoutRenderer({
   // Nothing to schedule here.
 
   const visible = useMemo(
-    () => (blocks || []).filter((b) => b.active).sort((a, b) => a.sort_order - b.sort_order),
-    [blocks],
+    () => (blocks || [])
+      .filter((b) => b.active)
+      // Jun 2026 — belt-and-braces scope guard. The owner reported a block
+      // created for "Essentials" also appearing on the Vegetables & Meat
+      // category screens. A stale cache entry or a legacy block with the
+      // wrong `scope_category` can do that, so we now re-assert the match
+      // on the client: on a category screen only blocks scoped to THAT
+      // exact category render; on Home only home-scoped blocks render.
+      .filter((b) => {
+        const bScope = (b as any).scope || "home";
+        if (scope === "category") {
+          return bScope === "category" && ((b as any).scope_category || "") === (category || "");
+        }
+        return bScope === "home";
+      })
+      .sort((a, b) => a.sort_order - b.sort_order),
+    [blocks, scope, category],
   );
+
+  // Jun 2026 — Auto-sourced product fetch.
+  // Runs AFTER `visible` is known (previously it ran inside the layout
+  // effect, before the blocks had landed). Only fires for blocks whose
+  // data_source is trending / new / best / category.
+  useEffect(() => {
+    const autoBlocks = visible.filter(
+      (b) => PRODUCT_BLOCK_TYPES.includes(b.block_type) && (b.data_source || "manual") !== "manual",
+    );
+    if (autoBlocks.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const updates: Record<string, Product[]> = {};
+      await Promise.all(autoBlocks.map(async (b) => {
+        try {
+          const r = await api.get<any>("/products/by-source", {
+            params: {
+              source: b.data_source,
+              limit: b.product_count || 10,
+              ...(b.category_filter ? { category: b.category_filter } : (category ? { category } : {})),
+              // Jul 2026 — enforce delivery zone on layout-block products too.
+              ...(pincode ? { pincode } : {}),
+              ...(lat !== undefined && lng !== undefined ? { lat, lng } : {}),
+              strict_location: "true",
+            },
+          });
+          const data = r.data;
+          const arr: Product[] = Array.isArray(data) ? data : (data?.items || []);
+          updates[b.id] = excludeOwn(arr);
+        } catch {
+          updates[b.id] = [];
+        }
+      }));
+      if (!cancelled) setSourceCache((prev) => ({ ...prev, ...updates }));
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, category, pincode, lat, lng, currentUserId]);
 
   // Nov 2026 — Auto-inject Product Grid blocks between banners so
   // customers never see an "empty" shop layout when the admin drops a
@@ -1030,25 +1243,17 @@ export function ShopLayoutRenderer({
     onAddToCart?.(productId);
   };
 
-  // Nov 2026 — When the app auto-injects a synthetic product_grid, we
-  // need a product list for it too.  Rather than firing another N
-  // /products/by-source requests, we reuse the top-of-catalogue list
-  // (`productsById` — already fetched) filtered by the current
-  // `category` prop (if any).  This is completely client-side so it
-  // renders instantly and doesn't extend the loading state.
-  const autoBlockProducts = useMemo<Product[]>(() => {
-    const all = Object.values(productsById);
-    if (!category) return all.slice(0, 20);
-    const lc = category.toLowerCase();
-    const filtered = all.filter((p: any) => {
-      const c = String(p?.category || "").toLowerCase();
-      const s = String(p?.subcategory || "").toLowerCase();
-      return c === lc || s === lc;
-    });
-    // Fallback — if nothing matches (vendor tagged with a different
-    // free-form label), show newest anything so the block never blanks.
-    return (filtered.length > 0 ? filtered : all).slice(0, 20);
-  }, [productsById, category]);
+  // (Removed Jun 2026) `autoBlockProducts` — the auto-inject feature it
+  // fed was deleted earlier; manual blocks now resolve from `productsById`
+  // directly at render time.
+
+  // Jun 2026 — Tell the parent how many blocks actually resolved so it can
+  // fall back to a plain "All products near you" grid when an admin hasn't
+  // built a layout for this pincode yet (customers were seeing a shop home
+  // with no products at all).
+  useEffect(() => {
+    if (blocks !== null) onBlocksResolved?.(augmented.length);
+  }, [blocks, augmented.length, onBlocksResolved]);
 
   if (blocks === null) {
     // Loading skeletons
@@ -1086,12 +1291,12 @@ export function ShopLayoutRenderer({
       {augmented.map((b) => {
         // Resolve products for product-driven blocks
         let prods: Product[] = [];
-        if (["product_grid", "horizontal_slider", "flash_sale"].includes(b.block_type)) {
-          // Auto-injected synthetic blocks have ids prefixed with __auto:
-          // and their product list comes from the client-side filter
-          // (no extra network round-trip).
-          prods = b.id.startsWith("__auto:")
-            ? autoBlockProducts
+        if (PRODUCT_BLOCK_TYPES.includes(b.block_type)) {
+          // Manual blocks resolve from the already-loaded product map at
+          // render time (see the layout effect); auto-sourced blocks come
+          // from the by-source cache.
+          prods = (b.data_source || "manual") === "manual"
+            ? ((b.product_ids || []).map((id) => productsById[id]).filter(Boolean) as Product[])
             : (sourceCache[b.id] || []);
         }
         // June 2026 Shop redesign — every block (admin-created or hardcoded)
@@ -1108,7 +1313,16 @@ export function ShopLayoutRenderer({
           case "category_circles":
             node = <CategoryCirclesBlock block={b} onCategoryPress={wrapCategoryPress(b.id)} excludeCategoryIds={consumedByEarlierCircles.get(b.id)} />; break;
           case "brand_slider":
-            node = <BrandSliderBlock block={b} />; break;
+            node = <BrandSliderBlock block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />; break;
+          case "spotlight":
+            node = (
+              <SpotlightBlock
+                block={b}
+                products={prods}
+                onProductPress={wrapProductPress(b.id)}
+                onViewAll={(target) => { trackClick(b.id); onCategoryPress?.(target || ""); }}
+              />
+            ); break;
           case "offer_cards":
             node = <OfferCardsBlock block={b} onProductPress={wrapProductPress(b.id)} onCategoryPress={wrapCategoryPress(b.id)} />; break;
           case "announcement_strip":
@@ -1163,9 +1377,19 @@ const styles = StyleSheet.create({
   circleImg: { width: "100%", height: "100%" },
   circleLabel: { fontSize: 11, fontWeight: "700", color: colors.textMain, marginTop: 6, textAlign: "center" },
   // Brand slider
-  brandTile: { width: 90, height: 50, borderRadius: 10, overflow: "hidden", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, padding: 6 },
+  // Brand slider — Jun 2026: bigger, readable tile with the label UNDER
+  // the logo (was a cramped 90×50 image-only chip).
+  brandTile: { width: 118, alignItems: "center" },
+  brandImgWrap: {
+    width: 118, height: 82, borderRadius: 14, overflow: "hidden",
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    padding: 8, alignItems: "center", justifyContent: "center",
+  },
   brandImg: { width: "100%", height: "100%" },
-  brandText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+  brandLabel: {
+    fontSize: 11.5, fontWeight: "800", color: colors.textMain,
+    marginTop: 6, textAlign: "center", lineHeight: 14.5,
+  },
   // Offer cards
   offerCard: { flexBasis: "48%", flexGrow: 1, borderRadius: SHOP_CARD_RADIUS, overflow: "hidden", minHeight: 90, position: "relative" },
   offerImg: { width: "100%", height: "100%", position: "absolute" },
@@ -1185,17 +1409,21 @@ const styles = StyleSheet.create({
   flashTimerText: { color: "#fff", fontSize: 12, fontWeight: "900", letterSpacing: 0.4 },
   flashTimerSep: { color: "#111827", fontWeight: "900" },
   flashEnded: { fontSize: 11, fontWeight: "800", color: colors.textMuted, fontStyle: "italic" },
-  flashCard: { width: 110, backgroundColor: "#fff", borderRadius: SHOP_CARD_RADIUS, overflow: "hidden" },
+  // Flash sale card — Jun 2026: 132 dp (was 110) so the photo actually
+  // sells the discount on a 6-inch phone.
+  flashCard: { width: 132, backgroundColor: "#fff", borderRadius: SHOP_CARD_RADIUS, overflow: "hidden" },
   flashCardImageWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted },
   flashCardImg: { width: "100%", height: "100%" },
-  flashCardName: { ...SHOP_TYPO.productName, fontSize: 12, padding: 6, paddingBottom: 0 },
-  flashCardPrice: { fontSize: 13, fontWeight: "900", color: "#DC2626", paddingHorizontal: 6, paddingBottom: 6 },
+  flashCardName: { ...SHOP_TYPO.productName, fontSize: 12.5, padding: 8, paddingBottom: 0, minHeight: 32, lineHeight: 16 },
+  flashCardPrice: { fontSize: 14, fontWeight: "900", color: "#DC2626", paddingHorizontal: 8, paddingBottom: 8 },
   // Product grid — 2 columns, equal width/height per spec.
   gridHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 },
   gridViewAllBtn: { flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.brand100 },
   gridViewAllText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
   // gap:16 → matches the global 16 dp inter-card gap requested in the spec.
-  gridWrap: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  // Jun 2026 — no `gap`: each cell owns its padding so percentage
+  // widths always add up to exactly 100%.
+  gridWrap: { flexDirection: "row", flexWrap: "wrap" },
   gridCard: {
     // Width is set inline by ProductGridBlock (based on perRow + gap +
     // screen width) so removing flexBasis here prevents the double-
@@ -1216,6 +1444,33 @@ const styles = StyleSheet.create({
     }),
   },
   // Nov 2026 — Wishlist heart overlay pill
+  // ── Spotlight (Jun 2026) — immersive full-width showcase, ~1/3 screen ──
+  spotWrap: {
+    borderRadius: SHOP_BANNER_RADIUS, overflow: "hidden",
+    position: "relative", justifyContent: "space-between",
+  },
+  spotScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(8,20,14,0.46)" },
+  spotHeader: { paddingHorizontal: 16, paddingTop: 16 },
+  spotEyebrow: { fontSize: 10, fontWeight: "900", color: "rgba(255,255,255,0.9)", letterSpacing: 1.6 },
+  spotTitle: { fontSize: 21, fontWeight: "900", color: "#fff", letterSpacing: -0.5, marginTop: 3, lineHeight: 26 },
+  spotCta: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    alignSelf: "flex-start", paddingHorizontal: 13, paddingVertical: 8,
+    borderRadius: 999, marginTop: 12, minHeight: 34,
+  },
+  spotCtaText: { fontSize: 12, fontWeight: "900" },
+  spotStrip: { gap: 10, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 6, alignItems: "flex-start" },
+  // Explicit pixel sizes (not aspectRatio) — the chip lives inside a
+  // fixed-height hero, and a ratio-driven box got vertically squeezed there.
+  spotChip: {
+    width: 106, height: 152, backgroundColor: "rgba(255,255,255,0.96)",
+    borderRadius: 12, overflow: "hidden", padding: 6,
+  },
+  spotChipImgWrap: { width: 94, height: 94, borderRadius: 8, overflow: "hidden", backgroundColor: colors.surfaceMuted },
+  spotChipImg: { width: "100%", height: "100%" },
+  spotChipName: { fontSize: 11, fontWeight: "700", color: colors.textMain, marginTop: 5, lineHeight: 14 },
+  spotChipPrice: { fontSize: 12.5, fontWeight: "900", color: colors.primary, marginTop: 2 },
+
   wishBtn: {
     position: "absolute", top: 6, right: 6,
     width: 26, height: 26, borderRadius: 13,
@@ -1241,11 +1496,14 @@ const styles = StyleSheet.create({
   gridPrice: { ...SHOP_TYPO.price, color: colors.primary, letterSpacing: -0.3 },
   gridAdd: { width: 32, height: 32, borderRadius: 10, alignItems: "center", justifyContent: "center" },
   // Horizontal product slider (Best Sellers / Featured / Recently Added)
-  hCard: { width: 140, backgroundColor: colors.surface, borderRadius: SHOP_CARD_RADIUS, borderWidth: 1, borderColor: colors.border, overflow: "hidden", padding: 8 },
-  hImgWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, borderRadius: 8, overflow: "hidden" },
+  // Horizontal slider — Jun 2026: 156 dp wide (was 140) with a price+Add
+  // footer row so cards align and are buyable in one tap.
+  hCard: { width: 156, backgroundColor: colors.surface, borderRadius: SHOP_CARD_RADIUS, borderWidth: 1, borderColor: colors.border, overflow: "hidden", padding: 8 },
+  hImgWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, borderRadius: 10, overflow: "hidden", position: "relative" },
   hImg: { width: "100%", height: "100%" },
-  hName: { ...SHOP_TYPO.productName, fontSize: 13, marginTop: 8, minHeight: 32 },
-  hPrice: { ...SHOP_TYPO.price, color: colors.primary, marginTop: 4 },
+  hName: { ...SHOP_TYPO.productName, fontSize: 13, marginTop: 8, minHeight: 34, lineHeight: 17 },
+  hFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6, gap: 6 },
+  hPrice: { ...SHOP_TYPO.price, color: colors.primary, flex: 1 },
   // Section header — Bold 18 per spec.
   sectionHeaderWrap: { marginTop: 0, marginBottom: 8 },
   sectionTitleText: { ...SHOP_TYPO.sectionTitle, color: colors.textMain },

@@ -21,6 +21,7 @@ import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
+import { SubscriptionLocked } from "../../src/subscription";
 import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
@@ -178,6 +179,22 @@ export default function WalletScreen() {
   }
 
   const hasPayoutMethod = !!(user?.upi_id || user?.bank_account);
+
+  // ── Free tier (Aug-2026) ──────────────────────────────────────────────
+  // The ₹118 is a subscription. Users who skipped it can browse and shop,
+  // but cashback / wallet / withdrawals are member-only.
+  if (user && user.role !== "admin" && !user.registration_paid) {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <ScrollView contentContainerStyle={styles.container}>
+          <Text style={styles.overline}>WALLET</Text>
+          <Text style={styles.h1Compact}>Your earnings</Text>
+          <View style={{ height: 12 }} />
+          <SubscriptionLocked feature="Wallet & cashback" />
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>

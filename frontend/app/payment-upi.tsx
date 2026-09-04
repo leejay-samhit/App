@@ -29,7 +29,7 @@ import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { useSmsUtrListener, isSmsConsentAvailable } from "../src/sms-utr";
 import QRCode from "react-native-qrcode-svg";
-import { LinearGradient } from "expo-linear-gradient";
+import { SubscriptionHero, SubscriptionBenefits, SkipSubscriptionButton } from "../src/subscription";
 
 type Config = {
   methods_enabled: { razorpay: boolean; upi_manual: boolean };
@@ -243,29 +243,9 @@ export default function UpiManualPayment() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
 
-          {/* Premium gradient header — Deep Blue + Purple + Cyan glow (June 2026) */}
-          <LinearGradient
-            colors={["#0A0E27", "#1E2A78", "#5B21B6"]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.heroGradient}
-          >
-            {/* Subtle cyan glow blob — gives a fintech "PhonePe / Cred" feel. */}
-            <View style={styles.heroGlow} pointerEvents="none" />
-            <Text style={styles.heroEyebrow}>{(brand.app_name || "App").toUpperCase()} · PAY TO ACTIVATE</Text>
-            <Text style={styles.heroAmount}>{formatINR(cfg.amount)}</Text>
-            <Text style={styles.heroSub}>Registration fee · paid once, refundable per policy</Text>
-            <View style={styles.heroPillRow}>
-              <View style={styles.heroPill}>
-                <Feather name="shield" size={11} color="#A5F3FC" />
-                <Text style={styles.heroPillText}>{"  "}Secure UPI</Text>
-              </View>
-              <View style={styles.heroPill}>
-                <Feather name="zap" size={11} color="#A5F3FC" />
-                <Text style={styles.heroPillText}>{"  "}Instant verify</Text>
-              </View>
-            </View>
-          </LinearGradient>
+          {/* Subscription hero + the 8 member benefits (Aug-2026) */}
+          <SubscriptionHero amount={cfg.amount} appName={brand.app_name} />
+          <SubscriptionBenefits />
 
           {/* Pending banner */}
           {isPending ? (
@@ -467,10 +447,15 @@ export default function UpiManualPayment() {
             </TouchableOpacity>
           </View>
 
+          {/* Free entry — the ₹118 is a subscription, not a wall. */}
+          {!isPending ? <SkipSubscriptionButton amount={cfg.amount} /> : null}
+
           <Text style={styles.fineprint}>
-            • Your account stays in PENDING until admin verifies the UTR against the bank statement.{"\n"}
+            • Your subscription stays PENDING until admin verifies the UTR against the bank statement.{"\n"}
             • Do NOT pay any amount other than {formatINR(cfg.amount)}.{"\n"}
-            • If your payment fails, the bank will auto-refund within 1–3 working days.
+            • If your payment fails, the bank will auto-refund within 1–3 working days.{"\n"}
+            • Without the subscription you can still browse and shop — cashback, wallet and
+            withdrawals stay locked.
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>

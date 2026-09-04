@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Image, ScrollView, Alert, Modal, Platform } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, Alert, Modal, Platform } from "react-native";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -9,6 +9,7 @@ import { useAuth } from "../src/auth";
 import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
+import { SubscriptionHero, SubscriptionBenefits, SkipSubscriptionButton } from "../src/subscription";
 
 type PayMethod = "upi" | "card" | "netbanking";
 
@@ -29,18 +30,13 @@ type PayConfig = {
 
 export default function Payment() {
   const { user, refresh, logout } = useAuth();
-  const { app_name, payment_hero, payment_methods } = useBranding();
+  const { app_name } = useBranding();
   const router = useRouter();
 
-  // ─── Razorpay feature flag (Feb-2026) ───
-  // When admin disables Razorpay, route this entry-point to the new manual
-  // UPI flow. Razorpay code stays intact below — it re-activates the moment
-  // `payment_methods.razorpay_enabled` flips back to true.
-  useEffect(() => {
-    if (payment_methods && payment_methods.razorpay_enabled === false) {
-      router.replace("/payment-upi" as any);
-    }
-  }, [payment_methods?.razorpay_enabled]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Aug-2026 — only TWO account types exist: Subscriber (Razorpay payment
+  // successful) and Non-subscriber ("Continue without subscription").
+  // The old UPI-manual / offline-cash subscription paths were removed, so this
+  // screen no longer redirects to /payment-upi.
 
   const [config, setConfig] = useState<PayConfig | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(true);
@@ -311,15 +307,9 @@ export default function Payment() {
           </TouchableOpacity>
         </View>
 
-        <Image
-          source={{ uri: "https://images.pexels.com/photos/5849577/pexels-photo-5849577.jpeg" }}
-          style={styles.hero}
-        />
-        <Text style={styles.overline}>ACTIVATION</Text>
-        <Text style={styles.h1}>{payment_hero}</Text>
-        <Text style={styles.subtitle}>
-          Pay the one-time {formatINR(config.amount)} activation fee to unlock your referral code and start earning.
-        </Text>
+        {/* Subscription hero + the 8 member benefits (Aug-2026) */}
+        <SubscriptionHero amount={config.amount} appName={app_name} />
+        <SubscriptionBenefits />
 
         <View style={styles.amountCard}>
           <Text style={styles.amountLabel}>AMOUNT TO PAY</Text>
@@ -363,8 +353,12 @@ export default function Payment() {
           <Text style={styles.payBtnText}> Pay {formatINR(config.amount)}</Text>
         </TouchableOpacity>
 
+        {/* Free entry — the ₹118 is a subscription, not a wall. */}
+        <SkipSubscriptionButton amount={config.amount} />
+
         <Text style={styles.note}>
           🔒 Secured by Razorpay. {config.is_mock ? "Sandbox mode — no real charge." : "Your payment is processed securely."}
+          {"\n"}Without the subscription you can still browse and shop — cashback, wallet and withdrawals stay locked.
         </Text>
       </ScrollView>
 

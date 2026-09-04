@@ -205,7 +205,9 @@ class AdminUserUpdate(BaseModel):
     # All money movements MUST go through /admin/users/{id}/wallet (credit/debit)
     # which atomically debits the system-wallet's `direct_added` bucket — this
     # enforces the "only money that's been deposited can be paid out" invariant.
-    registration_paid: Optional[bool] = None
+    # registration_paid removed (Aug-2026) — paid status is immutable once a
+    # Razorpay payment succeeded. Referral payouts are toggled via
+    # POST /admin/users/{id}/referral-approval instead.
     upi_id: Optional[str] = None
     bank_account: Optional[str] = None
     ifsc: Optional[str] = None

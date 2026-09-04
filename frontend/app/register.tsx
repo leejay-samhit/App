@@ -15,12 +15,13 @@ import { Feather } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../src/auth";
-import { colors, radii, spacing } from "../src/theme";
+import { colors, radii, spacing, useResponsiveContainer } from "../src/theme";
 import { formatApiError } from "../src/api";
 
 export default function Register() {
   const { register } = useAuth();
   const router = useRouter();
+  const wideColumn = useResponsiveContainer();
   const params = useLocalSearchParams<{ ref?: string }>();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -60,7 +61,7 @@ export default function Register() {
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
-        <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        <ScrollView contentContainerStyle={[styles.container, wideColumn]} keyboardShouldPersistTaps="handled">
           <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} testID="register-back">
             <Feather name="arrow-left" size={20} color={colors.textMain} />
           </TouchableOpacity>

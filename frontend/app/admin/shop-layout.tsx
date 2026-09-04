@@ -13,7 +13,7 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import { api, formatApiError } from "../../src/api";
+import { api, formatApiError, resolveImageUrl } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
@@ -68,7 +68,7 @@ const LAYOUT_GUIDE_STEPS: GuideStep[] = [
 ];
 
 type Block = LayoutBlock;
-type Product = { id: string; name: string; price?: number; image_url?: string; category?: string };
+type Product = { id: string; name: string; price?: number; image_url?: string; category?: string; vendor_id?: string | null; vendor_name?: string; is_published?: boolean };
 
 const TYPE_META: Record<BlockType, { label: string; icon: any; hint: string; group: string }> = {
   // Hero / Banners
@@ -81,7 +81,8 @@ const TYPE_META: Record<BlockType, { label: string; icon: any; hint: string; gro
   // Products
   product_grid:     { label: "Product grid",    icon: "grid",         hint: "2-column grid of products (manual or auto-sourced)",          group: "Products" },
   horizontal_slider:{ label: "Horizontal slider",icon: "arrow-right", hint: "Horizontal-scroll list of products (Trending / New / Best)",  group: "Products" },
-  content_box:      { label: "Content box",     icon: "package",      hint: "Single featured-product card · resizable",                    group: "Products" },
+  content_box:      { label: "Content box",     icon: "package",      hint: "Single featured-product card · big photo · resizable",         group: "Products" },
+  spotlight:        { label: "Spotlight",       icon: "star",         hint: "Immersive full-width showcase (~1/3 of the phone screen) with product chips + View more", group: "Products" },
   flash_sale:       { label: "Flash sale",      icon: "clock",        hint: "Countdown sale section with featured products",              group: "Products" },
   // Promo
   offer_cards:      { label: "Offer cards",     icon: "tag",          hint: "Promotional cards (Buy 1 Get 1, Cashback, etc.)",            group: "Promo" },
@@ -93,7 +94,7 @@ const TYPE_META: Record<BlockType, { label: string; icon: any; hint: string; gro
 const ALL_TYPES: BlockType[] = [
   "banner_slider", "background", "announcement_strip",
   "category_circles", "brand_slider",
-  "product_grid", "horizontal_slider", "content_box", "flash_sale",
+  "spotlight", "product_grid", "horizontal_slider", "content_box", "flash_sale",
   "offer_cards", "section_header", "text",
 ];
 
@@ -104,6 +105,20 @@ const DATA_SOURCES: { value: string; label: string; hint: string }[] = [
   { value: "best", label: "Best sellers", hint: "Auto: most sold" },
   { value: "category", label: "Category", hint: "All products in a category" },
 ];
+
+// Jun 2026 — data sources are now PER BLOCK TYPE, per owner spec:
+//   • Product grid  → Manual only (admin curates exactly what sells)
+//   • Flash sale    → Manual only (used to clear slow-moving stock)
+//   • Horizontal    → Manual + Category
+//   • Spotlight     → Manual + Category
+// The old "Trending / New / Best" auto chips were removed from those
+// blocks because they silently replaced the admin's curated picks.
+const SOURCES_FOR_TYPE: Record<string, string[]> = {
+  product_grid: ["manual"],
+  flash_sale: ["manual"],
+  horizontal_slider: ["manual", "category"],
+  spotlight: ["manual", "category"],
+};
 
 const ALIGN_OPTIONS: { v: "left" | "center" | "right"; icon: any }[] = [
   { v: "left", icon: "align-left" }, { v: "center", icon: "align-center" }, { v: "right", icon: "align-right" },
@@ -185,7 +200,7 @@ export default function AdminShopLayoutScreen() {
     try {
       const [bRes, pRes, aRes, cRes] = await Promise.all([
         api.get<{ items: Block[] }>("/admin/shop-layout"),
-        api.get<any>("/admin/products"),
+        api.get<any>("/admin/products", { params: { limit: 500 } }),
         api.get<{ blocks: Record<string, { impressions: number; clicks: number; ctr: number }> }>("/admin/shop-layout/analytics", { params: { days: 7 } }).catch(() => ({ data: { blocks: {} } as any })),
         api.get<{ items: { id?: string; name: string; active: boolean; parent_id?: string | null; depth?: number }[] }>("/admin/shop-categories").catch(() => ({ data: { items: [] } as any })),
       ]);
@@ -743,6 +758,28 @@ function BlockFormModal({
   const [picking, setPicking] = useState(false);
   const [showProductPicker, setShowProductPicker] = useState(false);
   const [showMultiPicker, setShowMultiPicker] = useState(false);
+  // Jun 2026 — multi-picker search + vendor filter state
+  const [pickSearch, setPickSearch] = useState("");
+  const [pickVendor, setPickVendor] = useState("");
+  const pickerVendors = useMemo(() => {
+    const m = new Map<string, { id: string; name: string; count: number }>();
+    products.forEach((p) => {
+      const id = p.vendor_id || "";
+      if (!id) return;
+      const cur = m.get(id);
+      if (cur) cur.count += 1;
+      else m.set(id, { id, name: p.vendor_name || "Vendor", count: 1 });
+    });
+    return Array.from(m.values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [products]);
+  const pickerFiltered = useMemo(() => {
+    const q = pickSearch.trim().toLowerCase();
+    return products.filter((p) => {
+      if (pickVendor && (p.vendor_id || "") !== pickVendor) return false;
+      if (!q) return true;
+      return `${p.name} ${p.category || ""} ${p.vendor_name || ""}`.toLowerCase().includes(q);
+    });
+  }, [products, pickSearch, pickVendor]);
   const [editingItemIdx, setEditingItemIdx] = useState<number | null>(null);
 
   useEffect(() => {
@@ -832,14 +869,31 @@ function BlockFormModal({
 
   const usesItems = ["banner_slider", "brand_slider", "offer_cards"].includes(type);
   const usesDynamicCategories = type === "category_circles";
-  const usesProducts = ["product_grid", "horizontal_slider", "flash_sale"].includes(type);
+  const usesProducts = ["product_grid", "horizontal_slider", "flash_sale", "spotlight"].includes(type);
   const usesSingleProduct = type === "content_box" || type === "background";
-  const usesImage = type === "background";
+  const usesImage = type === "background" || type === "spotlight";
+  // Jun 2026 — subtitle is hidden for product sections (it pushed the last
+  // row of products off-screen). Spotlight keeps it as a small eyebrow line.
+  const usesSubtitle = !["announcement_strip", "product_grid", "horizontal_slider", "flash_sale"].includes(type);
+  const allowedSources = SOURCES_FOR_TYPE[type] || DATA_SOURCES.map((d) => d.value);
+  const sourceOptions = DATA_SOURCES.filter((d) => allowedSources.includes(d.value));
+  // "View more" is supported by product_grid AND the new spotlight block.
+  const usesViewMore = type === "product_grid" || type === "spotlight";
+
+  useEffect(() => {
+    if (!visible) return;
+    // Jun 2026 — keep `dataSource` legal for the current block type. Product
+    // grid / flash sale are Manual-only now, so an old "trending" value must
+    // snap back to "manual" instead of silently overriding the admin's picks.
+    const allowed = SOURCES_FOR_TYPE[type];
+    if (allowed && !allowed.includes(dataSource)) setDataSource(allowed[0]);
+  }, [visible, type, dataSource]);
 
   const onSave = async () => {
-    if (usesImage && !imageDataUrl) { Alert.alert("Image required", "Banner blocks need an image."); return; }
+    if (type === "background" && !imageDataUrl) { Alert.alert("Image required", "Banner blocks need an image."); return; }
     if (type === "content_box" && !productId) { Alert.alert("Product required", "Pick a product for this content box."); return; }
-    if (usesItems && items.length === 0) { Alert.alert("Items required", "Add at least one slide/item."); return; }    setSaving(true);
+    if (usesItems && items.length === 0) { Alert.alert("Items required", "Add at least one slide/item."); return; }
+    setSaving(true);
     try {
       const payload: any = {
         block_type: type,
@@ -860,13 +914,13 @@ function BlockFormModal({
         button_color: buttonColor, button_text_color: buttonTextColor,
         height: height ? parseInt(height, 10) : null,
         data_source: usesProducts ? dataSource : "manual",
-        product_count: usesProducts ? parseInt(productCount, 10) || 10 : 10,
+        product_count: usesProducts ? Math.max(1, Math.min(500, parseInt(productCount, 10) || 10)) : 10,
         category_filter: usesProducts ? categoryFilter : "",
         items: usesItems ? items : [],
         flash_sale_ends_at: type === "flash_sale" ? flashEndsAt : "",
         products_per_row: type === "product_grid" ? Math.max(1, Math.min(4, parseInt(productsPerRow, 10) || 2)) : 2,
-        show_view_all: type === "product_grid" ? showViewAll : false,
-        view_all_link: type === "product_grid" ? viewAllLink.trim() : "",
+        show_view_all: usesViewMore ? showViewAll : false,
+        view_all_link: usesViewMore ? viewAllLink.trim() : "",
         // Sept 2026 — only meaningful for category_circles blocks; other
         // block types persist an empty list so a follow-up type-switch
         // doesn't inherit stale selection.
@@ -1098,10 +1152,10 @@ function BlockFormModal({
                   type === "flash_sale" ? "Flash Sale" :
                   type === "announcement_strip" ? "Free shipping on orders over ₹999" : "Block title"
                 } placeholderTextColor={colors.textMuted} maxLength={80} />
-                {(type !== "announcement_strip") ? (
+                {usesSubtitle ? (
                   <>
-                    <Text style={styles.label}>Subtitle (optional)</Text>
-                    <TextInput style={styles.input} value={subtitle} onChangeText={setSubtitle} placeholder="Short helper text" placeholderTextColor={colors.textMuted} maxLength={120} />
+                    <Text style={styles.label}>{type === "spotlight" ? "Eyebrow line (optional)" : "Subtitle (optional)"}</Text>
+                    <TextInput style={styles.input} value={subtitle} onChangeText={setSubtitle} placeholder={type === "spotlight" ? "TRENDING NOW" : "Short helper text"} placeholderTextColor={colors.textMuted} maxLength={120} />
                   </>
                 ) : null}
                 {type === "text" ? (
@@ -1113,12 +1167,14 @@ function BlockFormModal({
               </>
             ) : null}
 
-            {/* Single image (background) */}
+            {/* Single image (background / spotlight backdrop) */}
             {usesImage ? (
               <>
-                <Text style={styles.label}>Image (required)</Text>
+                <Text style={styles.label}>{type === "spotlight" ? "Backdrop image (optional)" : "Image (required)"}</Text>
                 <Text style={styles.hint}>
-                  {pickerHintFor("background")}
+                  {type === "spotlight"
+                    ? "Fills the whole spotlight card behind the title. Leave empty to use the first product's photo."
+                    : pickerHintFor("background")}
                   {imageFit === "cover"
                     ? " — image will fill the block (edges may crop)."
                     : " — full image will be shown (no crop). Set a background color below to fill any gaps."}
@@ -1185,15 +1241,25 @@ function BlockFormModal({
             {/* Product-grid / Horizontal slider / Flash sale — data source + products */}
             {usesProducts ? (
               <>
-                <Text style={styles.label}>Data source</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                  {DATA_SOURCES.map((ds) => (
-                    <TouchableOpacity key={ds.value} onPress={() => setDataSource(ds.value)} style={[styles.chip, dataSource === ds.value && styles.chipActive]}>
-                      <Text style={[styles.chipText, dataSource === ds.value && { color: colors.primaryFg }]}>{ds.label}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-                <Text style={styles.hint}>{DATA_SOURCES.find((d) => d.value === dataSource)?.hint || ""}</Text>
+                {sourceOptions.length > 1 ? (
+                  <>
+                    <Text style={styles.label}>Data source</Text>
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                      {sourceOptions.map((ds) => (
+                        <TouchableOpacity key={ds.value} onPress={() => setDataSource(ds.value)} style={[styles.chip, dataSource === ds.value && styles.chipActive]} testID={`ds-${ds.value}`}>
+                          <Text style={[styles.chipText, dataSource === ds.value && { color: colors.primaryFg }]}>{ds.label}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <Text style={styles.hint}>{sourceOptions.find((d) => d.value === dataSource)?.hint || ""}</Text>
+                  </>
+                ) : (
+                  <Text style={styles.hint}>
+                    {type === "flash_sale"
+                      ? "Products are hand-picked — use a flash sale to move slow stock at a discount."
+                      : "Products are hand-picked so this section always shows exactly what you choose."}
+                  </Text>
+                )}
 
                 {dataSource === "manual" ? (
                   <>
@@ -1203,6 +1269,10 @@ function BlockFormModal({
                         {productIds.length ? `${productIds.length} product${productIds.length === 1 ? "" : "s"} selected — tap to edit` : "Tap to select products"}
                       </Text>
                     </TouchableOpacity>
+                    {/* Jun 2026 — manual blocks show EVERY selected product, so
+                        there is no "Product count" cap to get out of sync
+                        (the old default of 3 hid the 4th pick). */}
+                    <Text style={styles.hint}>All {productIds.length || 0} selected product{productIds.length === 1 ? "" : "s"} will be shown.</Text>
                   </>
                 ) : (
                   <>
@@ -1218,11 +1288,11 @@ function BlockFormModal({
                         </TouchableOpacity>
                       ))}
                     </View>
+                    <Text style={styles.label}>Product count (1-500)</Text>
+                    <TextInput style={styles.input} value={productCount} onChangeText={(t) => setProductCount(t.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="numeric" placeholder="10" placeholderTextColor={colors.textMuted} />
+                    <Text style={styles.hint}>How many auto-picked products to show. Max 500.</Text>
                   </>
                 )}
-
-                <Text style={styles.label}>Product count (1-50)</Text>
-                <TextInput style={styles.input} value={productCount} onChangeText={setProductCount} keyboardType="numeric" placeholder="10" placeholderTextColor={colors.textMuted} />
 
                 {/* Product Grid extras: per-row count, View More link */}
                 {type === "product_grid" ? (
@@ -1249,11 +1319,19 @@ function BlockFormModal({
                     <Text style={styles.hint}>
                       Combine with Size (S/M/L) on the block card to fine-tune card height. 1 per row = full-width hero cards, 4 per row = compact thumbnails.
                     </Text>
+                  </>
+                ) : null}
 
+                {usesViewMore ? (
+                  <>
                     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12, paddingHorizontal: 4 }}>
                       <View style={{ flex: 1, paddingRight: 10 }}>
                         <Text style={[styles.label, { marginTop: 0 }]}>Show {`"View More"`} link</Text>
-                        <Text style={styles.hint}>Appears at the top-right of the section header.</Text>
+                        <Text style={styles.hint}>
+                          {type === "spotlight"
+                            ? "Adds the CTA pill on the spotlight card. Tapping the card also opens this target."
+                            : "Appears at the top-right of the section header."}
+                        </Text>
                       </View>
                       <Switch value={showViewAll} onValueChange={setShowViewAll} />
                     </View>
@@ -1276,12 +1354,17 @@ function BlockFormModal({
                   </>
                 ) : null}
 
-                {type === "flash_sale" ? (
+                {type === "spotlight" ? (
                   <>
-                    <Text style={styles.label}>Sale ends (ISO date)</Text>
-                    <TextInput style={styles.input} value={flashEndsAt} onChangeText={setFlashEndsAt} placeholder="2026-12-31T23:59:00Z" placeholderTextColor={colors.textMuted} autoCapitalize="none" />
+                    <Text style={styles.label}>CTA label (optional)</Text>
+                    <TextInput style={styles.input} value={ctaLabel} onChangeText={setCtaLabel} placeholder="Shop the collection" placeholderTextColor={colors.textMuted} maxLength={28} />
+                    <Text style={styles.hint}>
+                      The spotlight card is ~1/3 of the phone screen tall. Leave Height blank below for the automatic size.
+                    </Text>
                   </>
                 ) : null}
+
+                {type === "flash_sale" ? <FlashEndsPicker value={flashEndsAt} onChange={setFlashEndsAt} /> : null}
               </>
             ) : null}
 
@@ -1441,26 +1524,101 @@ function BlockFormModal({
         </View>
       </Modal>
 
-      {/* Multi-product picker */}
+      {/* Multi-product picker — Jun 2026 rebuild.
+          Owner asked for a vendor-wise filter and the full product list (the
+          old sheet was an unsearchable flat list capped at the API default,
+          which made curating a flash sale across 200 SKUs impossible).
+          Adds: search box, vendor chips, thumbnails + price, and
+          "Select all shown / Clear". */}
       <Modal visible={showMultiPicker} transparent animationType="slide" onRequestClose={() => setShowMultiPicker(false)}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalSheet, { maxHeight: "75%" }]}>
+          <View style={[styles.modalSheet, { maxHeight: "88%" }]}>
             <View style={styles.modalHeader}>
               <TouchableOpacity onPress={() => setShowMultiPicker(false)} style={styles.iconBtn}><Feather name="x" size={20} color={colors.textMain} /></TouchableOpacity>
               <Text style={styles.modalTitle}>Select products ({productIds.length})</Text>
-              <TouchableOpacity onPress={() => setShowMultiPicker(false)} style={[styles.iconBtn, styles.iconBtnPrimary]}>
+              <TouchableOpacity onPress={() => setShowMultiPicker(false)} style={[styles.iconBtn, styles.iconBtnPrimary]} testID="multi-picker-done">
                 <Feather name="check" size={20} color={colors.primaryFg} />
               </TouchableOpacity>
             </View>
-            <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 32 }}>
-              {products.length === 0 ? (
-                <Text style={{ color: colors.textMuted, textAlign: "center", padding: 20 }}>No products yet</Text>
-              ) : products.map((p) => {
+
+            <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+              <View style={styles.pickSearchWrap}>
+                <Feather name="search" size={14} color={colors.textMuted} />
+                <TextInput
+                  value={pickSearch}
+                  onChangeText={setPickSearch}
+                  placeholder="Search products"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.pickSearchInput}
+                  testID="multi-picker-search"
+                />
+                {pickSearch ? (
+                  <TouchableOpacity onPress={() => setPickSearch("")} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Feather name="x-circle" size={15} color={colors.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
+              {pickerVendors.length > 1 ? (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 8 }}>
+                  <TouchableOpacity onPress={() => setPickVendor("")} style={[styles.chip, !pickVendor && styles.chipActive]} testID="pick-vendor-all">
+                    <Text style={[styles.chipText, !pickVendor && { color: colors.primaryFg }]}>All vendors</Text>
+                  </TouchableOpacity>
+                  {pickerVendors.map((v) => (
+                    <TouchableOpacity key={v.id} onPress={() => setPickVendor(v.id)} style={[styles.chip, pickVendor === v.id && styles.chipActive]} testID={`pick-vendor-${v.id}`}>
+                      <Text style={[styles.chipText, pickVendor === v.id && { color: colors.primaryFg }]} numberOfLines={1}>{v.name} ({v.count})</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              ) : null}
+
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: 6 }}>
+                <Text style={styles.hint}>{pickerFiltered.length} shown · {productIds.length} selected</Text>
+                <View style={{ flexDirection: "row", gap: 6 }}>
+                  <TouchableOpacity
+                    onPress={() => setProductIds((prev) => Array.from(new Set([...prev, ...pickerFiltered.map((p) => p.id)])))}
+                    style={styles.miniChip}
+                    testID="multi-picker-select-all"
+                  >
+                    <Text style={styles.miniChipText}>Select all shown</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => setProductIds([])} style={styles.miniChip} testID="multi-picker-clear">
+                    <Text style={[styles.miniChipText, { color: "#B91C1C" }]}>Clear</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+
+            <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 4, paddingBottom: 32 }}>
+              {pickerFiltered.length === 0 ? (
+                <Text style={{ color: colors.textMuted, textAlign: "center", padding: 20 }}>
+                  {products.length === 0 ? "No products yet" : "No products match this search / vendor"}
+                </Text>
+              ) : pickerFiltered.map((p) => {
                 const selected = productIds.includes(p.id);
                 return (
-                  <TouchableOpacity key={p.id} style={[styles.productRow, selected && { borderColor: colors.primary, backgroundColor: colors.brand100 }]} onPress={() => toggleProductId(p.id)}>
-                    <Text style={styles.productRowText}>{p.name}</Text>
-                    {selected ? <Feather name="check-square" size={16} color={colors.primary} /> : <Feather name="square" size={16} color={colors.textMuted} />}
+                  <TouchableOpacity
+                    key={p.id}
+                    style={[styles.pickRow, selected && { borderColor: colors.primary, backgroundColor: colors.brand100 }]}
+                    onPress={() => toggleProductId(p.id)}
+                    testID={`pick-product-${p.id}`}
+                  >
+                    {p.image_url ? (
+                      <Image source={{ uri: resolveImageUrl(p.image_url) }} style={styles.pickThumb} resizeMode="cover" />
+                    ) : (
+                      <View style={[styles.pickThumb, { alignItems: "center", justifyContent: "center" }]}>
+                        <Feather name="image" size={14} color={colors.textMuted} />
+                      </View>
+                    )}
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.productRowText} numberOfLines={1}>{p.name}</Text>
+                      <Text style={styles.pickMeta} numberOfLines={1}>
+                        {p.vendor_name || "Own catalogue"}
+                        {typeof p.price === "number" ? ` · ₹${Math.round(p.price)}` : ""}
+                        {p.is_published === false ? " · unpublished" : ""}
+                      </Text>
+                    </View>
+                    {selected ? <Feather name="check-square" size={18} color={colors.primary} /> : <Feather name="square" size={18} color={colors.textMuted} />}
                   </TouchableOpacity>
                 );
               })}
@@ -1469,6 +1627,101 @@ function BlockFormModal({
         </View>
       </Modal>
     </Modal>
+  );
+}
+
+/* ────────────────── Flash-sale "Sale ends" date + time picker ──────────────────
+ *
+ * Jun 2026 — the field used to be a raw ISO text box which shipped empty
+ * (`""`), so the countdown never rendered and admins had no idea what format
+ * to type. This gives a date box, a time box, and one-tap presets. We keep
+ * storing an ISO-8601 string so the renderer's countdown is unchanged.
+ * Deliberately dependency-free (no native date-picker module) so it behaves
+ * identically on iOS, Android and the web admin panel.
+ */
+
+function pad2(n: number) { return String(n).padStart(2, "0"); }
+
+function FlashEndsPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const parsed = value ? new Date(value) : null;
+  const valid = parsed && !isNaN(parsed.getTime());
+  const dateStr = valid ? `${parsed!.getFullYear()}-${pad2(parsed!.getMonth() + 1)}-${pad2(parsed!.getDate())}` : "";
+  const timeStr = valid ? `${pad2(parsed!.getHours())}:${pad2(parsed!.getMinutes())}` : "";
+  const [dateDraft, setDateDraft] = useState(dateStr);
+  const [timeDraft, setTimeDraft] = useState(timeStr);
+
+  useEffect(() => { setDateDraft(dateStr); setTimeDraft(timeStr); }, [dateStr, timeStr]);
+
+  const commit = (d: string, t: string) => {
+    const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d.trim());
+    const tm = /^(\d{1,2}):(\d{2})$/.exec(t.trim());
+    if (!dm) { onChange(""); return; }
+    const hh = tm ? Math.min(23, parseInt(tm[1], 10)) : 23;
+    const mm = tm ? Math.min(59, parseInt(tm[2], 10)) : 59;
+    const dt = new Date(Number(dm[1]), Number(dm[2]) - 1, Number(dm[3]), hh, mm, 0);
+    if (isNaN(dt.getTime())) { onChange(""); return; }
+    onChange(dt.toISOString());
+  };
+
+  const preset = (hours: number) => {
+    const dt = new Date(Date.now() + hours * 3_600_000);
+    onChange(dt.toISOString());
+  };
+
+  const remaining = (() => {
+    if (!valid) return "";
+    const diff = parsed!.getTime() - Date.now();
+    if (diff <= 0) return "Already ended";
+    const h = Math.floor(diff / 3_600_000);
+    const d = Math.floor(h / 24);
+    return d > 0 ? `Ends in ${d}d ${h % 24}h` : `Ends in ${h}h ${Math.floor((diff % 3_600_000) / 60_000)}m`;
+  })();
+
+  return (
+    <>
+      <Text style={styles.label}>Sale ends</Text>
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        <View style={{ flex: 1.4 }}>
+          <TextInput
+            style={styles.input}
+            value={dateDraft}
+            onChangeText={(t) => { setDateDraft(t); commit(t, timeDraft); }}
+            placeholder="YYYY-MM-DD"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            maxLength={10}
+            testID="flash-ends-date"
+          />
+        </View>
+        <View style={{ flex: 1 }}>
+          <TextInput
+            style={styles.input}
+            value={timeDraft}
+            onChangeText={(t) => { setTimeDraft(t); commit(dateDraft, t); }}
+            placeholder="HH:MM"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            maxLength={5}
+            testID="flash-ends-time"
+          />
+        </View>
+      </View>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        {[["+6 hours", 6], ["+24 hours", 24], ["+3 days", 72], ["+7 days", 168]].map(([label, h]) => (
+          <TouchableOpacity key={String(label)} onPress={() => preset(Number(h))} style={styles.chip} testID={`flash-preset-${h}`}>
+            <Text style={styles.chipText}>{label as string}</Text>
+          </TouchableOpacity>
+        ))}
+        {value ? (
+          <TouchableOpacity onPress={() => onChange("")} style={[styles.chip, { borderColor: "#FCA5A5" }]} testID="flash-clear">
+            <Text style={[styles.chipText, { color: "#B91C1C" }]}>Clear</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+      <Text style={styles.hint}>
+        {valid ? `${remaining} · countdown shown to customers` : "Pick a date/time (or a preset) to show the live countdown on the block."}
+      </Text>
+    </>
   );
 }
 
@@ -1576,6 +1829,22 @@ const styles = StyleSheet.create({
   alignBtn: { width: 40, height: 36, borderRadius: 10, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
   alignBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   productRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 14, borderRadius: 12, borderWidth: 1, borderColor: colors.border, marginBottom: 8, backgroundColor: colors.surface },
+  // Jun 2026 — multi-product picker chrome
+  pickSearchWrap: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: colors.surfaceMuted, borderRadius: 12,
+    paddingHorizontal: 12, minHeight: 44,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  pickSearchInput: { flex: 1, fontSize: 13, color: colors.textMain, paddingVertical: 10 },
+  pickRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    borderWidth: 1, borderColor: colors.border, borderRadius: 12,
+    padding: 10, marginBottom: 8, backgroundColor: colors.surface,
+    minHeight: 56,
+  },
+  pickThumb: { width: 40, height: 40, borderRadius: 8, backgroundColor: colors.surfaceMuted },
+  pickMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   productRowText: { fontSize: 14, fontWeight: "700", color: colors.textMain },
   // Category-circles "interlinked" info banner shown in the form for the
   // category_circles block type. Categories themselves are managed from

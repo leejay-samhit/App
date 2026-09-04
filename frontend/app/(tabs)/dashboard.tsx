@@ -20,6 +20,7 @@ import { cachedGet } from "../../src/cachedGet";
 import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
 import { colors, formatINR, radii, spacing } from "../../src/theme";
+import { SubscribeBanner } from "../../src/subscription";
 import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
 import { Sparkline, DonutProgress, BarChart } from "../../src/charts";
@@ -215,6 +216,9 @@ export default function DashboardScreen() {
     );
   }
 
+  // Free tier = signed up but no ₹118 subscription yet.
+  const isFreeTier = !!user && (user as any).role !== "admin" && !user.registration_paid;
+
   const progressPct = ((data.directs_required - data.next_payout_in) / data.directs_required) * 100;
 
   return (
@@ -242,10 +246,14 @@ export default function DashboardScreen() {
           </View>
         </Animated.View>
 
+        <SubscribeBanner />
+
         <Animated.View entering={FadeInDown.duration(400).delay(80)} style={{ height: 6 }} />
 
-        {/* Approval status banner — only show if not approved */}
-        {(user as any)?.approval_status && (user as any).approval_status !== "approved" && (
+        {/* Approval status banner — only for SUBSCRIBED users awaiting
+            verification. Free (unsubscribed) users see the subscribe banner
+            above instead; approval never blocks app access (Aug-2026). */}
+        {!isFreeTier && (user as any)?.approval_status && (user as any).approval_status !== "approved" && (
           <TouchableOpacity
             onPress={() => router.push("/extra-docs" as any)}
             style={[styles.approvalBanner, { backgroundColor: (user as any).approval_status === "rejected" ? "#FCE9E5" : "#FFF4E5", borderColor: (user as any).approval_status === "rejected" ? "#F2B8B5" : "#FFD79A" }]}
@@ -300,9 +308,13 @@ export default function DashboardScreen() {
           <Feather name="chevron-right" size={20} color="#FFFFFF" />
         </TouchableOpacity>
 
-        {/* === Compact Total Earnings card === */}
-        {/* The card body is tappable: it toggles the expanded sections.
-            The Withdraw button is OUTSIDE the toggle area so taps go to wallet. */}
+        {/* === Compact Total Earnings card ===
+            Hidden for free (unsubscribed) users — cashback, wallet and
+            withdrawals are member-only, and the subscribe banner above is
+            their call-to-action. */}
+        {isFreeTier ? null : (
+        /* The card body is tappable: it toggles the expanded sections.
+           The Withdraw button is OUTSIDE the toggle area so taps go to wallet. */
         <Animated.View entering={FadeInDown.duration(450).delay(120)}>
           <GradientCard variant="emerald" style={styles.heroCardCompact}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
@@ -338,6 +350,7 @@ export default function DashboardScreen() {
             </View>
           </GradientCard>
         </Animated.View>
+        )}
 
         {/* === Vendor Panel preview — only visible for approved vendors === */}
         {vendorStats ? (

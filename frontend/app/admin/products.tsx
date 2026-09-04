@@ -93,6 +93,9 @@ export default function AdminProducts() {
   const [vendorFilter, setVendorFilter] = useState<VendorLite | null>(null);
   const [vendorPickerOpen, setVendorPickerOpen] = useState(false);
   const [interestedFor, setInterestedFor] = useState<Product | null>(null);
+  // Jun 2026 — bulk publish / unpublish (whole catalog or one vendor).
+  const [bulkConfirm, setBulkConfirm] = useState<null | "publish" | "unpublish">(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -145,6 +148,26 @@ export default function AdminProducts() {
         },
       },
     ]);
+  };
+
+  const runBulkPublish = async () => {
+    if (!bulkConfirm) return;
+    const publish = bulkConfirm === "publish";
+    setBulkBusy(true);
+    try {
+      const r = await api.post<any>("/admin/products/publish-all", {
+        vendor_id: vendorFilter?.id || null,
+        publish,
+      });
+      setBulkConfirm(null);
+      await load();
+      Alert.alert(
+        publish ? "Published" : "Unpublished",
+        `${r.data?.updated ?? 0} product${(r.data?.updated ?? 0) === 1 ? "" : "s"} updated.`,
+      );
+    } catch (e) {
+      Alert.alert("Bulk action failed", formatApiError(e));
+    } finally { setBulkBusy(false); }
   };
 
   return (
@@ -239,7 +262,32 @@ export default function AdminProducts() {
             )}
           </TouchableOpacity>
 
-          {/* Stats strip */}
+          {/* Jun 2026 — Bulk publish. Vendors upload 50-200 SKUs at a time;
+              flipping each one by hand was the biggest admin time-sink.
+              Scoped to the selected vendor when a filter is active. */}
+          <View style={styles.bulkRow}>
+            <TouchableOpacity
+              style={[styles.bulkBtn, styles.bulkBtnPrimary]}
+              onPress={() => setBulkConfirm("publish")}
+              testID="products-publish-all"
+              activeOpacity={0.85}
+            >
+              <Feather name="check-circle" size={13} color={colors.primaryFg} />
+              <Text style={[styles.bulkBtnText, { color: colors.primaryFg }]} numberOfLines={1}>
+                Publish all{vendorFilter ? " (vendor)" : ""}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.bulkBtn}
+              onPress={() => setBulkConfirm("unpublish")}
+              testID="products-unpublish-all"
+              activeOpacity={0.85}
+            >
+              <Feather name="eye-off" size={13} color={colors.textMain} />
+              <Text style={styles.bulkBtnText} numberOfLines={1}>Unpublish all</Text>
+            </TouchableOpacity>
+          </View>
+
           <View style={styles.statsStrip}>
             <Stat label="Total" value={String(items.length)} />
             <Stat label="Live" value={String(items.filter(p => p.is_published !== false).length)} accent />
@@ -360,6 +408,48 @@ export default function AdminProducts() {
         onPick={(v) => { setVendorFilter(v); setVendorPickerOpen(false); }}
         selectedId={vendorFilter?.id}
       />
+
+      {/* Bulk publish confirm — a Modal (not Alert.alert, whose buttons are
+          a no-op on RN-Web where the admin panel is used most). */}
+      <Modal visible={!!bulkConfirm} transparent animationType="fade" onRequestClose={() => setBulkConfirm(null)}>
+        <View style={styles.bulkOverlay}>
+          <View style={styles.bulkCard}>
+            <Text style={styles.bulkTitle}>
+              {bulkConfirm === "publish" ? "Publish all products?" : "Unpublish all products?"}
+            </Text>
+            <Text style={styles.bulkBody}>
+              {vendorFilter
+                ? `This applies to every product from ${vendorFilter.name}.`
+                : "This applies to EVERY product in the catalog, from all vendors."}
+              {bulkConfirm === "publish"
+                ? " They become visible to customers immediately."
+                : " They are hidden from the shop immediately."}
+            </Text>
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
+              <TouchableOpacity
+                onPress={() => setBulkConfirm(null)}
+                style={[styles.bulkModalBtn, { backgroundColor: colors.surfaceMuted }]}
+                testID="bulk-publish-cancel"
+              >
+                <Text style={{ fontWeight: "700", color: colors.textMain }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={runBulkPublish}
+                disabled={bulkBusy}
+                style={[
+                  styles.bulkModalBtn,
+                  { backgroundColor: bulkConfirm === "publish" ? colors.primary : "#B91C1C", opacity: bulkBusy ? 0.6 : 1 },
+                ]}
+                testID="bulk-publish-confirm"
+              >
+                {bulkBusy
+                  ? <ActivityIndicator color="#fff" />
+                  : <Text style={{ fontWeight: "800", color: "#fff" }}>{bulkConfirm === "publish" ? "Publish all" : "Unpublish all"}</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -759,13 +849,16 @@ function ProductModal({ visible, existing, onClose, onSaved }: { visible: boolea
   };
 
   const onAddGalleryImage = async () => {
-    if (galleryImages.length >= 10) {
+    const room = 10 - galleryImages.length;
+    if (room <= 0) {
       Alert.alert("Limit reached", "You can upload up to 10 gallery images.");
       return;
     }
     try {
-      const data = await pickAndCompressImage({ aspect: [1, 1], width: 1000 });
-      if (data) setGalleryImages([...galleryImages, data]);
+      // Jun 2026 — multi-select: pick several gallery photos in one pass.
+      const { pickAndFitImages } = await import("../../src/image-fitter");
+      const picked = await pickAndFitImages("product_image", room);
+      if (picked.length) setGalleryImages([...galleryImages, ...picked].slice(0, 10));
     } catch (e) {
       Alert.alert("Image pick failed", formatApiError(e));
     }
@@ -1211,8 +1304,7 @@ const styles = StyleSheet.create({
   empty: { padding: 40, textAlign: "center", color: colors.textMuted },
 
   // Jul 2026 — Vendor filter chip + row
-  vendorFilterChip: {
-    flexDirection: "row", alignItems: "center", gap: 8,
+  vendorFilterChip: {    flexDirection: "row", alignItems: "center", gap: 8,
     paddingHorizontal: 14, paddingVertical: 10,
     borderRadius: 999,
     borderWidth: 1, borderColor: colors.border,
@@ -1223,6 +1315,22 @@ const styles = StyleSheet.create({
   vendorFilterText: { fontSize: 13, fontWeight: "700", color: colors.textMain, flex: 1 },
   vendorRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 4 },
   vendorRowText: { fontSize: 10, fontWeight: "700", color: colors.primary, flexShrink: 1 },
+
+  // Jun 2026 — Bulk publish controls
+  bulkRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
+  bulkBtn: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    paddingVertical: 11, paddingHorizontal: 10, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface,
+    minHeight: 44,
+  },
+  bulkBtnPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },
+  bulkBtnText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+  bulkOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 24 },
+  bulkCard: { backgroundColor: colors.surface, borderRadius: 18, padding: 20 },
+  bulkTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain },
+  bulkBody: { fontSize: 13, color: colors.textMuted, marginTop: 8, lineHeight: 19 },
+  bulkModalBtn: { flex: 1, paddingVertical: 13, borderRadius: 12, alignItems: "center", justifyContent: "center", minHeight: 46 },
 });
 
 const modalStyles = StyleSheet.create({

@@ -302,8 +302,23 @@ export default function ShopCategoryScreen() {
             layout blocks (not gated by hasLayout).  Admin can drop
             banners without the grid disappearing, and the empty state
             uses the same location-aware NoVendorsHero regardless of
-            whether a sub-filter is active. */}
-        <View style={{ paddingHorizontal: spacing.screen, paddingTop: spacing.screen }}>
+            whether a sub-filter is active.
+            Jun 2026 — the old `paddingTop: spacing.screen` stacked on top of
+            the renderer's own 16 dp footer + ContentContainer margin, which
+            left a ~48 dp dead band between the last block and the first
+            product row.  Trimmed to 2 dp and given a real section heading so
+            the break reads as intentional. */}
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 2 }}>
+        {!loadingProducts && filtered.length > 0 ? (
+          <View style={styles.gridHeadRow}>
+            <Text style={styles.gridHeadTitle}>
+              {selectedSub || category}
+            </Text>
+            <Text style={styles.gridHeadCount}>
+              {filtered.length} item{filtered.length === 1 ? "" : "s"}
+            </Text>
+          </View>
+        ) : null}
         {loadingProducts ? (
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, paddingHorizontal: 4 }}>
             {[...Array(6)].map((_, i) => <ProductCardSkeleton key={i} index={i} />)}
@@ -384,6 +399,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.primary + "33",
   },
   clearFilterText: { fontSize: 12, color: colors.primary, fontWeight: "800", letterSpacing: 0.2 },
+  // Jun 2026 — heading above the category product grid
+  gridHeadRow: {
+    flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between",
+    gap: 8, marginTop: 10, marginBottom: 10,
+  },
+  gridHeadTitle: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3, flexShrink: 1 },
+  gridHeadCount: { fontSize: 11.5, fontWeight: "700", color: colors.textMuted },
   // Dec 2026 — Cart badge + inline added flash strip
   cartBadge: {
     position: "absolute", top: -2, right: -2,

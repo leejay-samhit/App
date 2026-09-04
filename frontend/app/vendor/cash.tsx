@@ -7,7 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { Stack, useRouter } from "expo-router";
 import { colors, spacing, formatINR } from "../../src/theme";
-import { getCashSummary, PosCashSummary, getStatement, PosStatementRow } from "../../src/vendor-pos-client";
+import { getCashSummary, PosCashSummary, getStatement, PosStatementRow, localDateStr } from "../../src/vendor-pos-client";
 import { formatApiError } from "../../src/api";
 
 const MODE_LABEL: Record<string, string> = {
@@ -24,7 +24,10 @@ export default function VendorCash() {
 
   const load = useCallback(async () => {
     try {
-      const today = new Date().toISOString().slice(0, 10);
+      // Jun 2026 — LOCAL date, not UTC: `toISOString()` rolled the day back
+      // for every bill rung up before 05:30 IST, leaving the cash summary
+      // blank for the vendor's morning trade.
+      const today = localDateStr();
       const [c, s] = await Promise.all([
         getCashSummary(today),
         getStatement(today, today),
@@ -61,6 +64,13 @@ export default function VendorCash() {
             <Kv label="Opening" value={formatINR(data.opening_balance)} />
             <Kv label="Cash received" value={formatINR(data.cash_received)} />
           </View>
+          {/* Jun 2026 — day turnover across ALL modes + bill count. The old
+              card only showed the cash slice, so a UPI-heavy day looked
+              like the vendor had sold nothing. */}
+          <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 12 }}>
+            <Kv label="Collected (all modes)" value={formatINR(data.total_collected ?? 0)} />
+            <Kv label="Bills today" value={String(data.bills ?? 0)} />
+          </View>
         </View>
 
         <Text style={styles.sectionLabel}>Breakdown by mode</Text>
@@ -93,10 +103,11 @@ export default function VendorCash() {
 }
 
 function Kv({ label, value }: { label: string; value: string }) {
+  // Rendered on the dark-green hero card — needs light-on-dark colours.
   return (
     <View>
-      <Text style={{ fontSize: 11, color: colors.textMuted }}>{label}</Text>
-      <Text style={{ fontSize: 14, fontWeight: "800", color: colors.textMain, marginTop: 2 }}>{value}</Text>
+      <Text style={{ fontSize: 11, color: "rgba(255,255,255,0.8)" }}>{label}</Text>
+      <Text style={{ fontSize: 14, fontWeight: "800", color: "#fff", marginTop: 2 }}>{value}</Text>
     </View>
   );
 }

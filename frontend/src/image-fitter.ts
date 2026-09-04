@@ -100,6 +100,53 @@ export async function pickAndFitImage(
 }
 
 /**
+ * Pick MULTIPLE images at once and auto-fit each to the target spec.
+ *
+ * Jun 2026 — product galleries used to require one tap per photo (open
+ * picker → pick → close → tap "+" again).  `allowsMultipleSelection`
+ * lets the vendor/admin select up to `max` photos in a single pass; each
+ * one goes through the same centre-crop + compress pipeline.
+ *
+ * Returns an array (possibly empty) — never throws.
+ */
+export async function pickAndFitImages(
+  target: ImageTarget,
+  max: number = 10,
+  fitMode: "cover" | "contain" = "cover",
+): Promise<string[]> {
+  try {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert("Permission needed", "Please allow photo library access to upload images.");
+      return [];
+    }
+    const r = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 1,
+      allowsEditing: false,
+      allowsMultipleSelection: true,
+      selectionLimit: Math.max(1, max),
+      exif: false,
+    });
+    if (r.canceled || !r.assets?.length) return [];
+    const out: string[] = [];
+    for (const asset of r.assets.slice(0, Math.max(1, max))) {
+      try {
+        const fitted = await fitToTarget(asset.uri, target, asset.width, asset.height, fitMode);
+        if (fitted) out.push(fitted);
+      } catch { /* skip the one bad file, keep the rest */ }
+    }
+    if (out.length === 0) {
+      Alert.alert("Couldn't load images", "Try picking different photos.");
+    }
+    return out;
+  } catch (e: any) {
+    Alert.alert("Couldn't load images", e?.message || "Try a different file.");
+    return [];
+  }
+}
+
+/**
  * Centre-crop + resize an existing image URI to the target spec and return
  * it as a `data:image/jpeg;base64,…` URL. The crop math:
  *

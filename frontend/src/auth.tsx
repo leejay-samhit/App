@@ -23,6 +23,8 @@ export type User = {
   wallet_balance: number;
   total_earned: number;
   registration_paid: boolean;
+  /** True when the user chose "Continue without subscription" (free tier). */
+  subscription_skipped?: boolean;
   direct_referrals_count: number;
   payouts_received: number;
   upi_id: string | null;

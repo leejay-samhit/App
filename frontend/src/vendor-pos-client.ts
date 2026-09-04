@@ -100,6 +100,10 @@ export type PosCashSummary = {
   opening_balance: number;
   expected_close: number;
   cash_received: number;
+  /** Total across every payment mode for the day (all-mode turnover). */
+  total_collected?: number;
+  /** Completed bill count for the day. */
+  bills?: number;
 };
 
 export type PosStatementRow = {
@@ -177,6 +181,18 @@ export const refundSale = async (id: string, reason?: string): Promise<PosSale> 
   (await api.post<PosSale>(`/vendor/me/pos/sales/${id}/refund`, { reason })).data;
 
 // ─── Dashboard / Cash / Statement / Analytics ───────────────────────
+/**
+ * Local (device / IST) calendar date as `YYYY-MM-DD`.
+ *
+ * Jun 2026 fix — `new Date().toISOString().slice(0,10)` returns the **UTC**
+ * date, so between 00:00 and 05:30 IST it reported YESTERDAY and the cash
+ * summary for "today" came back empty.
+ */
+export function localDateStr(d: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export const getDashboard = async (): Promise<PosDashboard> =>
   (await api.get<PosDashboard>("/vendor/me/pos/dashboard")).data;
 

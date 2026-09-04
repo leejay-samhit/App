@@ -15,7 +15,7 @@
  * chip. Wrap a list of these in a <View style={productGridStyles.wrap}>.
  */
 import React from "react";
-import { View, Text, Image, TouchableOpacity, StyleSheet } from "react-native";
+import { View, Text, Image, TouchableOpacity, StyleSheet, useWindowDimensions } from "react-native";
 import { Feather } from "@expo/vector-icons";
 
 import { resolveImageUrl } from "./api";
@@ -41,20 +41,49 @@ type Props = {
   index?: number;
 };
 
+/**
+ * Jun 2026 — Responsive column count.
+ *
+ * The card was hard-coded to `flexBasis: 48%` (always 2-up). On a 12-inch
+ * tablet that made each tile ~500 dp wide with a 500 dp tall square image —
+ * two absurdly large cards per row. We now derive the column count from the
+ * live window width so phones stay 2-up while tablets/desktop fill the row.
+ */
+export function gridColumnsFor(width: number): number {
+  if (width >= 1280) return 5;
+  if (width >= 1024) return 4;
+  if (width >= 700) return 3;
+  return 2;
+}
+
+const GRID_GAP = 12;
+
 export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, index = 0 }: Props) {
+  const { width } = useWindowDimensions();
+  const cols = gridColumnsFor(width);
+  // ── Gutter strategy (Jun 2026) ────────────────────────────────────────
+  // The old card mixed a PERCENT basis (48%) with a PIXEL `gap: 12` on the
+  // wrapper.  48% + 48% + 12 px overflows 100% on narrow phones, so flexWrap
+  // pushed every second card onto its own row — the "one product per line"
+  // bug.  Now the OUTER cell is an exact 100/cols % with symmetric padding,
+  // and the visual card lives inside it.  Percentages only → never overflows.
+  const cellWidth = `${100 / cols}%`;
   const inStock = p.is_in_stock ?? (p.stock || 0) > 0;
   return (
-    <FadeSlideIn delay={Math.min(index, 8) * 40} style={styles.card as any}>
-      <View style={!inStock ? { opacity: 0.55 } : undefined}>
+    <FadeSlideIn
+      delay={Math.min(index, 8) * 40}
+      style={[styles.cell, { width: cellWidth as any, maxWidth: cellWidth as any }] as any}
+    >
+      <View style={[styles.card, !inStock && { opacity: 0.55 }]}>
         <TouchableOpacity activeOpacity={0.85} onPress={() => onOpen(p)} testID={`product-open-${p.id}`}>
           <Image source={{ uri: resolveImageUrl(p.image_url || "") }} style={styles.img} resizeMode="cover" />
         </TouchableOpacity>
-        <View style={{ padding: 10 }}>
+        <View style={styles.body}>
           <TouchableOpacity activeOpacity={0.85} onPress={() => onOpen(p)}>
             <Text style={styles.name} numberOfLines={2}>{p.name}</Text>
           </TouchableOpacity>
           <View style={styles.footer}>
-            <Text style={styles.price}>{formatINR(p.price)}</Text>
+            <Text style={styles.price} numberOfLines={1}>{formatINR(p.price)}</Text>
             {!inStock ? (
               <View style={[styles.addBtn, { backgroundColor: "#B91C1C" }]}>
                 <Text style={styles.addBtnText}>SOLD OUT</Text>
@@ -92,18 +121,25 @@ export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, i
   );
 }
 
-/** Wrapper style for a 2-up grid of ProductGridCards. */
+/** Wrapper style for a responsive grid of ProductGridCards. */
 export const productGridStyles = StyleSheet.create({
-  wrap: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  // No `gap` here — each cell carries its own padding (see styles.cell), so
+  // the row math is 100% percentage-based and can never overflow.
+  wrap: { flexDirection: "row", flexWrap: "wrap", marginHorizontal: -GRID_GAP / 2 },
 });
 
 const styles = StyleSheet.create({
-  card: { flexBasis: "48%", flexGrow: 0, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
-  img: { width: "100%", aspectRatio: 1.05, backgroundColor: colors.surfaceMuted },
-  name: { fontSize: 12, fontWeight: "700", color: colors.textMain, minHeight: 30, lineHeight: 15 },
-  price: { fontSize: 14, fontWeight: "900", color: colors.primary },
-  footer: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
-  addBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary, minHeight: 28 },
+  cell: { paddingHorizontal: GRID_GAP / 2, paddingBottom: GRID_GAP },
+  card: {
+    backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1,
+    borderColor: colors.border, overflow: "hidden",
+  },
+  body: { padding: 10 },
+  img: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted },
+  name: { fontSize: 12.5, fontWeight: "700", color: colors.textMain, minHeight: 32, lineHeight: 16 },
+  price: { fontSize: 14, fontWeight: "900", color: colors.primary, flexShrink: 1 },
+  footer: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8, gap: 6 },
+  addBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary, minHeight: 28, flexShrink: 0 },
   addBtnText: { fontSize: 11, fontWeight: "800", color: "#fff", letterSpacing: 0.3 },
   stepper: {
     flexDirection: "row", alignItems: "center",

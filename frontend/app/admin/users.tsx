@@ -27,17 +27,6 @@ import { formatActiveAgo } from "../../src/location";
 import { downloadText } from "../../src/download";
 import { SourceTabs } from "../../src/source-tabs";
 
-// Phase: User-source unification (2026-05-27). Human-readable labels for
-// the three creation paths. Used by the New User modal dropdown and the
-// system wallet breakdown card. `unknown` is a defensive fallback for
-// legacy rows where backfill couldn't determine the source.
-const SOURCE_LABELS: Record<string, string> = {
-  offline_cash: "Offline / cash",
-  razorpay:     "Razorpay gateway",
-  upi_manual:   "UPI manual transfer",
-  unknown:      "Unknown source",
-};
-
 // Per-source badge styling for the roster rows + category tabs.
 const SOURCE_META: Record<string, { short: string; icon: any; color: string }> = {
   razorpay:     { short: "RAZORPAY",   icon: "credit-card", color: "#0369A1" },
@@ -60,6 +49,10 @@ type AdminUser = {
   referred_by: string | null;
   registration_paid: boolean;
   registration_source?: string | null;
+  referral_enabled?: boolean;
+  referral_switch_note?: string | null;
+  referral_switch_at?: string | null;
+  referral_switch_by?: string | null;
   direct_referrals_count: number;
   wallet_balance: number;
   total_earned: number;
@@ -166,13 +159,14 @@ export default function AdminUsers() {
 
   useFocusEffect(useCallback(() => { load(); /* eslint-disable-next-line */ }, []));
 
+  // Aug-2026 — only two account types exist. "Legacy" only appears while
+  // historical UPI-manual / offline joinings still exist in the DB.
   const sourceTabsData = [
-    { key: "all",          label: "All",         icon: "users" as any,        count: sourceCounts?.all },
-    { key: "razorpay",     label: "Razorpay",    icon: "credit-card" as any,  count: sourceCounts?.razorpay },
-    { key: "upi_manual",   label: "UPI manual",  icon: "smartphone" as any,   count: sourceCounts?.upi_manual },
-    { key: "offline_cash", label: "Offline",     icon: "tag" as any,          count: sourceCounts?.offline_cash },
-    { key: "unpaid",       label: "Not approved", icon: "clock" as any,       count: sourceCounts?.unpaid },
-  ].filter((t) => t.key !== "unknown");
+    { key: "all",            label: "All",            icon: "users" as any,       count: sourceCounts?.all },
+    { key: "subscriber",     label: "Subscribers",    icon: "award" as any,       count: sourceCounts?.subscriber },
+    { key: "non_subscriber", label: "No subscription", icon: "clock" as any,      count: sourceCounts?.non_subscriber },
+    { key: "legacy",         label: "Legacy",         icon: "archive" as any,     count: sourceCounts?.legacy },
+  ].filter((t) => t.key !== "legacy" || !!(sourceCounts?.legacy && sourceCounts.legacy > 0));
 
   const onDownloadUsers = async () => {
     setExporting(true);
@@ -248,7 +242,7 @@ export default function AdminUsers() {
             {canCreate && (
               <TouchableOpacity onPress={() => setCreateOpen(true)} style={styles.newUserBtn} testID="admin-user-new">
                 <Feather name="user-plus" size={16} color={colors.primaryFg} />
-                <Text style={styles.newUserBtnText}>  Add new user (offline-paid)</Text>
+                <Text style={styles.newUserBtnText}>  Add new user</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity
@@ -363,7 +357,7 @@ export default function AdminUsers() {
             <View style={{ alignItems: "flex-end" }}>
               <Text style={styles.userAmount}>{formatINR(item.total_earned)}</Text>
               <View style={[styles.statusDot, { backgroundColor: item.registration_paid ? colors.success : colors.warning }]}>
-                <Text style={styles.statusDotText}>{item.registration_paid ? "PAID" : "UNPAID"}</Text>
+                <Text style={styles.statusDotText}>{item.registration_paid ? "₹118 PAID" : "NO SUB"}</Text>
               </View>
             </View>
             <Feather name="chevron-right" size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
@@ -406,21 +400,12 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [sponsor, setSponsor] = useState("");
-  const [markPaid, setMarkPaid] = useState(true);
-  // Canonical source for the registration. Defaults to offline_cash (the
-  // most common scenario when admins manually create users). Admin can flip
-  // this to razorpay / upi_manual if they collected the fee through one of
-  // those channels OUTSIDE the app (e.g. customer paid via Razorpay link
-  // and admin is creating the account based on that proof).
-  const [source, setSource] = useState<"offline_cash" | "razorpay" | "upi_manual">("offline_cash");
-  // Optional UTR/Reference number — required visibility for accounting when
-  // admin actually received money via UPI / Razorpay / bank transfer.
-  const [utr, setUtr] = useState("");
+
   const [saving, setSaving] = useState(false);
 
   const reset = () => {
     setName(""); setEmail(""); setPhone(""); setPassword(""); setSponsor("");
-    setMarkPaid(true); setSource("offline_cash"); setUtr("");
+
   };
 
   const onSubmit = async () => {
@@ -436,13 +421,12 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
         password,
         phone: phone.trim() || undefined,
         referral_code: sponsor.trim().toUpperCase() || undefined,
-        mark_paid_offline: markPaid,
-        registration_source: markPaid ? source : undefined,
-        utr: markPaid && utr.trim() ? utr.trim().toUpperCase() : undefined,
+        mark_paid_offline: false,
       });
-      Alert.alert("User created", markPaid
-        ? `Account created and marked as paid via ${SOURCE_LABELS[source]}. It now awaits finance approval.`
-        : "Account created — awaiting payment + finance approval.");
+      Alert.alert(
+        "User created",
+        "Account created as a Non-subscriber. They can sign in and shop now, and activate the ₹118 subscription from inside the app.",
+      );
       reset();
       onCreated();
     } catch (e) {
@@ -455,7 +439,7 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
       <KeyboardAvoidingView style={nuStyles.overlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <View style={nuStyles.sheet}>
           <Text style={nuStyles.title}>Add new user</Text>
-          <Text style={nuStyles.sub}>Create a user account on behalf of a customer. The account will route to finance for approval.</Text>
+          <Text style={nuStyles.sub}>Create a user account on behalf of a customer. They start as a Non-subscriber and can activate the ₹118 subscription in the app.</Text>
           <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 460 }}>
             <Text style={nuStyles.fieldLabel}>Full name</Text>
             <TextInput value={name} onChangeText={setName} placeholder="e.g. Aman Verma" placeholderTextColor={colors.textMuted} style={nuStyles.input} testID="new-user-name" />
@@ -467,60 +451,15 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
             <TextInput value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="+91 ..." placeholderTextColor={colors.textMuted} style={nuStyles.input} testID="new-user-phone" />
             <Text style={nuStyles.fieldLabel}>Sponsor referral code (optional)</Text>
             <TextInput value={sponsor} onChangeText={(v) => setSponsor(v.toUpperCase())} autoCapitalize="characters" placeholder="e.g. NET5XY9Z" placeholderTextColor={colors.textMuted} style={[nuStyles.input, { letterSpacing: 1 }]} testID="new-user-sponsor" />
-            <View style={nuStyles.switchRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={nuStyles.switchTitle}>Mark registration fee as paid (offline)</Text>
-                <Text style={nuStyles.switchSub}>Turn ON if the customer has paid in cash / other channels. Turn OFF if they'll pay via the app.</Text>
-              </View>
-              <Switch value={markPaid} onValueChange={setMarkPaid} testID="new-user-mark-paid" />
+            <View style={nuStyles.infoRow}>
+              <Feather name="info" size={14} color={colors.primary} />
+              <Text style={nuStyles.infoText}>
+                The account is created as a <Text style={{ fontWeight: "900" }}>Non-subscriber</Text>.
+                They can sign in and shop right away, and activate the ₹{REG_FEE_HINT} subscription
+                themselves from Shop, Dashboard or Profile — so every rupee of revenue and GST comes
+                from a real Razorpay collection.
+              </Text>
             </View>
-
-            {markPaid ? (
-              <View style={nuStyles.sourceBlock}>
-                <Text style={nuStyles.fieldLabel}>Payment source · how did the customer pay?</Text>
-                <Text style={nuStyles.switchSub}>This tags the user + ledger so the System Wallet breakdown stays accurate. Pick the channel that actually carried the ₹118.</Text>
-                <View style={nuStyles.sourceRow}>
-                  {(["offline_cash", "razorpay", "upi_manual"] as const).map((s) => {
-                    const active = source === s;
-                    return (
-                      <TouchableOpacity
-                        key={s}
-                        onPress={() => setSource(s)}
-                        style={[nuStyles.sourceChip, active && nuStyles.sourceChipActive]}
-                        testID={`new-user-source-${s}`}
-                      >
-                        <Feather
-                          name={s === "razorpay" ? "credit-card" : s === "upi_manual" ? "smartphone" : "tag"}
-                          size={13}
-                          color={active ? "#fff" : colors.primary}
-                        />
-                        <Text style={[nuStyles.sourceChipText, active && { color: "#fff" }]}>{SOURCE_LABELS[s]}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-                {/* UTR / Reference number — optional. When given, this is
-                   stamped on the user, the registration txn, AND the bank
-                   ledger row, so accounting traces back to a real bank
-                   reference. For pure cash with no bank receipt, leave blank. */}
-                <Text style={[nuStyles.fieldLabel, { marginTop: 12 }]}>
-                  UTR / Reference number {source === "offline_cash" ? "(optional)" : "(recommended)"}
-                </Text>
-                <TextInput
-                  value={utr}
-                  onChangeText={(v) => setUtr(v.replace(/\s+/g, "").toUpperCase())}
-                  autoCapitalize="characters"
-                  placeholder={source === "razorpay" ? "Razorpay payment / order ref" : source === "upi_manual" ? "12-22 char UPI UTR" : "Optional bank receipt number"}
-                  placeholderTextColor={colors.textMuted}
-                  style={[nuStyles.input, { letterSpacing: 1 }]}
-                  testID="new-user-utr"
-                  maxLength={32}
-                />
-                <Text style={nuStyles.switchSub}>
-                  ₹{REG_FEE_HINT}. GST 18% (₹{Math.round(REG_FEE_HINT * 18 / 118)}) is collected automatically at the moment of save.
-                </Text>
-              </View>
-            ) : null}
           </ScrollView>
           <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
             <TouchableOpacity onPress={() => { reset(); onClose(); }} style={[nuStyles.btn, { backgroundColor: colors.surfaceMuted }]}>
@@ -537,6 +476,8 @@ function NewUserModal({ visible, onClose, onCreated }: { visible: boolean; onClo
 }
 
 const nuStyles = StyleSheet.create({
+  infoRow: { flexDirection: "row", gap: 10, alignItems: "flex-start", backgroundColor: colors.brand100, borderRadius: 12, padding: 12, marginTop: 12 },
+  infoText: { flex: 1, fontSize: 11.5, color: colors.textMain, lineHeight: 17 },
   overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   sheet: { backgroundColor: colors.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 40 },
   title: { fontSize: 20, fontWeight: "800", color: colors.textMain },
@@ -598,6 +539,11 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
+  // ── Admin Approved (referral payments) switch — note is mandatory ───
+  const [referralEnabled, setReferralEnabled] = useState(false);
+  const [pendingReferral, setPendingReferral] = useState<boolean | null>(null);
+  const [referralNote, setReferralNote] = useState("");
+  const [referralBusy, setReferralBusy] = useState(false);
 
   // Reset form when user changes
   if (user && (name === "" || email === "" || (user.email !== email && msg === ""))) {
@@ -611,6 +557,9 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
     setRole((u.role as any) || "user");
     setWalletBalance(String(u.wallet_balance ?? 0));
     setRegistrationPaid(!!u.registration_paid);
+    setReferralEnabled(!!u.referral_enabled);
+    setPendingReferral(null);
+    setReferralNote("");
     setUpi(u.upi_id || "");
     setBank(u.bank_account || "");
     setIfsc(u.ifsc || "");
@@ -640,7 +589,6 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
         role,
         // wallet_balance is INTENTIONALLY OMITTED — it can only be changed via
         // the credit/debit endpoint which goes through the System Wallet.
-        registration_paid: registrationPaid,
         upi_id: upi.trim() || undefined,
         bank_account: bank.trim() || undefined,
         ifsc: ifsc.trim() || undefined,
@@ -654,6 +602,38 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
       setMsg(formatApiError(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const submitReferralSwitch = async () => {
+    if (pendingReferral === null) return;
+    if (referralNote.trim().length < 3) {
+      setMsg("Please write a short note (minimum 3 characters).");
+      return;
+    }
+    setReferralBusy(true);
+    try {
+      const { data } = await api.post(`/admin/users/${user.id}/referral-approval`, {
+        enabled: pendingReferral,
+        note: referralNote.trim(),
+      });
+      setReferralEnabled(!!data.referral_enabled);
+      const cb = data?.clawback;
+      Alert.alert(
+        pendingReferral ? "Referral payments ON" : "Referral payments OFF",
+        pendingReferral
+          ? (data.commissions_triggered
+              ? "The upline cascade has been credited."
+              : (data.reason || "Payouts start once the member subscribes."))
+          : `No future commission will be paid.${cb?.clawed_back_count ? `\n\nClawed back ₹${cb.clawed_back_amount} from ${cb.clawed_back_count} upline${cb.clawed_back_count === 1 ? "" : "s"}.` : ""}`,
+      );
+      setPendingReferral(null);
+      setReferralNote("");
+      onSaved();
+    } catch (e) {
+      setMsg(formatApiError(e));
+    } finally {
+      setReferralBusy(false);
     }
   };
 
@@ -714,18 +694,47 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
                 testID="edit-role-switch"
               />
             </View>
-            <View style={[modalStyles.row, { alignItems: "flex-start" }]}>
-              <View style={{ flex: 1, paddingRight: 12 }}>
-                <Text style={modalStyles.label}>Admin Approved</Text>
-                <Text style={modalStyles.labelHint}>
-                  Approves this account for login only. No referral commission is credited to the
-                  upline and no registration revenue is recorded.
+            <View style={modalStyles.row}>
+              <Text style={modalStyles.label}>Paid status</Text>
+              <View
+                style={[
+                  modalStyles.paidPill,
+                  { backgroundColor: registrationPaid ? colors.success + "1A" : colors.warning + "1A",
+                    borderColor: registrationPaid ? colors.success + "55" : colors.warning + "55" },
+                ]}
+                testID="edit-paid-status"
+              >
+                <Feather
+                  name={registrationPaid ? "check-circle" : "x-circle"}
+                  size={12}
+                  color={registrationPaid ? colors.success : colors.warning}
+                />
+                <Text style={[modalStyles.paidPillText, { color: registrationPaid ? colors.success : colors.warning }]}>
+                  {registrationPaid ? `₹${REG_FEE_HINT} PAID` : "NO — not paid"}
                 </Text>
               </View>
+            </View>
+            <View style={[modalStyles.row, { alignItems: "flex-start" }]}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={modalStyles.label}>Admin Approved · referral payments</Text>
+                <Text style={modalStyles.labelHint}>
+                  ON = referral commissions are credited to this member&apos;s upline.
+                  OFF = refund done — commissions already paid are clawed back and no future
+                  payment is made. A note is required for every change. Paid status is never
+                  affected.
+                </Text>
+                {user.referral_switch_note ? (
+                  <Text style={modalStyles.switchNote} testID="edit-referral-note">
+                    Last note: “{user.referral_switch_note}”
+                    {user.referral_switch_at ? ` · ${new Date(user.referral_switch_at).toLocaleDateString()}` : ""}
+                    {user.referral_switch_by ? ` · ${user.referral_switch_by}` : ""}
+                  </Text>
+                ) : null}
+              </View>
               <Switch
-                value={registrationPaid}
-                onValueChange={setRegistrationPaid}
-                testID="edit-paid-switch"
+                value={!!referralEnabled}
+                onValueChange={(v) => { setPendingReferral(v); setReferralNote(""); }}
+                testID="edit-referral-switch"
               />
             </View>
             <Field label="Wallet balance (read-only)">
@@ -1010,6 +1019,63 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
+
+        {/* Mandatory note before the Admin Approved switch is applied */}
+        <Modal
+          visible={pendingReferral !== null}
+          transparent
+          animationType="fade"
+          statusBarTranslucent
+          onRequestClose={() => setPendingReferral(null)}
+        >
+          <View style={modalStyles.noteOverlay}>
+            <View style={modalStyles.noteSheet}>
+              <Text style={modalStyles.noteTitle}>
+                {pendingReferral ? "Turn referral payments ON" : "Turn referral payments OFF"}
+              </Text>
+              <Text style={modalStyles.noteBody}>
+                {pendingReferral
+                  ? "The upline cascade will be credited for this member. Write why you are enabling it — the note is saved with your name and appears in the Users CSV."
+                  : "This is treated as REFUND DONE: commissions already paid for this member are clawed back and no future commission is paid. Paid status stays unchanged. Write the reason — it is saved with your name and appears in the Users CSV."}
+              </Text>
+              <TextInput
+                value={referralNote}
+                onChangeText={setReferralNote}
+                placeholder={pendingReferral ? "e.g. Razorpay payment verified — enable payouts" : "e.g. Refund paid back to customer on 12 Sep"}
+                placeholderTextColor={colors.textMuted}
+                multiline
+                maxLength={500}
+                style={modalStyles.noteInput}
+                testID="referral-note-input"
+              />
+              <View style={modalStyles.noteRow}>
+                <TouchableOpacity
+                  onPress={() => { setPendingReferral(null); setReferralNote(""); }}
+                  style={[modalStyles.noteBtn, { backgroundColor: colors.surfaceMuted }]}
+                  testID="referral-note-cancel"
+                >
+                  <Text style={{ color: colors.textMain, fontWeight: "800" }}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={submitReferralSwitch}
+                  disabled={referralBusy || referralNote.trim().length < 3}
+                  style={[
+                    modalStyles.noteBtn,
+                    { backgroundColor: pendingReferral ? colors.primary : "#B3261E" },
+                    (referralBusy || referralNote.trim().length < 3) && { opacity: 0.5 },
+                  ]}
+                  testID="referral-note-submit"
+                >
+                  {referralBusy ? <ActivityIndicator color="#fff" /> : (
+                    <Text style={{ color: "#fff", fontWeight: "800" }}>
+                      {pendingReferral ? "Enable payments" : "Disable & claw back"}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </Modal>
   );
@@ -1248,6 +1314,16 @@ const modalStyles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 10, paddingHorizontal: 4 },
   label: { fontSize: 14, color: colors.textMain, fontWeight: "600" },
   labelHint: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 16 },
+  paidPill: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, borderWidth: 1 },
+  paidPillText: { fontSize: 11, fontWeight: "900", letterSpacing: 0.3 },
+  switchNote: { fontSize: 11, color: colors.primary, marginTop: 6, fontStyle: "italic", lineHeight: 16 },
+  noteOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center", padding: 24 },
+  noteSheet: { width: "100%", maxWidth: 440, backgroundColor: colors.surface, borderRadius: 22, padding: 20 },
+  noteTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain },
+  noteBody: { fontSize: 12.5, color: colors.textMuted, marginTop: 6, lineHeight: 18 },
+  noteInput: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, padding: 14, fontSize: 14, color: colors.textMain, minHeight: 90, textAlignVertical: "top", marginTop: 14 },
+  noteRow: { flexDirection: "row", gap: 10, marginTop: 14 },
+  noteBtn: { flex: 1, minHeight: 48, borderRadius: radii.button, alignItems: "center", justifyContent: "center" },
   msg: { fontSize: 13, marginTop: 12, textAlign: "center" },
   saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 14, borderRadius: radii.button, marginTop: 16 },
   saveBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 15 },

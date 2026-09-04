@@ -191,6 +191,17 @@ export default function PendingApproval() {
           )}
         </TouchableOpacity>
 
+        {/* Verification never blocks app access (Aug-2026) — the user can
+            browse and shop while admin verifies the payment. */}
+        <TouchableOpacity
+          onPress={() => router.replace("/(tabs)/shop" as any)}
+          style={styles.continueBtn}
+          testID="pending-continue"
+        >
+          <Feather name="shopping-bag" size={16} color={colors.primary} />
+          <Text style={styles.continueBtnText}> Continue to the app</Text>
+        </TouchableOpacity>
+
         <Text style={styles.note}>
           Need help? Contact us at <Text style={{ fontWeight: "700", color: colors.textMain }}>support@slangcart.com</Text>
         </Text>
@@ -240,5 +251,7 @@ const styles = StyleSheet.create({
   stepBody: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   primaryBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 14, marginTop: 4 },
   primaryBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 15 },
+  continueBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: colors.primary, borderRadius: radii.button, paddingVertical: 13, marginTop: 10, minHeight: 48 },
+  continueBtnText: { color: colors.primary, fontWeight: "800", fontSize: 14 },
   note: { textAlign: "center", color: colors.textMuted, fontSize: 12, marginTop: 16 },
 });

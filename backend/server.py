@@ -957,6 +957,13 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     """
     if user.get("commission_triggered"):
         return
+    # ── Admin Approved = referral switch (Aug-2026) ───────────────────
+    # Commissions are credited ONLY while the admin has the "Admin
+    # Approved" switch ON for this member. OFF means "refund done" — the
+    # downline pays nobody. Admin flips it from
+    # POST /admin/users/{id}/referral-approval (note mandatory).
+    if not user.get("referral_enabled"):
+        return
     settings = await get_settings()
     directs_required = settings["directs_required"]
     level_payouts = [settings.get(f"payout_l{i}", 0) or 0 for i in range(1, 11)]  # 10 levels
@@ -1351,6 +1358,28 @@ async def admin_get_pending_levels(
         "threshold_per_level": threshold,
         "generated_at": now_utc().isoformat(),
     }
+
+
+@api_router.post("/payment/skip-subscription")
+async def skip_subscription(user: Dict[str, Any] = Depends(get_current_user)):
+    """Free entry — "Continue without subscription" (Aug-2026).
+
+    The ₹118 joining fee is a SUBSCRIPTION, not a hard gate. A user may
+    enter the app without paying: they can browse and shop, but wallet /
+    cashback / referral earnings / withdrawals stay locked until they
+    subscribe. This endpoint only records the choice — no money moves and
+    no referral commission is ever triggered for a free account.
+    """
+    if user.get("registration_paid"):
+        return {"ok": True, "already_paid": True, "subscription_skipped": False}
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "subscription_skipped": True,
+            "subscription_skipped_at": now_utc().isoformat(),
+        }},
+    )
+    return {"ok": True, "subscription_skipped": True}
 
 
 @api_router.post("/payment/register-fee")
@@ -2083,8 +2112,15 @@ def _users_source_query(source: Optional[str]) -> Dict[str, Any]:
     """
     if not source or source == "all":
         return {}
-    if source == "unpaid":
+    if source in ("unpaid", "non_subscriber"):
         return {"registration_paid": {"$ne": True}}
+    if source == "subscriber":
+        # Aug-2026: a Subscriber is a member whose Razorpay payment succeeded.
+        return {"registration_paid": True, "registration_source": "razorpay"}
+    if source == "legacy":
+        # Historical UPI-manual / offline-cash joinings (kept for the books).
+        return {"role": "user", "registration_paid": True,
+                "registration_source": {"$in": ["upi_manual", "offline_cash"]}}
     if source == "unknown":
         return {
             "registration_paid": True,
@@ -2098,7 +2134,8 @@ async def admin_users_source_counts(_: Dict[str, Any] = Depends(require_admin)):
     """Counts for the Admin → Users category tabs (all / razorpay / upi_manual
     / offline_cash / unknown / unpaid)."""
     out: Dict[str, int] = {"all": await db.users.count_documents({})}
-    for key in ("razorpay", "upi_manual", "offline_cash", "unknown", "unpaid"):
+    for key in ("razorpay", "upi_manual", "offline_cash", "unknown", "unpaid",
+                "subscriber", "non_subscriber", "legacy"):
         out[key] = await db.users.count_documents(_users_source_query(key))
     return out
 
@@ -2892,19 +2929,26 @@ async def admin_list_products(
     }
 
     total = await db.products.count_documents(prod_query)
-    items = await (
-        db.products.find(prod_query, LIST_PROJ)
-        .sort("created_at", -1)
-        .skip(offset)
-        .limit(limit)
-        .to_list(limit)
-    )
+    # Jun 2026 fix — `_gallery_n` lets us know whether a product has gallery
+    # images WITHOUT shipping the (base64, multi-MB) `images` array.  Vendor
+    # products that only carry gallery photos previously rendered as an empty
+    # placeholder in the admin grid.
+    items = await db.products.aggregate([
+        {"$match": prod_query},
+        {"$sort": {"created_at": -1}},
+        {"$skip": offset},
+        {"$limit": limit},
+        {"$addFields": {"_gallery_n": {"$size": {"$ifNull": ["$images", []]}}}},
+        {"$project": LIST_PROJ},
+    ]).to_list(limit)
 
     # Rewrite base64 image_url to lazy thumbnail endpoint so the wire
     # payload doesn't balloon on data:image URIs.
     for p in items:
         img = p.get("image_url") or ""
-        if isinstance(img, str) and img.startswith("data:"):
+        gallery_n = int(p.pop("_gallery_n", 0) or 0)
+        inline = isinstance(img, str) and img.startswith("data:")
+        if inline or (not img and gallery_n > 0):
             p["image_url"] = f"/api/products/{p.get('id')}/image?w=360&q=72"
             p["has_inline_image"] = True
 
@@ -2985,6 +3029,44 @@ async def admin_list_vendors(q: Optional[str] = None, _: Dict[str, Any] = Depend
     return {"items": items, "total": len(items)}
 
 
+@api_router.post("/admin/products/publish-all")
+async def admin_publish_all_products(
+    payload: Dict[str, Any] = Body(default={}),
+    admin: Dict[str, Any] = Depends(require_admin_not_finance),
+):
+    """Jun 2026 — Bulk publish/unpublish.
+
+    Vendors upload in batches of 50-200 SKUs; flipping each one by hand in
+    the Admin Products grid was the single biggest operational time-sink.
+    Body:
+      • `vendor_id` (optional) — restrict to one vendor's catalogue.
+      • `publish`   (default true) — set False to bulk-UNPUBLISH.
+    Returns how many documents actually changed.
+    """
+    vendor_id = (payload or {}).get("vendor_id") or None
+    publish = bool((payload or {}).get("publish", True))
+
+    query: Dict[str, Any] = {}
+    if vendor_id:
+        query["vendor_id"] = vendor_id
+    if publish:
+        query["$or"] = [{"is_published": {"$ne": True}}, {"is_published": {"$exists": False}}]
+    else:
+        query["is_published"] = True
+
+    res = await db.products.update_many(query, {"$set": {"is_published": publish}})
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
+    await _audit_log(
+        admin, "product.publish_all", "product", vendor_id or "all",
+        {"publish": publish, "matched": res.matched_count, "modified": res.modified_count},
+    )
+    return {"ok": True, "publish": publish, "matched": res.matched_count, "updated": res.modified_count}
+
+
 @api_router.patch("/admin/products/{product_id}")
 async def admin_update_product(product_id: str, payload: ProductUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.products.find_one({"id": product_id})
@@ -3034,6 +3116,12 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     update = {k: v for k, v in payload.dict().items() if v is not None}
+    # ── Paid status is IMMUTABLE (Aug-2026) ───────────────────────────
+    # Once a Razorpay payment succeeded the member is a Subscriber for
+    # life — no admin action may show them as unpaid again. Referral
+    # payouts are controlled separately by
+    # POST /admin/users/{id}/referral-approval.
+    update.pop("registration_paid", None)
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
     # Only super_admin can change role / admin_role (admin promotion/demotion)
@@ -3067,30 +3155,161 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot demote the last admin")
     await db.users.update_one({"id": user_id}, {"$set": update})
-    # ── "Admin Approved" toggle (June-2026) ───────────────────────────
-    # Renamed from "Registration paid" in the UI. Flipping it ON approves
-    # the account ONLY — it must NEVER move money or credit the upline.
-    # We stamp `commission_triggered=True` so no later flow can fire the
-    # L1..L10 cascade for this manually-approved account, and we do NOT
-    # write a registration_fee revenue row (no money was received).
-    if update.get("registration_paid") is True and not target.get("registration_paid"):
-        await db.users.update_one(
-            {"id": user_id},
-            {"$set": {
-                "commission_triggered": True,
-                "admin_approved_only": True,
-                "admin_approved_at": now_utc().isoformat(),
-                "admin_approved_by": admin.get("email") or admin.get("id"),
-            }},
-        )
-        await _audit_log(admin, "user.admin_approved", "user", user_id, {
-            "note": "Admin Approved toggle — no referral commission, no revenue row",
-        })
     fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     await _create_notification(user_id, "account", "Account updated", "Your account details were updated by admin.")
     if sensitive_fields & set(update.keys()):
         await _audit_log(admin, "admin.role_change", "user", user_id, {k: update[k] for k in sensitive_fields & set(update.keys())})
     return fresh
+
+
+class ReferralApprovalPayload(BaseModel):
+    enabled: bool
+    note: str = Field(..., min_length=3, max_length=500)
+
+
+async def _clawback_referral_payouts(target: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    """Reverse every referral payout that this member's joining triggered.
+
+    Used when the admin switches "Admin Approved" OFF — the owner treats
+    that as "refund done", so the uplines must give the money back and no
+    future commission fires (the cascade is gated on `referral_enabled`).
+
+    Mirrors the Group-8 refund clawback: debit the recipient wallet (may go
+    negative → tracked in `refund_debt`), write a `refund_clawback` txn,
+    reverse the admin platform-fee credit and mark the original payout
+    `reversed` so no report double-counts it.
+    """
+    ts = now_utc().isoformat()
+    rows: List[Dict[str, Any]] = []
+    total_net, total_pf = 0.0, 0.0
+    payouts = await db.transactions.find({
+        "related_signup_id": target["id"],
+        "type": "referral_payout",
+        "status": "success",
+    }).to_list(200)
+    for p in payouts:
+        rid = p.get("user_id")
+        if not rid:
+            continue
+        net_paid = float(p.get("amount") or 0)
+        platform_fee = float(p.get("platform_fee_amount") or 0)
+        level = int(p.get("level") or 0)
+        rec = await db.users.find_one({"id": rid})
+        if not rec:
+            continue
+        cur_wallet = float(rec.get("wallet_balance") or 0)
+        cur_debt = float(rec.get("refund_debt") or 0)
+        new_wallet = round(cur_wallet - net_paid, 2)
+        new_debt = round(cur_debt + (abs(new_wallet) if new_wallet < 0 else 0), 2)
+        await db.users.update_one(
+            {"id": rid},
+            {"$set": {"wallet_balance": new_wallet, "refund_debt": new_debt},
+             "$inc": {"total_earned": -net_paid}},
+        )
+        cb_id = str(uuid.uuid4())
+        await db.transactions.insert_one({
+            "id": cb_id,
+            "user_id": rid,
+            "type": "refund_clawback",
+            "amount": -net_paid,
+            "level": level,
+            "status": "success",
+            "description": f"Claw-back of L{level} payout — {reason}",
+            "reverses": p.get("id"),
+            "related_signup_id": target["id"],
+            "created_at": ts,
+        })
+        if platform_fee > 0:
+            try:
+                await credit_admin_bucket("platform_fee_collected", -platform_fee, also_total_earned=False)
+                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"id": 1, "_id": 0})
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": (admin_doc or {}).get("id"),
+                    "type": "platform_fee_reversal",
+                    "amount": -platform_fee,
+                    "level": level,
+                    "status": "success",
+                    "description": f"Platform-fee reversal — {reason}",
+                    "reverses": p.get("id"),
+                    "related_signup_id": target["id"],
+                    "created_at": ts,
+                })
+                total_pf += platform_fee
+            except Exception as _e:
+                logger.warning(f"platform-fee reversal failed for payout {p.get('id')}: {_e}")
+        await db.transactions.update_one(
+            {"id": p.get("id")},
+            {"$set": {"status": "reversed", "reversed_by": cb_id, "reversed_at": ts}},
+        )
+        rows.append({"recipient_id": rid, "level": level, "amount": net_paid})
+        total_net += net_paid
+    return {
+        "clawed_back_count": len(rows),
+        "clawed_back_amount": round(total_net, 2),
+        "platform_fee_reversed": round(total_pf, 2),
+        "rows": rows,
+    }
+
+
+@api_router.post("/admin/users/{user_id}/referral-approval")
+async def admin_set_referral_approval(
+    user_id: str,
+    payload: ReferralApprovalPayload,
+    admin: Dict[str, Any] = Depends(require_admin_not_finance),
+):
+    """"Admin Approved" switch — controls REFERRAL PAYOUTS only (Aug-2026).
+
+    ON  → the member's joining pays the L1..L10 upline cascade (fires now if
+          the member is a paid Subscriber and it never ran before).
+    OFF → treated as "refund done": every commission already paid for this
+          member is clawed back and no future commission can fire.
+
+    A note is MANDATORY on every switch and is stored in
+    `referral_switch_history` (also exported in the Users CSV).
+    """
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    ts = now_utc().isoformat()
+    note = payload.note.strip()
+    entry = {
+        "enabled": bool(payload.enabled),
+        "note": note,
+        "at": ts,
+        "by": admin.get("email") or admin.get("id"),
+    }
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {
+            "referral_enabled": bool(payload.enabled),
+            "referral_switch_note": note,
+            "referral_switch_at": ts,
+            "referral_switch_by": entry["by"],
+        }, "$push": {"referral_switch_history": entry}},
+    )
+
+    result: Dict[str, Any] = {"ok": True, "referral_enabled": bool(payload.enabled), "note": note}
+    if payload.enabled:
+        fresh = await db.users.find_one({"id": user_id})
+        if fresh and fresh.get("registration_paid"):
+            await _trigger_referral_commissions(fresh)
+            result["commissions_triggered"] = True
+        else:
+            result["commissions_triggered"] = False
+            result["reason"] = "Member has not paid the subscription yet — payouts start once they do."
+        await _create_notification(
+            user_id, "approval", "Referral earnings enabled",
+            "Your sponsor network is active — referral commissions are now being credited.",
+        )
+    else:
+        cb = await _clawback_referral_payouts(target, f"Admin Approved switched OFF — {note}")
+        result["clawback"] = cb
+    await _audit_log(admin, "user.referral_approval", "user", user_id, {
+        "enabled": bool(payload.enabled), "note": note, **({"clawback": result.get("clawback", {}).get("clawed_back_amount", 0)} if not payload.enabled else {}),
+    })
+    return result
 
 
 @api_router.post("/admin/users/{user_id}/reset-password")
@@ -4560,6 +4779,17 @@ async def admin_approve_user(
             "approval_reject_reason": None,
         }},
     )
+    # Approving a member also switches referral payouts ON (the switch the
+    # admin sees as "Admin Approved" on the user edit sheet).
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {
+            "referral_enabled": True,
+            "referral_switch_note": "Enabled on account approval",
+            "referral_switch_at": now_utc().isoformat(),
+            "referral_switch_by": admin.get("email") or admin.get("id"),
+        }},
+    )
     fresh = await db.users.find_one({"id": user_id})
     # Trigger commissions only if registration is paid (paid users entering the tree).
     if fresh and fresh.get("registration_paid"):
@@ -4777,13 +5007,22 @@ async def admin_create_user(
         "sponsor_id": sponsor["id"] if sponsor else None,
         "wallet_balance": 0.0,
         "total_earned": 0.0,
-        "registration_paid": bool(payload.mark_paid_offline),
-        # Phase: User-source unification (2026-05-27). Every user gets a
-        # canonical `registration_source` so the system-wallet breakdown,
-        # filters, and audit trail can group / count / sum by origin.
-        "registration_source": (payload.registration_source or "offline_cash") if payload.mark_paid_offline else None,
-        "payment_method": "admin_offline" if payload.mark_paid_offline else None,
-        "paid_at": now if payload.mark_paid_offline else None,
+        # ── Aug-2026: only TWO account types exist ────────────────────
+        #   Subscriber      → Razorpay payment successful (in-app)
+        #   Non-subscriber  → no subscription yet
+        # Admin-created accounts always start as NON-SUBSCRIBERS. The member
+        # activates the ₹118 subscription themselves from Shop / Dashboard /
+        # Profile, which keeps the treasury + GST maths exact (every rupee
+        # comes from a real Razorpay collection).
+        "registration_paid": False,
+        "registration_source": None,
+        "payment_method": None,
+        "paid_at": None,
+        # Never wall an admin-created account behind the payment screen.
+        "subscription_skipped": True,
+        "subscription_skipped_at": now,
+        # Referral payouts stay OFF until the admin flips "Admin Approved".
+        "referral_enabled": False,
         "payment_attempts": 0,
         "last_payment_failure_at": None,
         "direct_referrals_count": 0,
@@ -4816,126 +5055,13 @@ async def admin_create_user(
     }
     await db.users.insert_one(user_doc)
 
-    # Log an offline-paid transaction for bookkeeping
-    if payload.mark_paid_offline:
-        chosen_source = payload.registration_source or "offline_cash"
-        fee_amount = settings["registration_fee"]
-        # Optional UTR / bank ref number — when admin actually received the
-        # money via UPI/Razorpay/bank transfer. Sanitized to upper-case
-        # alphanumeric; falls back to synthetic placeholder when blank.
-        clean_utr: Optional[str] = None
-        if getattr(payload, "utr", None):
-            _u = str(payload.utr).strip().upper()
-            if 6 <= len(_u) <= 32 and _u.replace("-", "").replace("_", "").isalnum():
-                clean_utr = _u
-        # Stamp the UTR on the user doc so invoices render correctly.
-        if clean_utr:
-            await db.users.update_one({"id": user_id}, {"$set": {"razorpay_utr": clean_utr}})
-
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "type": "registration_fee",
-            "amount": fee_amount,
-            "status": "paid",
-            # Canonical source tag — see _trigger_referral_commissions where
-            # downstream payout txns inherit this so the entire fan-out is
-            # filterable by where the money originally came from.
-            "source": chosen_source,
-            "description": f"Registration fee — {chosen_source.replace('_',' ')} (admin {admin.get('email')})"
-                            + (f" · UTR {clean_utr}" if clean_utr else ""),
-            "reference_number": clean_utr,
-            "created_at": now,
-        })
-
-        # ── GST collection at offline-create time (Bug-fix · 2026-05-31) ──
-        # When admin marks a user paid offline, the ₹118 (inclusive of 18%
-        # GST) MUST register the ₹18 GST liability immediately. Without
-        # this, the GST ledger missed every offline joining with a referrer
-        # (the cascade only collected payout-level GST, not entry GST).
-        #
-        # Inclusive formula: gst = fee × 18 / 118 (₹18 on the standard ₹118 fee).
-        try:
-            from server import REFERRAL_GST_PCT  # 18 — local re-import safe (we ARE server.py)
-        except Exception:
-            REFERRAL_GST_PCT = 18
-        registration_gst = round(float(fee_amount) * (REFERRAL_GST_PCT / (100.0 + REFERRAL_GST_PCT)), 2)
-        if registration_gst > 0:
-            await db.transactions.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": admin["id"],  # GST entry belongs on the admin/system wallet ledger
-                "type": "gst_collected",
-                "gst_kind": "registration_entry",
-                "related_signup_id": user_id,
-                "amount": registration_gst,
-                "status": "success",
-                "description": f"GST {int(REFERRAL_GST_PCT)}% on registration fee · offline · {payload.name}",
-                "source_user_id": user_id,
-                "source_user_name": payload.name,
-                "linked_payout_to_user_id": user_id,
-                "reference_number": (clean_utr or "") + "-GST",
-                "created_at": now,
-            })
-            # Marker for the commission engine so it does NOT collect
-            # registration-level GST again at approval-time (it will still
-            # collect payout-level GST on L2-L10 platform fees).
-            await db.users.update_one(
-                {"id": user_id},
-                {"$set": {"registration_gst_collected_at_create": True}},
-            )
-        # ── Accountability sync (2026-05-27) ─────────────────────────────
-        # The admin has physically/digitally collected ₹118 (cash, Razorpay
-        # link, or direct UPI). That money MUST land in the system-wallet
-        # so the ledger drift checker sees inflow == actual_held. Park it
-        # in the `direct_added` bucket — same bucket used by manual
-        # system-wallet deposits — until the user is approved and
-        # _trigger_referral_commissions splits it into L1/GST/cascade.
-        # We also log a parallel system-wallet deposit row so admins can
-        # see WHO/WHEN even before approval. Idempotent via unique
-        # (user_id, type) txn index — duplicate offline create attempts
-        # would already 409 at the user-insert step.
-        try:
-            await credit_admin_bucket("direct_added", float(fee_amount), also_total_earned=False)
-            await db.system_wallet_deposits.insert_one({
-                "id": str(uuid.uuid4()),
-                "amount": float(fee_amount),
-                # Real UTR when admin provided it; synthetic fallback keeps
-                # the unique-index happy and tags rows admin can distinguish
-                # from real bank deposits.
-                "utr": clean_utr or f"OFFLINE-{user_id[:8].upper()}",
-                "bank_ref": clean_utr,
-                "remarks": f"Offline registration fee · {chosen_source} · {payload.name}"
-                           + (f" · UTR {clean_utr}" if clean_utr else ""),
-                "deposited_by": admin["id"],
-                "deposited_by_email": admin.get("email"),
-                "source": chosen_source,
-                "linked_user_id": user_id,
-                "created_at": now,
-            })
-            # ── Ledger marker (2026-06 fix) ──────────────────────────────
-            # Stamp the exact amount we pre-credited to `direct_added` on
-            # the user doc. `_trigger_referral_commissions` will read this
-            # at approval time and DEBIT direct_added by the same amount
-            # BEFORE the cascade redistributes the fee. Without this
-            # marker, the cascade adds money on top of the pre-credit
-            # (double-count) and the money-flow checker logs a recurring
-            # [LEDGER ALERT] drift equal to Σ pre-credited fees.
-            await db.users.update_one(
-                {"id": user_id},
-                {"$set": {"offline_pre_credit_amount": float(fee_amount)}},
-            )
-        except Exception as _e:
-            # Wallet-credit failures are non-fatal at user-creation time —
-            # the ledger heal-check will surface the drift on its next run
-            # and admins can re-run via /api/admin/system-wallet/reconcile.
-            logger.warning(f"offline-create wallet credit failed for {user_id}: {_e}")
-
     await _create_notification(
         user_id, "welcome",
         "Account created by admin",
-        "Your account was created by our team. It is awaiting final finance approval before login access is enabled.",
+        "Your account was created by our team. You can sign in and start shopping right away — "
+        "activate the ₹118 subscription any time from Shop, Dashboard or Profile to unlock cashback.",
     )
-    await _audit_log(admin, "user.admin_create", "user", user_id, {"email": email, "mark_paid_offline": payload.mark_paid_offline})
+    await _audit_log(admin, "user.admin_create", "user", user_id, {"email": email, "type": "non_subscriber"})
     return {"ok": True, "user": serialize_user(user_doc)}
 
 
@@ -6479,11 +6605,18 @@ async def admin_export(
         for r in rows:
             paid = bool(r.get("registration_paid"))
             src = r.get("registration_source")
-            r["join_source"] = SRC_LABEL.get(src or "", "Unknown source") if paid else "Not paid yet"
-            r["admin_approved"] = "Yes" if paid else "No"
+            r["join_source"] = SRC_LABEL.get(src or "", "Unknown source") if paid else "No subscription"
+            r["account_type"] = "Subscriber" if paid else "Non-subscriber"
+            r["paid_status"] = "₹118 PAID" if paid else "Not paid"
+            r["admin_approved"] = "ON" if r.get("referral_enabled") else "OFF"
+            r["admin_approved_note"] = r.get("referral_switch_note") or ""
+            r["admin_approved_on"] = r.get("referral_switch_at") or ""
+            r["admin_approved_by"] = r.get("referral_switch_by") or ""
         fields = [
             "id", "name", "email", "phone", "role", "referral_code", "referred_by",
-            "join_source", "admin_approved", "approval_status", "paid_at",
+            "account_type", "paid_status", "join_source",
+            "admin_approved", "admin_approved_note", "admin_approved_on", "admin_approved_by",
+            "approval_status", "paid_at",
             "direct_referrals_count", "wallet_balance", "total_earned",
             "upi_id", "bank_account", "ifsc", "account_holder",
             "is_blocked", "kyc_status", "created_at",
@@ -7811,6 +7944,54 @@ async def _background_init():
                     pass
         except Exception as _drift_err:
             logger.warning(f"Drift self-heal skipped: {str(_drift_err)[:200]}")
+        # ── Aug-2026 · Two-account-type migration (one-time) ─────────────
+        # Business rule change: only a successful RAZORPAY payment makes a
+        # member a Subscriber. Legacy UPI-manual / offline-cash joinings are
+        # converted to Non-subscribers (their historical revenue rows are
+        # KEPT so the books and GST reports stay truthful). Also seeds the
+        # new `referral_enabled` switch from the existing approval state so
+        # nothing changes for members who are already earning.
+        try:
+            _mig_key = "two_account_types_migration_2026_08"
+            _mig = await db.app_state.find_one({"_id": _mig_key})
+            if not _mig:
+                _ts = now_utc().isoformat()
+                legacy = await db.users.update_many(
+                    {
+                        "role": "user",
+                        "registration_paid": True,
+                        "registration_source": {"$in": ["upi_manual", "offline_cash"]},
+                    },
+                    {"$set": {
+                        "registration_paid": False,
+                        "subscription_skipped": True,
+                        "legacy_non_subscriber": True,
+                        "converted_to_non_subscriber_at": _ts,
+                    }},
+                )
+                on_res = await db.users.update_many(
+                    {"role": "user", "referral_enabled": {"$exists": False},
+                     "approval_status": "approved", "registration_source": "razorpay"},
+                    {"$set": {"referral_enabled": True,
+                              "referral_switch_note": "Seeded ON from existing approval",
+                              "referral_switch_at": _ts}},
+                )
+                off_res = await db.users.update_many(
+                    {"role": "user", "referral_enabled": {"$exists": False}},
+                    {"$set": {"referral_enabled": False}},
+                )
+                await db.app_state.insert_one({
+                    "_id": _mig_key, "at": _ts,
+                    "legacy_converted": legacy.modified_count,
+                    "referral_on": on_res.modified_count,
+                    "referral_off": off_res.modified_count,
+                })
+                logger.info(
+                    f"two-account-type migration: {legacy.modified_count} legacy → non-subscriber, "
+                    f"referral switch seeded ON={on_res.modified_count} OFF={off_res.modified_count}"
+                )
+        except Exception as _mig_err:
+            logger.warning(f"two-account-type migration skipped: {str(_mig_err)[:200]}")
         try:
             await seed_admin()
         except Exception as _e:

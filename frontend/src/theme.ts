@@ -83,19 +83,26 @@ export const READABLE_MAX_WIDTH = 480;
 
 import { useWindowDimensions, ViewStyle } from "react-native";
 
-/** Returns true when the viewport is tablet-sized (>= 600 px). */
+/** Returns true when the viewport is tablet-sized (>= 900 px). */
 export function useIsTablet(): boolean {
   const { width } = useWindowDimensions();
   return width >= TABLET_MIN_WIDTH;
 }
 
-/** Style spread that constrains content to a centered, readable column on tablets.
- *  Drop this onto a screen's outermost <View>/<ScrollView>'s contentContainerStyle. */
+/**
+ * Style spread that constrains a FORM-style screen (login, register,
+ * payment) to a centred, readable column on tablets / desktop.
+ *
+ * Jun 2026 — the app no longer wraps everything in a fake phone frame, so
+ * single-column form screens would otherwise stretch edge-to-edge on a
+ * 12-inch tablet. Content-heavy screens (shop grid, layout blocks) are
+ * deliberately NOT constrained — they adapt their column count instead.
+ */
 export function useResponsiveContainer(): ViewStyle {
   const { width } = useWindowDimensions();
-  if (width >= TABLET_MIN_WIDTH) {
+  if (width >= 768) {
     return {
-      maxWidth: READABLE_MAX_WIDTH,
+      maxWidth: 560,
       alignSelf: "center",
       width: "100%",
     };

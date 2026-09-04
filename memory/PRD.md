@@ -454,3 +454,94 @@ per txn type). Shown in the list rows and the detail sheet ("Reference").
 `backend/tests/seed_reg_revenue.py` (3 razorpay + 2 upi_manual + 2 offline
 users, 30 filler payouts) → summary 7/₹826, razorpay 3/₹354, GST ₹54.
 Screens verified in web preview after the TDZ fix.
+
+---
+
+## Aug-2026 · ₹118 becomes a SUBSCRIPTION (free tier + benefits card)
+
+### Owner report
+New users landed on the payment wall ("PAY TO ACTIVATE") with only a Pay
+button and could never enter the app — even after admin approval.
+
+### Business rules now
+- ₹118 is a **subscription**, not a gate. `POST /api/payment/skip-subscription`
+  records `subscription_skipped=true`; `app/index.tsx` + `app/login.tsx` route
+  `unpaid && !subscription_skipped → /payment`, everyone else → `/(tabs)/shop`.
+- **Admin approval never blocks entry** — `/pending-approval` gained a
+  "Continue to the app" button and is no longer a redirect target from index.
+- Free tier = browse + shop only. Wallet / cashback / referral earnings /
+  withdrawals are member-only (`/withdrawals` already 400s for unpaid).
+  Dashboard hides the Total-Earnings + Withdraw card; `/wallet` shows
+  `SubscriptionLocked`; Shop / Dashboard / Profile show `SubscribeBanner`.
+- Free users stay in the referral tree with zero commission (unchanged).
+- **Admin Approved ON** (customer paid the admin by hand) now records ₹118 as
+  `offline_cash` registration revenue + a `direct_added` system-wallet mirror,
+  sets `registration_source/paid_at/admin_approved_*`, and keeps
+  `commission_triggered=True` → still NO GST and NO referral commission.
+  Idempotent (never a second fee txn).
+
+### New UI kit — `src/subscription.tsx`
+`SubscriptionHero` (gradient · "SUBSCRIPTION" · ₹118 · "Complete your
+registration with ₹118"), `SubscriptionBenefits` (the 8 owner-specified
+benefits), `SkipSubscriptionButton` (in-app Modal confirm — NOT Alert.alert so
+it behaves the same on web + native), `SubscribeBanner`, `SubscriptionLocked`.
+Used by BOTH payment screens (`app/payment.tsx` Razorpay and
+`app/payment-upi.tsx` UPI-manual) so they never drift.
+
+### Admin
+`/admin/users` category tab labelled **"No subscription"** (key `unpaid`),
+roster badges `₹118 PAID` / `NO SUB`, and a **Paid status** pill in the edit
+slide next to the Admin Approved switch.
+
+### Verified
+5/5 pytest in `backend/tests/test_iter60_subscription.py` + full Playwright
+pass (report `test_reports/iteration_60.json`). Test accounts:
+`freetier1@test.com` (admin-approved → ₹118 paid) and `freetier2@test.com`
+(skipped → free), password `Just@4me`.
+
+---
+
+## Sep-2026 · Phase 1 — Two account types + Admin Approved = referral switch
+
+### Rules implemented
+- **Only two account types**: `Subscriber` = Razorpay payment successful ·
+  `Non-subscriber` = continued without subscription. UPI-manual & offline-cash
+  removed from all account-creation paths (`/payment` no longer redirects to
+  `/payment-upi`; `POST /admin/users/create` always creates a non-subscriber
+  with `subscription_skipped=true`, `referral_enabled=false`, and writes NO
+  fee / GST / system-wallet rows — so treasury + GST maths stay exact).
+- **Paid status is immutable**: `registration_paid` removed from
+  `AdminUserUpdate` and popped in `admin_update_user`. A Razorpay-paid member
+  can never be shown unpaid again.
+- **"Admin Approved" is now a referral-payment switch only** —
+  `POST /admin/users/{id}/referral-approval {enabled, note}` (note ≥ 3 chars,
+  mandatory). ON → sets `referral_enabled`, fires the L1..L10 cascade for paid
+  subscribers. OFF → "refund done": `_clawback_referral_payouts()` debits each
+  upline by the net paid, rolls back `total_earned`, tracks `refund_debt`,
+  writes `refund_clawback` + `platform_fee_reversal` txns and marks the
+  original payouts `reversed`. Every switch is pushed to
+  `referral_switch_history` and surfaced in the Users CSV
+  (`admin_approved`, `admin_approved_note/on/by`, `account_type`, `paid_status`).
+- `_trigger_referral_commissions` now returns early unless `referral_enabled`
+  is true; `/admin/approvals/{id}/approve` turns the switch ON.
+- **One-time startup migration** `two_account_types_migration_2026_08`:
+  legacy UPI-manual/offline members → non-subscriber (historical revenue rows
+  KEPT), and `referral_enabled` seeded from the existing approval state
+  (preview run: 10 converted, ON=3, OFF=24).
+- Admin → Users tabs are now **All · Subscribers · No subscription** (Legacy
+  only while legacy rows exist). Add-new-user modal lost the mark-paid switch,
+  source chips and UTR field.
+
+### Verified
+10/10 pytest `backend/tests/test_iter61_two_account_types.py` (clawback
+arithmetic verified to the rupee) + Playwright UI pass — report
+`test_reports/iteration_61.json`. The one bug the tester found (immutability
+patch had landed in the wrong function) is fixed and re-tested green.
+
+### Remaining phases (owner-approved order)
+2. Product image bugs (vendor→admin bin image, publish without re-upload,
+   multi-image gallery select, product-detail gallery)
+3. Admin Products vendor-first loading + one-click "publish all of vendor"
+4. Smart-search suggestions in Add Product (item-wise unique, import price/images)
+5. Vendor POS invoice ↔ web sync, cash summary, GST & tax return
+6. Tablet (12") shop images + hero card alignment

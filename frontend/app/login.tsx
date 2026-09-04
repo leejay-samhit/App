@@ -16,7 +16,7 @@ import { Feather } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../src/auth";
 import { useBranding } from "../src/branding";
-import { colors, radii, spacing } from "../src/theme";
+import { colors, radii, spacing, useResponsiveContainer } from "../src/theme";
 import { formatApiError } from "../src/api";
 import { GradientCard } from "../src/gradient-card";
 import Animated, { FadeInDown } from "react-native-reanimated";
@@ -34,6 +34,7 @@ export default function Login() {
   } = useAuth();
   const { app_name, tagline, login_subtitle } = useBranding();
   const router = useRouter();
+  const wideColumn = useResponsiveContainer();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -79,7 +80,7 @@ export default function Login() {
 
   const navigateAfter = (u: any) => {
     if (u.role === "admin") router.replace("/admin/home");
-    else if (!u.registration_paid) router.replace("/payment");
+    else if (!u.registration_paid && !u.subscription_skipped) router.replace("/payment");
     // Approved customers land directly on the Shop tab so they can start
     // browsing immediately. Dashboard is one tap away via the bottom nav.
     else router.replace("/(tabs)/shop");
@@ -152,7 +153,7 @@ export default function Login() {
         style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
       >
-        <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        <ScrollView contentContainerStyle={[styles.container, wideColumn]} keyboardShouldPersistTaps="handled">
           <Animated.View entering={FadeInDown.duration(400)}>
             <GradientCard variant="emerald" style={styles.heroBrand}>
               <View style={styles.brandRow}>

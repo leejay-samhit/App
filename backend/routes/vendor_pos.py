@@ -37,7 +37,7 @@ Endpoints (22):
 """
 import re
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -145,6 +145,53 @@ def _parse_discount(raw: Optional[str], base: float) -> float:
 
 def _round2(x: float) -> float:
     return round(float(x or 0.0), 2)
+
+
+# ── IST-aware day / month boundaries ────────────────────────────────────
+# Jun 2026 fix — POS day aggregations (cash summary, "today" KPIs) used to
+# slice on the UTC calendar day.  India is UTC+5:30, so a vendor who billed
+# between 00:00 and 05:30 IST saw those bills land on YESTERDAY's cash
+# summary (and the previous evening's 18:30-24:00 IST bills leaked into
+# today's) — the "cash summary missing / wrong" bug.  Every POS day window
+# is now computed from the IST calendar day and converted to the UTC ISO
+# strings that `created_at` is stored as.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_day_bounds(date_str: Optional[str] = None) -> tuple:
+    """UTC ISO bounds (inclusive) covering one IST calendar day.
+
+    `date_str` is an IST date as `YYYY-MM-DD`; omit it for "today in IST".
+    """
+    if date_str:
+        y, m, d = (int(x) for x in str(date_str)[:10].split("-"))
+        start_ist = datetime(y, m, d, 0, 0, 0, tzinfo=IST)
+    else:
+        start_ist = now_utc().astimezone(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_ist = start_ist + timedelta(days=1) - timedelta(microseconds=1)
+    return (
+        start_ist.astimezone(timezone.utc).isoformat(),
+        end_ist.astimezone(timezone.utc).isoformat(),
+    )
+
+
+def _ist_today_str() -> str:
+    return now_utc().astimezone(IST).date().isoformat()
+
+
+def _range_bounds(from_: Optional[str], to: Optional[str]) -> Dict[str, Any]:
+    """Build a `created_at` filter from `from`/`to` query params.
+
+    Plain `YYYY-MM-DD` values are interpreted as IST calendar days (so a
+    single-day range covers 00:00→23:59:59 IST, not UTC).  Full ISO
+    timestamps pass through untouched.
+    """
+    out: Dict[str, Any] = {}
+    if from_:
+        out["$gte"] = _ist_day_bounds(from_)[0] if len(str(from_)) == 10 else from_
+    if to:
+        out["$lte"] = _ist_day_bounds(to)[1] if len(str(to)) == 10 else to
+    return out
 
 
 def _compute_totals(items: List[Dict[str, Any]], gst_inclusive: bool, bill_discount: Optional[str], round_off: bool) -> Dict[str, Any]:
@@ -463,10 +510,9 @@ async def list_sales(
     filt: Dict[str, Any] = {"vendor_id": vendor_id}
     if status:
         filt["status"] = status
-    if from_:
-        filt.setdefault("created_at", {})["$gte"] = from_
-    if to:
-        filt.setdefault("created_at", {})["$lte"] = to + ("T23:59:59" if len(to) == 10 else "")
+    date_filter = _range_bounds(from_, to)
+    if date_filter:
+        filt["created_at"] = date_filter
     if min_amt is not None:
         filt["totals.grand_total"] = {"$gte": float(min_amt)}
     if max_amt is not None:
@@ -586,15 +632,15 @@ async def invoice_html(sale_id: str, user: Dict[str, Any] = Depends(get_current_
 # ───────────────────────── Dashboard / KPIs ─────────────────────────
 
 def _today_bounds() -> (str, str):
-    now = now_utc()
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start.isoformat(), now.isoformat()
+    """UTC ISO bounds for TODAY in IST (see `_ist_day_bounds`)."""
+    return _ist_day_bounds()
 
 
 def _month_bounds() -> (str, str):
-    now = now_utc()
-    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    return start.isoformat(), now.isoformat()
+    """UTC ISO bounds from the 1st of the current IST month → now."""
+    now_ist = now_utc().astimezone(IST)
+    start_ist = now_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start_ist.astimezone(timezone.utc).isoformat(), now_utc().isoformat()
 
 
 async def _aggregate_kpis(vendor_id: str, from_: str, to: str) -> Dict[str, Any]:
@@ -636,11 +682,9 @@ async def vendor_pos_cash_summary(
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     vendor_id = await _ensure_vendor(user)
-    if date:
-        start = f"{date}T00:00:00"
-        end = f"{date}T23:59:59"
-    else:
-        start, end = _today_bounds()
+    # IST calendar day (see `_ist_day_bounds`) — a bill rung up at 01:00 IST
+    # belongs to that IST day, not to the previous UTC day.
+    start, end = _ist_day_bounds(date) if date else _ist_day_bounds()
     pipeline = [
         {"$match": {"vendor_id": vendor_id, "status": "completed", "created_at": {"$gte": start, "$lte": end}}},
         {"$unwind": "$payments"},
@@ -651,12 +695,22 @@ async def vendor_pos_cash_summary(
     settings = await _get_pos_settings(vendor_id)
     opening = float(settings.get("opening_balance") or 0)
     cash_in = by_mode.get("cash", {}).get("amount", 0.0)
+    # Total across every mode — the vendor's actual day turnover, which the
+    # old response never exposed (only the cash slice), so the mobile Cash
+    # screen had no day total to show.
+    total_collected = _round2(sum(float(v["amount"] or 0) for v in by_mode.values()))
+    bills = await db.offline_sales.count_documents({
+        "vendor_id": vendor_id, "status": "completed",
+        "created_at": {"$gte": start, "$lte": end},
+    })
     return {
-        "date": (date or now_utc().date().isoformat()),
+        "date": (date or _ist_today_str()),
         "by_mode": by_mode,
         "opening_balance": opening,
         "expected_close": _round2(opening + cash_in),
         "cash_received": _round2(cash_in),
+        "total_collected": total_collected,
+        "bills": bills,
     }
 
 
@@ -668,10 +722,9 @@ async def vendor_pos_statement(
 ):
     vendor_id = await _ensure_vendor(user)
     filt: Dict[str, Any] = {"vendor_id": vendor_id, "status": "completed"}
-    if from_:
-        filt.setdefault("created_at", {})["$gte"] = from_
-    if to:
-        filt.setdefault("created_at", {})["$lte"] = to + ("T23:59:59" if len(to) == 10 else "")
+    date_filter = _range_bounds(from_, to)
+    if date_filter:
+        filt["created_at"] = date_filter
     rows = await db.offline_sales.find(filt, {"_id": 0}).sort("created_at", 1).limit(2000).to_list(2000)
     running = 0.0
     statement = []
@@ -814,10 +867,9 @@ async def admin_vendor_sales(
     offset: int = Query(0, ge=0),
 ):
     filt: Dict[str, Any] = {"vendor_id": vendor_id}
-    if from_:
-        filt.setdefault("created_at", {})["$gte"] = from_
-    if to:
-        filt.setdefault("created_at", {})["$lte"] = to + ("T23:59:59" if len(to) == 10 else "")
+    date_filter = _range_bounds(from_, to)
+    if date_filter:
+        filt["created_at"] = date_filter
     total = await db.offline_sales.count_documents(filt)
     rows = await db.offline_sales.find(filt, {"_id": 0}).sort("created_at", -1).skip(offset).limit(limit).to_list(limit)
     return {"total": total, "limit": limit, "offset": offset, "items": rows}
