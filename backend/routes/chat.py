@@ -798,7 +798,20 @@ async def delete_message(msg_id: str, user: Dict[str, Any] = Depends(get_current
         raise HTTPException(status_code=404, detail="Message not found.")
     if m["sender_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="You can only delete your own messages.")
-    await db.chat_messages.update_one({"id": msg_id}, {"$set": {"deleted": True, "text": "", "image_data_url": "", "updated_at": _now()}})
+    # Sep 2026 — COMPLIANCE ARCHIVE. The live `text` / `image_data_url` are
+    # still wiped so both chat participants see "deleted", but the original
+    # content is copied into `audit_*` fields which ONLY the super-admin
+    # Chat Records screen can read (routes/chat_audit.py). Required so the
+    # platform can produce a conversation on a lawful request.
+    await db.chat_messages.update_one({"id": msg_id}, {"$set": {
+        "deleted": True,
+        "text": "", "image_data_url": "",
+        "audit_text": m.get("audit_text") or m.get("text") or "",
+        "audit_image_data_url": m.get("audit_image_data_url") or m.get("image_data_url") or "",
+        "deleted_at": _now(),
+        "deleted_by": user["id"],
+        "updated_at": _now(),
+    }})
     t = await db.chat_threads.find_one({"id": m["thread_id"]})
     if t:
         await manager.send_to(list(t["participants"]), {"type": "message.deleted", "thread_id": m["thread_id"], "message_id": msg_id})
@@ -841,7 +854,16 @@ async def clear_thread_messages(
         )
         return {"ok": True, "scope": "me"}
 
-    # scope == "everyone" — wipe for both sides.
+    # scope == "everyone" — wipe for both sides. Content is archived into
+    # `audit_*` first (compliance — see delete_message above).
+    async for m in db.chat_messages.find(
+        {"thread_id": thread_id, "audit_text": {"$exists": False}},
+        {"_id": 0, "id": 1, "text": 1, "image_data_url": 1},
+    ):
+        await db.chat_messages.update_one({"id": m["id"]}, {"$set": {
+            "audit_text": m.get("text") or "",
+            "audit_image_data_url": m.get("image_data_url") or "",
+        }})
     await db.chat_messages.update_many(
         {"thread_id": thread_id},
         {
@@ -852,6 +874,8 @@ async def clear_thread_messages(
                 "image_data_url": "",
                 "reactions": {},
                 "starred_by": [],
+                "deleted_at": _now(),
+                "deleted_by": user["id"],
                 "updated_at": _now(),
             },
         },
@@ -1092,7 +1116,15 @@ async def delete_for_everyone(msg_id: str, user: Dict[str, Any] = Depends(get_cu
         raise HTTPException(status_code=400, detail="The 1-hour window for delete-for-everyone has passed.")
     await db.chat_messages.update_one(
         {"id": msg_id},
-        {"$set": {"deleted": True, "deleted_for_everyone": True, "text": "", "image_data_url": "", "updated_at": _now()}},
+        {"$set": {
+            "deleted": True, "deleted_for_everyone": True,
+            "text": "", "image_data_url": "",
+            "audit_text": m.get("audit_text") or m.get("text") or "",
+            "audit_image_data_url": m.get("audit_image_data_url") or m.get("image_data_url") or "",
+            "deleted_at": _now(),
+            "deleted_by": user["id"],
+            "updated_at": _now(),
+        }},
     )
     t = await db.chat_threads.find_one({"id": m["thread_id"]})
     if t:

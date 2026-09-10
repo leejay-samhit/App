@@ -141,6 +141,7 @@ from routes import promo_banners as promo_banners_router  # noqa: E402
 from routes import shop_layout as shop_layout_router  # noqa: E402
 from routes import shop_layout_analytics as shop_layout_analytics_router  # noqa: E402
 from routes import chat as chat_router  # noqa: E402
+from routes import chat_audit as chat_audit_router  # noqa: E402
 from routes import products_extended as products_extended_router  # noqa: E402
 from routes import products_ai as products_ai_router  # noqa: E402
 from routes import shop_categories as shop_categories_router  # noqa: E402
@@ -10763,6 +10764,7 @@ app.include_router(promo_banners_router.router, prefix="/api")
 app.include_router(shop_layout_router.router, prefix="/api")
 app.include_router(shop_layout_analytics_router.router, prefix="/api")
 app.include_router(chat_router.router, prefix="/api")
+app.include_router(chat_audit_router.router, prefix="/api")
 app.include_router(products_extended_router.router, prefix="/api")
 app.include_router(products_ai_router.router, prefix="/api")
 app.include_router(shop_categories_router.router, prefix="/api")

@@ -1065,3 +1065,47 @@ sections, layout-manager shop preview without 403, admin user rows open with
 no crash. Report `test_reports/iteration_69.json`.
 Biometric + tray push are native-build-only — code paths asserted, real
 delivery needs a published build.
+
+## Sep 2026 (later session) — Legal pages + Chat Records
+
+### 8. Legal & Policies (admin-editable, one source of truth)
+- `legal_pages` kinds are now: `about`, `contact_us`, `privacy`, `refund`,
+  `terms`. `about` was previously hardcoded in `app/legal/about.tsx` — that
+  screen now renders `<LegalPageView kind="about" />`, and the admin editor
+  (`app/admin/legal-pages.tsx`) has an "About us" tab.
+- Contact was TWO screens (`/legal/contact` hardcoded pre-login vs
+  `/legal/contact-us` admin-editable post-login). Unified into
+  `/legal/contact`: admin text via `LegalPageView` + a new optional `footer`
+  prop carrying the support-ticket / track-ticket cards. `contact-us.tsx`
+  deleted; `more.tsx` repointed. Login footer now lists
+  Terms · Privacy · Refund · Contact · About.
+
+### 9. Admin → Chat = two groups (owner: legal/court compliance)
+- `app/admin/chat.tsx` is now a wrapper with a segmented switcher:
+  1. **Message users** → the normal `ChatListScreen` (unchanged; admin can
+     still text anyone).
+  2. **Chat records** → `src/chat-audit.tsx`, SUPER-ADMIN ONLY, read-only.
+     Non-super admins never see the switcher.
+- `backend/routes/chat_audit.py` (all `require_admin_role("super_admin")`):
+  - `GET /admin/chat-audit/threads?q=` — every conversation (user↔user AND
+    admin↔user) with FULL identities (name/email/phone/ref/role), message,
+    deleted and photo counts.
+  - `GET /admin/chat-audit/threads/{id}/messages` — whole transcript incl.
+    deleted messages, image blobs stripped (`has_image` flag only).
+  - `GET /admin/chat-audit/messages/{id}/image` (bytes) and
+    `/image-data` (data URL, used by the app so `<Image>` works on web).
+  - `GET /admin/chat-audit/threads/{id}/export` and
+    `GET /admin/chat-audit/users/{id}/export` → `{filename, content}` plain
+    text; the app saves it with `src/download.ts`. Format: confidential
+    header, lettered participants with full contact details, then
+    `[n] dd-mm-yyyy hh:mm:ss AM IST  Sender (A) -> Other (B) [flags]` with
+    flags `EDITED`, `PHOTO attached — visible in app`, `REPLY to #n`,
+    `DELETED at … — content recovered / not recoverable`.
+  - Every read and export writes an `audit_logs` row
+    (`chat_audit.read_thread` / `.export_thread` / `.export_user`).
+- **Deleted-message archive**: the three delete paths in `routes/chat.py`
+  (`delete_message`, `clear_thread_messages scope=everyone`,
+  `delete_for_everyone`) now copy the original into `audit_text` /
+  `audit_image_data_url` and stamp `deleted_at` / `deleted_by` before wiping
+  the live fields. Participants still see "deleted". Messages deleted BEFORE
+  this change are NOT recoverable and are reported as such.

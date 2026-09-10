@@ -9037,3 +9037,34 @@ agent_communication:
       identical content from both the login footer and Profile → More, and the
       admin editor shows 5 tabs (about, contact_us, privacy, refund, terms).
       Test doc removed afterwards so About is back on the system default.
+
+  - agent: "main"
+    message: |
+      Chat Records (super-admin legal audit) — Sep 2026.
+
+      Backend: new routes/chat_audit.py, all gated by
+      require_admin_role("super_admin"); registered in server.py. Deleted
+      content is now archived: routes/chat.py delete handlers copy
+      text/image into audit_text / audit_image_data_url + deleted_at /
+      deleted_by before wiping the live fields (participants still see
+      "deleted"). Pre-existing deletions have no archive → reported as
+      "content not recoverable".
+
+      Frontend: app/admin/chat.tsx became a 2-group switcher
+      (Message users | Chat records); src/chat-audit.tsx is the read-only
+      audit UI (search, conversation cards with message/deleted/photo
+      counts, transcript modal with DELETED badges + tap-to-view photos,
+      "Download this chat (.txt)" and "All chats of a user").
+
+      Verified with backend/tests/test_chat_audit.py (all assertions pass):
+      created a thread between testbuyer/testbuyer2, posted 4 messages
+      (incl. a photo + a reply), deleted one → user list shows text "" and
+      deleted=true, while the audit endpoint returns the original text with
+      recovered=true and the deletion timestamp. Image byte endpoint 200
+      image/png. Thread export contains the recovered text, "DELETED" and
+      "PHOTO attached"; user-wide export covers all 3 threads.
+      RBAC: normal user 403, products_manager 403, super admin 200.
+      Playwright: switcher renders, records list shows 21 conversations,
+      transcript modal renders the DELETED bubble, photo viewer opens, and
+      the browser download produced
+      slangcart-chat-Buyer-and-Buyer-20260911-0451.txt.
