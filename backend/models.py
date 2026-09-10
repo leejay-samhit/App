@@ -269,6 +269,9 @@ class WipeUsersRequest(BaseModel):
 class WipeAllRequest(BaseModel):
     danger_pin: str
     confirm_phrase: Optional[str] = None  # require user to type "RESET" client-side
+    # Sep 2026 — the admin must download the .json backup before a wipe;
+    # restores are file-based only (no in-app one-click restore).
+    backup_downloaded: bool = False
 
 
 class SettingsUpdate(BaseModel):

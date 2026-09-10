@@ -75,6 +75,10 @@ export default function ProviderProfileScreen() {
     wallet_balance: number; revealed_provider_ids: string[];
   } | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // Sep 2026 — the pay sheet is shared by "Get phone number" and
+  // "Start Chat"; this remembers where to go once payment lands.
+  const [payIntent, setPayIntent] = useState<"call" | "chat">("call");
+  const [chatOpening, setChatOpening] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
 
   const load = useCallback(async () => {
@@ -149,6 +153,44 @@ export default function ProviderProfileScreen() {
       return;
     }
     // Show confirm sheet with fee + GST breakdown + T&C
+    setPayIntent("call");
+    setTermsAccepted(false);
+    setConfirmOpen(true);
+  };
+
+  /** Create/reuse the thread and navigate. Assumes access is allowed. */
+  const openChatThread = async () => {
+    if (!p?.id) return;
+    setChatOpening(true);
+    try {
+      const r = await api.post<{ id: string }>("/chat/threads", { other_user_id: p.id });
+      router.push(`/chat/${r.data.id}` as any);
+    } catch (e) {
+      Alert.alert("Couldn't open chat", formatApiError(e));
+    } finally {
+      setChatOpening(false);
+    }
+  };
+
+  /**
+   * Sep 2026 — "Start Chat" for a service provider.
+   * Free when the admin sets the unlock fee to ₹0, otherwise it runs the
+   * SAME pay sheet as the phone reveal and enters the thread right after
+   * the payment succeeds.
+   */
+  const openChat = async () => {
+    if (!user) {
+      Alert.alert("Login required", "Please log in to chat with this provider.");
+      return;
+    }
+    const alreadyUnlocked = !!revealedPhone
+      || (revealConfig?.revealed_provider_ids || []).includes(String(p?.id));
+    const fee = Number(revealConfig?.total ?? 0);
+    if (alreadyUnlocked || fee <= 0) {
+      openChatThread();
+      return;
+    }
+    setPayIntent("chat");
     setTermsAccepted(false);
     setConfirmOpen(true);
   };
@@ -174,6 +216,14 @@ export default function ProviderProfileScreen() {
         const { data: cfg } = await api.get("/services/reveal-config");
         setRevealConfig(cfg);
       } catch {}
+      // Sep 2026 — the sheet can be opened either to CALL or to CHAT. When
+      // the customer came in through "Start Chat" we take them into the
+      // thread instead of the dialer.
+      if (payIntent === "chat") {
+        setPayIntent("call");
+        openChatThread();
+        return;
+      }
       // Auto open dialer after a brief pause
       setTimeout(() => {
         Linking.openURL(`tel:${data.provider_phone}`).catch(() => {});
@@ -393,25 +443,24 @@ export default function ProviderProfileScreen() {
                 : "Get phone number"}
           </Text>
         </TouchableOpacity>
-        {/* June 2026 — once the user has revealed the provider's phone we
-            also surface an in-app "Start Chat" CTA so they don't have to
-            leave for a call. Opens a chat thread (created on first send)
-            against the provider's user_id. */}
-        {revealedPhone && p?.id ? (
+        {/* Sep 2026 — Chat is ALWAYS offered. If this provider hasn't been
+            unlocked yet, tapping it runs the same pay-and-unlock sheet (or
+            opens straight away when the admin has set the unlock fee to ₹0)
+            and then drops the customer into the thread. Previously the
+            button only appeared after a phone reveal, and even then the
+            request was rejected by the server — so "chat after paying
+            ₹1.18" did nothing. */}
+        {p?.id ? (
           <TouchableOpacity
-            onPress={async () => {
-              try {
-                const r = await api.post("/chat/threads", { other_user_id: p.id });
-                router.push(`/chat/${r.data.id}` as any);
-              } catch (e) {
-                Alert.alert("Couldn't open chat", "Please try again.");
-              }
-            }}
-            style={[styles.ctaBtn, { marginLeft: 8, backgroundColor: "#16A34A" }]}
+            onPress={openChat}
+            disabled={chatOpening}
+            style={[styles.ctaBtn, { marginLeft: 8, backgroundColor: "#16A34A" }, chatOpening && { opacity: 0.6 }]}
             testID="start-chat-btn"
           >
-            <Feather name="message-circle" size={16} color="#fff" />
-            <Text style={styles.ctaBtnText}>Start Chat</Text>
+            {chatOpening
+              ? <ActivityIndicator color="#fff" size="small" />
+              : <Feather name="message-circle" size={16} color="#fff" />}
+            <Text style={styles.ctaBtnText}>{chatOpening ? "Opening…" : "Start Chat"}</Text>
           </TouchableOpacity>
         ) : null}
       </View>
@@ -430,10 +479,13 @@ export default function ProviderProfileScreen() {
               <View style={styles.revealHeroIcon}>
                 <Feather name="phone" size={28} color="#fff" />
               </View>
-              <Text style={styles.modalTitle}>Unlock provider's phone</Text>
+              <Text style={styles.modalTitle}>
+                {payIntent === "chat" ? "Unlock chat with provider" : "Unlock provider's phone"}
+              </Text>
               <Text style={styles.revealSubtitle}>
-                Pay a one-time fee to get {p.name?.split(" ")[0] || "this provider"}'s direct number.
-                You'll be able to call them anytime after that.
+                {payIntent === "chat"
+                  ? `One-time fee to message ${p.name?.split(" ")[0] || "this provider"} directly. Their phone number unlocks too — chat and call anytime after this.`
+                  : `Pay a one-time fee to get ${p.name?.split(" ")[0] || "this provider"}'s direct number. You'll be able to call them anytime after that.`}
               </Text>
             </View>
             {/* Fee breakdown */}
@@ -506,7 +558,7 @@ export default function ProviderProfileScreen() {
               {revealing ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.modalBtnText}>Pay & unlock</Text>
+                <Text style={styles.modalBtnText}>{payIntent === "chat" ? "Pay & chat" : "Pay & unlock"}</Text>
               )}
             </TouchableOpacity>
             <TouchableOpacity

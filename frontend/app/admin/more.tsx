@@ -1,9 +1,8 @@
-import { useState } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Modal, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { api, formatApiError } from "../../src/api";
+import { api } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { downloadText } from "../../src/download";
 import { colors, radii, spacing } from "../../src/theme";
@@ -56,25 +55,6 @@ const EXPORTS = [
 export default function More() {
   const router = useRouter();
   const { user, logout } = useAuth();
-  const [wipeOpen, setWipeOpen] = useState(false);
-  const [wipePin, setWipePin] = useState("");
-  const [wipeBusy, setWipeBusy] = useState(false);
-  const [wipeError, setWipeError] = useState<string | null>(null);
-
-  // Full factory-reset state ("Reset app to zero")
-  const [resetOpen, setResetOpen] = useState(false);
-  const [resetPin, setResetPin] = useState("");
-  const [resetPhrase, setResetPhrase] = useState("");
-  const [resetBusy, setResetBusy] = useState(false);
-  const [resetError, setResetError] = useState<string | null>(null);
-
-  // Reset Shop Products (scoped — products + reviews + cart + layout + categories)
-  const [shopResetOpen, setShopResetOpen] = useState(false);
-  const [shopResetPin, setShopResetPin] = useState("");
-  const [shopResetBusy, setShopResetBusy] = useState(false);
-  const [shopResetError, setShopResetError] = useState<string | null>(null);
-
-  const isPin = (p: string) => /^[0-9]{6}$/.test(p);
 
   const onExport = async (kind: string) => {
     try {
@@ -96,85 +76,9 @@ export default function More() {
     }
   };
 
-  const onWipe = async () => {
-    setWipeError(null);
-    if (!isPin(wipePin)) {
-      setWipeError("PIN must be exactly 6 digits.");
-      return;
-    }
-    setWipeBusy(true);
-    try {
-      const { data } = await api.post("/admin/system/wipe-users", {
-        keep_admins: true,
-        danger_pin: wipePin,
-      });
-      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
-      setWipeOpen(false);
-      setWipePin("");
-      Alert.alert(
-        "Wipe complete",
-        `Deleted:\n• ${data.users_deleted} users\n• ${data.transactions_deleted} transactions\n• ${data.withdrawals_deleted} withdrawals\n• ${data.orders_deleted} orders\n• ${data.cart_items_deleted} cart items\n• ${data.notifications_deleted} notifications${snapId ? `\n\nAuto-backup taken (#${snapId}). Restore from Admin → Data Backups if needed.` : ""}`,
-      );
-    } catch (e) {
-      setWipeError(formatApiError(e));
-    } finally {
-      setWipeBusy(false);
-    }
-  };
-  const onResetShopProducts = async () => {
-    setShopResetError(null);
-    if (!isPin(shopResetPin)) {
-      setShopResetError("PIN must be exactly 6 digits.");
-      return;
-    }
-    setShopResetBusy(true);
-    try {
-      const { data } = await api.post("/admin/system/reset-shop-products", {
-        danger_pin: shopResetPin,
-      });
-      const s = data.summary || {};
-      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
-      setShopResetOpen(false);
-      setShopResetPin("");
-      Alert.alert(
-        "Shop reset",
-        `Cleared:\n• ${s.products_deleted || 0} products\n• ${s.product_reviews_deleted || 0} reviews\n• ${s.cart_items_deleted || 0} cart items\n• ${s.shop_layout_blocks_deleted || 0} layout blocks\n• ${s.shop_categories_deleted || 0} categories\n\nUsers, transactions, withdrawals, orders, services and settings are untouched.${snapId ? `\n\nAuto-backup taken (#${snapId}).` : ""}`,
-      );
-    } catch (e) {
-      setShopResetError(formatApiError(e));
-    } finally {
-      setShopResetBusy(false);
-    }
-  };
-
   const onLogout = async () => {
     await logout();
     router.replace("/login");
-  };
-
-  const onFullReset = async () => {
-    setResetError(null);
-    if (!isPin(resetPin)) { setResetError("PIN must be exactly 6 digits."); return; }
-    if (resetPhrase.trim().toUpperCase() !== "RESET") { setResetError('Please type RESET (in capitals) to confirm.'); return; }
-    setResetBusy(true);
-    try {
-      const { data } = await api.post("/admin/system/wipe-all", {
-        danger_pin: resetPin,
-        confirm_phrase: resetPhrase.trim().toUpperCase(),
-      });
-      setResetOpen(false); setResetPin(""); setResetPhrase("");
-      const s = data.summary || {};
-      const total = Object.values(s).reduce((a: number, b: any) => a + (Number(b) || 0), 0);
-      const snapId = data.snapshot_id ? String(data.snapshot_id).slice(0, 8) : null;
-      Alert.alert(
-        "App reset to zero",
-        `${total} records cleared.\n\n• ${s.users_deleted || 0} users\n• ${s.transactions_deleted || 0} transactions\n• ${s.orders_deleted || 0} orders\n• ${s.withdrawals_deleted || 0} withdrawals\n• ${s.products_deleted || 0} products\n• ${s.tickets_deleted || 0} tickets\n• ${s.system_wallet_deposits_deleted || 0} system deposits\n\nSettings & super-admin login preserved.${snapId ? `\n\nFull pre-reset backup taken (#${snapId}). Restore from Admin → Data Backups if needed.` : ""}`,
-      );
-    } catch (e) {
-      setResetError(formatApiError(e));
-    } finally {
-      setResetBusy(false);
-    }
   };
 
   const isSuperAdmin = ((user as any)?.admin_role || "super_admin") === "super_admin";
@@ -242,34 +146,26 @@ export default function More() {
           <>
             <Text style={[styles.sectionLabel, { color: "#B3261E" }]}>DANGER ZONE</Text>
 
-            {/* Scoped reset — only shop products + reviews + cart + layout +
-                categories. Less destructive than "Wipe users" / "Reset app",
-                so admin can rebuild the catalog without nuking customers. */}
-            <TouchableOpacity onPress={() => { setShopResetError(null); setShopResetPin(""); setShopResetOpen(true); }} style={[styles.dangerRow, { backgroundColor: "#FFF7E6", borderColor: "#E57A44" }]} testID="more-reset-shop">
-              <View style={[styles.dangerIcon, { backgroundColor: "#FFEDD5" }]}><Feather name="shopping-bag" size={16} color="#E57A44" /></View>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.dangerText, { color: "#9A3412" }]}>Reset shop products</Text>
-                <Text style={styles.dangerHint}>Deletes products, reviews, cart, shop layout blocks and shop categories. Users, transactions, withdrawals, orders, services, wallets and settings are kept intact.</Text>
-              </View>
-              <Feather name="refresh-cw" size={16} color="#E57A44" />
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={() => { setWipeError(null); setWipePin(""); setWipeOpen(true); }} style={styles.dangerRow} testID="more-wipe-users">
-              <View style={styles.dangerIcon}><Feather name="trash-2" size={16} color="#B3261E" /></View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.dangerText}>Wipe all users</Text>
-                <Text style={styles.dangerHint}>Deletes every non-admin user + their transactions, orders, withdrawals, cart, and notifications.</Text>
-              </View>
-              <Feather name="alert-triangle" size={16} color="#B3261E" />
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={() => { setResetError(null); setResetPin(""); setResetPhrase(""); setResetOpen(true); }} style={[styles.dangerRow, { backgroundColor: "#FFE6E6", borderColor: "#B3261E", borderWidth: 2 }]} testID="more-reset-app">
+            {/* Sep 2026 — the three blind red buttons (wipe all users / reset
+                shop products / reset app to zero) are replaced by ONE guided
+                Reset centre. It makes you pick the exact account or shop,
+                forces a backup FILE download, and only then unlocks the
+                wipe — the owner's rule: nothing is destroyed without a
+                restorable file in hand. */}
+            <TouchableOpacity
+              onPress={() => router.push("/admin/reset-center" as any)}
+              style={[styles.dangerRow, { backgroundColor: "#FFE6E6", borderColor: "#B3261E", borderWidth: 2 }]}
+              testID="more-reset-center"
+            >
               <View style={[styles.dangerIcon, { backgroundColor: "#B3261E" }]}><Feather name="zap" size={16} color="#fff" /></View>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.dangerText, { fontSize: 15 }]}>Reset app to zero</Text>
-                <Text style={styles.dangerHint}>Deletes EVERYTHING — users, transactions, orders, products, services, vendors, tickets, audit log, deposits and snapshots. Settings &amp; super-admin login are preserved.</Text>
+                <Text style={[styles.dangerText, { fontSize: 15 }]}>Reset centre</Text>
+                <Text style={styles.dangerHint}>
+                  Reset ONE customer, clear ONE shop, or reset the whole app to zero.
+                  Every option downloads a restorable backup file first.
+                </Text>
               </View>
-              <Feather name="alert-octagon" size={18} color="#B3261E" />
+              <Feather name="chevron-right" size={18} color="#B3261E" />
             </TouchableOpacity>
           </>
         )}
@@ -280,207 +176,6 @@ export default function More() {
         </TouchableOpacity>
       </ScrollView>
 
-      <Modal
-        visible={wipeOpen}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        presentationStyle="overFullScreen"
-        onRequestClose={() => setWipeOpen(false)}
-      >
-        <KeyboardAvoidingView
-          style={[styles.modalOverlay, Platform.OS === "web" ? ({ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999 } as any) : null]}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          <TouchableOpacity activeOpacity={1} style={{ flex: 1 }} onPress={() => setWipeOpen(false)} />
-          <View style={styles.modalSheet}>
-            <View style={styles.modalIconWrap}>
-              <Feather name="alert-triangle" size={28} color="#B3261E" />
-            </View>
-            <Text style={styles.modalTitle}>Wipe all users?</Text>
-            <Text style={styles.modalBody}>
-              This will permanently delete every non-admin user account and all their related data
-              (transactions, withdrawals, orders, cart, notifications).{"\n\n"}
-              Admin accounts and the system audit log are kept.{"\n\n"}
-              <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first</Text> — you can
-              restore from <Text style={{ fontWeight: "800" }}>Admin → Data Backups</Text> if needed.{"\n\n"}
-              Enter your <Text style={{ fontWeight: "800" }}>6-digit Danger PIN</Text> to confirm.
-            </Text>
-            <TextInput
-              testID="wipe-pin-input"
-              value={wipePin}
-              onChangeText={(v) => { setWipeError(null); setWipePin(v.replace(/[^0-9]/g, "").slice(0, 6)); }}
-              secureTextEntry
-              keyboardType="number-pad"
-              maxLength={6}
-              placeholder="••••••"
-              placeholderTextColor={colors.textMuted}
-              style={[styles.modalInput, !!wipeError && { borderWidth: 2, borderColor: "#B3261E" }]}
-              autoFocus
-            />
-            {!!wipeError && (
-              <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
-                <Feather name="x-circle" size={16} color="#B3261E" />
-                <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{wipeError}</Text>
-              </View>
-            )}
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-              <TouchableOpacity onPress={() => { setWipeOpen(false); setWipePin(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} testID="wipe-cancel">
-                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={onWipe}
-                disabled={!isPin(wipePin) || wipeBusy}
-                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (!isPin(wipePin) || wipeBusy) && { opacity: 0.5 }]}
-                testID="wipe-confirm"
-              >
-                {wipeBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Yes, wipe</Text>}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* SHOP-ONLY RESET MODAL — scoped, less destructive. Asks only for the
-          6-digit Danger PIN (no RESET phrase) since financial data is safe. */}
-      <Modal
-        visible={shopResetOpen}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        presentationStyle="overFullScreen"
-        onRequestClose={() => setShopResetOpen(false)}
-      >
-        <KeyboardAvoidingView
-          style={[styles.modalOverlay, Platform.OS === "web" ? ({ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999 } as any) : null]}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          <TouchableOpacity activeOpacity={1} style={{ flex: 1 }} onPress={() => setShopResetOpen(false)} />
-          <View style={styles.modalSheet}>
-            <View style={[styles.modalIconWrap, { backgroundColor: "#FFEDD5" }]}>
-              <Feather name="shopping-bag" size={28} color="#E57A44" />
-            </View>
-            <Text style={styles.modalTitle}>Reset shop products?</Text>
-            <Text style={styles.modalBody}>
-              This deletes:{"\n"}
-              • All products{"\n"}
-              • Product reviews{"\n"}
-              • Cart items{"\n"}
-              • Shop layout blocks{"\n"}
-              • Shop categories{"\n\n"}
-              <Text style={{ fontWeight: "800", color: colors.success }}>Kept:</Text> users, transactions, withdrawals, orders, services, wallets, settings, branding.{"\n\n"}
-              <Text style={{ fontWeight: "800", color: colors.success }}>An automatic backup is taken first.</Text>{"\n\n"}
-              Enter the <Text style={{ fontWeight: "800" }}>6-digit Danger PIN</Text> to confirm.
-            </Text>
-            <TextInput
-              testID="shop-reset-pin"
-              value={shopResetPin}
-              onChangeText={(v) => { setShopResetError(null); setShopResetPin(v.replace(/[^0-9]/g, "").slice(0, 6)); }}
-              secureTextEntry
-              keyboardType="number-pad"
-              maxLength={6}
-              placeholder="••••••"
-              placeholderTextColor={colors.textMuted}
-              style={[styles.modalInput, !!shopResetError && { borderWidth: 2, borderColor: "#B3261E" }]}
-              autoFocus
-            />
-            {!!shopResetError && (
-              <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
-                <Feather name="x-circle" size={16} color="#B3261E" />
-                <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{shopResetError}</Text>
-              </View>
-            )}
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-              <TouchableOpacity onPress={() => { setShopResetOpen(false); setShopResetPin(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} testID="shop-reset-cancel">
-                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={onResetShopProducts}
-                disabled={!isPin(shopResetPin) || shopResetBusy}
-                style={[styles.modalBtn, { backgroundColor: "#E57A44" }, (!isPin(shopResetPin) || shopResetBusy) && { opacity: 0.5 }]}
-                testID="shop-reset-confirm"
-              >
-                {shopResetBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Reset shop</Text>}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* FULL RESET MODAL */}
-      <Modal
-        visible={resetOpen}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        presentationStyle="overFullScreen"
-        onRequestClose={() => setResetOpen(false)}
-      >
-        <KeyboardAvoidingView
-          style={[styles.modalOverlay, Platform.OS === "web" ? ({ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999 } as any) : null]}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          <TouchableOpacity activeOpacity={1} style={{ flex: 1 }} onPress={() => setResetOpen(false)} />
-          <View style={styles.modalSheet}>
-            <View style={[styles.modalIconWrap, { backgroundColor: "#FFE6E6", borderWidth: 2, borderColor: "#B3261E" }]}>
-              <Feather name="alert-octagon" size={28} color="#B3261E" />
-            </View>
-            <Text style={styles.modalTitle}>Reset app to zero?</Text>
-            <Text style={styles.modalBody}>
-              This will permanently delete <Text style={{ fontWeight: "800", color: "#B3261E" }}>EVERYTHING</Text>:
-              users, transactions, withdrawals, orders, products, services, vendors, tickets,
-              audit logs, deposits and snapshots.{"\n\n"}
-              Only <Text style={{ fontWeight: "800" }}>Settings</Text> (branding/payouts) and your
-              <Text style={{ fontWeight: "800" }}> super-admin login</Text> are preserved.{"\n\n"}
-              <Text style={{ fontWeight: "800", color: colors.success }}>An automatic full backup is taken first</Text> — the
-              backup itself survives the reset and can be restored from <Text style={{ fontWeight: "800" }}>Admin → Data
-              Backups</Text>.{"\n\n"}
-              <Text style={{ color: "#B3261E", fontWeight: "800" }}>This action cannot be undone (without restoring the backup).</Text>
-            </Text>
-            <Text style={styles.label}>Type RESET to confirm</Text>
-            <TextInput
-              testID="reset-phrase-input"
-              value={resetPhrase}
-              onChangeText={(v) => { setResetError(null); setResetPhrase(v.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 5)); }}
-              autoCapitalize="characters"
-              placeholder="RESET"
-              placeholderTextColor={colors.textMuted}
-              style={[styles.modalInput, { letterSpacing: 6, fontSize: 18 }, !!resetError && { borderWidth: 2, borderColor: "#B3261E" }]}
-            />
-            <Text style={[styles.label, { marginTop: 14 }]}>6-digit Danger PIN</Text>
-            <TextInput
-              testID="reset-pin-input"
-              value={resetPin}
-              onChangeText={(v) => { setResetError(null); setResetPin(v.replace(/[^0-9]/g, "").slice(0, 6)); }}
-              secureTextEntry
-              keyboardType="number-pad"
-              maxLength={6}
-              placeholder="••••••"
-              placeholderTextColor={colors.textMuted}
-              style={[styles.modalInput, !!resetError && { borderWidth: 2, borderColor: "#B3261E" }]}
-            />
-            {!!resetError && (
-              <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: "#FCE9E5", padding: 10, borderRadius: 10, marginTop: 10, gap: 8 }}>
-                <Feather name="x-circle" size={16} color="#B3261E" />
-                <Text style={{ color: "#B3261E", fontSize: 12, fontWeight: "700", flex: 1 }}>{resetError}</Text>
-              </View>
-            )}
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-              <TouchableOpacity onPress={() => { setResetOpen(false); setResetPin(""); setResetPhrase(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]} testID="reset-cancel">
-                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={onFullReset}
-                disabled={!isPin(resetPin) || resetPhrase !== "RESET" || resetBusy}
-                style={[styles.modalBtn, { backgroundColor: "#B3261E" }, (!isPin(resetPin) || resetPhrase !== "RESET" || resetBusy) && { opacity: 0.5 }]}
-                testID="reset-confirm"
-              >
-                {resetBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontWeight: "800" }}>Reset to zero</Text>}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
 
     </SafeAreaView>
   );

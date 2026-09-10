@@ -313,17 +313,27 @@ async def start_thread(body: Dict[str, Any], user: Dict[str, Any] = Depends(get_
     # Allow if (a) the customer has revealed THIS provider's phone, OR
     # (b) the OTHER user is an approved service provider and the caller
     # has at least one successful reveal of them in `phone_reveal_invoices`.
+    # Sep 2026 BUGFIX — this guard looked for `customer_id` + a `status`
+    # field, but a paid reveal writes `user_id` and no status at all (see
+    # /services/{id}/reveal-phone). So every customer who HAD paid the
+    # ₹1.18 fee still got "Reveal the provider's phone first" and Start
+    # Chat did nothing. An invoice row only exists after the wallet debit
+    # succeeded, so its presence IS the proof of payment.
     if other.get("is_service_provider") or other.get("service_status") == "approved":
         ok = await db.phone_reveal_invoices.find_one({
-            "customer_id":     user["id"],
-            "provider_id":     other_user_id,
-            "status":          {"$in": ["paid", "success", "approved"]},
+            "provider_id": other_user_id,
+            "$or": [{"user_id": user["id"]}, {"customer_id": user["id"]}],
         })
         if not ok:
-            raise HTTPException(
-                status_code=403,
-                detail="Reveal the provider's phone first to start a chat.",
-            )
+            # A zero-fee configuration means chat is free for everyone —
+            # admins can set the unlock fee to ₹0 in Service Analytics.
+            settings = await db.settings.find_one({"id": "global"}, {"_id": 0, "phone_reveal_fee": 1}) or {}
+            fee = float(settings.get("phone_reveal_fee") if settings.get("phone_reveal_fee") is not None else 1.0)
+            if fee > 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unlock this provider first to start a chat.",
+                )
     else:
         # For non-provider chats keep the existing safety net — must already
         # have an accepted thread or an approved request.

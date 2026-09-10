@@ -288,6 +288,89 @@ async def admin_backup_dump(
     }
 
 
+# ══════════════════ 4C — SCOPED (per-account) BACKUP ═════════════════════
+#
+# Owner ask: "before resetting one user, create one backup of ALL data for
+# that particular user, and the user can restore it back."
+#
+# There is no single field that marks ownership across 50+ collections, so
+# instead of hardcoding a map we LINK UP on every id/email field a document
+# could plausibly carry. Mongo simply ignores the branches a collection
+# doesn't have, so this stays correct as new collections appear.
+SCOPE_ID_FIELDS = [
+    "user_id", "vendor_id", "buyer_id", "customer_id", "seller_id", "owner_id",
+    "provider_id", "referrer_id", "from_user_id", "to_user_id", "actor_id",
+    "created_by", "assigned_to", "target_user_id", "sender_id", "recipient_id",
+]
+SCOPE_EMAIL_FIELDS = ["user_email", "vendor_email", "email", "customer_email", "actor_email"]
+
+
+def scope_query(user_id: str, email: Optional[str], collection: str) -> Dict[str, Any]:
+    ors: List[Dict[str, Any]] = [{f: user_id} for f in SCOPE_ID_FIELDS]
+    ors.append({"participants": user_id})          # chat threads
+    ors.append({"user_ids": user_id})
+    if email:
+        ors.extend({f: email} for f in SCOPE_EMAIL_FIELDS)
+    if collection == "users":
+        ors.append({"id": user_id})
+    return {"$or": ors}
+
+
+async def _scope_target(user_id: str) -> Dict[str, Any]:
+    u = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    return u
+
+
+@router.get("/admin/backup/account/{user_id}/manifest")
+async def account_backup_manifest(
+    user_id: str,
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Everything the app holds about ONE account (customer or vendor)."""
+    u = await _scope_target(user_id)
+    email = (u.get("email") or "").lower() or None
+    collections = []
+    for name in await _exportable_collections(False):
+        n = await db[name].count_documents(scope_query(user_id, email, name))
+        if n:
+            collections.append({"name": name, "count": n})
+    return {
+        "format": "slangcart.account-backup",
+        "version": 1,
+        "generated_at": now_utc().isoformat(),
+        "account": {
+            "id": u["id"], "email": u.get("email"), "name": u.get("name"),
+            "is_vendor": bool(u.get("is_vendor")), "role": u.get("role"),
+        },
+        "collections": collections,
+        "total_documents": sum(c["count"] for c in collections),
+    }
+
+
+@router.get("/admin/backup/account/{user_id}/dump")
+async def account_backup_dump(
+    user_id: str,
+    collection: str = Query(...),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    u = await _scope_target(user_id)
+    if collection in NEVER_EXPORT:
+        raise HTTPException(status_code=400, detail=f"{collection} is not exportable")
+    email = (u.get("email") or "").lower() or None
+    q = scope_query(user_id, email, collection)
+    total = await db[collection].count_documents(q)
+    docs = await db[collection].find(q).skip(offset).limit(limit).to_list(limit)
+    return {
+        "collection": collection, "total": total, "offset": offset, "limit": limit,
+        "has_more": (offset + len(docs)) < total,
+        "docs": [_json_safe(d) for d in docs],
+    }
+
+
 @router.post("/admin/backup/restore")
 async def admin_backup_restore(
     payload: Dict[str, Any] = Body(...),

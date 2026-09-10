@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl, TextInput,
+  ActivityIndicator, RefreshControl, TextInput, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -30,6 +30,43 @@ export default function ServiceAnalytics() {
   // June 2026 — pincode live-data filter (admin can scope KPIs to one area).
   const [pincode, setPincode] = useState("");
   const [appliedPincode, setAppliedPincode] = useState<string>("");
+  // Sep 2026 — global unlock fee (phone reveal + provider chat).
+  const [feeDraft, setFeeDraft] = useState("");
+  const [feeSaved, setFeeSaved] = useState<{ fee: number; gst_pct: number; total: number } | null>(null);
+  const [savingFee, setSavingFee] = useState(false);
+
+  const loadFee = useCallback(async () => {
+    try {
+      const { data } = await api.get<any>("/admin/settings");
+      const fee = Number(data?.phone_reveal_fee ?? 1);
+      const gst = Number(data?.phone_reveal_gst_pct ?? 18);
+      setFeeSaved({ fee, gst_pct: gst, total: Math.round((fee + (fee * gst) / 100) * 100) / 100 });
+      setFeeDraft(String(fee));
+    } catch { /* non-fatal */ }
+  }, []);
+
+  const saveFee = useCallback(async () => {
+    const value = Number(feeDraft);
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      Alert.alert("Enter 0 to 100", "The unlock fee must be between ₹0 and ₹100.");
+      return;
+    }
+    setSavingFee(true);
+    try {
+      await api.put("/admin/settings", { phone_reveal_fee: value });
+      await loadFee();
+      Alert.alert(
+        "Saved",
+        value === 0
+          ? "Phone numbers and provider chat are now free for customers."
+          : `Customers will pay ₹${value} + GST to unlock a provider's number and chat.`,
+      );
+    } catch (e) {
+      Alert.alert("Couldn't save", formatApiError(e));
+    } finally {
+      setSavingFee(false);
+    }
+  }, [feeDraft, loadFee]);
 
   const load = useCallback(async () => {
     try {
@@ -45,6 +82,7 @@ export default function ServiceAnalytics() {
   }, [appliedPincode]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadFee(); }, [loadFee]);
 
   if (loading) {
     return <SafeAreaView style={s.safe}><View style={s.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
@@ -115,6 +153,42 @@ export default function ServiceAnalytics() {
         {appliedPincode ? (
           <Text style={s.scopeLine}>Showing live data scoped to pincode {appliedPincode}</Text>
         ) : null}
+
+        {/* Sep 2026 — Unlock fee control (owner ask). One global amount for
+            revealing a provider's phone AND starting a chat with them. Set
+            ₹0 to make both free; GST is added on top at checkout time. */}
+        <Text style={s.section}>UNLOCK FEE (PHONE + CHAT)</Text>
+        <View style={s.feeCard}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.feeHint}>
+              Customers pay this once per provider to see the number and to chat.
+              {feeSaved?.gst_pct ? ` GST ${feeSaved.gst_pct}% is added on top` : ""}
+              {feeSaved ? ` → customer pays ${formatINR(feeSaved.total)}.` : "."}
+            </Text>
+            <Text style={s.feeHintMuted}>Set 0 to make chat and phone free for everyone. Max ₹100.</Text>
+          </View>
+          <View style={s.feeInputRow}>
+            <Text style={s.feeCurrency}>₹</Text>
+            <TextInput
+              style={s.feeInput}
+              value={feeDraft}
+              onChangeText={(v) => setFeeDraft(v.replace(/[^0-9.]/g, "").slice(0, 6))}
+              keyboardType="decimal-pad"
+              placeholder="0"
+              placeholderTextColor={colors.textMuted}
+              testID="analytics-fee-input"
+            />
+            <TouchableOpacity
+              onPress={saveFee}
+              disabled={savingFee || feeDraft.trim() === ""}
+              style={[s.feeSaveBtn, (savingFee || feeDraft.trim() === "") && { opacity: 0.5 }]}
+              testID="analytics-fee-save"
+            >
+              {savingFee ? <ActivityIndicator color="#fff" size="small" /> : <Feather name="check" size={15} color="#fff" />}
+              <Text style={s.clearBtnText}>{"  "}Save</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
         {/* Provider availability KPIs */}
         <Text style={s.section}>PROVIDER AVAILABILITY</Text>
@@ -229,6 +303,25 @@ const s = StyleSheet.create({
   catName: { flex: 1, fontSize: 13, color: colors.textMain, fontWeight: "700" },
   catCount: { fontSize: 13, fontWeight: "900", color: colors.primary },
   // June 2026 — pincode filter bar
+  // Sep 2026 — unlock fee editor.
+  feeCard: {
+    backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1,
+    borderColor: colors.border, padding: 14, marginBottom: 16, gap: 10,
+  },
+  feeHint: { fontSize: 12.5, color: colors.textMain, lineHeight: 18 },
+  feeHintMuted: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
+  feeInputRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  feeCurrency: { fontSize: 16, fontWeight: "900", color: colors.textMain },
+  feeInput: {
+    flex: 1, minHeight: 46, borderRadius: radii.input, borderWidth: 1,
+    borderColor: colors.border, backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: 12, fontSize: 16, fontWeight: "800", color: colors.textMain,
+  },
+  feeSaveBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    paddingHorizontal: 16, minHeight: 46, borderRadius: radii.button,
+    backgroundColor: colors.primary,
+  },
   filterBar: { flexDirection: "row", gap: 8, alignItems: "center" },
   pinInput: {
     flex: 1,

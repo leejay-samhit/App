@@ -844,3 +844,72 @@ Implemented in `app/product/[id].tsx`:
   its own price hint so options can be compared without tapping.
 - **Sticky bar** — 50pt buttons, 12px gap, top shadow/elevation, and
   `insets.bottom` safe-area padding.
+
+---
+
+## Sep 2026 — Reset centre, service chat fee, layout save & orders bug (iteration 67)
+
+### Reset centre (replaces the three blind Danger-Zone buttons)
+New screen `app/admin/reset-center.tsx` (Admin → More → Reset centre). Old
+`Wipe all users` / `Reset shop products` / `Reset app to zero` rows + modals in
+`admin/more.tsx` were deleted, along with the `/admin/system/wipe-users`
+endpoint.
+
+Owner's rule enforced everywhere: **no in-app snapshot for resets — the backup
+FILE must be downloaded first, and restores happen only by uploading that file**
+(Admin → Data backups → File backup). The wipe button stays disabled until the
+download completes, and the API rejects any reset without `backup_downloaded`.
+
+- **One account** — search + pick a user → per-account manifest → download →
+  PIN → **Clear data** (keeps the login, wallet → ₹0) or **Delete user**.
+  `POST /api/admin/system/account-reset {user_id, mode: clear|delete,
+  danger_pin, backup_downloaded}`.
+- **One shop** — pick a vendor → `POST /api/admin/system/reset-shop-products
+  {vendor_id, …}` clears THAT vendor's products, reviews/cart/questions for
+  them, their POS + online sales/invoices, and scrubs their product ids out of
+  admin layout blocks (empty blocks removed). Other vendors untouched.
+- **Whole app** — `POST /api/admin/system/wipe-all` rewritten to walk EVERY
+  collection (was a hand-maintained list of ~22, so chat, POS invoices, wallet
+  ledgers, layouts, services, wishlists all survived a "reset to zero").
+  Keeps `settings`, `branding`, `db_snapshots*`, `pincodes` and the seed
+  super-admin (wallet/counters zeroed). Still needs PIN + typed "RESET".
+- **Per-account backup** — `GET /api/admin/backup/account/{id}/manifest` and
+  `/dump` in `routes/backup.py`. Ownership is found by LINKING UP every
+  plausible id/email field (`scope_query`) instead of a hardcoded map, so new
+  collections are covered automatically. The file uses the app-backup envelope
+  so the existing File-backup restore merges it straight back.
+
+### Service unlock fee + chat (owner: one global fee, 0–100)
+- **Chat after paying was broken**: `routes/chat.py` looked for
+  `customer_id` + a `status` field on `phone_reveal_invoices`, but a paid
+  reveal writes `user_id` and no status → every paying customer still got
+  "reveal the phone first". Now matches `user_id`/`customer_id`, no status.
+- `phone_reveal_fee or 1.0` in `server.py` swallowed a deliberate ₹0, so the
+  fee could never be turned off. Read as configured; a ₹0 total skips the
+  wallet debit, the transaction rows and the admin bucket credit entirely.
+- "Start Chat" on `services/[id]` is always visible: free when the fee is ₹0
+  or already unlocked, otherwise it reuses the pay sheet and drops the
+  customer into the thread after payment (`payIntent`).
+- Admin → Service Analytics has an **UNLOCK FEE (PHONE + CHAT)** card:
+  edit ₹0–₹100, shows the GST-inclusive total, saved via `PUT /admin/settings`.
+
+### Bug fixes
+- **Free users' orders** — the whole lower dashboard (YOUR NETWORK, QUICK
+  ACTIONS, My orders row + recent-orders hero, RECENT ACTIVITY) was inside the
+  `expanded &&` earnings block, which unsubscribed users can never open
+  (their earnings card is hidden). Free-tier users saw an empty dashboard and
+  had no route to My Orders. Only the earnings charts collapse now. Also
+  removed a duplicate style key in that file.
+- **Shop layout "save failed"** — layout images are now compressed
+  server-side on create/patch (`compress_data_url`), so an oversized photo is
+  downscaled instead of failing the 4 MB field cap; managed-image-URL index
+  parsing hardened with a regex. Verified: every block type saves, and 1–5 MB
+  payloads pass through the edge proxy.
+
+### Verified
+`tests/test_iter66_reset_centre.py` (link-up manifest, clear/delete, scoped
+vendor reset, all three wipe-all guards) PASS; chat/fee flow script PASS
+(403 before pay → 200 after pay → free chat at ₹0);
+`test_iter66_layout_payload.py` PASS; browser: free-tier dashboard now shows
+My orders + recent orders, Reset centre 3 tabs with per-account (3 records)
+and whole-app (920 records) manifests and the download gate.

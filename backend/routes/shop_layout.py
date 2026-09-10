@@ -24,6 +24,7 @@ ENDPOINTS:
 """
 from __future__ import annotations
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from core.db import db
+from core.image_compress import compress_data_url
 from core.security import require_admin
 
 logger = logging.getLogger(__name__)
@@ -395,17 +397,22 @@ def _build_updates(payload: Dict[str, Any], existing: Optional[Dict[str, Any]] =
     existing_items = existing.get("items") or []
     if _is_managed_image_url(payload.get("image_data_url")):
         payload = {k: v for k, v in payload.items() if k != "image_data_url"}
+    elif str(payload.get("image_data_url") or "").startswith("data:"):
+        payload = {**payload, "image_data_url": compress_data_url(payload["image_data_url"]) or payload["image_data_url"]}
     if isinstance(payload.get("items"), list):
         merged_items = []
         for it in payload["items"]:
             src = dict(it) if isinstance(it, dict) else it
             if isinstance(src, dict) and _is_managed_image_url(src.get("image_data_url")):
-                try:
-                    old_idx = int(str(src["image_data_url"]).rstrip("/image").rstrip("/").split("/")[-1])
-                except (ValueError, IndexError):
-                    old_idx = -1
+                m = re.search(r"/items/(\d+)/image$", str(src["image_data_url"]))
+                old_idx = int(m.group(1)) if m else -1
                 old = existing_items[old_idx] if 0 <= old_idx < len(existing_items) else {}
                 src["image_data_url"] = (old or {}).get("image_data_url") or ""
+            if isinstance(src, dict) and str(src.get("image_data_url") or "").startswith("data:"):
+                # Sep 2026 — compress on the way in. A raw camera-roll photo
+                # can exceed the 4 MB field cap and the save came back as a
+                # bare validation error ("save failed") with no clue why.
+                src["image_data_url"] = compress_data_url(src["image_data_url"]) or src["image_data_url"]
             merged_items.append(src)
         payload = {**payload, "items": merged_items}
     updates: Dict[str, Any] = {}

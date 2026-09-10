@@ -3735,6 +3735,27 @@ async def admin_set_danger_pin(
 
 class ResetShopRequest(BaseModel):
     danger_pin: str = Field(..., min_length=6, max_length=6)
+    # Sep 2026 — scoped reset: WHICH vendor's shop are we clearing?
+    vendor_id: str
+    backup_downloaded: bool = False
+
+
+class AccountResetRequest(BaseModel):
+    danger_pin: str = Field(..., min_length=6, max_length=6)
+    user_id: str
+    mode: str = "clear"          # "clear" (keep the login) | "delete"
+    backup_downloaded: bool = False
+
+
+# Sep 2026 — Danger-zone policy change (owner's decision):
+# these resets NO LONGER write a snapshot inside the app. The admin must
+# download the .json backup first (the UI enforces it and sets
+# `backup_downloaded`), and restores happen by uploading that file in
+# Admin → Data backups → File backup. One source of truth, no silent
+# half-backups.
+_BACKUP_REQUIRED_MSG = (
+    "Download the backup file first — restores are only possible from that file."
+)
 
 
 @api_router.post("/admin/system/reset-shop-products")
@@ -3742,139 +3763,164 @@ async def admin_reset_shop_products(
     payload: ResetShopRequest,
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
-    """Scoped reset — wipes ONLY shop products and directly-related data:
-      • products
-      • product_reviews
-      • cart_items
-      • shop_layout_blocks  (the per-block layout config)
-      • shop_categories      (dynamic category list)
+    """Clear ONE vendor's shop (owner's choice: products + layout + POS).
 
-    EVERYTHING else is preserved: users, transactions, withdrawals,
-    orders (historical sales record), services, wallets, settings,
-    branding, snapshots, tickets, audit log, system_wallet_deposits.
+    Deletes, for the selected vendor only:
+      • their products (and every review / cart row pointing at them)
+      • their POS + online sales records and invoices
+      • their product ids inside admin layout blocks (blocks left empty are
+        removed, so the home page never shows a dead slot)
 
-    Per user request — a less destructive alternative to the full
-    "wipe-users" / "wipe-all" actions, so admin can rebuild the catalog
-    without losing customer or financial data.
-
-    Requires the 6-digit Danger PIN. super_admin only. Auto-snapshot
-    taken just before deletion so a restore is always possible.
+    Everything belonging to OTHER vendors, plus users, wallets, orders of
+    other shops and global settings, is untouched. Requires the Danger PIN
+    and a downloaded backup.
     """
     if not await get_danger_pin_hash():
         raise HTTPException(status_code=400, detail="Danger PIN not set. Please set it in Admin → Admin access.")
     if not await verify_danger_pin(payload.danger_pin):
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
+    if not payload.backup_downloaded:
+        raise HTTPException(status_code=400, detail=_BACKUP_REQUIRED_MSG)
+
+    vendor = await db.users.find_one({"id": payload.vendor_id}, {"_id": 0})
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    mine = await db.products.find({"vendor_id": vendor["id"]}, {"_id": 0, "id": 1}).to_list(10000)
+    product_ids = [m["id"] for m in mine if m.get("id")]
+
+    summary: Dict[str, int] = {}
+    summary["products_deleted"] = (await db.products.delete_many({"vendor_id": vendor["id"]})).deleted_count
+    if product_ids:
+        summary["product_reviews_deleted"] = (await db.product_reviews.delete_many({"product_id": {"$in": product_ids}})).deleted_count
+        summary["cart_items_deleted"] = (await db.cart_items.delete_many({"product_id": {"$in": product_ids}})).deleted_count
+        summary["product_questions_deleted"] = (await db.product_questions.delete_many({"product_id": {"$in": product_ids}})).deleted_count
+    for coll in ("vendor_sales", "offline_sales", "vendor_invoices", "pos_invoices"):
+        try:
+            summary[f"{coll}_deleted"] = (await db[coll].delete_many({"vendor_id": vendor["id"]})).deleted_count
+        except Exception:
+            summary[f"{coll}_deleted"] = 0
+
+    # Scrub this vendor's products out of hand-curated layout blocks.
+    blocks_cleaned = 0
+    blocks_removed = 0
+    if product_ids:
+        async for b in db.shop_layout_blocks.find({"product_ids": {"$in": product_ids}}, {"_id": 0, "id": 1, "product_ids": 1}):
+            keep = [pid for pid in (b.get("product_ids") or []) if pid not in product_ids]
+            if keep:
+                await db.shop_layout_blocks.update_one({"id": b["id"]}, {"$set": {"product_ids": keep}})
+                blocks_cleaned += 1
+            else:
+                await db.shop_layout_blocks.delete_one({"id": b["id"]})
+                blocks_removed += 1
+    summary["layout_blocks_cleaned"] = blocks_cleaned
+    summary["layout_blocks_removed"] = blocks_removed
 
     try:
-        snap_info = await _take_snapshot(
-            kind="auto-pre-reset-shop",
-            note="Auto-backup before Reset Shop Products",
-            created_by=admin["id"],
-        )
-    except Exception as e:
-        logging.warning(f"pre-reset-shop snapshot failed, proceeding: {e}")
-        snap_info = {"id": None, "created_at": now_utc().isoformat(), "counts": {}}
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
 
-    products_deleted = await db.products.delete_many({})
-    reviews_deleted = await db.product_reviews.delete_many({})
-    cart_deleted = await db.cart_items.delete_many({})
-    layout_deleted = await db.shop_layout_blocks.delete_many({})
-    categories_deleted = await db.shop_categories.delete_many({})
-
-    summary = {
-        "products_deleted":          products_deleted.deleted_count,
-        "product_reviews_deleted":   reviews_deleted.deleted_count,
-        "cart_items_deleted":        cart_deleted.deleted_count,
-        "shop_layout_blocks_deleted": layout_deleted.deleted_count,
-        "shop_categories_deleted":   categories_deleted.deleted_count,
-    }
-    await _audit_log(admin, "system.reset_shop_products", "system", "shop", summary)
+    await _audit_log(admin, "system.reset_shop_products", "vendor", vendor["id"], {**summary, "vendor_email": vendor.get("email")})
     return {
         "ok": True,
+        "vendor": {"id": vendor["id"], "email": vendor.get("email"), "shop_name": vendor.get("shop_name") or vendor.get("name")},
         "summary": summary,
-        "snapshot_id": snap_info.get("id") if snap_info else None,
     }
 
 
-@api_router.post("/admin/system/wipe-users")
-async def admin_wipe_users(
-    payload: WipeUsersRequest,
+@api_router.post("/admin/system/account-reset")
+async def admin_account_reset(
+    payload: AccountResetRequest,
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
-    """DESTRUCTIVE: Deletes all (non-admin) users + their related data.
-    Caller must provide the 6-digit Danger PIN. super_admin only."""
+    """Reset ONE account — replaces the old blanket "wipe all users".
+
+    `mode="clear"` keeps the login and wipes everything the account owns
+    (orders, transactions, withdrawals, cart, chat, notifications, tickets,
+    products if they're a vendor, referral counters, wallet → ₹0), so the
+    customer stays in the admin's list as a fresh account.
+    `mode="delete"` does the same and then removes the account itself.
+
+    Uses the SAME link-up rules as the per-account backup file, so what was
+    downloaded is exactly what gets cleared.
+    """
     if not await get_danger_pin_hash():
         raise HTTPException(status_code=400, detail="Danger PIN not set. Please set it in Admin → Admin access.")
     if not await verify_danger_pin(payload.danger_pin):
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
+    if not payload.backup_downloaded:
+        raise HTTPException(status_code=400, detail=_BACKUP_REQUIRED_MSG)
+    mode = (payload.mode or "clear").lower()
+    if mode not in ("clear", "delete"):
+        raise HTTPException(status_code=400, detail="mode must be 'clear' or 'delete'")
+    if payload.user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="You can't reset your own admin account")
 
-    # ---------- AUTO BACKUP before destructive action ----------
-    try:
-        snap_info = await _take_snapshot(
-            kind="auto-pre-wipe-users",
-            note="Auto-backup before Wipe-All-Users",
-            created_by=admin["id"],
-        )
-    except Exception as e:
-        logging.warning(f"pre-wipe-users snapshot failed, proceeding: {e}")
-        snap_info = {"id": None, "created_at": now_utc().isoformat(), "counts": {}}
+    target = await db.users.find_one({"id": payload.user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if (target.get("role") == "admin") and mode == "delete":
+        raise HTTPException(status_code=400, detail="Admin accounts can't be deleted here — use Admin access.")
 
-    user_query: Dict[str, Any] = {"role": {"$ne": "admin"}} if payload.keep_admins else {"id": {"$ne": admin["id"]}}
-    if not payload.keep_admins:
-        # never wipe self
-        user_query = {"id": {"$ne": admin["id"]}}
+    from routes.backup import scope_query
+    email = (target.get("email") or "").lower() or None
 
-    # Snapshot ids before delete (so we can purge their dependent data)
-    targets = await db.users.find(user_query, {"_id": 0, "id": 1, "email": 1, "role": 1}).to_list(100000)
-    target_ids = [t["id"] for t in targets]
+    # Vendor products need their dependants cleaned too.
+    mine = await db.products.find({"vendor_id": target["id"]}, {"_id": 0, "id": 1}).to_list(10000)
+    product_ids = [m["id"] for m in mine if m.get("id")]
+    if product_ids:
+        await db.product_reviews.delete_many({"product_id": {"$in": product_ids}})
+        await db.cart_items.delete_many({"product_id": {"$in": product_ids}})
 
-    users_deleted = await db.users.delete_many(user_query)
+    summary: Dict[str, int] = {}
+    from routes.backup import NEVER_EXPORT, REFERENCE_COLLECTIONS
+    protected = set(NEVER_EXPORT) | set(REFERENCE_COLLECTIONS) | {
+        "settings", "branding", "audit_logs", "db_snapshots", "db_snapshot_chunks",
+        "shop_categories", "shop_layout_blocks", "service_categories",
+    }
+    for coll in await db.list_collection_names():
+        if coll in protected:
+            continue
+        q = scope_query(target["id"], email, coll)
+        if coll == "users":
+            # handled below so "clear" can keep the login
+            continue
+        try:
+            res = await db[coll].delete_many(q)
+            if res.deleted_count:
+                summary[f"{coll}_deleted"] = res.deleted_count
+        except Exception as e:
+            logging.warning(f"account-reset: {coll} skipped: {e}")
 
-    # Wipe related collections fully — cleanest slate
-    cart_deleted = await db.cart_items.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
-    notif_deleted = await db.notifications.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
-    tx_deleted = await db.transactions.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
-    wd_deleted = await db.withdrawals.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
-    orders_deleted = await db.orders.delete_many({}) if target_ids else type("X", (), {"deleted_count": 0})()
-
-    # Reset wallet/referral counters on remaining (admin) users so the system starts clean
-    await db.users.update_many(
-        {},
-        {"$set": {
+    if mode == "delete":
+        await db.users.delete_one({"id": target["id"]})
+        summary["account_deleted"] = 1
+    else:
+        await db.users.update_one({"id": target["id"]}, {"$set": {
             "wallet_balance": 0.0,
             "total_earned": 0.0,
             "direct_referrals_count": 0,
             "payouts_received": 0,
-        }},
-    )
+            "wallet_frozen": False,
+        }})
+        summary["account_cleared"] = 1
 
-    await _audit_log(
-        admin,
-        "system.wipe_users",
-        "system",
-        "all",
-        {
-            "users_deleted": users_deleted.deleted_count,
-            "transactions_deleted": tx_deleted.deleted_count,
-            "withdrawals_deleted": wd_deleted.deleted_count,
-            "orders_deleted": orders_deleted.deleted_count,
-            "cart_items_deleted": cart_deleted.deleted_count,
-            "notifications_deleted": notif_deleted.deleted_count,
-            "keep_admins": payload.keep_admins,
-            "snapshot_id": snap_info["id"],
-        },
-    )
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
 
+    await _audit_log(admin, f"system.account_{mode}", "user", target["id"], {
+        **summary, "email": target.get("email"), "name": target.get("name"),
+    })
     return {
         "ok": True,
-        "users_deleted": users_deleted.deleted_count,
-        "transactions_deleted": tx_deleted.deleted_count,
-        "withdrawals_deleted": wd_deleted.deleted_count,
-        "orders_deleted": orders_deleted.deleted_count,
-        "cart_items_deleted": cart_deleted.deleted_count,
-        "notifications_deleted": notif_deleted.deleted_count,
-        "snapshot_id": snap_info["id"],
-        "snapshot_created_at": snap_info["created_at"],
+        "mode": mode,
+        "account": {"id": target["id"], "email": target.get("email"), "name": target.get("name")},
+        "summary": summary,
     }
 
 
@@ -3883,98 +3929,82 @@ async def admin_wipe_all(
     payload: WipeAllRequest,
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
-    """ULTRA DESTRUCTIVE: Full factory reset. Deletes every business record
-    (users, txns, orders, products, vendors, services, tickets, audit log,
-    backups, deposits) and resets the seeded super-admin's wallet to ₹0.
-    Preserves: settings (branding + payouts) and the super-admin login itself.
-    Caller must provide the 6-digit Danger PIN AND type the phrase 'RESET'."""
+    """RESET APP TO ZERO — a true full-scan wipe.
+
+    Sep 2026 rewrite. The old version deleted a hand-maintained list of ~22
+    collections, so every feature added since (chat, POS invoices, wallet
+    ledgers, shop layout, services, wishlists, device logins…) survived a
+    "reset to zero" and the app was never actually zero. It now walks EVERY
+    collection in the database (the same list the backup covers) and clears
+    it, keeping only:
+      • `settings` + `branding` (payout structure, business identity)
+      • the seed super-admin login (wallet and counters zeroed)
+
+    Requires the Danger PIN, the typed phrase "RESET", and a downloaded
+    backup file — restores are done by uploading that file.
+    """
     if not await get_danger_pin_hash():
         raise HTTPException(status_code=400, detail="Danger PIN not set. Please set it in Admin → Admin access.")
     if not await verify_danger_pin(payload.danger_pin):
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
     if (payload.confirm_phrase or "").strip().upper() != "RESET":
         raise HTTPException(status_code=400, detail='You must type "RESET" to confirm a full factory wipe')
+    if not payload.backup_downloaded:
+        raise HTTPException(status_code=400, detail=_BACKUP_REQUIRED_MSG)
 
-    # ---------- AUTO BACKUP before destructive action ----------
-    # Take the snapshot first; it lands in db_snapshots and we deliberately do NOT
-    # include db_snapshots in the wipe list below, so the backup survives the reset
-    # and can be restored from Admin → Data Backups.
-    # Dec 2026 — Snapshot failure should NEVER block the wipe (the user's
-    # deliberate intent is clear).  We still try, log, and continue.
-    try:
-        snap_info = await _take_snapshot(
-            kind="auto-pre-wipe-all",
-            note="Auto-backup before Reset App to Zero",
-            created_by=admin["id"],
-        )
-    except Exception as e:
-        logging.warning(f"pre-wipe snapshot failed, proceeding: {e}")
-        snap_info = {"id": None, "created_at": now_utc().isoformat(), "counts": {}}
-
-    # Identify the seed super-admin so we can keep their account but reset stats.
     seed_admin_email = ADMIN_EMAIL.lower()
     seed = await db.users.find_one({"email": seed_admin_email})
-    seed_id = seed["id"] if seed else None
+    seed_id = seed["id"] if seed else admin["id"]
+
+    from routes.backup import REFERENCE_COLLECTIONS
+    keep_collections = {
+        "settings", "branding",
+        "db_snapshots", "db_snapshot_chunks",   # historical backups must survive a wipe
+        *REFERENCE_COLLECTIONS,                 # pincode catalogue is reference data
+    }
 
     summary: Dict[str, int] = {}
+    for coll in await db.list_collection_names():
+        if coll in keep_collections or coll == "users":
+            continue
+        try:
+            res = await db[coll].delete_many({})
+            if res.deleted_count:
+                summary[f"{coll}_deleted"] = res.deleted_count
+        except Exception as e:
+            logging.warning(f"wipe-all: {coll} skipped: {e}")
 
-    # --- Wipe data collections (db_snapshots is intentionally NOT in this list) ---
-    # Bug-fix · 2026-06: Earlier reset left behind UPI manual_payments,
-    # bank_ledger, and expenses — admin reported "Reset app to zero" was not
-    # actually fully zeroing the books. Now we also wipe those + their _archived
-    # mirrors so a fresh start is truly fresh.
-    wipe_collections = [
-        "transactions", "withdrawals", "orders", "cart_items", "notifications",
-        "products", "vendor_sales", "vendor_applications",
-        "service_bookings", "service_applications",
-        "tickets", "ticket_messages",
-        # Treasury / finance collections
-        "system_wallet_deposits", "system_wallet_deposits_archived",
-        "manual_payments", "manual_payments_archived",
-        "bank_ledger", "bank_ledger_archived",
-        "expenses", "expenses_archived",
-        # Registration audit collections
-        "approved_registrations", "rejected_registrations",
-    ]
-    for coll in wipe_collections:
-        res = await db[coll].delete_many({})
-        summary[f"{coll}_deleted"] = res.deleted_count
-
-    # --- Delete users (preserve only the seed super-admin) ---
-    user_q: Dict[str, Any] = {"id": {"$ne": seed_id}} if seed_id else {}
-    users_res = await db.users.delete_many(user_q)
+    users_res = await db.users.delete_many({"id": {"$ne": seed_id}})
     summary["users_deleted"] = users_res.deleted_count
 
-    # --- Reset the seed admin's wallet & counters to zero ---
-    if seed_id:
-        await db.users.update_one(
-            {"id": seed_id},
-            {"$set": {
-                "wallet_balance": 0.0,
-                "total_earned": 0.0,
-                "direct_referrals_count": 0,
-                "payouts_received": 0,
-                "wallet_buckets": {b: 0.0 for b in SYSTEM_WALLET_BUCKETS},
-                "wallet_frozen": False,
-                "is_blocked": False,
-                "block_reason": None,
-            }},
-        )
+    await db.users.update_one({"id": seed_id}, {"$set": {
+        "wallet_balance": 0.0,
+        "total_earned": 0.0,
+        "direct_referrals_count": 0,
+        "payouts_received": 0,
+        "wallet_buckets": {b: 0.0 for b in SYSTEM_WALLET_BUCKETS},
+        "wallet_frozen": False,
+        "is_blocked": False,
+        "block_reason": None,
+    }})
 
-    # --- Audit log: wipe LAST so this entry survives ---
-    await db.audit_logs.delete_many({})
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
+
+    # Audit last so this entry survives the wipe.
     await _audit_log(
         admin, "system.wipe_all", "system", "all",
-        {"summary": summary, "preserved": ["settings", "seed_admin", "db_snapshots"], "snapshot_id": snap_info["id"]},
+        {"collections_cleared": len(summary), "summary": summary,
+         "preserved": ["settings", "branding", "seed_admin", "db_snapshots", "pincodes"]},
     )
-    summary["audit_logs_deleted"] = 0  # we just wiped them and re-wrote 1
-
     return {
         "ok": True,
         "summary": summary,
-        "snapshot_id": snap_info["id"],
-        "snapshot_created_at": snap_info["created_at"],
-        "message": "App reset to zero. Settings, super-admin account, and pre-reset backup preserved.",
+        "collections_cleared": len(summary),
+        "message": "App reset to zero. Only settings, branding and the super-admin login remain.",
     }
 
 
@@ -10239,8 +10269,11 @@ async def my_service_bookings(role: Optional[str] = "all", user: Dict[str, Any] 
 async def get_phone_reveal_config(user: Dict[str, Any] = Depends(get_current_user)):
     """Return fee + GST + user balance + already-revealed providers."""
     settings = await get_settings()
-    fee = float(settings.get("phone_reveal_fee") or 1.0)
-    gst_pct = float(settings.get("phone_reveal_gst_pct") or 18.0)
+    # Sep 2026 — `or 1.0` swallowed a deliberate ₹0 fee, so admins could not
+    # make unlock/chat free. Read the value as configured (None = default ₹1).
+    _fee_cfg = settings.get("phone_reveal_fee")
+    fee = float(_fee_cfg) if _fee_cfg is not None else 1.0
+    gst_pct = float(settings.get("phone_reveal_gst_pct") if settings.get("phone_reveal_gst_pct") is not None else 18.0)
     gst_amt = round(fee * gst_pct / 100.0, 2)
     total = round(fee + gst_amt, 2)
     # Providers already revealed by this user (so we can show without re-charging)
@@ -10290,8 +10323,11 @@ async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, use
         }
 
     settings = await get_settings()
-    fee = float(settings.get("phone_reveal_fee") or 1.0)
-    gst_pct = float(settings.get("phone_reveal_gst_pct") or 18.0)
+    # Sep 2026 — `or 1.0` swallowed a deliberate ₹0 fee, so admins could not
+    # make unlock/chat free. Read the value as configured (None = default ₹1).
+    _fee_cfg = settings.get("phone_reveal_fee")
+    fee = float(_fee_cfg) if _fee_cfg is not None else 1.0
+    gst_pct = float(settings.get("phone_reveal_gst_pct") if settings.get("phone_reveal_gst_pct") is not None else 18.0)
     gst_amt = round(fee * gst_pct / 100.0, 2)
     total = round(fee + gst_amt, 2)
     bal = float(user.get("wallet_balance") or 0)
@@ -10301,41 +10337,46 @@ async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, use
             detail=f"Insufficient wallet balance — need ₹{total:.2f} (₹{fee:.2f} + ₹{gst_amt:.2f} GST). Please top up.",
         )
 
-    # Atomic wallet debit guarded by balance condition
-    debit_res = await db.users.update_one(
-        {"id": user["id"], "wallet_balance": {"$gte": total}},
-        {"$inc": {"wallet_balance": -total}},
-    )
-    if debit_res.modified_count == 0:
-        raise HTTPException(status_code=400, detail="Insufficient wallet balance — please top up.")
+    # Atomic wallet debit guarded by balance condition.
+    # A ₹0 configured fee means unlocking is free — skip the debit entirely
+    # (an $inc of 0 would still fail the $gte guard on an empty wallet).
+    if total > 0:
+        debit_res = await db.users.update_one(
+            {"id": user["id"], "wallet_balance": {"$gte": total}},
+            {"$inc": {"wallet_balance": -total}},
+        )
+        if debit_res.modified_count == 0:
+            raise HTTPException(status_code=400, detail="Insufficient wallet balance — please top up.")
 
     inv_id = str(uuid.uuid4())
     ts = now_utc().isoformat()
     invoice_no = f"PR-{ts[:10].replace('-', '')}-{inv_id[:6].upper()}"
 
     # Credit admin buckets: fee → service_margin, gst → gst_collected
-    await credit_admin_bucket("service_margin", fee, also_total_earned=True)
+    if fee > 0:
+        await credit_admin_bucket("service_margin", fee, also_total_earned=True)
     if gst_amt > 0:
         await credit_admin_bucket("gst_collected", gst_amt, also_total_earned=False)
 
-    # Customer-side debit transaction
+    # Customer-side debit transaction (nothing to record when unlocking is free)
     try:
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": user["id"],
-            "type": "phone_reveal_fee",
-            "amount": -total,
-            "status": "success",
-            "description": f"Phone reveal fee for {provider.get('name')} (₹{fee:.2f} + ₹{gst_amt:.2f} GST)",
-            "provider_id": provider_id,
-            "invoice_id": inv_id,
-            "invoice_no": invoice_no,
-            "created_at": ts,
-        })
+        if total > 0:
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": user["id"],
+                "type": "phone_reveal_fee",
+                "amount": -total,
+                "status": "success",
+                "description": f"Phone reveal fee for {provider.get('name')} (₹{fee:.2f} + ₹{gst_amt:.2f} GST)",
+                "provider_id": provider_id,
+                "invoice_id": inv_id,
+                "invoice_no": invoice_no,
+                "created_at": ts,
+            })
     except DuplicateKeyError:
         pass
     # Admin-side credit transaction (records the income side for ledger sums)
-    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()}) if fee > 0 else None
     if admin_doc:
         try:
             await db.transactions.insert_one({

@@ -542,6 +542,13 @@ export default function DashboardScreen() {
           </Animated.View>
         )}
 
+        {/* Sept 2026 BUGFIX — the `expanded` block used to run all the way
+            down past QUICK ACTIONS, so a free (unsubscribed) user — who
+            never sees the Total Earnings card and therefore can't expand
+            anything — got an EMPTY dashboard with no way to reach "My
+            orders". Only the earnings charts are collapsible now. */}
+        </>)}
+
         <Animated.View entering={FadeInDown.duration(450).delay(240)}>
           <Text style={styles.sectionLabel}>YOUR NETWORK</Text>
           <View style={styles.bento}>
@@ -661,7 +668,6 @@ export default function DashboardScreen() {
             ))}
           </Animated.View>
         )}
-        </>)}
       </ScrollView>
     </SafeAreaView>
   );
@@ -713,8 +719,6 @@ const styles = StyleSheet.create({
   tierDivider: { width: 1, height: 12, backgroundColor: colors.primary, opacity: 0.2 },
   tierTeam: { fontSize: 11, color: colors.primary, fontWeight: "600" },
   approvalBanner: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, borderWidth: 1, marginBottom: 16 },
-  approvalBannerTitle: { fontSize: 14, fontWeight: "800" } as any,
-  approvalBannerSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   // WhatsApp welcome card — Bright green to look like WhatsApp's own brand.
   waCard: {
     flexDirection: "row",
