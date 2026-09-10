@@ -408,12 +408,26 @@ export default function VendorDashboard() {
             <TouchableOpacity onPress={onAddProduct} style={styles.primaryBtn} testID="vendor-add-empty">
               <Feather name="plus" size={16} color={colors.primaryFg} /><Text style={styles.primaryBtnText}>  Add product</Text>
             </TouchableOpacity>
+            {/* Jun 2026 — a brand-new shop can start by restoring a catalogue
+                backup taken from another login instead of typing it all in. */}
+            <TouchableOpacity onPress={() => router.push("/vendor/catalogue-backup" as any)} style={styles.backupBtn} testID="vendor-backup-empty">
+              <Feather name="upload-cloud" size={15} color={colors.primary} />
+              <Text style={styles.backupBtnText}>Restore from a backup file</Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <ScrollView
             contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
           >
+            <TouchableOpacity onPress={() => router.push("/vendor/catalogue-backup" as any)} style={styles.backupRow} testID="vendor-backup-open">
+              <Feather name="hard-drive" size={16} color={colors.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.backupRowTitle}>Backup / restore catalogue</Text>
+                <Text style={styles.backupRowHint}>Download all {products.length} products, or restore them into another shop login</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
             <View style={styles.vendorGrid}>
               {products.map((item) => {
                 const oos = (item.stock || 0) === 0;
@@ -877,6 +891,13 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 17, fontWeight: "800", marginTop: 2 },
   primaryBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 14, marginTop: 20 },
   primaryBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
+  // Jun 2026 — catalogue backup / restore entry points (Phase 4A).
+  backupBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 12, paddingVertical: 12, paddingHorizontal: 16, borderRadius: radii.button, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  backupBtnText: { color: colors.primary, fontWeight: "800", fontSize: 13 },
+  backupRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, marginBottom: 12, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  backupRowTitle: { fontSize: 13.5, fontWeight: "800", color: colors.textMain },
+  backupRowHint: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+
   prodCard: { flexDirection: "row", alignItems: "center", padding: 10, backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, gap: 10 },
   prodImg: { width: 48, height: 48, borderRadius: 8 },
   prodName: { fontSize: 13, fontWeight: "800", color: colors.textMain },

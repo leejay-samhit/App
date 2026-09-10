@@ -72,7 +72,12 @@ async def vendor_submit_edit_request(
     if existing:
         raise HTTPException(status_code=400, detail="You already have a pending edit request.  Please wait for the admin to review it before submitting another.")
 
-    body = payload.model_dump(exclude_none=True)
+    # Jun 2026 (Phase 5A) — `exclude_none` used to drop explicit nulls, so a
+    # vendor could never TURN OFF their km-radius or clear their extra
+    # pincode list: the field was silently removed from the request and the
+    # old value stayed live. `exclude_unset` keeps what the client actually
+    # sent (including nulls) and still ignores fields it left out.
+    body = payload.model_dump(exclude_unset=True)
     note = str(body.pop("note", "") or "")
     changes: Dict[str, Any] = {k: v for k, v in body.items() if k in ALLOWED_FIELDS}
     if not changes:
@@ -146,7 +151,23 @@ async def admin_approve_edit_request(req_id: str, admin: Dict[str, Any] = Depend
     changes = doc.get("changes") or {}
     # Apply approved changes to the vendor's user document.
     if changes:
-        await db.users.update_one({"id": doc["user_id"]}, {"$set": changes})
+        user_set: Dict[str, Any] = dict(changes)
+        # Jun 2026 (Phase 5A) — keep the fields the DELIVERY ENGINE reads in
+        # sync. The engine matches on `store_pincode` and on flat `lat`/`lng`;
+        # an approved edit used to write only `pincode` and the GeoJSON
+        # `location`, so a vendor who moved their shop kept serving their OLD
+        # area and the new one showed nothing.
+        if changes.get("pincode"):
+            user_set["store_pincode"] = changes["pincode"]
+        loc = changes.get("location") or {}
+        coords = (loc.get("coordinates") if isinstance(loc, dict) else None) or []
+        if isinstance(coords, list) and len(coords) == 2:
+            try:
+                user_set["lng"] = float(coords[0])
+                user_set["lat"] = float(coords[1])
+            except (TypeError, ValueError):
+                pass
+        await db.users.update_one({"id": doc["user_id"]}, {"$set": user_set})
         # Denormalise pincode/location onto any of the vendor's products so
         # the customer-facing filter works instantly.
         if any(k in changes for k in ("pincode", "location", "delivery_radius_km", "delivery_radius_mode", "delivery_pincodes")):

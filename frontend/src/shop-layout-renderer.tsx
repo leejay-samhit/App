@@ -18,6 +18,8 @@ import { api, resolveImageUrl } from "./api";
 import { cachedGet } from "./cachedGet";
 import { colors, formatINR } from "./theme";
 import { ContentContainer, SHOP_CARD_RADIUS, SHOP_BANNER_RADIUS, SHOP_SECTION_GAP, SHOP_TYPO } from "./content-container";
+import { useContentWidth } from "./content-width";
+import { setProductPreview } from "./product-preview";
 import { useAuth } from "./auth";
 
 /* ─────────────────────────── Types ─────────────────────────── */
@@ -142,6 +144,26 @@ function pickImage(p?: Product): string | undefined {
   return resolveImageUrl(raw) || undefined;
 }
 
+/**
+ * Jun 2026 — Instant product open.
+ * Drop what the card already knows into the preview cache, so
+ * /product/[id] paints the hero, name and price on its FIRST frame instead
+ * of showing a white screen until the API responds.
+ */
+function openProduct(p: Product, onProductPress?: (id: string) => void) {
+  setProductPreview({
+    id: p.id,
+    name: p.name,
+    price: p.price,
+    image: pickImage(p),
+    stock: p.stock,
+    is_in_stock: p.is_in_stock,
+    has_variants: (p as any).has_variants,
+  });
+  onProductPress?.(p.id);
+}
+
+
 function alignToTextAlign(a?: string): "left" | "center" | "right" {
   return a === "center" || a === "right" || a === "left" ? a : "left";
 }
@@ -168,7 +190,7 @@ function BannerSliderBlock({
   // wide tablet, squashing the 1080×600 artwork into a 4.5:1 letterbox
   // strip.  We now track the live window width and grow the banner height
   // proportionally on wide screens.
-  const { width: winW } = useWindowDimensions();
+  const winW = useContentWidth();
   const heightRaw = resolveBlockHeight(block);
   const slideWidth = winW - 32;
   const height = winW >= 700
@@ -204,7 +226,7 @@ function BannerSliderBlock({
             >
               {item.image_data_url ? (
                 <Image
-                  source={{ uri: item.image_data_url }}
+                  source={{ uri: resolveImageUrl(item.image_data_url) }}
                   style={StyleSheet.absoluteFill as any}
                   resizeMode={
                     (item.image_fit || block.image_fit) === "contain" ? "contain" : "cover"
@@ -368,7 +390,7 @@ function CategoryCirclesBlock({
           >
             <View style={[styles.circleAvatar, { backgroundColor: it.color || colors.brand100 }]}>
               {it.image_data_url ? (
-                <Image source={{ uri: it.image_data_url }} style={styles.circleImg} resizeMode="cover" />
+                <Image source={{ uri: resolveImageUrl(it.image_data_url) }} style={styles.circleImg} resizeMode="cover" />
               ) : (
                 <Feather name="grid" size={22} color={colors.primary} />
               )}
@@ -417,7 +439,7 @@ function BrandSliderBlock({
               <View style={styles.brandImgWrap}>
                 {it.image_data_url ? (
                   <Image
-                    source={{ uri: it.image_data_url }}
+                    source={{ uri: resolveImageUrl(it.image_data_url) }}
                     style={styles.brandImg}
                     resizeMode={it.image_fit === "cover" ? "cover" : "contain"}
                   />
@@ -460,7 +482,7 @@ function OfferCardsBlock({
             }}
           >
             {it.image_data_url ? (
-              <Image source={{ uri: it.image_data_url }} style={styles.offerImg} resizeMode="cover" />
+              <Image source={{ uri: resolveImageUrl(it.image_data_url) }} style={styles.offerImg} resizeMode="cover" />
             ) : null}
             <View style={styles.offerContent}>
               {it.subtitle ? <Text style={styles.offerSub} numberOfLines={1}>{it.subtitle}</Text> : null}
@@ -542,7 +564,7 @@ function FlashSaleBlock({
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingVertical: 4 }}>
         {products.slice(0, (block.data_source || "manual") === "manual" ? products.length : (block.product_count || 10)).map((p) => (
-          <TouchableOpacity key={p.id} style={styles.flashCard} activeOpacity={0.85} onPress={() => onProductPress?.(p.id)}>
+          <TouchableOpacity key={p.id} style={styles.flashCard} activeOpacity={0.85} onPress={() => openProduct(p, onProductPress)}>
             <View style={styles.flashCardImageWrap}>
               {pickImage(p) ? (
                 <Image source={{ uri: pickImage(p) }} style={styles.flashCardImg} resizeMode="cover" />
@@ -567,7 +589,7 @@ function ProductGridBlock({
   block, products, onProductPress, onAddToCart, onViewAll,
 }: { block: LayoutBlock; products: Product[]; onProductPress?: (id: string) => void; onAddToCart?: (id: string) => void; onViewAll?: (target: string) => void }) {
   // Jun 2026 tablet fix — hook MUST run before the early return.
-  const { width: winW } = useWindowDimensions();
+  const winW = useContentWidth();
   if (products.length === 0) return <SkeletonBlock height={160} />;
   const basePerRow = Math.max(1, Math.min(4, block.products_per_row || 2));
   // On a 12-inch tablet the admin's "2 per row" produced ~480 dp wide cards
@@ -629,7 +651,7 @@ function ProductGridBlock({
               <TouchableOpacity
                 style={[styles.gridCard, { width: "100%", padding: 0, flexBasis: undefined as any }, !inStock && { opacity: 0.7 }]}
                 activeOpacity={0.85}
-                onPress={() => onProductPress?.(p.id)}
+                onPress={() => openProduct(p, onProductPress)}
                 testID={`grid-card-${p.id}`}
               >
                 {/* Square image — matches the shop-wide product tile so every
@@ -689,7 +711,7 @@ function ProductGridBlock({
                         add, which used to look like a dead button). */}
                     {(p as any).has_variants ? (
                       <TouchableOpacity
-                        onPress={(e: any) => { e.stopPropagation?.(); onProductPress?.(p.id); }}
+                        onPress={(e: any) => { e.stopPropagation?.(); openProduct(p, onProductPress); }}
                         disabled={!inStock}
                         style={[styles.addCartBtn, { paddingHorizontal: 9, width: undefined }, !inStock && { opacity: 0.5 }]}
                         testID={`grid-select-${p.id}`}
@@ -739,7 +761,7 @@ function HorizontalSliderBlock({
               key={p.id}
               style={[styles.hCard, !inStock && { opacity: 0.6 }]}
               activeOpacity={0.85}
-              onPress={() => onProductPress?.(p.id)}
+              onPress={() => openProduct(p, onProductPress)}
               testID={`hslide-card-${p.id}`}
             >
               <View style={styles.hImgWrap}>
@@ -761,7 +783,7 @@ function HorizontalSliderBlock({
                 <Text style={styles.hPrice} numberOfLines={1}>{formatINR(p.price)}</Text>
                 {(p as any).has_variants ? (
                   <TouchableOpacity
-                    onPress={(e: any) => { e.stopPropagation?.(); onProductPress?.(p.id); }}
+                    onPress={(e: any) => { e.stopPropagation?.(); openProduct(p, onProductPress); }}
                     disabled={!inStock}
                     style={[styles.addCartBtn, { paddingHorizontal: 9, width: undefined }, !inStock && { opacity: 0.5 }]}
                     testID={`hslide-select-${p.id}`}
@@ -850,7 +872,7 @@ function BackgroundBlock({
     <View style={[styles.bannerBox, { height, backgroundColor: block.bg_color || colors.brand100 }]}>
       {block.image_data_url ? (
         <Image
-          source={{ uri: block.image_data_url }}
+          source={{ uri: resolveImageUrl(block.image_data_url) }}
           style={StyleSheet.absoluteFill as any}
           resizeMode={block.image_fit === "contain" ? "contain" : "cover"}
         />
@@ -899,7 +921,7 @@ function ContentBoxBlock({
     return (
       <TouchableOpacity
         style={[styles.productCard, { minHeight: imgHeight + 96 }]}
-        onPress={() => onProductPress?.(p.id)}
+        onPress={() => openProduct(p, onProductPress)}
         activeOpacity={0.85}
         testID={`content-box-${p.id}`}
       >
@@ -932,7 +954,7 @@ function ContentBoxBlock({
   return (
     <View style={[styles.contentBox, { minHeight: height }]}>
       {block.image_data_url ? (
-        <Image source={{ uri: block.image_data_url }} style={[styles.contentImage, { height: Math.max(80, height - 80) }]} resizeMode="cover" />
+        <Image source={{ uri: resolveImageUrl(block.image_data_url) }} style={[styles.contentImage, { height: Math.max(80, height - 80) }]} resizeMode="cover" />
       ) : null}
       <View style={{ padding: 14 }}>
         {block.title ? <Text style={styles.contentTitle}>{block.title}</Text> : null}
@@ -974,7 +996,7 @@ function SpotlightBlock({
   // ~1/3 of the phone screen, clamped so the header + product strip always
   // fit exactly (no dead band between the CTA and the chips).
   const heroHeight = block.height || Math.max(288, Math.min(348, Math.round(winH * 0.34)));
-  const cover = block.image_data_url || pickImage(products[0]);
+  const cover = resolveImageUrl(block.image_data_url || "") || pickImage(products[0]);
   const strip = products.slice(0, 12);
   const target = block.view_all_link || block.category_filter || "";
 
@@ -1038,7 +1060,7 @@ function SpotlightBlock({
                 key={`spot-${p.id}`}
                 style={styles.spotChip}
                 activeOpacity={0.85}
-                onPress={() => onProductPress?.(p.id)}
+                onPress={() => openProduct(p, onProductPress)}
                 testID={`spotlight-product-${p.id}`}
               >
                 <View style={styles.spotChipImgWrap}>

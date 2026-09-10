@@ -12,9 +12,10 @@
  *     touch (vertical ScrollViews, horizontal chip strips, buttons) keep it —
  *     we only claim drags that are unambiguously horizontal.
  *
- * Thresholds: claim at |dx| > 24 while |dy| < 24, commit at |dx| > 60 OR a
- * fast flick (|vx| > 0.35) so short, quick swipes register like they do in
- * WhatsApp.
+ * Thresholds (Jun 2026 — lightened per owner feedback "make the swipe
+ * lighter"): claim at |dx| > 14 while |dy| < 14 and the drag is clearly more
+ * horizontal than vertical, commit at |dx| > 40 OR a flick (|vx| > 0.22) so a
+ * short, quick swipe registers like it does in WhatsApp.
  */
 import { useRef } from "react";
 import { PanResponder } from "react-native";
@@ -36,10 +37,13 @@ export function useSwipePager({ onNext, onPrev, enabled = true }: Options) {
   const responder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_e, g) =>
-        cbRef.current.enabled && Math.abs(g.dx) > 24 && Math.abs(g.dy) < 24,
+        cbRef.current.enabled &&
+        Math.abs(g.dx) > 14 &&
+        Math.abs(g.dy) < 14 &&
+        Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
       onPanResponderRelease: (_e, g) => {
         if (!cbRef.current.enabled) return;
-        const committed = Math.abs(g.dx) > 60 || Math.abs(g.vx) > 0.35;
+        const committed = Math.abs(g.dx) > 40 || Math.abs(g.vx) > 0.22;
         if (!committed) return;
         if (g.dx < 0) cbRef.current.onNext();
         else cbRef.current.onPrev();

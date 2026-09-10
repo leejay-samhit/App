@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 66 edge cases + UI checks: backend 11/11 pytest PASS (catalogue export leakage, merge multi-chunk drafts+cleanup, buyer 403, malformed payload, admin manifest excludes db_snapshots/pincodes, admin restore bad-collection & malformed docs are <500, delivery /check with lat/lng only + no location, /api/products?pincode=517644, shop-layout never inlines base64). All four original scripted tests were kept intact (not re-run per instructions). Frontend: /vendor/catalogue-backup renders both Download + Choose file buttons and the vendor-backup-open row is visible on Products tab of /vendor/dashboard; /admin/backups shows the 'Full app backup to a file' entry (backups-file-open testID); /admin/backup-file renders the manifest chips (890 records across 53 collections, users=28, products=16, orders=34 etc) with Download + Choose buttons; buyer shop home renders 7 product cards with delivery header at Srikalahasti 517644. TWO frontend concerns (not necessarily bugs): (1) after clicking 'Download backup' on both the vendor and admin backup-file screens, the result box (testID catalogue-result / appbackup-result) did NOT appear within 30s / 90s in headless Playwright — the underlying Blob<->URL.createObjectURL<->anchor click may succeed silently but setResult never runs OR the download promise never resolves in headless mode; user-side download works in real Chrome; (2) tablet-viewport reload of /shop stalled on the Slangcart splash for >5s, so I could NOT visually confirm the centred-column layout — code review of src/content-width.tsx confirms it caps maxWidth to a fixed value which is correct. NOTE: my initial replace-mode multi-chunk test wiped vendor2 products; I re-seeded 'Vendor Two Gadget' via /app/backend/tests/seed_iter55.py and replaced the test with a merge-mode multi-chunk one that preserves fixtures. Deprecated packages detected: NONE new; RN-Web still emits 'shadow*' and 'props.pointerEvents' deprecation warnings (carried over from previous iterations).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "vendor/catalogue-backup", "issue": "After tapping catalogue-export the result box (catalogue-result) never appears in headless web preview within 30s; state may be stuck on 'Packing…'. Cannot rule out that downloadText promise never resolves after the Blob anchor click. Please verify manually in Chrome that the ✅ result string surfaces.", "testID": "catalogue-result", "priority": "MEDIUM"},
+      {"component": "admin/backup-file", "issue": "Same pattern as above — appbackup-result did not appear within 90s after clicking appbackup-download; manifest & chips render fine but the success confirmation cannot be verified via automation.", "testID": "appbackup-result", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "login form submit in headless preview", "issue": "Same carryover blocker as iteration 65: filling login-email-input + login-password-input + clicking login-submit-button does not advance URL in headless Playwright. Worked around by POSTing /api/auth/login and injecting the returned token into localStorage(auth_token, auth_refresh_token). Recommend investigating why the RN-Web login submit does not trigger navigation under headless Chrome — likely a passkey/OTP branch or a redirect eaten by CSP/session.", "affected_testIDs": ["login-submit-button"]}
+    ],
+    "design_issues": [
+      {"screen": "shop home (tablet 834x1112)", "issues": ["Second load of /shop at 834x1112 stalled on the Slangcart splash for >5s; code review of src/content-width.tsx confirms max-width cap logic, but the running app could not be visually verified at this viewport in the automation run — manual visual pass recommended."]}
+    ],
+    "react_native_issues": [
+      {"component": "Style props", "issue": "'shadow*' style props deprecated warning across screens — carryover, not new. Reference: multiple RN-Web components."},
+      {"component": "props.pointerEvents", "issue": "props.pointerEvents deprecated warning — carryover. Should be moved to style.pointerEvents."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter66_edge_cases.py",
+    "/app/test_reports/pytest/iter66_edge_cases.xml",
+    "/app/test_reports/iter66_vendor_catalogue_backup.png",
+    "/app/test_reports/iter66_products_tab.png",
+    "/app/test_reports/iter66_admin_backups.png",
+    "/app/test_reports/iter66_admin_backup_file.png",
+    "/app/test_reports/iter66_shop_home.png"
+  ],
+  "action_items": [
+    "Investigate why /vendor/catalogue-backup and /admin/backup-file do NOT surface the ✅ success text (catalogue-result / appbackup-result) in headless web preview — either the Blob<->anchor click blocks the JS turn or setResult is not reached. Verify in real Chrome that the result box appears once the file is downloaded.",
+    "Login flow blocker persists — clicking login-submit-button in headless Chrome does not navigate. Add an explicit navigation-guard or ensure the form is a plain onPress-driven fetch so automation can drive login end-to-end.",
+    "Manual visual pass at 834x1112 to confirm the centred max-width column and non-stretched layout blocks (automation load stalled on splash).",
+    "RN-Web deprecation warnings (shadow* / props.pointerEvents) — schedule a migration pass in a future iteration.",
+    "Consider preserving vendor2 fixture behaviour by rejecting mode=replace when the vendor has ANY non-restored (owned) products, OR at least surfacing a strong 'this will wipe your entire catalogue' confirmation in the UI. Current API silently deletes ALL vendor products in replace-mode first_chunk, which is destructive."
+  ],
+  "critical_code_review_comments": [
+    "routes/backup.py replace-mode wipes ALL of the vendor's products, not only restored drafts (line 130-135). The problem statement's spec says restored products land as HIDDEN DRAFTS but doesn't spell out what replace actually replaces. Consider limiting the wipe to {restored_from_backup: true} unless the UI clearly warns.",
+    "core/delivery.py + routes/delivery.py — vendor and customer views AGREE on pincode 517644/517641/near/far and on lat/lng-only queries, so the shared engine is doing what the spec asked. /delivery/check with neither pincode nor lat/lng returns a graceful <500 response.",
+    "shop-layout list endpoints correctly return /api/shop-layout/{id}/image URLs (no base64 leaks in public or admin list), and PATCHing a block back with the URL keeps the stored artwork.",
+    "Frontend downloadText uses window.URL.createObjectURL + anchor.click on web — this pattern is fine for real browsers but Playwright's download event only fires when Content-Disposition is set OR anchor has download attribute. downloadText DOES set the download attribute — the missing result box is likely a JS timing/state issue, not the download itself."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter66_edge_cases.py (NEW)"
+  ],
+  "success_rate": {"backend": "100% (11/11 edge cases + 4/4 pre-existing scripted smoke tests reported PASS by main agent)", "frontend": "6/8 verified — screens render + backup row visible + admin manifest chips + shop home cards; 2/8 unverifiable in headless (result box on downloads, tablet layout)"},
+  "seed_data_creation": "Re-seeded testvendor2's 'Vendor Two Gadget' via /app/backend/tests/seed_iter55.py after my initial replace-mode multi-chunk test wiped vendor2's product; final test uses merge-mode multi-chunk which does NOT touch fixture data. Danger PIN hash was temporarily swapped for '135790' and restored via test_iter66_edge_cases.py teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "test_iter66_edge_cases.py runs 11 tests in ~7s against the public preview and is safe to re-run — it uses merge-mode only on vendor2 and cleans up every restored draft. Do NOT run replace-mode against vendor2 unless you first re-seed with seed_iter55.py. Login form still doesn't advance in headless — the pattern that works everywhere is: POST /api/auth/login + localStorage.setItem('auth_token', ...) + localStorage.setItem('auth_refresh_token', ...) then navigate. Danger PIN hash is temporarily set to hash('135790') during the run and restored in teardown."
+}

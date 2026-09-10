@@ -713,3 +713,107 @@ button, and a real COD checkout taking XL 2→0 / total 10→8 with
   with wipe-replace / merge chosen at upload.
 - **Phase 5** — vendor Delivery Radius edit not saving; customer "Deliver to"
   map missing pincodes the vendor radius map captures (one shared engine).
+
+---
+
+## Sep 2026 — Phase 2 (UI polish) + Phase 4 (Backup/Restore) + Phase 5 (Maps & payload) ✅ · iteration 66
+
+### Phase 2 — UI/UX polish
+- **Tablet layout** — `src/content-width.tsx` (NEW): the app renders into a
+  centred column capped at `TABLET_MAX_WIDTH = 760` on tablets (owner's choice:
+  "keep 2–3 columns, centre with max-width"). `TabletContainer` in
+  `app/_layout.tsx` supplies it; every width-aware component (banner slider,
+  spotlight, product grid, product hero) reads `useContentWidth()` instead of
+  the raw window width, so blocks stop stretching. Phones and desktop web
+  (≥1024, DesktopShell) are untouched. Verified at 834×1112 → centred, 3-up grid.
+- **No more green flash** — the root `Stack` painted `#143D2E` (splash green)
+  behind every screen transition. Navigator background is now `colors.background`
+  and the bottom tabs get `sceneStyle` with the same colour.
+- **Instant product open** — `src/product-preview.ts` (NEW) LRU cache. Cards
+  stash name/price/cover before navigating; `/product/[id]` seeds state from it
+  and paints on the first frame, hydrating the rest in place (size picker shows
+  a placeholder, buy buttons stay inert until the real doc lands).
+- **Lighter swipe** — `useSwipePager` claims at |dx|>14 (was 24), commits at
+  |dx|>40 or |vx|>0.22, and requires the drag to be clearly horizontal.
+- **Category highlight follows the swipe** — the sub-category strip on
+  `shop-category/[name]` auto-centres the active chip.
+
+### Phase 4A — Vendor catalogue backup  (`routes/backup.py`)
+- `GET /api/vendor/me/catalogue/export?offset&limit` (limit ≤ 25) — paged, so a
+  photo-heavy catalogue never travels in one oversized response. Ownership
+  fields (`id`, `vendor_id`, `store_*`, delivery zone, counters) are stripped.
+- `POST /api/vendor/me/catalogue/import` — `{products, mode: merge|replace,
+  first_chunk}`. Re-stamps a new id + the importing vendor's identity and
+  delivery zone, normalises images + variants, and lands everything as
+  **hidden drafts** (`is_published=false`, `restored_from_backup=true`).
+  `replace` wipes that vendor's products on the first chunk only.
+- UI: `app/vendor/catalogue-backup.tsx` (Download / Choose file / Merge vs
+  Replace with a destructive confirm), reachable from the Products tab row and
+  the empty state of the vendor dashboard.
+
+### Phase 4B — Full app backup, merged into ONE admin screen
+- `GET /api/admin/backup/manifest`, `GET /api/admin/backup/dump?collection&offset&limit`,
+  `POST /api/admin/backup/restore` (`merge` = upsert by id, `wipe` = delete then
+  insert; 6-digit **Danger PIN** required; audit-logged). super_admin only.
+  Excluded: `db_snapshots`, `db_snapshot_chunks`, security events, analytics,
+  caches, and `pincodes` (reference data, opt-in).
+- Money is restored exactly as in the file — it's a data replay, no commission
+  or payout logic runs (owner's choice).
+- **Merged screens** — `admin/backups` is now the single "Data backups" screen
+  with two tabs: **File backup** (`src/app-backup-panel.tsx`) and
+  **Snapshots**. `admin/backup-file` is a redirect for old links.
+- **Snapshot engine rewritten** (`server.py`): the old one crammed the entire
+  DB into ONE Mongo doc (16 MB cap → silently degraded to a useless
+  "metadata-only" backup) and covered only 19 hardcoded collections. Now it
+  streams into `db_snapshot_chunks` (≤200 rows / ~6 MB per chunk) with a small
+  index doc, covers **all 53 collections** (same list as the file backup),
+  restores chunk-by-chunk (legacy `data` snapshots still restorable), and prunes
+  auto snapshots harder (`BACKUP_AUTO_RETENTION=6`) since each is a full copy.
+
+### Phase 5A — ONE delivery-zone engine  (`core/delivery.py` NEW)
+- `vendor_zone()` reads coordinates from flat `lat`/`lng` **or** GeoJSON
+  `location`; `zone_covers_pincode()`, `zone_covers_point()`, `vendor_covers()`,
+  `eligible_vendor_ids()`.
+- **Root-cause fix** for "the vendor's radius map covers this pincode but the
+  customer sees nothing": with no GPS fix the radius rule was skipped entirely.
+  The engine now resolves the **pincode centre** (geocoded once via Nominatim
+  and cached onto the `pincodes` row) and runs the same radius test →
+  `reason: "radius_pincode_centre"`.
+- `products_public._eligible_vendor_ids` (and therefore the shop filter, the
+  category screens and the checkout guard) delegates to it.
+- **Vendor edits now save**: `vendor_edit_requests` uses `exclude_unset`
+  (explicit `null` radius / empty pincode list used to be dropped, so a vendor
+  could never switch the radius off), the app always sends the pincode array,
+  and approving an edit keeps `store_pincode` + flat `lat`/`lng` in sync with
+  the new `location` (a moved shop used to keep serving its old area).
+- New: `GET /api/vendor/me/delivery-zone`, `…/check?pincode=`,
+  `GET /api/delivery/check?pincode=&lat=&lng=`. The vendor Request-Edit screen
+  shows a **"My live delivery zone"** card + pincode tester.
+
+### Phase 5B — Cloudflare "could not parse response"
+- Root cause: `GET /shop-layout` and `/admin/shop-layout` inlined base64
+  artwork — up to 4 MB per image, 30 slides per block, 200 blocks. Lists now
+  return `/api/shop-layout/{id}/image` and `…/items/{n}/image`; the bytes are
+  served on demand with a 1-day cache. Saving a block back with that URL is
+  treated as "image unchanged" (matched by slide index) so nothing is wiped.
+- Frontend resolves those relative URLs via `resolveImageUrl` in the renderer
+  and the admin layout screen.
+- Added an **oversized-response watchdog** middleware: any response > 2 MB is
+  logged with its path, so the next offender names itself.
+
+### Verified
+`tests/test_iter66_catalogue_backup.py`, `test_iter66_app_backup.py`,
+`test_iter66_delivery_engine.py`, `test_iter66_layout_payload.py`,
+`test_iter66_snapshot_engine.py` (53 collections, 34 chunks, lossless restore)
+all PASS, plus the testing agent's `test_iter66_edge_cases.py` 11/11. Browser:
+vendor download → "✅ Backed up 11 products", admin download → "✅ Saved 890
+records across 53 collections", merged Data backups tabs, tablet 834×1112
+centred column.
+
+### Still open
+- File **restore** (upload) paths are backend-verified; the file-picker step
+  needs a human pass on a real device / browser.
+- Phase 2 leftovers the owner said are already fixed: Product-Grid "+" add,
+  vendor gallery multi-select.
+- Backlog: multi-vendor order splitting, wallet+COD combo, device login
+  history, Razorpay (deferred).

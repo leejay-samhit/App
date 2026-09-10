@@ -15,12 +15,14 @@
  * chip. Wrap a list of these in a <View style={productGridStyles.wrap}>.
  */
 import React from "react";
-import { View, Text, Image, TouchableOpacity, StyleSheet, useWindowDimensions } from "react-native";
+import { View, Text, Image, TouchableOpacity, StyleSheet } from "react-native";
 import { Feather } from "@expo/vector-icons";
 
 import { resolveImageUrl } from "./api";
 import { colors, formatINR } from "./theme";
 import { FadeSlideIn } from "./anim";
+import { useContentWidth } from "./content-width";
+import { setProductPreview } from "./product-preview";
 
 export type GridProduct = {
   id: string;
@@ -61,8 +63,17 @@ export function gridColumnsFor(width: number): number {
 const GRID_GAP = 12;
 
 export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, index = 0 }: Props) {
-  const { width } = useWindowDimensions();
+  const width = useContentWidth();
   const cols = gridColumnsFor(width);
+  // Jun 2026 — prime the preview cache so /product/[id] paints instantly.
+  const open = () => {
+    setProductPreview({
+      id: p.id, name: p.name, price: p.price,
+      image: resolveImageUrl(p.image_url || ""),
+      stock: p.stock, is_in_stock: p.is_in_stock, has_variants: p.has_variants,
+    });
+    onOpen(p);
+  };
   // ── Gutter strategy (Jun 2026) ────────────────────────────────────────
   // The old card mixed a PERCENT basis (48%) with a PIXEL `gap: 12` on the
   // wrapper.  48% + 48% + 12 px overflows 100% on narrow phones, so flexWrap
@@ -77,11 +88,11 @@ export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, i
       style={[styles.cell, { width: cellWidth as any, maxWidth: cellWidth as any }] as any}
     >
       <View style={[styles.card, !inStock && { opacity: 0.55 }]}>
-        <TouchableOpacity activeOpacity={0.85} onPress={() => onOpen(p)} testID={`product-open-${p.id}`}>
+        <TouchableOpacity activeOpacity={0.85} onPress={open} testID={`product-open-${p.id}`}>
           <Image source={{ uri: resolveImageUrl(p.image_url || "") }} style={styles.img} resizeMode="cover" />
         </TouchableOpacity>
         <View style={styles.body}>
-          <TouchableOpacity activeOpacity={0.85} onPress={() => onOpen(p)}>
+          <TouchableOpacity activeOpacity={0.85} onPress={open}>
             <Text style={styles.name} numberOfLines={2}>{p.name}</Text>
           </TouchableOpacity>
           <View style={styles.footer}>
@@ -95,7 +106,7 @@ export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, i
                  customer has to choose one, so the button opens the product
                  page (where the size picker lives) instead of failing. */
               <TouchableOpacity
-                onPress={() => onOpen(p)}
+                onPress={open}
                 style={styles.addBtn}
                 hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                 testID={`pick-size-${p.id}`}

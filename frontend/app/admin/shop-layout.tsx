@@ -576,7 +576,7 @@ function BlockCard({
   const meta = TYPE_META[b.block_type] || TYPE_META.text;
   const sizable = (b.block_type === "background" || b.block_type === "content_box" || b.block_type === "banner_slider");
   const linkedProduct = b.product_id ? products.find((p) => p.id === b.product_id) : null;
-  const thumbUrl = b.image_data_url || (b.items && b.items[0]?.image_data_url) || "";
+  const thumbUrl = resolveImageUrl(b.image_data_url || (b.items && b.items[0]?.image_data_url) || "");
   // Jun 2026 — Multi-pincode targets (falls back to the legacy single field).
   const targetPins: string[] = Array.from(new Set([
     ...(Array.isArray((b as any).scope_pincodes) ? (b as any).scope_pincodes.map(String) : []),
@@ -1154,7 +1154,7 @@ function BlockFormModal({
                             testID={`circle-img-${c.id}`}
                           >
                             {ov || c.image_url ? (
-                              <Image source={{ uri: ov || (c.image_url as string) }} style={{ width: "100%", height: "100%", borderRadius: 8 }} resizeMode="cover" />
+                              <Image source={{ uri: resolveImageUrl(ov || (c.image_url as string)) }} style={{ width: "100%", height: "100%", borderRadius: 8 }} resizeMode="cover" />
                             ) : (
                               <Feather name="image" size={14} color={colors.textMuted} />
                             )}
@@ -1266,7 +1266,7 @@ function BlockFormModal({
 
                 <TouchableOpacity onPress={() => pickImage(setImageDataUrl, "background")} style={styles.imagePicker}>
                   {imageDataUrl ? (
-                    <Image source={{ uri: imageDataUrl }} style={styles.imagePreview} resizeMode={imageFit === "contain" ? "contain" : "cover"} />
+                    <Image source={{ uri: resolveImageUrl(imageDataUrl) }} style={styles.imagePreview} resizeMode={imageFit === "contain" ? "contain" : "cover"} />
                   ) : (
                     <View style={styles.imagePickerEmpty}>
                       {picking ? <ActivityIndicator color={colors.primary} /> : (
@@ -1450,7 +1450,7 @@ function BlockFormModal({
                   <View key={`item-${idx}`} style={styles.itemRow}>
                     <TouchableOpacity onPress={() => pickImage((url) => updateItem(idx, { image_data_url: url }), type as ImageTarget)} style={styles.itemThumb}>
                       {it.image_data_url ? (
-                        <Image source={{ uri: it.image_data_url }} style={{ width: "100%", height: "100%", borderRadius: 8 }} resizeMode="cover" />
+                        <Image source={{ uri: resolveImageUrl(it.image_data_url) }} style={{ width: "100%", height: "100%", borderRadius: 8 }} resizeMode="cover" />
                       ) : (
                         <Feather name="image" size={16} color={colors.textMuted} />
                       )}

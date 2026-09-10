@@ -343,6 +343,13 @@ async def _eligible_vendor_ids(
     (pincode, lat, lng).  This turns the O(N) vendor scan + haversine
     loop into an O(1) lookup for repeated calls from the same
     customer session (category screen, layout blocks, checkout).
+
+    Jun 2026 (Phase 5A) — the RULES now live in `core/delivery.py` so the
+    vendor's Delivery Radius screen, this filter and checkout all answer
+    "can this vendor deliver here?" identically. That module additionally
+    falls back to the PINCODE CENTRE when the customer has no GPS fix, which
+    is what used to make a pincode inside the vendor's radius look
+    undeliverable.
     """
     # Round coords to 3 decimal places (~110m) for cache key stability
     # — a customer walking 100m shouldn't invalidate their session.
@@ -354,54 +361,12 @@ async def _eligible_vendor_ids(
     if hit and (now - hit[0]) < _ELIGIBLE_TTL:
         return set(hit[1])
 
-    import math
-    ids: set = set()
-
-    # ─ Pincode-based matches (Mongo query — fast) ──────────────────
-    if pincode:
-        pincode_filter = {
-            "is_vendor_approved": True,
-            "$or": [
-                {"delivery_pincodes": pincode},
-                {"$and": [
-                    {"store_pincode": pincode},
-                    {"$or": [
-                        {"delivery_radius_mode": "pincode"},
-                        {"delivery_radius_mode": "both"},
-                        {"delivery_radius_mode": {"$exists": False}},
-                    ]},
-                ]},
-            ],
-        }
-        async for v in db.users.find(pincode_filter, {"_id": 0, "id": 1}):
-            ids.add(v["id"])
-
-    # ─ Radius-based matches (in-Python haversine) ──────────────────
-    if lat is not None and lng is not None:
-        R = 6371.0088  # Earth radius, km
-        plat = math.radians(lat); plng = math.radians(lng)
-        radius_filter = {
-            "is_vendor_approved": True,
-            "lat": {"$type": "number"}, "lng": {"$type": "number"},
-            "delivery_radius_km": {"$gt": 0},
-            "$or": [
-                {"delivery_radius_mode": "radius"},
-                {"delivery_radius_mode": "both"},
-            ],
-        }
-        async for v in db.users.find(
-            radius_filter,
-            {"_id": 0, "id": 1, "lat": 1, "lng": 1, "delivery_radius_km": 1},
-        ):
-            try:
-                vlat = math.radians(float(v["lat"])); vlng = math.radians(float(v["lng"]))
-                dlat = vlat - plat; dlng = vlng - plng
-                a = math.sin(dlat/2)**2 + math.cos(plat)*math.cos(vlat)*math.sin(dlng/2)**2
-                d = 2 * R * math.asin(math.sqrt(a))
-                if d <= float(v.get("delivery_radius_km") or 0):
-                    ids.add(v["id"])
-            except Exception:
-                continue
+    from core.delivery import eligible_vendor_ids as _shared_eligible
+    ids = await _shared_eligible(
+        pincode=pincode,
+        lat=float(lat) if lat is not None else None,
+        lng=float(lng) if lng is not None else None,
+    )
     _eligible_cache[cache_key] = (now, ids)
     return ids
 

@@ -83,6 +83,10 @@ export default function TabsLayout() {
           // Horizontal slide so a swipe (or a tab tap) reads as moving
           // sideways through the app, matching the reference video.
           animation: "shift",
+          // Jun 2026 — paint each tab scene on the app background. Without
+          // this the scene is transparent during the shift animation and the
+          // dark root view flashed green between tabs.
+          sceneStyle: { backgroundColor: colors.background },
           tabBarActiveTintColor: colors.primary,
           tabBarInactiveTintColor: colors.textMuted,
           tabBarHideOnKeyboard: true,

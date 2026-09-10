@@ -8,6 +8,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { AppBackupPanel } from "../../src/app-backup-panel";
 import { colors, radii, spacing } from "../../src/theme";
 
 type Backup = {
@@ -23,9 +24,14 @@ export default function AdminBackups() {
   const router = useRouter();
   const { user } = useAuth();
   const isSuper = ((user as any)?.admin_role || "super_admin") === "super_admin";
+  // Jun 2026 — ONE backup screen. "File" is the portable .json download /
+  // restore (works across forks and environments); "Snapshots" is the
+  // in-database auto-history. They used to be two separate screens, which is
+  // why taking a backup here looked like it did nothing useful.
+  const [tab, setTab] = useState<"file" | "snapshots">("file");
 
   const [items, setItems] = useState<Backup[]>([]);
-  const [meta, setMeta] = useState<{ interval_seconds: number; retention: number } | null>(null);
+  const [meta, setMeta] = useState<{ interval_seconds: number; retention: number; auto_retention?: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -41,9 +47,9 @@ export default function AdminBackups() {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get<{ backups: Backup[]; interval_seconds: number; retention: number }>("/admin/backups");
+      const { data } = await api.get<{ backups: Backup[]; interval_seconds: number; retention: number; auto_retention?: number }>("/admin/backups");
       setItems(data.backups);
-      setMeta({ interval_seconds: data.interval_seconds, retention: data.retention });
+      setMeta({ interval_seconds: data.interval_seconds, retention: data.retention, auto_retention: data.auto_retention });
     } catch (e) {
       Alert.alert("Error", formatApiError(e));
     } finally {
@@ -125,11 +131,34 @@ export default function AdminBackups() {
         <View style={{ width: 40 }} />
       </View>
 
+      <View style={styles.tabsRow}>
+        {([
+          { k: "file", l: "File backup", icon: "hard-drive" as const },
+          { k: "snapshots", l: "Snapshots", icon: "clock" as const },
+        ]).map((t) => (
+          <TouchableOpacity
+            key={t.k}
+            onPress={() => setTab(t.k as any)}
+            style={[styles.tabBtn, tab === t.k && styles.tabBtnActive]}
+            testID={`backups-tab-${t.k}`}
+          >
+            <Feather name={t.icon} size={14} color={tab === t.k ? colors.primary : colors.textMuted} />
+            <Text style={[styles.tabBtnText, tab === t.k && { color: colors.primary }]}>{t.l}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {tab === "file" ? (
+        isSuper ? <AppBackupPanel /> : (
+          <Text style={styles.empty}>Only a super admin can download or restore a full app backup.</Text>
+        )
+      ) : (
+      <>
       <View style={styles.metaCard}>
         <Feather name="hard-drive" size={20} color={colors.primary} />
         <View style={{ flex: 1 }}>
           <Text style={styles.metaTitle}>Auto-snapshot every {meta ? Math.round(meta.interval_seconds / 60) : 15} min</Text>
-          <Text style={styles.metaSub}>Keeps last {meta?.retention ?? 24} snapshots · Older ones auto-pruned</Text>
+          <Text style={styles.metaSub}>Full database each time · keeps the last {meta?.auto_retention ?? 6} automatic and {meta?.retention ?? 24} manual snapshots</Text>
         </View>
       </View>
 
@@ -200,13 +229,15 @@ export default function AdminBackups() {
           ListEmptyComponent={<Text style={styles.empty}>No snapshots yet — first one will auto-trigger soon.</Text>}
         />
       )}
+      </>
+      )}
 
       {/* Manual snapshot modal */}
       <Modal visible={manualOpen} transparent animationType="slide" onRequestClose={() => setManualOpen(false)}>
         <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.modalSheet}>
             <Text style={styles.modalTitle}>Take snapshot</Text>
-            <Text style={styles.modalSub}>Captures the full state of users, transactions, withdrawals, orders, products, settings, and audit logs.</Text>
+            <Text style={styles.modalSub}>Captures every collection in the database — users, products, orders, invoices, chat, services, wallet and settings. Stored inside the app; use the File backup tab for a copy you can download.</Text>
             <Text style={styles.fieldLabel}>Note (optional)</Text>
             <TextInput
               value={note}
@@ -283,6 +314,11 @@ const styles = StyleSheet.create({
   metaSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   takeBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, marginHorizontal: spacing.screen, padding: 12, backgroundColor: colors.primary, borderRadius: radii.button, marginBottom: 10 },
   takeBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
+  // Jun 2026 — entry point for the portable file backup (Phase 4B).
+  tabsRow: { flexDirection: "row", gap: 8, paddingHorizontal: spacing.screen, marginBottom: 10 },
+  tabBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: radii.button, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, minHeight: 44 },
+  tabBtnActive: { borderColor: colors.primary, backgroundColor: colors.brand100 },
+  tabBtnText: { fontSize: 12.5, fontWeight: "800", color: colors.textMuted },
   card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14, marginBottom: 10 },
   cardTop: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   kindPill: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 99 },

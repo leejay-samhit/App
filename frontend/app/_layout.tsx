@@ -1,7 +1,7 @@
 import { Stack, router as expoRouter } from "expo-router";
 import { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
-import { Text, TextInput, Platform } from "react-native";
+import { Text, TextInput, Platform, View, useWindowDimensions } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as SplashScreen from "expo-splash-screen";
@@ -14,6 +14,8 @@ import { LocationGate } from "../src/location-gate";
 import { SplashOverlay } from "../src/splash-overlay";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
 import { registerForPush } from "../src/push";
+import { ContentWidthProvider, TABLET_MAX_WIDTH } from "../src/content-width";
+import { colors } from "../src/theme";
 
 // ── Push notifications: module-scope wiring (required by playbook) ──
 // Foreground display behaviour — show the banner + play sound even while
@@ -85,8 +87,33 @@ function GlobalFont({ children }: { children: React.ReactNode }) {
 // components (product grid columns, banner height, layout blocks) adapt via
 // useWindowDimensions().  On wide web viewports DesktopShell still supplies
 // the sidebar + top bar chrome.
+// Jun 2026 tablet fix (v2) — the app used to be wrapped in a fake "Android
+// phone frame" (a ~504 px centred column on a dark backdrop) for every
+// viewport ≥ 900 px. That was removed, but letting every screen use the FULL
+// width of a 12-inch tablet made banners 1000+ dp wide and product images
+// 500 dp tall — the layout "disaster" the owner reported.
+//
+// Per the owner's choice ("keep 2–3 columns, centre the content with a
+// max-width") the app now paints into a centred column capped at
+// TABLET_MAX_WIDTH on tablets, and every width-aware component reads that
+// column width via useContentWidth() instead of the window width, so the
+// shop-layout blocks lay out exactly as they were designed.
+//
+// Phones are untouched (no wrapper, no provider) and desktop web ≥ 1024 px
+// still gets the full-width DesktopShell chrome.
 function TabletContainer({ children }: { children: React.ReactNode }) {
-  return <>{children}</>;
+  const { width } = useWindowDimensions();
+  const isDesktopWeb = Platform.OS === "web" && width >= 1024;
+  if (isDesktopWeb || width <= TABLET_MAX_WIDTH) return <>{children}</>;
+  return (
+    <ContentWidthProvider width={TABLET_MAX_WIDTH}>
+      <View style={{ flex: 1, backgroundColor: colors.surfaceMuted, alignItems: "center" }}>
+        <View style={{ flex: 1, width: TABLET_MAX_WIDTH, backgroundColor: colors.background }}>
+          {children}
+        </View>
+      </View>
+    </ContentWidthProvider>
+  );
 }
 
 // Phase 3 Session A — Full-screen gate that swaps the entire app for a
@@ -186,11 +213,14 @@ function RootLayoutInner() {
                     <Stack
                       screenOptions={{
                         headerShown: false,
-                        // Use the splash brand color as the screen background
-                        // so the brief frame between splash unmount and the
-                        // login screen mount blends into the splash colour
-                        // instead of flashing off-white (FAF9F6).
-                        contentStyle: { backgroundColor: "#143D2E" },
+                        // Jun 2026 — this used to be the dark splash green
+                        // (#143D2E) so the splash→login handoff blended. But
+                        // the navigator background shows THROUGH every screen
+                        // transition, so each tab swipe / product open
+                        // flashed green. SplashOverlay already covers the
+                        // launch frames, so the navigator now uses the app
+                        // background and transitions are flash-free.
+                        contentStyle: { backgroundColor: colors.background },
                         animation: "fade",
                       }}
                     />

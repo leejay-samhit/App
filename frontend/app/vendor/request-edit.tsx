@@ -3,7 +3,7 @@
 // Approved vendors cannot edit their profile directly. This screen lets
 // them submit a change request that admins review before applying it to
 // their live profile.
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity,
   ActivityIndicator, Alert, KeyboardAvoidingView, Platform,
@@ -45,6 +45,37 @@ export default function VendorRequestEdit() {
   const [deliveryPincodes, setDeliveryPincodes] = useState<string[]>([]);
   const [pincodeInput, setPincodeInput] = useState("");
   const [pendingReq, setPendingReq] = useState<any>(null);
+  // Jun 2026 (Phase 5A) — what the delivery engine says is LIVE right now,
+  // plus a tester so the vendor can confirm a pincode really is covered
+  // instead of guessing whether their radius edit went through.
+  const [zone, setZone] = useState<any>(null);
+  const [testPin, setTestPin] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string>("");
+
+  const loadZone = useCallback(async () => {
+    try {
+      const r = await api.get<any>("/vendor/me/delivery-zone");
+      setZone(r.data);
+    } catch { /* non-fatal */ }
+  }, []);
+
+  const runZoneTest = useCallback(async () => {
+    if (testPin.length !== 6) return;
+    setTesting(true); setTestResult("");
+    try {
+      const r = await api.get<any>("/vendor/me/delivery-zone/check", { params: { pincode: testPin } });
+      const d = r.data || {};
+      const why =
+        d.reason === "pincode" ? "matches your pincode list"
+        : d.reason === "radius" || d.reason === "radius_pincode_centre" ? `inside your ${zone?.radius_km ?? ""} km radius (${d.distance_km} km away)`
+        : d.reason === "delivery_off" ? "your delivery is switched off"
+        : "outside your delivery zone";
+      setTestResult(`${d.covered ? "✅ You deliver to" : "❌ You don't deliver to"} ${testPin} — ${why}.`);
+    } catch (e) {
+      setTestResult(`Couldn't check: ${formatApiError(e)}`);
+    } finally { setTesting(false); }
+  }, [testPin, zone]);
 
   useEffect(() => {
     (async () => {
@@ -89,7 +120,8 @@ export default function VendorRequestEdit() {
         setLoading(false);
       }
     })();
-  }, []);
+    loadZone();
+  }, [loadZone]);
 
   const onSubmit = async () => {
     if (pendingReq) {
@@ -125,7 +157,7 @@ export default function VendorRequestEdit() {
           if (coverEntirePincode) return "pincode";
           return "none";
         })(),
-        delivery_pincodes: deliveryPincodes.length ? deliveryPincodes : undefined,
+        delivery_pincodes: deliveryPincodes,
         location: (shopLocation.latitude !== null && shopLocation.longitude !== null)
           ? { type: "Point", coordinates: [shopLocation.longitude, shopLocation.latitude] }
           : undefined,
@@ -175,6 +207,48 @@ export default function VendorRequestEdit() {
               </View>
             </View>
           )}
+
+          {/* Jun 2026 (Phase 5A) — what's LIVE right now, straight from the
+              same engine the customer shop uses, plus a coverage tester. */}
+          {zone ? (
+            <View style={styles.zoneCard} testID="vendor-live-zone">
+              <View style={styles.zoneHead}>
+                <Feather name="map-pin" size={16} color={colors.primary} />
+                <Text style={styles.zoneTitle}>My live delivery zone</Text>
+              </View>
+              <Text style={styles.zoneLine}>
+                {zone.explains?.radius ? `• ${zone.radius_km} km around the shop\n` : ""}
+                {zone.explains?.pincode ? `• All of pincode ${zone.store_pincode}\n` : ""}
+                {zone.explains?.extra_pincodes ? `• Extra pincodes: ${(zone.pincodes || []).join(", ")}\n` : ""}
+                {!zone.explains?.radius && !zone.explains?.pincode && !zone.explains?.extra_pincodes
+                  ? "• Nothing set — customers can't see your products yet."
+                  : ""}
+              </Text>
+              {!zone.has_coordinates ? (
+                <Text style={styles.zoneWarn}>Shop coordinates missing — the km radius can&apos;t be used until you set the location below.</Text>
+              ) : null}
+              <View style={{ flexDirection: "row", gap: 6, marginTop: 8 }}>
+                <TextInput
+                  value={testPin}
+                  onChangeText={(v) => { setTestPin(v.replace(/\D/g, "").slice(0, 6)); setTestResult(""); }}
+                  placeholder="Check a pincode"
+                  placeholderTextColor={colors.textMuted}
+                  keyboardType="number-pad"
+                  style={[styles.input, { flex: 1, marginTop: 0 }]}
+                  testID="vendor-zone-test-input"
+                />
+                <TouchableOpacity
+                  onPress={runZoneTest}
+                  disabled={testPin.length !== 6 || testing}
+                  style={[styles.zoneTestBtn, (testPin.length !== 6 || testing) && { opacity: 0.5 }]}
+                  testID="vendor-zone-test-btn"
+                >
+                  {testing ? <ActivityIndicator color={colors.primaryFg} size="small" /> : <Text style={styles.zoneTestBtnText}>Check</Text>}
+                </TouchableOpacity>
+              </View>
+              {testResult ? <Text style={styles.zoneResult} testID="vendor-zone-test-result">{testResult}</Text> : null}
+            </View>
+          ) : null}
 
           <Text style={styles.section}>SHOP DETAILS</Text>
           <Text style={styles.label}>Shop name</Text>
@@ -358,6 +432,16 @@ const styles = StyleSheet.create({
   primaryBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 15, marginTop: 24 },
   primaryBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
   note: { fontSize: 11, color: colors.textMuted, textAlign: "center", marginTop: 12 },
+  // Phase 5A — live delivery-zone card + pincode tester.
+  zoneCard: { backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, padding: 12, marginBottom: 12 },
+  zoneHead: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
+  zoneTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain },
+  zoneLine: { fontSize: 12.5, color: colors.textMain, lineHeight: 19 },
+  zoneWarn: { fontSize: 11.5, color: "#B3261E", marginTop: 4, lineHeight: 17 },
+  zoneTestBtn: { paddingHorizontal: 16, justifyContent: "center", alignItems: "center", borderRadius: radii.button, backgroundColor: colors.primary, minHeight: 46 },
+  zoneTestBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 13 },
+  zoneResult: { fontSize: 12.5, color: colors.textMain, marginTop: 8, lineHeight: 18 },
+
   radiusChip: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   radiusChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   radiusChipText: { fontSize: 11, fontWeight: "700", color: colors.textMain, letterSpacing: 0.2 },

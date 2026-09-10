@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from core.db import db
@@ -215,6 +216,39 @@ def _serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
     return doc
 
 
+# ── Jun 2026 (Phase 5B) — never ship base64 artwork inside a LIST ────────
+#
+# Banner / offer / category artwork is stored as a base64 data URL (up to
+# 4 MB each, 30 slides per block, 200 blocks per response). A home screen
+# with a few real banners therefore answered `GET /shop-layout` with tens of
+# megabytes of JSON — which is exactly what makes the edge proxy give up with
+# "could not parse the response". Lists now hand back a tiny IMAGE URL and
+# the bytes are streamed on demand (and cached) from the endpoints below.
+IMAGE_URL_PREFIX = "/api/shop-layout"
+
+
+def _is_managed_image_url(v: Any) -> bool:
+    return isinstance(v, str) and v.startswith(f"{IMAGE_URL_PREFIX}/") and v.endswith("/image")
+
+
+def _slim_images(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Swap inline base64 for the on-demand image endpoint (list responses)."""
+    if not doc:
+        return doc
+    bid = doc.get("id")
+    if isinstance(doc.get("image_data_url"), str) and doc["image_data_url"].startswith("data:"):
+        doc["image_data_url"] = f"{IMAGE_URL_PREFIX}/{bid}/image"
+    items = doc.get("items") or []
+    for idx, it in enumerate(items):
+        if isinstance(it, dict) and isinstance(it.get("image_data_url"), str) and it["image_data_url"].startswith("data:"):
+            it["image_data_url"] = f"{IMAGE_URL_PREFIX}/{bid}/items/{idx}/image"
+    return doc
+
+
+def _serialize_slim(doc: Dict[str, Any]) -> Dict[str, Any]:
+    return _slim_images(_serialize(doc))
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -353,7 +387,27 @@ def _build_doc_from_in(body: ShopLayoutBlockIn) -> Dict[str, Any]:
     }
 
 
-def _build_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _build_updates(payload: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # Phase 5B — the client now receives an image URL instead of the base64
+    # blob, so a plain "save" round-trips that URL back to us. Treat it as
+    # "image unchanged" and keep the stored artwork instead of destroying it.
+    existing = existing or {}
+    existing_items = existing.get("items") or []
+    if _is_managed_image_url(payload.get("image_data_url")):
+        payload = {k: v for k, v in payload.items() if k != "image_data_url"}
+    if isinstance(payload.get("items"), list):
+        merged_items = []
+        for it in payload["items"]:
+            src = dict(it) if isinstance(it, dict) else it
+            if isinstance(src, dict) and _is_managed_image_url(src.get("image_data_url")):
+                try:
+                    old_idx = int(str(src["image_data_url"]).rstrip("/image").rstrip("/").split("/")[-1])
+                except (ValueError, IndexError):
+                    old_idx = -1
+                old = existing_items[old_idx] if 0 <= old_idx < len(existing_items) else {}
+                src["image_data_url"] = (old or {}).get("image_data_url") or ""
+            merged_items.append(src)
+        payload = {**payload, "items": merged_items}
     updates: Dict[str, Any] = {}
     if "block_type" in payload and payload["block_type"] is not None:
         updates["block_type"] = _validate_type(payload["block_type"])
@@ -473,8 +527,44 @@ async def list_active_shop_layout(
     q = _scope_filter(scope, category, pincode)
     q["active"] = True
     cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])
-    items = [_serialize(d) for d in await cursor.to_list(200)]
+    items = [_serialize_slim(d) for d in await cursor.to_list(200)]
     return {"items": items, "scope": scope or "home", "category": category or "", "pincode": pincode or ""}
+
+
+# ── Image endpoints (Phase 5B) ───────────────────────────────────────────
+
+def _decode_data_url(data_url: str):
+    """('image/png', b'...') from a base64 data URL, or (None, None)."""
+    import base64
+    if not isinstance(data_url, str) or not data_url.startswith("data:"):
+        return None, None
+    try:
+        head, b64 = data_url.split(",", 1)
+        mime = head[5:].split(";")[0] or "image/jpeg"
+        return mime, base64.b64decode(b64)
+    except Exception:
+        return None, None
+
+
+@router.get("/shop-layout/{block_id}/image")
+async def shop_layout_block_image(block_id: str):
+    doc = await db.shop_layout_blocks.find_one({"id": block_id}, {"_id": 0, "image_data_url": 1})
+    mime, raw = _decode_data_url((doc or {}).get("image_data_url") or "")
+    if not raw:
+        raise HTTPException(status_code=404, detail="No image on this block")
+    return Response(content=raw, media_type=mime, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.get("/shop-layout/{block_id}/items/{index}/image")
+async def shop_layout_item_image(block_id: str, index: int):
+    doc = await db.shop_layout_blocks.find_one({"id": block_id}, {"_id": 0, "items": 1})
+    items = (doc or {}).get("items") or []
+    if index < 0 or index >= len(items):
+        raise HTTPException(status_code=404, detail="No such slide")
+    mime, raw = _decode_data_url((items[index] or {}).get("image_data_url") or "")
+    if not raw:
+        raise HTTPException(status_code=404, detail="No image on this slide")
+    return Response(content=raw, media_type=mime, headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ---------- Admin ----------
@@ -488,7 +578,7 @@ async def list_all_shop_layout(
 ):
     q = _scope_filter(scope, category, pincode, admin_view=True) if (scope or pincode) else {}
     cursor = db.shop_layout_blocks.find(q).sort([("sort_order", 1), ("created_at", 1)])
-    items = [_serialize(d) for d in await cursor.to_list(1000)]
+    items = [_serialize_slim(d) for d in await cursor.to_list(1000)]
     return {"items": items}
 
 
@@ -497,7 +587,7 @@ async def create_shop_layout_block(body: ShopLayoutBlockIn, _: Dict[str, Any] = 
     _validate_type(body.block_type)
     doc = _build_doc_from_in(body)
     await db.shop_layout_blocks.insert_one(doc.copy())
-    return _serialize(doc)
+    return _serialize_slim(doc)
 
 
 @router.patch("/admin/shop-layout/{block_id}")
@@ -506,12 +596,12 @@ async def update_shop_layout_block(block_id: str, body: ShopLayoutBlockPatch, _:
     if not existing:
         raise HTTPException(status_code=404, detail="Block not found")
     payload = body.dict(exclude_unset=True)
-    updates = _build_updates(payload)
+    updates = _build_updates(payload, existing)
     if updates:
         updates["updated_at"] = _now()
         await db.shop_layout_blocks.update_one({"id": block_id}, {"$set": updates})
     refreshed = await db.shop_layout_blocks.find_one({"id": block_id})
-    return _serialize(refreshed)
+    return _serialize_slim(refreshed)
 
 
 @router.delete("/admin/shop-layout/{block_id}")

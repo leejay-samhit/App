@@ -9,7 +9,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, ActivityIndicator,
   Alert, RefreshControl, TextInput, Modal, Pressable, KeyboardAvoidingView, Platform,
-  useWindowDimensions, NativeSyntheticEvent, NativeScrollEvent,
+  NativeSyntheticEvent, NativeScrollEvent,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -18,6 +18,8 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError, resolveImageUrl } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { useContentWidth } from "../../src/content-width";
+import { getProductPreview } from "../../src/product-preview";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 
 /* ─── Types ─── */
@@ -53,7 +55,22 @@ export default function ProductDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
-  const [product, setProduct] = useState<Product | null>(null);
+  // ── Jun 2026 — INSTANT OPEN ────────────────────────────────────────────
+  // The card the customer tapped already knows the name, price and cover
+  // image, and stashed them in the preview cache. We seed state with that
+  // so this screen paints real content on its first frame; the full doc
+  // (variants, description, specs, reviews) replaces it when it lands.
+  const previewRef = useRef(getProductPreview(id));
+  const preview = previewRef.current;
+  const [product, setProduct] = useState<Product | null>(
+    preview
+      ? {
+          id: preview.id, name: preview.name, price: preview.price,
+          image_url: preview.image, stock: preview.stock,
+          is_in_stock: preview.is_in_stock, has_variants: preview.has_variants,
+        }
+      : null,
+  );
   const [vendor, setVendor] = useState<{ id: string; name: string; referral_code?: string } | null>(null);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [reviewStats, setReviewStats] = useState({ average: 0, total: 0, breakdown: {} as Record<string, number> });
@@ -61,7 +78,8 @@ export default function ProductDetailScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [activeImageIdx, setActiveImageIdx] = useState(0);
   const heroScrollRef = useRef<ScrollView>(null);
-  const { width: windowWidth } = useWindowDimensions();
+  // Width of the column this screen paints into (capped on tablets).
+  const windowWidth = useContentWidth();
   const [qty, setQty] = useState(1);
   // Jun 2026 — variants
   const [variantId, setVariantId] = useState<string | null>(null);
@@ -105,13 +123,19 @@ export default function ProductDetailScreen() {
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) return <SafeAreaView style={styles.safe} edges={["top"]}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
+  // Only block the whole screen when we have NOTHING to show. With a preview
+  // in hand we render straight away and let the details hydrate in place.
+  if (loading && !product) return <SafeAreaView style={styles.safe} edges={["top"]}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
   if (!product) return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.headerRow}><TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}><Feather name="arrow-left" size={20} color={colors.textMain} /></TouchableOpacity><Text style={styles.title}>Not found</Text><View style={{ width: 40 }} /></View>
       <View style={styles.center}><Feather name="alert-circle" size={28} color={colors.textMuted} /><Text style={styles.errText}>Product not found</Text></View>
     </SafeAreaView>
   );
+
+  // True while the full document is still in flight but we're already
+  // showing the preview (name / price / cover image).
+  const hydrating = loading;
 
   // ── Jun 2026 — Variants (size / RAM-ROM) ───────────────────────────────
   // Products with options are unbuyable until the customer picks one, and
@@ -364,6 +388,22 @@ export default function ProductDetailScreen() {
               "Size guide" sheet shows real measurements (chest / length in
               inches, foot length in cm) — the #1 reason shoppers abandon
               fashion carts is fit uncertainty. */}
+          {/* While the full doc hydrates, a product we KNOW has options shows
+              a placeholder card instead of popping in later — no layout jump. */}
+          {hydrating && product.has_variants && !hasVariants ? (
+            <View style={styles.sizeCard}>
+              <View style={styles.sizeHeadRow}>
+                <Text style={styles.qtyLabel}>SELECT SIZE</Text>
+              </View>
+              <View style={styles.sizeWrap}>
+                {[0, 1, 2, 3].map((i) => (
+                  <View key={`sk-${i}`} style={[styles.sizeChip, { backgroundColor: colors.surfaceMuted, borderColor: colors.border, width: 54 }]} />
+                ))}
+              </View>
+              <Text style={styles.sizeMeta}>Loading options…</Text>
+            </View>
+          ) : null}
+
           {hasVariants ? (
             <View style={[styles.sizeCard, sizeError && !selected && { borderColor: "#DC2626" }]}>
               <View style={styles.sizeHeadRow}>
@@ -576,7 +616,15 @@ export default function ProductDetailScreen() {
 
       {/* Sticky bottom CTA */}
       <View style={styles.stickyCta}>
-        {inStock ? (
+        {hydrating ? (
+          /* Jun 2026 — the page is live from the preview, but we don't know
+             the real stock / options yet, so the buy actions stay inert for
+             the fraction of a second the request takes. */
+          <View style={[styles.buyBtn, { flex: 1, backgroundColor: colors.surfaceMuted }]}>
+            <ActivityIndicator color={colors.primary} size="small" />
+            <Text style={[styles.buyBtnText, { color: colors.textMuted }]}>Loading…</Text>
+          </View>
+        ) : inStock ? (
           <>
             <TouchableOpacity onPress={() => onAddToCart(false)} disabled={adding} style={[styles.cartBtn, adding && { opacity: 0.5 }]} testID="add-to-cart">
               {adding ? <ActivityIndicator color={colors.primary} size="small" /> : <><Feather name="shopping-bag" size={18} color={colors.primary} /><Text style={styles.cartBtnText}>Add to Cart</Text></>}

@@ -1,7 +1,7 @@
 // Dynamic Category Page — fully rendered from admin-managed `shop_layout`
 // blocks where scope="category" and scope_category=<name>. Falls back to a
 // plain product grid filtered by category if no admin layout exists.
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -47,6 +47,13 @@ export default function ShopCategoryScreen() {
   // Jun 2026 — Sibling categories at the same tree depth, used by the
   // left/right swipe gesture to hop between categories without going back.
   const [siblings, setSiblings] = useState<string[]>([]);
+  // Jun 2026 — The sub-category strip follows the swipe: we remember where
+  // each chip sits and glide the strip so the active one is always visible
+  // (previously a swipe changed the section but the highlight stayed
+  // off-screen, so the user lost track of where they were).
+  const chipStripRef = useRef<ScrollView | null>(null);
+  const chipPos = useRef<Record<string, { x: number; w: number }>>({});
+  const stripWidth = useRef(0);
 
   const load = useCallback(async (options?: { silent?: boolean }) => {
     // Dec 2026 — Latency killer.  Previously each mount fired 3 sequential
@@ -185,6 +192,15 @@ export default function ShopCategoryScreen() {
     onPrev: () => swipeStep(-1),
   });
 
+  // Centre the active chip whenever the selection changes (tap OR swipe).
+  useEffect(() => {
+    const key = selectedSub || "__all__";
+    const pos = chipPos.current[key];
+    if (!pos || !chipStripRef.current) return;
+    const target = Math.max(0, pos.x - Math.max(0, (stripWidth.current - pos.w) / 2));
+    chipStripRef.current.scrollTo({ x: target, animated: true });
+  }, [selectedSub, subNames.length]);
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.headerRow}>
@@ -234,13 +250,16 @@ export default function ShopCategoryScreen() {
           if (subs.length === 0) return null;
           return (
             <ScrollView
+              ref={chipStripRef}
               horizontal
               showsHorizontalScrollIndicator={false}
+              onLayout={(e) => { stripWidth.current = e.nativeEvent.layout.width; }}
               contentContainerStyle={{ paddingHorizontal: spacing.screen, paddingVertical: 6, gap: 6 }}
               testID="sub-category-strip"
             >
               <TouchableOpacity
                 onPress={() => setSelectedSub("")}
+                onLayout={(e) => { chipPos.current["__all__"] = { x: e.nativeEvent.layout.x, w: e.nativeEvent.layout.width }; }}
                 style={[styles.subChip, selectedSub === "" && styles.subChipActive]}
                 testID="sub-chip-all"
               >
@@ -258,6 +277,7 @@ export default function ShopCategoryScreen() {
                   <TouchableOpacity
                     key={s}
                     onPress={() => setSelectedSub(isActive ? "" : s)}
+                    onLayout={(e) => { chipPos.current[s] = { x: e.nativeEvent.layout.x, w: e.nativeEvent.layout.width }; }}
                     style={[styles.subChip, isActive && styles.subChipActive]}
                     testID={`sub-chip-${s}`}
                   >

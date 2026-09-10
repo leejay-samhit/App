@@ -153,6 +153,8 @@ from routes import vendor_pos as vendor_pos_router  # noqa: E402
 from routes import broadcast as broadcast_router  # noqa: E402
 from routes import maintenance as maintenance_router  # noqa: E402
 from routes import chat_settings as chat_settings_router  # noqa: E402
+from routes import backup as backup_router  # noqa: E402
+from routes import delivery as delivery_router  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -186,6 +188,30 @@ from core.idempotency import IdempotencyMiddleware  # noqa: E402
 app.add_middleware(IdempotencyMiddleware)
 app.state.limiter = _rate_limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+
+
+# Jun 2026 (Phase 5B) — OVERSIZED RESPONSE WATCHDOG.
+# The "Cloudflare could not parse the response" reports were always the same
+# root cause: an endpoint answering with megabytes of inline base64 artwork.
+# Slim payloads fixed the known offenders (vendor products, shop layout), and
+# this logs any future one by name instead of leaving us guessing.
+_RESPONSE_SIZE_WARN_BYTES = 2 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _warn_on_huge_response(request, call_next):
+    response = await call_next(request)
+    try:
+        size = int(response.headers.get("content-length") or 0)
+        if size > _RESPONSE_SIZE_WARN_BYTES:
+            logging.warning(
+                f"[HUGE RESPONSE] {size / (1024 * 1024):.1f} MB from "
+                f"{request.method} {request.url.path} — inline base64? "
+                f"Serve images by URL instead (edge proxies truncate large bodies)."
+            )
+    except Exception:
+        pass
+    return response
 
 
 # Local alias so the @decorator syntax stays compact at the route definitions.
@@ -7129,45 +7155,85 @@ async def admin_purge_demo_users(admin: Dict[str, Any] = Depends(require_admin_r
 
 
 # ------------------ Data Backup / Restore (admin) ------------------
-BACKUP_COLLECTIONS = (
-    "users", "transactions", "withdrawals", "orders", "cart_items",
-    "notifications", "products", "settings", "audit_logs",
-    # Extended coverage so pre-delete / pre-wipe snapshots are restorable
-    "vendor_applications", "vendor_sales",
-    "service_applications", "service_bookings",
-    "system_wallet_deposits",
-    "approved_registrations", "rejected_registrations",
-    "tickets", "ticket_messages",
-)
 BACKUP_INTERVAL_SECONDS = int(os.environ.get("BACKUP_INTERVAL_SECONDS", 15 * 60))  # 15 min default
 BACKUP_RETENTION = int(os.environ.get("BACKUP_RETENTION", 24))  # keep last 24 snapshots
+# Auto snapshots are full-database copies now — keep fewer of them.
+BACKUP_AUTO_RETENTION = int(os.environ.get("BACKUP_AUTO_RETENTION", 6))
+
+
+async def _snapshot_collections() -> List[str]:
+    """Every collection worth snapshotting.
+
+    Jun 2026 — this used to be a hardcoded list of 19 collections, so a
+    snapshot silently missed chat, POS invoices, wallet ledgers, shop layout,
+    services and more: restoring one looked like it worked but left half the
+    app behind. It now mirrors the FILE backup (routes/backup.py) exactly, so
+    both paths cover the same A-to-Z data.
+    """
+    from routes.backup import NEVER_EXPORT, REFERENCE_COLLECTIONS
+    names = await db.list_collection_names()
+    skip = set(NEVER_EXPORT) | set(REFERENCE_COLLECTIONS) | {"db_snapshots", "db_snapshot_chunks"}
+    return sorted(n for n in names if n not in skip)
+
+
+# One chunk document per slice of a collection. Mongo caps a document at
+# 16 MB, and the old code stuffed the ENTIRE database into ONE document —
+# which is why snapshots on a real catalogue (base64 product photos) failed
+# and then silently degraded to "metadata-only", i.e. a useless backup.
+_SNAPSHOT_CHUNK_ROWS = 200
+_SNAPSHOT_CHUNK_BYTES = 6 * 1024 * 1024
 
 
 async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
                          created_by: Optional[str] = None) -> Dict[str, Any]:
-    """Capture a full snapshot of all key collections into the db_snapshots collection.
+    """Capture every collection into `db_snapshot_chunks`, then index it with
+    one small parent doc in `db_snapshots`.
 
-    Dec 2026 — Hardened: if the snapshot payload exceeds MongoDB's 16 MB
-    document limit (which happens when the products collection is
-    packed with base64 images), we (a) skip the "heavy" collections
-    (products, db_snapshots-adjacent) from the payload, (b) still record
-    the SNAPSHOT metadata so the wipe/reset flow that depends on this
-    call can proceed, and (c) log a warning.  A partial snapshot is
-    better than blocking Danger Zone with a 500.
+    Chunking means a snapshot can never hit the 16 MB document limit again,
+    no matter how many base64 images the catalogue carries.
     """
     snap_id = str(uuid.uuid4())
-    payload: Dict[str, Any] = {}
     counts: Dict[str, int] = {}
     skipped: List[str] = []
-    for coll in BACKUP_COLLECTIONS:
+    chunk_total = 0
+
+    for coll in await _snapshot_collections():
         try:
-            rows = await db[coll].find({}, {"_id": 0}).to_list(100000)
-            payload[coll] = rows
-            counts[coll] = len(rows)
+            rows: List[Dict[str, Any]] = []
+            approx = 0
+            n = 0
+            seq = 0
+
+            async def _flush(batch: List[Dict[str, Any]], seq_no: int) -> None:
+                if not batch:
+                    return
+                await db.db_snapshot_chunks.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "snapshot_id": snap_id,
+                    "collection": coll,
+                    "seq": seq_no,
+                    "rows": batch,
+                })
+
+            async for doc in db[coll].find({}, {"_id": 0}):
+                rows.append(doc)
+                n += 1
+                approx += len(str(doc))
+                if len(rows) >= _SNAPSHOT_CHUNK_ROWS or approx >= _SNAPSHOT_CHUNK_BYTES:
+                    await _flush(rows, seq)
+                    chunk_total += 1
+                    seq += 1
+                    rows = []
+                    approx = 0
+            await _flush(rows, seq)
+            if rows:
+                chunk_total += 1
+            counts[coll] = n
         except Exception as e:
             logging.warning(f"snapshot: skipping collection {coll}: {e}")
             skipped.append(coll)
             counts[coll] = 0
+
     doc = {
         "id": snap_id,
         "kind": kind,
@@ -7175,62 +7241,68 @@ async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
         "created_by": created_by,
         "created_at": now_utc().isoformat(),
         "counts": counts,
-        "data": payload,
+        "chunks": chunk_total,
+        "storage": "chunked",
     }
-    try:
-        await db.db_snapshots.insert_one(doc)
-    except Exception as e:
-        # Very likely: BSON document too large (>16 MB).  Progressively
-        # drop the largest collections until the doc fits, so a bloated
-        # products collection (base64 images) doesn't block Danger Zone.
-        logging.warning(f"snapshot: full insert failed ({e}); trimming payload…")
-        # Compute rough size per collection and drop biggest ones.
-        sizes = [(k, len(str(v))) for k, v in payload.items()]
-        sizes.sort(key=lambda x: -x[1])
-        trimmed = dict(doc)
-        trimmed_payload = dict(payload)
-        for coll, _ in sizes:
-            trimmed_payload.pop(coll, None)
-            skipped.append(coll)
-            trimmed["data"] = trimmed_payload
-            trimmed["counts"] = {**counts, **{c: 0 for c in skipped}}
-            trimmed["note"] = (note or "") + f" (partial — trimmed {','.join(skipped)} for size)"
-            try:
-                await db.db_snapshots.insert_one(trimmed)
-                break
-            except Exception:
-                continue
-        else:
-            # Even empty payload failed — insert a metadata-only marker.
-            await db.db_snapshots.insert_one({
-                **doc, "data": {}, "counts": {c: 0 for c in BACKUP_COLLECTIONS},
-                "note": (note or "") + " (metadata-only — full snapshot exceeded 16 MB)",
-            })
-    # Retention: keep only the last BACKUP_RETENTION
-    extras = await db.db_snapshots.find(
-        {}, {"_id": 0, "id": 1, "created_at": 1}
-    ).sort("created_at", -1).skip(BACKUP_RETENTION).to_list(1000)
-    if extras:
-        await db.db_snapshots.delete_many({"id": {"$in": [e["id"] for e in extras]}})
+    await db.db_snapshots.insert_one(doc.copy())
+
+    # Retention (Jun 2026) — snapshots now cover the WHOLE database including
+    # base64 product photos, so keeping 24 full copies could balloon storage.
+    # Auto snapshots are pruned harder than the ones an admin (or a Danger
+    # Zone action) deliberately took.
+    for kinds, keep in (
+        (["auto"], BACKUP_AUTO_RETENTION),
+        (None, BACKUP_RETENTION),
+    ):
+        q = {"kind": {"$in": kinds}} if kinds else {}
+        extras = await db.db_snapshots.find(
+            q, {"_id": 0, "id": 1, "created_at": 1}
+        ).sort("created_at", -1).skip(keep).to_list(1000)
+        if extras:
+            stale = [e["id"] for e in extras]
+            await db.db_snapshots.delete_many({"id": {"$in": stale}})
+            await db.db_snapshot_chunks.delete_many({"snapshot_id": {"$in": stale}})
+    doc.pop("_id", None)
     return {"id": snap_id, "counts": counts, "created_at": doc["created_at"], "skipped": skipped}
 
 
 async def _restore_snapshot(snap_id: str) -> Dict[str, Any]:
-    """Restore the DB to the state captured in a snapshot. Wipes current rows in
-    backed-up collections then re-inserts. Snapshots collection itself is preserved."""
+    """Put the database back exactly as the snapshot captured it.
+
+    Reads the chunked format written above, and still understands the legacy
+    single-document `data` field so older snapshots stay restorable.
+    """
     snap = await db.db_snapshots.find_one({"id": snap_id})
     if not snap:
         raise HTTPException(status_code=404, detail="Snapshot not found")
-    data = snap.get("data") or {}
+
+    legacy_data = snap.get("data") or {}
     restored: Dict[str, int] = {}
-    for coll in BACKUP_COLLECTIONS:
-        rows = data.get(coll) or []
+    collections = [c for c, n in (snap.get("counts") or {}).items()] or list(legacy_data.keys())
+
+    for coll in collections:
+        if coll in ("db_snapshots", "db_snapshot_chunks"):
+            continue
+        rows: List[Dict[str, Any]] = list(legacy_data.get(coll) or [])
+        if not rows:
+            async for ch in db.db_snapshot_chunks.find(
+                {"snapshot_id": snap_id, "collection": coll}, {"_id": 0, "rows": 1, "seq": 1},
+            ).sort("seq", 1):
+                rows.extend(ch.get("rows") or [])
+        # A collection captured as EMPTY must end up empty — that's what the
+        # snapshot recorded.
         await db[coll].delete_many({})
         if rows:
-            # Strip _id if present (we projected it out, but be defensive)
             cleaned = [{k: v for k, v in r.items() if k != "_id"} for r in rows]
-            await db[coll].insert_many(cleaned)
+            for i in range(0, len(cleaned), 500):
+                await db[coll].insert_many(cleaned[i:i + 500])
         restored[coll] = len(rows)
+
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
     return {"ok": True, "restored": restored, "snapshot_id": snap_id}
 
 
@@ -7417,6 +7489,7 @@ async def admin_list_backups(_: Dict[str, Any] = Depends(require_admin_not_finan
         "backups": items,
         "interval_seconds": BACKUP_INTERVAL_SECONDS,
         "retention": BACKUP_RETENTION,
+        "auto_retention": BACKUP_AUTO_RETENTION,
     }
 
 
@@ -7447,6 +7520,8 @@ async def admin_delete_backup(snap_id: str, admin: Dict[str, Any] = Depends(requ
     r = await db.db_snapshots.delete_one({"id": snap_id})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+    # Chunked snapshots keep their payload in a side collection.
+    await db.db_snapshot_chunks.delete_many({"snapshot_id": snap_id})
     await _audit_log(admin, "backup.delete", "snapshot", snap_id)
     return {"ok": True}
 
@@ -10522,6 +10597,8 @@ app.include_router(push_router.router, prefix="/api")
 app.include_router(broadcast_router.router, prefix="/api")
 app.include_router(maintenance_router.router, prefix="/api")
 app.include_router(chat_settings_router.router, prefix="/api")
+app.include_router(backup_router.router, prefix="/api")
+app.include_router(delivery_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)
