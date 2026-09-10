@@ -245,7 +245,10 @@ export default function VendorDashboard() {
               {[
                 { key: "orders", label: "Shop orders", icon: "package", path: "/vendor/orders", primary: true },
                 { key: "pos", label: "New sale", icon: "shopping-cart", path: "/vendor/pos" },
-                { key: "sales", label: "Store sale", icon: "list", path: "/vendor/sales" },
+                // Sep 2026 — "Store sale" history tile removed on the owner's
+                // request: it listed every order with ₹0 amounts and simply
+                // duplicated "All invoices", which shows both shop orders and
+                // store sales with the correct totals.
                 { key: "invoices", label: "All invoices", icon: "file-text", path: "/vendor/invoices" },
                 { key: "cash", label: "Cash", icon: "dollar-sign", path: "/vendor/cash" },
                 { key: "analytics", label: "Analytics", icon: "bar-chart-2", path: "/vendor/analytics" },
@@ -644,6 +647,7 @@ export default function VendorDashboard() {
         endpoints={{
           create: "/vendor/me/products",
           update: (id: string) => `/vendor/me/products/${id}`,
+          detail: (id: string) => `/vendor/me/products/${id}`,
         }}
         hidePublishedToggle={true}
       />

@@ -8978,3 +8978,35 @@ agent_communication:
 
       Backend restart + smoke-tested via curl: `?q=widget` returns
       Test Widget only from published catalog. Frontend restart OK.
+
+  - agent: "main"
+    message: |
+      Sep 2026 — VERIFICATION of the two pending fixes from the handoff.
+
+      1. **Fake pincode from "Deliver to" (owner saw 517500)** — ROOT CAUSE
+         FOUND AND FIXED. `/api/geo/resolve` had a "learn unknown pincode"
+         branch that UPSERTED whatever Nominatim returned into the
+         `pincodes` collection whenever a state/district resolved. So the
+         very first Tirupati capture inserted the non-existent 517500 and
+         every later lookup then "validated" it. Deleted that branch in
+         routes/geo.py (and the `pincode_learned` response field) and purged
+         the poisoned row from the DB (1 doc, geo_source=geo_resolve_learned).
+         Verified live: 13.6288/79.4192 → pincode="" + rejected_pincode="517500";
+         12.9716/77.5946 → 560001 valid. Customers with an unverifiable
+         pincode still see the right shops because /api/products matches by
+         coords: lat/lng 13.7497,79.7036 → 8 products, Tirupati coords → 0.
+
+      2. **Vendor product image upload / admin preview sync** — VERIFIED.
+         Backend E2E: vendor create with base64 cover + 2 gallery images →
+         vendor detail, admin list (thumbnail URL serves real bytes), admin
+         detail all keep the base64 cover + gallery; a price-only PATCH does
+         NOT wipe them. Frontend: admin /admin/products → Edit on a product
+         with a photo renders the 800x800 base64 cover immediately (hydration
+         from /api/admin/products/{id} works), and after changing the price
+         and tapping "Save changes" the DB still holds the full base64 cover
+         (5731 chars) + 1 gallery image with price updated to 249.
+         Multi-photo pick (`pickAndFitImages`, first→cover, rest→gallery) is
+         native-only and can't be driven in headless web; code verified.
+
+      3. Vendor dashboard has NO "Sales" quick-link tile (confirmed by
+         testing agent, iteration_70.json).

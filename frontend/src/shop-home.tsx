@@ -19,7 +19,6 @@ import {
   ActivityIndicator, Platform,
   Modal, Pressable, RefreshControl, Linking,
 } from "react-native";
-import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
@@ -30,10 +29,9 @@ import { colors, spacing } from "./theme";
 import { SubscribeBanner } from "./subscription";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
 import {
-  getCurrentCoords,
   checkLocationPermission,
-  requestLocationPermission,
 } from "./location";
+import { captureCurrentPlace } from "./capture-location";
 import { useAuth } from "./auth";
 import { NoVendorsHero } from "./no-vendors-hero";
 import { FadeSlideIn, ProductCardSkeleton } from "./anim";
@@ -239,53 +237,31 @@ export function ShopHome({
   const refreshLocation = useCallback(async (interactive: boolean) => {
     setLocBusy(true);
     try {
-      // Step 1 — permission check
-      let ps = await checkLocationPermission();
-      if (ps === "undetermined") {
-        // Only prompt when the user asks (interactive) or on first mount
-        // (interactive=false → still probe once because we want to know
-        // whether the browser already has permission).
-        ps = await requestLocationPermission();
-      }
-      if (ps === "denied") { setPermStatus("denied"); return; }
-      if (ps === "unsupported") { setPermStatus("unsupported"); return; }
-      setPermStatus(ps === "granted" ? "granted" : "prompt");
-
-      const c = await getCurrentCoords();
-      if (!c) {
-        if (interactive) alert("Couldn't read your GPS. Please check location permission in your device settings.");
+      // Sep 2026 — ONE engine for customer + vendor maps
+      // (src/capture-location.ts). It reads the device geocoder first (the
+      // one that actually returns a pincode) and then validates through
+      // /api/geo/resolve so we never store a pincode that doesn't exist.
+      const place = await captureCurrentPlace();
+      if (!place) {
+        // Reflect the permission state so the location gate can react.
+        const ps = await checkLocationPermission();
+        setPermStatus(ps === "granted" ? "granted" : ps === "denied" ? "denied" : ps === "unsupported" ? "unsupported" : "prompt");
+        if (interactive && ps === "granted") {
+          alert("Couldn't read your GPS. Please try again in a moment.");
+        }
         return;
       }
-      setDeliveryCoords({ lat: c.lat, lng: c.lng });
-
-      let nice = "";
-      let pin = "";
-      // Prefer our own /geo/reverse — returns pincode consistently
-      // whereas expo-location's device-side reverse geocode does not.
-      try {
-        const r = await api.get<any>("/geo/reverse", { params: { lat: c.lat, lng: c.lng } });
-        const d = r.data || {};
-        const parts = [d.area || d.city, d.state].filter(Boolean);
-        nice = parts.join(", ");
-        pin = d.pincode || "";
-      } catch { /* fall back to expo-location */ }
-      if (!nice && Platform.OS !== "web") {
-        try {
-          const places = await Location.reverseGeocodeAsync({ latitude: c.lat, longitude: c.lng });
-          if (places && places[0]) {
-            const p = places[0];
-            const city = p.city || p.subregion || p.district || "";
-            const region = p.region || p.country || "";
-            nice = [city, region].filter(Boolean).join(", ");
-            pin = (p as any).postalCode || pin;
-          }
-        } catch { /* fall through */ }
-      }
-      if (!nice) nice = `Near ${c.lat.toFixed(2)}, ${c.lng.toFixed(2)}`;
-      const display = pin ? `${nice} · ${pin}` : nice;
+      setPermStatus("granted");
+      setDeliveryCoords({ lat: place.lat, lng: place.lng });
+      const display = place.label || `Near ${place.lat.toFixed(2)}, ${place.lng.toFixed(2)}`;
       setDeliveryAddress(display);
-      setDeliveryPincode(pin);
-      persistAddress(display, pin, { lat: c.lat, lng: c.lng });
+      setDeliveryPincode(place.pincode);
+      persistAddress(display, place.pincode, { lat: place.lat, lng: place.lng });
+      if (!place.pincode && place.rejectedPincode && interactive) {
+        alert(
+          `We couldn't verify the pincode ${place.rejectedPincode} for your spot, so we're matching shops by your GPS location instead.`,
+        );
+      }
     } finally { setLocBusy(false); }
   }, [persistAddress]);
 

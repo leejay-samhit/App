@@ -3123,6 +3123,20 @@ async def admin_publish_all_products(
     return {"ok": True, "publish": publish, "matched": res.matched_count, "updated": res.modified_count}
 
 
+@api_router.get("/admin/products/{product_id}")
+async def admin_product_detail(product_id: str, _: Dict[str, Any] = Depends(require_admin)):
+    """FULL product document for the admin editor (cover + gallery base64).
+
+    The list endpoint ships slim rows whose `image_url` is a lazy-load URL,
+    so the editor must hydrate from here — otherwise the admin sees no photo
+    before publishing and a save would blank it.
+    """
+    doc = await db.products.find_one({"id": product_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return doc
+
+
 @api_router.patch("/admin/products/{product_id}")
 async def admin_update_product(product_id: str, payload: ProductUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.products.find_one({"id": product_id})
@@ -3131,9 +3145,9 @@ async def admin_update_product(product_id: str, payload: ProductUpdate, admin: D
     update = {k: v for k, v in payload.dict().items() if v is not None}
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
-    from core.image_compress import compress_product_payload
+    from core.image_compress import compress_product_payload, strip_managed_image_urls
     from core.variants import apply_variants_to_payload
-    update = compress_product_payload(update)
+    update = compress_product_payload(strip_managed_image_urls(update, target))
     # Base price for "extra" mode = the price in THIS update if the vendor
     # changed it, otherwise the stored base/current price.
     _base = float(
@@ -9061,9 +9075,9 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
         raise HTTPException(status_code=400, detail="No fields provided")
     # Dec 2026 — Compress any image fields present in the update
     # (Pillow, ≤1280 px, JPEG q=82).  Safe no-op for non-image updates.
-    from core.image_compress import compress_product_payload
+    from core.image_compress import compress_product_payload, strip_managed_image_urls
     from core.variants import apply_variants_to_payload
-    update = compress_product_payload(update)
+    update = compress_product_payload(strip_managed_image_urls(update, target))
     _base = float(
         update.get("price")
         if update.get("price") is not None

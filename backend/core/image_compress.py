@@ -94,6 +94,38 @@ def compress_data_url(src: Optional[str]) -> Optional[str]:
     return "data:image/jpeg;base64," + base64.b64encode(out).decode()
 
 
+def strip_managed_image_urls(update: dict, stored: Optional[dict] = None) -> dict:
+    """Drop image fields that are just OUR OWN lazy-load URLs.
+
+    Sep 2026 bug: list endpoints hand the client
+    `/api/products/{id}/image?w=360&q=72` instead of the base64 cover (to
+    keep payloads small). The admin product editor seeded its form from that
+    slim row, so saving wrote the URL back into `image_url`. The image
+    endpoint then saw a non-data source and 307-redirected to itself → every
+    photo broke for admins AND customers the moment a product was edited or
+    published. Such values now mean "image unchanged": the field is removed
+    from the update so the stored bytes survive.
+    """
+    def _is_managed(v) -> bool:
+        return isinstance(v, str) and "/api/products/" in v and "/image" in v
+
+    if "image_url" in update and _is_managed(update.get("image_url")):
+        update.pop("image_url", None)
+    imgs = update.get("images")
+    if isinstance(imgs, list) and any(_is_managed(x) for x in imgs):
+        kept_stored = list((stored or {}).get("images") or [])
+        rebuilt = []
+        for i, x in enumerate(imgs):
+            if _is_managed(x):
+                # Keep whatever is stored at that slot (matched by index).
+                if i < len(kept_stored):
+                    rebuilt.append(kept_stored[i])
+            else:
+                rebuilt.append(x)
+        update["images"] = rebuilt
+    return update
+
+
 def compress_product_payload(payload_dict: dict) -> dict:
     """In-place compression for a product-create/update payload.
 

@@ -13,12 +13,12 @@
 import React, { useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, Modal,
-  TextInput, ScrollView, Switch, Image, KeyboardAvoidingView, Platform,
+  TextInput, ScrollView, Switch, Image, KeyboardAvoidingView, Platform, Linking,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import { api, formatApiError } from "./api";
+import { api, formatApiError, resolveImageUrl } from "./api";
 import { colors, radii } from "./theme";
 import {
   VariantEditor, VariantState, emptyVariantState, variantPayload, variantStateFrom,
@@ -65,6 +65,10 @@ export type RichProductEndpoints = {
   create: string;
   /** Function that returns the PATCH endpoint for UPDATE for a given id. */
   update: (id: string) => string;
+  /** GET endpoint for the FULL document (base64 cover + gallery) when
+   *  editing. List rows are slim, so without this the editor can't show or
+   *  preserve the existing photos. */
+  detail?: (id: string) => string;
 };
 
 const emptyStyled = (): StyledText => ({ text: "", bold: false, font_size: null, align: "left" });
@@ -578,6 +582,27 @@ export function RichProductEditor({
     setCustomCategory(!!e.category && !isPresetCat(e.category));
   }, [visible, existing?.id]);
 
+  // Sep 2026 — hydrate the FULL document when editing.
+  // List rows are slim: their `image_url` is a lazy-load thumbnail URL and
+  // `images` is dropped entirely. Seeding the form from that row meant the
+  // admin saw no cover before publishing and a save wiped the real photo.
+  // `endpoints.detail` (vendor: /vendor/me/products/{id},
+  // admin: /admin/products/{id}) returns the base64 cover + gallery.
+  useEffect(() => {
+    if (!visible || !existing?.id || !endpoints.detail) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get<any>(endpoints.detail!(existing.id!));
+        if (cancelled || !data) return;
+        if (typeof data.image_url === "string" && data.image_url) setImageUrl(data.image_url);
+        if (Array.isArray(data.images)) setGalleryImages(data.images);
+      } catch { /* keep the slim row — preview URLs are resolved for display */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, existing?.id]);
+
   // Jun 2026 — Cover picker is now MULTI-select.
   // Owner report: "vendor can only select 1 image for the main photo; if
   // they choose 5, put the rest in the gallery — and the picked image
@@ -592,6 +617,68 @@ export function RichProductEditor({
     setImageUrl(picked[0]);
     if (picked.length > 1) {
       setGalleryImages((prev) => [...prev, ...picked.slice(1)].slice(0, 10));
+    }
+  };
+
+  /**
+   * Sep 2026 — MULTI-shot camera capture (owner report: "take photo only
+   * lets me take one pic"). The first shot becomes the cover, every extra
+   * shot is appended to the gallery, and after each shot we ask whether to
+   * take another (up to the 10-image gallery cap).
+   */
+  const captureWithCamera = async (asCoverFirst: boolean) => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      if (!perm.canAskAgain) {
+        Alert.alert(
+          "Camera blocked",
+          "Allow camera access for Slangcart in Settings to photograph your products.",
+          [{ text: "Cancel" }, { text: "Open Settings", onPress: () => Linking.openSettings() }],
+        );
+      } else {
+        Alert.alert("Camera needed", "Please allow camera access to take a photo.");
+      }
+      return;
+    }
+    const { fitToTarget } = await import("./image-fitter");
+    let isFirst = asCoverFirst;
+    for (let i = 0; i < 10; i++) {
+      const r = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.9,
+        allowsEditing: false,
+        exif: false,
+      });
+      if (r.canceled || !r.assets?.[0]?.uri) return;
+      const asset = r.assets[0];
+      const fitted = await fitToTarget(asset.uri, "product_image", asset.width, asset.height, "cover");
+      if (!fitted) return;
+      if (isFirst) {
+        setImageUrl(fitted);
+        isFirst = false;
+      } else {
+        let full = false;
+        setGalleryImages((prev) => {
+          if (prev.length >= 10) { full = true; return prev; }
+          return [...prev, fitted];
+        });
+        if (full) {
+          Alert.alert("Limit reached", "You can keep up to 10 gallery images.");
+          return;
+        }
+      }
+      const again = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          "Photo added",
+          "Take another photo of this product?",
+          [
+            { text: "Done", style: "cancel", onPress: () => resolve(false) },
+            { text: "Take another", onPress: () => resolve(true) },
+          ],
+          { cancelable: false },
+        );
+      });
+      if (!again) return;
     }
   };
 
@@ -612,32 +699,14 @@ export function RichProductEditor({
     }
     Alert.alert(
       "Add cover image",
-      "Take a fresh photo or pick one from your gallery.",
+      "Take fresh photos or pick from your gallery.",
       [
         {
           text: "Take photo",
           onPress: async () => {
             setPicking(true);
             try {
-              const perm = await ImagePicker.requestCameraPermissionsAsync();
-              if (!perm.granted) {
-                Alert.alert("Camera needed", "Please allow camera access to take a photo.");
-                return;
-              }
-              const r = await ImagePicker.launchCameraAsync({
-                mediaTypes: ImagePicker.MediaTypeOptions.Images,
-                quality: 0.9,
-                allowsEditing: false,
-                exif: false,
-              });
-              if (r.canceled || !r.assets?.[0]?.uri) return;
-              const asset = r.assets[0];
-              const { fitToTarget } = await import("./image-fitter");
-              const fitted = await fitToTarget(
-                asset.uri, "product_image",
-                asset.width, asset.height, "cover",
-              );
-              if (fitted) setImageUrl(fitted);
+              await captureWithCamera(true);
             } catch (e) {
               Alert.alert("Camera failed", formatApiError(e));
             } finally { setPicking(false); }
@@ -665,11 +734,38 @@ export function RichProductEditor({
       Alert.alert("Limit reached", "You can upload up to 10 gallery images.");
       return;
     }
-    try {
-      // Jun 2026 — multi-select: pick several gallery photos in one pass.
+    const fromLibrary = async () => {
       const { pickAndFitImages } = await import("./image-fitter");
       const picked = await pickAndFitImages("product_image", room);
-      if (picked.length) setGalleryImages([...galleryImages, ...picked].slice(0, 10));
+      if (picked.length) setGalleryImages((prev) => [...prev, ...picked].slice(0, 10));
+    };
+    try {
+      if (Platform.OS === "web") { await fromLibrary(); return; }
+      Alert.alert(
+        "Add gallery images",
+        "Take photos with the camera or pick from your gallery.",
+        [
+          {
+            text: "Take photos",
+            onPress: async () => {
+              setPicking(true);
+              try { await captureWithCamera(false); }
+              catch (e) { Alert.alert("Camera failed", formatApiError(e)); }
+              finally { setPicking(false); }
+            },
+          },
+          {
+            text: "Choose from gallery",
+            onPress: async () => {
+              setPicking(true);
+              try { await fromLibrary(); }
+              catch (e) { Alert.alert("Image pick failed", formatApiError(e)); }
+              finally { setPicking(false); }
+            },
+          },
+          { text: "Cancel", style: "cancel" },
+        ],
+      );
     } catch (e) {
       Alert.alert("Image pick failed", formatApiError(e));
     }
@@ -1406,7 +1502,7 @@ export function RichProductEditor({
 
               <View style={{ flexDirection: "row", gap: 8 }}>
                 <TouchableOpacity onPress={onPickCover} style={[modalStyles.imagePick, { flex: 1 }]} testID="product-image-pick">
-                  {imageUrl ? <Image source={{ uri: imageUrl }} style={modalStyles.imagePickImg} /> : (
+                  {imageUrl ? <Image source={{ uri: resolveImageUrl(imageUrl) }} style={modalStyles.imagePickImg} /> : (
                     <View style={modalStyles.imagePickPlaceholder}>
                       {picking ? <ActivityIndicator color={colors.primary} /> : (
                         <>
@@ -1855,7 +1951,7 @@ export function RichProductEditor({
               <View style={sectionStyles.galleryGrid}>
                 {galleryImages.map((img, i) => (
                   <View key={i} style={sectionStyles.galleryItem}>
-                    <Image source={{ uri: img }} style={sectionStyles.galleryImg} />
+                    <Image source={{ uri: resolveImageUrl(img) }} style={sectionStyles.galleryImg} />
                     <TouchableOpacity
                       onPress={() => setGalleryImages(galleryImages.filter((_, j) => j !== i))}
                       style={sectionStyles.galleryRemove}

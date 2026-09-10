@@ -396,6 +396,7 @@ export default function AdminProducts() {
         endpoints={{
           create: "/admin/products",
           update: (id: string) => `/admin/products/${id}`,
+          detail: (id: string) => `/admin/products/${id}`,
         }}
       />
 
@@ -963,7 +964,7 @@ function ProductModal({ visible, existing, onClose, onSaved }: { visible: boolea
               testID="section-basics"
             >
               <TouchableOpacity onPress={onPickCover} style={modalStyles.imagePick} testID="product-image-pick">
-                {imageUrl ? <Image source={{ uri: imageUrl }} style={modalStyles.imagePickImg} /> : (
+                {imageUrl ? <Image source={{ uri: resolveImageUrl(imageUrl) }} style={modalStyles.imagePickImg} /> : (
                   <View style={modalStyles.imagePickPlaceholder}>
                     {picking ? <ActivityIndicator color={colors.primary} /> : (
                       <>
@@ -1041,7 +1042,7 @@ function ProductModal({ visible, existing, onClose, onSaved }: { visible: boolea
               <View style={sectionStyles.galleryGrid}>
                 {galleryImages.map((img, i) => (
                   <View key={i} style={sectionStyles.galleryItem}>
-                    <Image source={{ uri: img }} style={sectionStyles.galleryImg} />
+                    <Image source={{ uri: resolveImageUrl(img) }} style={sectionStyles.galleryImg} />
                     <TouchableOpacity
                       onPress={() => setGalleryImages(galleryImages.filter((_, j) => j !== i))}
                       style={sectionStyles.galleryRemove}

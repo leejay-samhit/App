@@ -133,6 +133,88 @@ async def geo_reverse(
     return _shape_nominatim(data)
 
 
+@router.get("/geo/resolve")
+async def geo_resolve(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    pincode: str = Query("", description="Pincode the device geocoder returned, if any"),
+):
+    """ONE place-resolution engine for the whole app (Sep 2026).
+
+    Both the customer "Deliver to" picker and the vendor delivery-zone /
+    profile map call this, so they can never disagree again. It also
+    VALIDATES the pincode against the local 19k-row `pincodes` catalogue —
+    Nominatim happily returns postcodes that don't exist in India Post data
+    (the owner saw 517500), which then matched no vendor at all.
+
+    Returns the address parts plus `pincode` (only ever a REAL one) and
+    `pincode_valid`.
+    """
+    candidates = []
+    clean = (pincode or "").strip()
+    if clean.isdigit() and len(clean) == 6:
+        candidates.append(clean)
+
+    place: Dict[str, Any] = {}
+    await _throttle()
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                f"{NOMINATIM_BASE}/reverse",
+                params={
+                    "lat": lat, "lon": lng,
+                    "format": "jsonv2",
+                    "addressdetails": 1,
+                    # zoom 18 = building level; postcodes are usually absent
+                    # at the old zoom 14, which is why the customer's pincode
+                    # never showed up in "Deliver to".
+                    "zoom": 18,
+                },
+                headers={"User-Agent": USER_AGENT, "Accept-Language": "en"},
+            )
+            r.raise_for_status()
+            place = _shape_nominatim(r.json())
+    except Exception as e:
+        logger.warning(f"geo/resolve reverse failed: {e}")
+
+    osm_pin = (place.get("pincode") or "").strip()
+    if osm_pin.isdigit() and len(osm_pin) == 6 and osm_pin not in candidates:
+        candidates.append(osm_pin)
+
+    valid_pin = ""
+    row: Dict[str, Any] = {}
+    for c in candidates:
+        found = await db.pincodes.find_one({"pincode": c}, {"_id": 0})
+        if found:
+            valid_pin, row = c, found
+            break
+
+    # NEVER invent a pincode. OSM/Nominatim happily returns postcodes that
+    # India Post never issued (the owner saw 517500 for Tirupati, whose real
+    # codes are 517501-517507). Writing those into the catalogue poisoned
+    # every later delivery-zone match, so an unverified code is simply
+    # reported back as `rejected_pincode`: the customer shop then matches
+    # vendors by GPS coordinates and the vendor form asks for a typed code.
+    area = place.get("area") or ""
+    city = place.get("city") or row.get("district") or ""
+    district = place.get("district") or row.get("district") or ""
+    state = place.get("state") or row.get("state") or ""
+    label = ", ".join([x for x in [area or city, state] if x]) or place.get("display_name") or ""
+    return {
+        "lat": lat,
+        "lng": lng,
+        "pincode": valid_pin,
+        "pincode_valid": bool(valid_pin),
+        "rejected_pincode": "" if valid_pin else (candidates[0] if candidates else ""),
+        "area": area,
+        "city": city,
+        "district": district,
+        "state": state,
+        "address": place.get("display_name") or "",
+        "label": f"{label} · {valid_pin}" if valid_pin else label,
+    }
+
+
 @router.get("/geo/pincode/{pincode}")
 async def geo_pincode(pincode: str):
     if not (pincode.isdigit() and 5 <= len(pincode) <= 6):

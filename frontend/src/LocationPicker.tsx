@@ -24,7 +24,7 @@
 import React, { useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, TextInput, ActivityIndicator, Alert, Linking } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import * as Location from "expo-location";
+import { captureCurrentPlace } from "./capture-location";
 import { colors, radii, spacing } from "./theme";
 
 export type LocationValue = {
@@ -62,43 +62,27 @@ export function LocationPicker({ value, onChange, title = "Location", hint, extr
   const captureLocation = async () => {
     setBusy(true);
     try {
-      const perm = await Location.requestForegroundPermissionsAsync();
-      if (perm.status !== "granted") {
-        setPermDenied(!perm.canAskAgain);
-        if (!perm.canAskAgain) {
-          Alert.alert(
-            "Location permission blocked",
-            "Enable location for this app in Settings so we can auto-fill your address.",
-            [{ text: "Cancel" }, { text: "Open Settings", onPress: () => Linking.openSettings() }],
-          );
-        } else {
-          Alert.alert("Location required", "Grant location permission to auto-fill your delivery address.");
-        }
-        return;
+      // Sep 2026 — shared engine (src/capture-location.ts): device geocode
+      // for pincode/city/state, then server-side validation so a
+      // non-existent pincode is never written into a delivery zone.
+      const place = await captureCurrentPlace();
+      if (!place) { setPermDenied(true); return; }
+      setPermDenied(false);
+      onChange({
+        latitude: place.lat,
+        longitude: place.lng,
+        pincode: place.pincode || value.pincode,
+        state: place.state || value.state,
+        district: place.district || value.district,
+        city: place.city || value.city,
+        address: place.address || value.address,
+      });
+      if (!place.pincode && place.rejectedPincode) {
+        Alert.alert(
+          "Check the pincode",
+          `${place.rejectedPincode} isn't in the postal list, so we left the field for you to type the correct one. Your GPS point is saved.`,
+        );
       }
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const { latitude, longitude } = pos.coords;
-      // Reverse-geocode on-device.  Returns 0..N candidates; the first
-      // is usually the best. `postalCode` maps to pincode in India.
-      let pincode = value.pincode;
-      let state = value.state;
-      let district = value.district;
-      let city = value.city;
-      let address = value.address;
-      try {
-        const rev = await Location.reverseGeocodeAsync({ latitude, longitude });
-        if (rev && rev.length > 0) {
-          const r0 = rev[0];
-          pincode = r0.postalCode || pincode;
-          state = r0.region || state;
-          district = r0.subregion || r0.district || district;
-          city = r0.city || r0.name || city;
-          // Build a nice one-line address if we didn't already have one.
-          const parts = [r0.name, r0.street, r0.district, r0.city, r0.postalCode].filter(Boolean);
-          if (!address && parts.length > 0) address = parts.join(", ");
-        }
-      } catch { /* reverse geocode is best-effort */ }
-      onChange({ latitude, longitude, pincode, state, district, city, address });
     } catch (e: any) {
       Alert.alert("Couldn't capture location", e?.message || "Please try again.");
     } finally { setBusy(false); }
