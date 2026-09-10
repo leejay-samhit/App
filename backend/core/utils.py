@@ -19,6 +19,10 @@ def serialize_user(u: Dict[str, Any]) -> Dict[str, Any]:
     u = dict(u)
     u.pop("_id", None)
     u.pop("password_hash", None)
+    # Never ship the reversible password copy (admin-only, read through
+    # /admin/users/{id}/password) or the internal session id to a client.
+    u.pop("password_recovery_ciphertext", None)
+    u.pop("_sid", None)
     return u
 
 

@@ -84,6 +84,15 @@ from core.config import (  # noqa: E402
     REFERRAL_GST_PCT,
     get_tier,
 )
+from core.password_recovery import password_fields  # noqa: E402
+
+# Assignable admin sub-roles. The four scoped ones are what the promote screen
+# offers now; manager/support/finance stay valid for admins promoted earlier.
+ADMIN_SUB_ROLES = (
+    "super_admin",
+    "products_manager", "layout_manager", "order_manager", "vendor_service_manager",
+    "manager", "support", "finance",
+)
 from core.security import (  # noqa: E402
     security,
     hash_password,
@@ -155,6 +164,9 @@ from routes import maintenance as maintenance_router  # noqa: E402
 from routes import chat_settings as chat_settings_router  # noqa: E402
 from routes import backup as backup_router  # noqa: E402
 from routes import delivery as delivery_router  # noqa: E402
+from routes import admin_passwords as admin_passwords_router  # noqa: E402
+from routes import login_history as login_history_router  # noqa: E402
+from core.login_history import record_login  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -280,7 +292,9 @@ async def register(request: Request, payload: RegisterRequest):
         "id": user_id,
         "name": payload.name.strip(),
         "email": email,
-        "password_hash": hash_password(payload.password),
+        # Sep 2026 — hash for login + Fernet copy so a super-admin can read
+        # the password back on a support call (see core/password_recovery).
+        **password_fields(payload.password),
         "phone": payload.phone,
         "role": "user",
         "admin_role": None,
@@ -441,6 +455,8 @@ async def login(request: Request, payload: LoginRequest):
         )
     except Exception:
         pass
+    # Device login history + new-device alert (never blocks sign-in).
+    await record_login(user, request, sid, method="password")
     return {"token": token, "refresh_token": refresh, "user": serialize_user(user)}
 
 
@@ -564,6 +580,7 @@ async def google_exchange(request: Request, payload: GoogleExchange):
     await register_session(user["id"], sid)
     token = create_access_token(user["id"], email, user.get("role", "user"), sid=sid)
     refresh = create_refresh_token(user["id"], sid)
+    await record_login(user, request, sid, method="google")
     return {"token": token, "refresh_token": refresh, "user": serialize_user(user), "is_new": is_new}
 
 
@@ -1976,7 +1993,7 @@ async def my_network(user: Dict[str, Any] = Depends(get_current_user), depth: in
     async def build_tree(uid: str, level: int) -> List[Dict[str, Any]]:
         if level >= depth:
             return []
-        children = await db.users.find({"sponsor_id": uid}, {"_id": 0, "password_hash": 0}).to_list(1000)
+        children = await db.users.find({"sponsor_id": uid}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}).to_list(1000)
         result = []
         for c in children:
             result.append({
@@ -2001,7 +2018,7 @@ async def update_bank(payload: BankUpdate, user: Dict[str, Any] = Depends(get_cu
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
     await db.users.update_one({"id": user["id"]}, {"$set": update})
-    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return fresh
 
 
@@ -2045,7 +2062,7 @@ async def update_profile_image(payload: ProfileImageUpload, user: Dict[str, Any]
             "profile_visibility": desired_vis,
         }},
     )
-    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return fresh
 
 
@@ -2055,7 +2072,7 @@ async def remove_profile_image(user: Dict[str, Any] = Depends(get_current_user))
         {"id": user["id"]},
         {"$unset": {"profile_image": "", "profile_image_updated_at": ""}},
     )
-    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return fresh
 
 
@@ -2123,7 +2140,7 @@ async def admin_list_users(
             {"phone": {"$regex": safe, "$options": "i"}},
             {"referral_code": {"$regex": safe, "$options": "i"}},
         ]
-    cursor = db.users.find(mongo_q, {"_id": 0, "password_hash": 0}).sort("created_at", -1)
+    cursor = db.users.find(mongo_q, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}).sort("created_at", -1)
     if limit and limit > 0:
         cursor = cursor.skip(max(0, offset)).limit(min(limit, 200))
         return await cursor.to_list(min(limit, 200))
@@ -2207,13 +2224,13 @@ async def admin_users_tree(
     depth = max(1, min(int(depth or 10), 10))
 
     if root_user_id:
-        root = await db.users.find_one({"id": root_user_id}, {"_id": 0, "password_hash": 0})
+        root = await db.users.find_one({"id": root_user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
         if not root:
             raise HTTPException(status_code=404, detail="Root user not found")
         roots = [root]
     else:
         # Admin is the matrix root.
-        admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "password_hash": 0})
+        admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
         roots: List[Dict[str, Any]] = []
         if admin:
             roots.append(admin)
@@ -2233,12 +2250,12 @@ async def admin_users_tree(
         if admin_id:
             # exclude admin itself, already a root
             orphans_q = {"$and": [orphans_q, {"id": {"$ne": admin_id}}]}
-        orphans_no_sp = await db.users.find(orphans_q, {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(2000)
+        orphans_no_sp = await db.users.find(orphans_q, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}).sort("created_at", 1).to_list(2000)
         # Users with stale sponsor_id (pointing to a deleted parent)
         stale_q: Dict[str, Any] = {"sponsor_id": {"$nin": list(all_user_ids) + [None, ""]}}
         if admin_id:
             stale_q = {"$and": [stale_q, {"id": {"$ne": admin_id}}]}
-        orphans_stale = await db.users.find(stale_q, {"_id": 0, "password_hash": 0}).sort("created_at", 1).to_list(2000)
+        orphans_stale = await db.users.find(stale_q, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}).sort("created_at", 1).to_list(2000)
         # De-dupe across both queries
         seen_root_ids = {r["id"] for r in roots}
         for o in (orphans_no_sp + orphans_stale):
@@ -2252,7 +2269,7 @@ async def admin_users_tree(
             return []
         children = await db.users.find(
             {"sponsor_id": uid},
-            {"_id": 0, "password_hash": 0},
+            {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
         ).sort("created_at", 1).to_list(2000)
         out: List[Dict[str, Any]] = []
         for c in children:
@@ -2276,7 +2293,7 @@ async def admin_user_lineage(user_id: str, _: Dict[str, Any] = Depends(require_a
     """Return the upline chain (sponsor → sponsor's sponsor → … → root) for a user,
     plus their direct downlines (1 level). Useful for a 'Who's above and below'
     quick view on any single user."""
-    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     # Walk upline by sponsor_id (more reliable than referral_code, also handles
@@ -2286,7 +2303,7 @@ async def admin_user_lineage(user_id: str, _: Dict[str, Any] = Depends(require_a
     seen = {u["id"]}
     while cur.get("sponsor_id"):
         parent = await db.users.find_one(
-            {"id": cur["sponsor_id"]}, {"_id": 0, "password_hash": 0},
+            {"id": cur["sponsor_id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
         )
         if not parent or parent["id"] in seen:
             break
@@ -2297,7 +2314,7 @@ async def admin_user_lineage(user_id: str, _: Dict[str, Any] = Depends(require_a
 
     # Direct downlines (1st level only)
     directs = await db.users.find(
-        {"sponsor_id": user_id}, {"_id": 0, "password_hash": 0},
+        {"sponsor_id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
     ).sort("created_at", 1).to_list(2000)
     downline = [_slim_user_node(d) for d in directs]
 
@@ -3192,7 +3209,7 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot demote the last admin")
     await db.users.update_one({"id": user_id}, {"$set": update})
-    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     await _create_notification(user_id, "account", "Account updated", "Your account details were updated by admin.")
     if sensitive_fields & set(update.keys()):
         await _audit_log(admin, "admin.role_change", "user", user_id, {k: update[k] for k in sensitive_fields & set(update.keys())})
@@ -3354,7 +3371,7 @@ async def admin_reset_password(user_id: str, payload: AdminPasswordReset, _: Dic
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(payload.new_password)}})
+    await db.users.update_one({"id": user_id}, {"$set": password_fields(payload.new_password)})
     await _create_notification(user_id, "account", "Password reset", "Your password was reset by admin. Please log in again.")
     return {"ok": True}
 
@@ -3560,7 +3577,7 @@ async def admin_list_admins(_: Dict[str, Any] = Depends(require_admin)):
     """List all admin accounts. Visible to any admin (so they know who else has access)."""
     items = await db.users.find(
         {"role": "admin"},
-        {"_id": 0, "password_hash": 0, "kyc_aadhaar_front": 0, "kyc_aadhaar_back": 0, "kyc_pan_image": 0, "kyc_selfie": 0},
+        {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0, "kyc_aadhaar_front": 0, "kyc_aadhaar_back": 0, "kyc_pan_image": 0, "kyc_selfie": 0},
     ).sort("created_at", 1).to_list(2000)
     return items
 
@@ -3568,7 +3585,10 @@ async def admin_list_admins(_: Dict[str, Any] = Depends(require_admin)):
 @api_router.post("/admin/admins")
 async def admin_create_admin(payload: AdminCreate, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
     """Create a new admin account directly (no public registration)."""
-    if payload.admin_role not in ("super_admin", "manager", "support", "finance"):
+    # Sep 2026 — scoped manager roles replace the old generic manager/support
+    # ones for NEW promotions; existing manager/support/finance admins keep
+    # working, so both sets are accepted here.
+    if payload.admin_role not in ADMIN_SUB_ROLES:
         raise HTTPException(status_code=400, detail="Invalid admin_role")
     email = payload.email.lower().strip()
     if await db.users.find_one({"email": email}):
@@ -3613,14 +3633,17 @@ async def admin_create_admin(payload: AdminCreate, admin: Dict[str, Any] = Depen
     }
     await db.users.insert_one(new_admin)
     await _audit_log(admin, "admin.create", "user", user_id, {"email": email, "admin_role": payload.admin_role})
-    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return fresh
 
 
 @api_router.post("/admin/users/{user_id}/promote")
 async def admin_promote_user(user_id: str, payload: PromoteRequest, admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
     """Promote an existing user to admin with a sub-role."""
-    if payload.admin_role not in ("super_admin", "manager", "support", "finance"):
+    # Sep 2026 — scoped manager roles replace the old generic manager/support
+    # ones for NEW promotions; existing manager/support/finance admins keep
+    # working, so both sets are accepted here.
+    if payload.admin_role not in ADMIN_SUB_ROLES:
         raise HTTPException(status_code=400, detail="Invalid admin_role")
     target = await db.users.find_one({"id": user_id})
     if not target:
@@ -3633,7 +3656,7 @@ async def admin_promote_user(user_id: str, payload: PromoteRequest, admin: Dict[
     )
     await _audit_log(admin, "admin.promote", "user", user_id, {"admin_role": payload.admin_role})
     await _create_notification(user_id, "account", "Promoted to admin", f"You have been granted {payload.admin_role} access.")
-    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return fresh
 
 
@@ -3657,7 +3680,7 @@ async def admin_demote_user(user_id: str, admin: Dict[str, Any] = Depends(requir
     await db.users.update_one({"id": user_id}, {"$set": {"role": "user", "admin_role": None}})
     await _audit_log(admin, "admin.demote", "user", user_id)
     await _create_notification(user_id, "account", "Admin access revoked", "Your admin access has been removed.")
-    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return fresh
 
 
@@ -4497,6 +4520,35 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 "created_at": ts_now,
             })
 
+        # ── Sep 2026 — ORDER NOTIFICATIONS (bell + phone push) ──────────
+        # The buyer and vendor already get bell rows further down; what was
+        # missing was (a) any notification for ADMINS and (b) a phone push
+        # for anyone, which is why "order notifications not coming" was
+        # reported across the board.
+        try:
+            push_targets = [user["id"]]
+            if vendor_id:
+                push_targets.append(vendor_id)
+            if admin_doc:
+                await _create_notification(
+                    admin_doc["id"], "order", "New order",
+                    f"{order_number} · ₹{sub_total:.0f} from {user.get('name') or user.get('email')}",
+                    extra={"order_id": order_id, "action_url": "/admin/orders"},
+                )
+                push_targets.append(admin_doc["id"])
+            from routes.push import send_push
+            await send_push(
+                recipients=push_targets,
+                data={
+                    "title": f"🛒 Order {order_number}",
+                    "message": f"₹{sub_total:.0f} · {len(vitems)} item(s)",
+                    "action_url": f"/orders/{order_id}",
+                },
+                idempotency_key=f"order-new-{order_id}",
+            )
+        except Exception as e:
+            logging.warning(f"order notification failed (non-blocking): {e}")
+
         # Platform margin + vendor payout are credited immediately ONLY
         # when the sub-order is fully prepaid from the wallet.  Anything
         # carrying a cash-on-delivery balance defers until delivery is
@@ -4653,7 +4705,7 @@ async def submit_kyc(payload: KYCSubmit, user: Dict[str, Any] = Depends(get_curr
 @api_router.get("/users/me/kyc")
 async def my_kyc(user: Dict[str, Any] = Depends(get_current_user)):
     # Re-fetch to include image fields not in cached dependency
-    u = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0}) or user
+    u = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}) or user
     return {
         "status": u.get("kyc_status", "none"),
         "full_name": u.get("kyc_full_name"),
@@ -4681,7 +4733,7 @@ async def admin_list_kyc(_: Dict[str, Any] = Depends(require_admin), status: Opt
     # Exclude heavy base64 image fields from list — fetch via /admin/kyc/{id} for detail.
     projection = {
         "_id": 0,
-        "password_hash": 0,
+        "password_hash": 0, "password_recovery_ciphertext": 0,
         "kyc_aadhaar_front": 0,
         "kyc_aadhaar_back": 0,
         "kyc_pan_image": 0,
@@ -4713,7 +4765,7 @@ async def admin_list_kyc(_: Dict[str, Any] = Depends(require_admin), status: Opt
 
 @api_router.get("/admin/kyc/{user_id}")
 async def admin_get_kyc_detail(user_id: str, _: Dict[str, Any] = Depends(require_admin)):
-    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     return {
@@ -4828,7 +4880,7 @@ async def admin_list_approvals(
     if status != "all":
         q["approval_status"] = status
     projection = {
-        "_id": 0, "password_hash": 0,
+        "_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0,
         "kyc_aadhaar_front": 0, "kyc_aadhaar_back": 0, "kyc_pan_image": 0, "kyc_selfie": 0,
         "extra_docs": 0,
     }
@@ -4852,7 +4904,7 @@ async def admin_list_approvals_today(_: Dict[str, Any] = Depends(require_admin))
     today = now_utc().date().isoformat()
     items = await db.users.find(
         {"role": "user", "created_at": {"$regex": f"^{today}"}},
-        {"_id": 0, "password_hash": 0,
+        {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0,
          "kyc_aadhaar_front": 0, "kyc_aadhaar_back": 0, "kyc_pan_image": 0, "kyc_selfie": 0,
          "extra_docs": 0},
     ).sort("created_at", -1).to_list(500)
@@ -4869,7 +4921,7 @@ async def admin_list_approvals_today(_: Dict[str, Any] = Depends(require_admin))
 
 @api_router.get("/admin/approvals/{user_id}")
 async def admin_get_approval_detail(user_id: str, _: Dict[str, Any] = Depends(require_admin)):
-    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     sp = None
@@ -5120,7 +5172,9 @@ async def admin_create_user(
         "id": user_id,
         "name": payload.name.strip(),
         "email": email,
-        "password_hash": hash_password(payload.password),
+        # Sep 2026 — hash for login + Fernet copy so a super-admin can read
+        # the password back on a support call (see core/password_recovery).
+        **password_fields(payload.password),
         "phone": payload.phone,
         "role": "user",
         "admin_role": None,
@@ -5768,7 +5822,7 @@ async def get_system_wallet_transactions(
         )
         rows = await db.transactions.find(
             {"user_id": a["id"], "type": {"$in": list(set(types))}, "status": "success"},
-            {"_id": 0, "password_hash": 0},
+            {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
         ).sort("created_at", -1).limit(limit).to_list(limit)
         subtotal = round(sum(float(r.get("amount") or 0) for r in rows), 2)
         return {"bucket": bucket, "subtotal": subtotal, "count": len(rows), "items": rows}
@@ -5784,7 +5838,7 @@ async def get_system_wallet_transactions(
                     {"type": "withdrawal", "status": "success"},
                 ],
             },
-            {"_id": 0, "password_hash": 0},
+            {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
         ).sort("created_at", -1).limit(limit)
         rows: List[Dict[str, Any]] = await cursor.to_list(limit)
         # Enrich with user email/name (best-effort, batched)
@@ -5809,7 +5863,7 @@ async def get_system_wallet_transactions(
         raise HTTPException(status_code=400, detail=f"Unknown bucket: {bucket}")
     rows = await db.transactions.find(
         {"user_id": a["id"], "type": {"$in": types}, "status": "success"},
-        {"_id": 0, "password_hash": 0},
+        {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
     ).sort("created_at", -1).limit(limit).to_list(limit)
     # Subtotal of the visible rows (informational; differs from bucket total
     # if more rows exist beyond the limit).
@@ -6206,6 +6260,28 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         )
     elif payload.status != "cancelled":
         await _create_notification(order["user_id"], "order", f"Order {payload.status}", f"Your order is now {payload.status}.")
+        # Sep 2026 — also push it to the phone, and tell the vendor.
+        try:
+            from routes.push import send_push
+            targets = [order["user_id"]]
+            if order.get("vendor_id"):
+                await _create_notification(
+                    order["vendor_id"], "vendor", f"Order {payload.status}",
+                    f"{order.get('order_number') or order['id'][:8]} is now {payload.status}.",
+                    extra={"order_id": order["id"], "action_url": "/vendor/orders"},
+                )
+                targets.append(order["vendor_id"])
+            await send_push(
+                recipients=targets,
+                data={
+                    "title": f"📦 Order {payload.status}",
+                    "message": f"{order.get('order_number') or ''} is now {payload.status}.",
+                    "action_url": f"/orders/{order['id']}",
+                },
+                idempotency_key=f"order-status-{order['id']}-{payload.status}",
+            )
+        except Exception as e:
+            logging.warning(f"order status push failed (non-blocking): {e}")
     await _audit_log(admin, "order.status", "order", order_id, {"status": payload.status, "prev": prev_status})
     return {"ok": True}
 
@@ -6716,7 +6792,7 @@ async def admin_export(
 ):
     if kind == "users":
         rows = await db.users.find(
-            _users_source_query(source), {"_id": 0, "password_hash": 0},
+            _users_source_query(source), {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
         ).sort("created_at", -1).to_list(20000)
         # Human-readable join source + approval columns (June-2026 request).
         SRC_LABEL = {
@@ -6877,7 +6953,7 @@ async def seed_admin():
         if not verify_password(ADMIN_PASSWORD, existing["password_hash"]):
             await db.users.update_one(
                 {"email": ADMIN_EMAIL.lower()},
-                {"$set": {"password_hash": hash_password(ADMIN_PASSWORD)}},
+                {"$set": password_fields(ADMIN_PASSWORD)},
             )
         # Backfill admin_role for legacy admin
         if not existing.get("admin_role"):
@@ -7043,7 +7119,7 @@ async def _find_spillover_under(parent: Dict[str, Any]) -> Optional[Dict[str, An
                 "role": {"$ne": "admin"},
                 "email": {"$ne": ADMIN_EMAIL.lower()},
             },
-            {"_id": 0, "password_hash": 0},
+            {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
         ).sort("created_at", 1).to_list(5000)
         if not children:
             break
@@ -7676,6 +7752,9 @@ async def _background_init():
             await db.audit_logs.create_index([("created_at", -1)], name="ix_audit_created")
             await db.audit_logs.create_index([("admin_id", 1)], name="ix_audit_admin")
             await db.security_events.create_index([("created_at", -1)], name="ix_sec_created")
+            await db.login_history.create_index(
+                [("user_id", 1), ("created_at", -1)], name="ix_loginhist_user_created",
+            )
             await db.security_events.create_index(
                 [("email", 1), ("created_at", -1)], name="ix_sec_email_created",
             )
@@ -10565,7 +10644,7 @@ async def update_my_address(payload: AddressUpdateRequest, user: Dict[str, Any] 
         raise HTTPException(status_code=400, detail="Nothing to update")
     update["address_updated_at"] = now_utc().isoformat()
     await db.users.update_one({"id": user["id"]}, {"$set": update})
-    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return {"ok": True, "user": fresh}
 
 
@@ -10640,6 +10719,8 @@ app.include_router(maintenance_router.router, prefix="/api")
 app.include_router(chat_settings_router.router, prefix="/api")
 app.include_router(backup_router.router, prefix="/api")
 app.include_router(delivery_router.router, prefix="/api")
+app.include_router(admin_passwords_router.router, prefix="/api")
+app.include_router(login_history_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

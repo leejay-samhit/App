@@ -242,7 +242,18 @@ export default function DashboardScreen() {
                 </View>
               )}
             </TouchableOpacity>
-            <View style={styles.avatar}><Text style={styles.avatarText}>{(user?.name || "U").charAt(0).toUpperCase()}</Text></View>
+            <TouchableOpacity
+              onPress={() => router.push("/(tabs)/profile")}
+              style={styles.avatar}
+              testID="dashboard-avatar"
+              accessibilityRole="button"
+              accessibilityLabel="Open profile"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.avatarText} pointerEvents="none">
+                {(user?.name || "U").charAt(0).toUpperCase()}
+              </Text>
+            </TouchableOpacity>
           </View>
         </Animated.View>
 

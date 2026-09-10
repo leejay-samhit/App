@@ -3,6 +3,11 @@ import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
+import { useAuth } from "../../src/auth";
+import { SCOPED_ADMIN_ROLES } from "../../src/admin-roles";
+
+/** Sep 2026 — scoped manager roles see ONLY their own section. */
+const SCOPED_ROLES = SCOPED_ADMIN_ROLES;
 
 /**
  * ╔════════════════════════════════════════════════════════════════════╗
@@ -25,9 +30,15 @@ export default function AdminLayout() {
   // Lift the tab bar above the device's navigation buttons (Android 3-button
   // nav bar / gesture pill / iOS home indicator) with a comfortable gap.
   const bottomPad = Math.max(insets.bottom, Platform.OS === "ios" ? 28 : 18);
+  const { user } = useAuth();
+  // A promoted Products / Layout / Order / Vendor-Service manager is NOT a
+  // full admin: their tab bar is just their own section + profile, and the
+  // backend blocks everything else (core/security.ADMIN_AREAS).
+  const scoped = SCOPED_ROLES.includes(String((user as any)?.admin_role || ""));
+  const tab = (visible: boolean, options: any) => (visible ? options : { href: null });
   return (
     <Tabs
-      initialRouteName="shop"
+      initialRouteName={scoped ? "manager-home" : "shop"}
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.accent,
@@ -45,15 +56,22 @@ export default function AdminLayout() {
         tabBarItemStyle: { paddingVertical: 4 },
       }}
     >
-      <Tabs.Screen name="home" options={{ title: "Home", tabBarIcon: ({ color, size }) => <Feather name="grid" size={size} color={color} /> }} />
-      <Tabs.Screen name="users" options={{ title: "Users", tabBarIcon: ({ color, size }) => <Feather name="users" size={size} color={color} /> }} />
-      <Tabs.Screen name="shop" options={{ title: "Shop", tabBarIcon: ({ color, size }) => <Feather name="shopping-bag" size={size} color={color} /> }} />
-      <Tabs.Screen name="payouts" options={{ title: "Payouts", tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="currency-inr" size={size} color={color} /> }} />
-      <Tabs.Screen name="wallet" options={{ title: "Wallet", tabBarIcon: ({ color, size }) => <Feather name="credit-card" size={size} color={color} /> }} />
-      <Tabs.Screen name="more" options={{ title: "More", tabBarIcon: ({ color, size }) => <Feather name="more-horizontal" size={size} color={color} /> }} />
+      <Tabs.Screen name="home" options={tab(!scoped, { title: "Home", tabBarIcon: ({ color, size }: any) => <Feather name="grid" size={size} color={color} /> })} />
+      <Tabs.Screen name="users" options={tab(!scoped, { title: "Users", tabBarIcon: ({ color, size }: any) => <Feather name="users" size={size} color={color} /> })} />
+      <Tabs.Screen name="shop" options={tab(!scoped, { title: "Shop", tabBarIcon: ({ color, size }: any) => <Feather name="shopping-bag" size={size} color={color} /> })} />
+      <Tabs.Screen name="payouts" options={tab(!scoped, { title: "Payouts", tabBarIcon: ({ color, size }: any) => <MaterialCommunityIcons name="currency-inr" size={size} color={color} /> })} />
+      <Tabs.Screen name="wallet" options={tab(!scoped, { title: "Wallet", tabBarIcon: ({ color, size }: any) => <Feather name="credit-card" size={size} color={color} /> })} />
+      <Tabs.Screen name="more" options={tab(!scoped, { title: "More", tabBarIcon: ({ color, size }: any) => <Feather name="more-horizontal" size={size} color={color} /> })} />
+      <Tabs.Screen
+        name="manager-home"
+        options={tab(scoped, { title: "My section", tabBarIcon: ({ color, size }: any) => <Feather name="grid" size={size} color={color} /> })}
+      />
       <Tabs.Screen name="transactions" options={{ href: null }} />
       <Tabs.Screen name="settings" options={{ href: null }} />
-      <Tabs.Screen name="profile" options={{ href: null }} />
+      <Tabs.Screen
+        name="profile"
+        options={tab(scoped, { title: "Profile", tabBarIcon: ({ color, size }: any) => <Feather name="user" size={size} color={color} /> })}
+      />
       <Tabs.Screen name="kyc" options={{ href: null }} />
       <Tabs.Screen name="orders" options={{ href: null }} />
       <Tabs.Screen name="audit" options={{ href: null }} />

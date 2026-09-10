@@ -913,3 +913,62 @@ vendor reset, all three wipe-all guards) PASS; chat/fee flow script PASS
 `test_iter66_layout_payload.py` PASS; browser: free-tier dashboard now shows
 My orders + recent orders, Reset centre 3 tabs with per-account (3 records)
 and whole-app (920 records) manifests and the download gate.
+
+---
+
+## Sep 2026 — Sub-role landing, device login history, dashboard avatar (iteration 68)
+
+### Device login history + new-device alerts (NEW)
+- `core/login_history.py` — `record_login(user, request, sid, method)` writes a
+  `login_history` row on every sign-in (password + Google) using the
+  `X-Device-FP` fingerprint the app already sends, a new `X-Device-Name`
+  label (expo-device model · OS, or a browser name on web), IP, session id and
+  `method`. Capped at the newest 50 rows per user, indexed on
+  `(user_id, created_at)`.
+- A fingerprint the account has never used raises an **alert**: an in-app
+  notification "New device signed in" (kind `security`, `action_url
+  /login-history`) plus a best-effort push. The FIRST login on an account is
+  deliberately NOT alerted.
+- `routes/login_history.py`:
+  `GET /api/users/me/login-history` (rows + `is_current` / `is_active` /
+  `active_devices`), `POST /api/users/me/login-history/{id}/revoke`
+  (400 if it's this device), `POST /api/users/me/login-history/revoke-others`
+  (keeps the caller alive), `GET /api/admin/users/{id}/login-history`
+  (super_admin only).
+- `get_current_user` now exposes the token's sid as `user["_sid"]` so those
+  routes can tell "this device" apart; `serialize_user` strips `_sid` **and**
+  `password_recovery_ciphertext` (the Fernet copy used to ride along on
+  `/auth/me`).
+- UI: `app/login-history.tsx` — device rows with platform icon, time, IP,
+  "THIS DEVICE" / "SIGNED IN" pills, per-row Sign out and "Sign out all other
+  devices". Reachable from Profile → **Login activity**.
+
+### Scoped manager landing bug (was: 403 straight after login)
+- `login.tsx` sent every admin to `/admin/home` and `index.tsx` to
+  `/admin/shop` — both hidden and API-blocked for the four scoped manager
+  roles, so a promoted manager landed on a dead screen. New shared
+  `src/admin-roles.ts` (`SCOPED_ADMIN_ROLES`, `isScopedAdmin`, `adminLanding`)
+  is now the single source for the tab layout AND both redirects → managers
+  land on `/admin/manager-home`.
+- `admin/admins.tsx` no longer resets the role picker to the legacy
+  `manager` value after creating/promoting.
+- `ADMIN_AREAS` entries may now be **method-scoped** (`"GET /admin/products"`).
+  Used so a Shop Layout manager can pick products into blocks while still
+  being unable to create, edit or publish a product.
+
+### Dashboard avatar
+The top-right initials circle was a plain `View`. It is now a 44×44
+TouchableOpacity → `/(tabs)/profile` with `hitSlop` and
+`pointerEvents="none"` on the inner `Text` (RN-web swallowed the tap on the
+nested text node).
+
+### Verified
+`tests/test_iter68_login_history.py` 17/17 PASS (login history + revoke rules,
+new-device notification only on the 2nd fingerprint, all four scoped roles
+own-area-200/others-403, layout_manager GET products 200 / POST 403, password
+reveal 403 for managers, `/auth/me` leak check, multi-vendor split
+`SC-…-1`/`SC-…-2`). Browser: `/login-history` renders with the THIS DEVICE
+pill, `manager-home` shows only "My section"+"Profile" tabs, My Orders shows
+the "1 checkout · 2 sellers" group with both sub-orders, and the dashboard
+avatar now navigates to Profile.
+Seed: `tests/seed_iter67_managers.py` (4 manager logins, `Manager@123`).

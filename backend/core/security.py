@@ -276,6 +276,9 @@ async def get_current_user(
             # Fingerprint observation must never break the request.
             pass
 
+        # Expose the token's session id to routes that manage devices
+        # (routes/login_history.py). Stripped by serialize_user.
+        user["_sid"] = token_sid or ""
         return user
     except HTTPException:
         raise
@@ -285,14 +288,74 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-async def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+ADMIN_AREAS: Dict[str, Any] = {
+    # Sep 2026 — scoped manager roles. A promoted user gets access to ONE
+    # area of the admin panel and nothing else (owner's requirement: "don't
+    # show all the admin available features"). `super_admin` keeps everything.
+    #
+    # Each entry lists the URL fragments that belong to that area; the guard
+    # below matches the request path against them, so every current AND future
+    # admin endpoint in that area is covered without touching each route.
+    # An entry may be prefixed with a method ("GET /admin/products") to grant
+    # read-only access to a neighbouring area a screen needs to function.
+    "products_manager": [
+        "/admin/products", "/admin/product", "/admin/bulk-products", "/admin/categories",
+        "/admin/shop-categories", "/admin/brands", "/admin/ai-tools", "/admin/master-products",
+    ],
+    "layout_manager": [
+        "/admin/shop-layout", "/admin/promo-banners", "/admin/branding", "/admin/shop-categories",
+        # The layout builder picks products into blocks — read-only, so a
+        # layout manager still cannot create, edit or publish a product.
+        "GET /admin/products",
+    ],
+    "order_manager": [
+        "/admin/orders", "/admin/order", "/admin/export", "/admin/invoices", "/admin/sales",
+    ],
+    "vendor_service_manager": [
+        "/admin/users/pending", "/admin/registrations", "/admin/approved-registrations",
+        "/admin/rejected-registrations", "/admin/vendors", "/admin/vendor",
+        "/admin/services", "/admin/service", "/admin/kyc", "/admin/approvals",
+    ],
+}
+
+# Endpoints every admin needs just to open the panel / see themselves.
+ADMIN_COMMON_PATHS = (
+    "/admin/settings", "/admin/me", "/admin/stats", "/admin/dashboard",
+    "/admin/notifications", "/admin/branding",
+)
+
+
+async def require_admin(request: Request, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+    sub = user.get("admin_role") or "super_admin"
+    allowed = ADMIN_AREAS.get(sub)
+    if allowed is not None:
+        path = request.url.path
+        method = request.method.upper()
+
+        def _matches(rule: str) -> bool:
+            if " " in rule:
+                want_method, frag = rule.split(" ", 1)
+                return method == want_method.upper() and frag in path
+            return rule in path
+
+        if not (any(_matches(p) for p in allowed) or any(p in path for p in ADMIN_COMMON_PATHS)):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your admin role ({sub.replace('_', ' ')}) doesn't cover this section.",
+            )
     return user
 
 
 def require_admin_role(*allowed: str):
-    """Restrict an endpoint to specific admin sub-roles (super_admin, manager, support, finance)."""
+    """Restrict an endpoint to specific admin sub-roles.
+
+    Sep 2026 — the scoped manager roles (products / layout / order /
+    vendor+service) are NOT super admins, so anything marked
+    `require_admin_role("super_admin")` stays out of their reach; their own
+    area is granted by the path check in `require_admin` above.
+    """
     async def checker(admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
         sub = admin.get("admin_role") or "super_admin"  # legacy admins default super
         if sub not in allowed:

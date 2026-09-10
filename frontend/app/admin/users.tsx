@@ -659,6 +659,33 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
     onRequestDelete(user);
   };
 
+  // Password reveal / reset (super admin only, audited server-side).
+  const [shownPassword, setShownPassword] = useState<string | null>(null);
+  const [pwNote, setPwNote] = useState("");
+  const [pwBusy, setPwBusy] = useState<"" | "show" | "reset">("");
+
+  const revealPassword = async () => {
+    setPwBusy("show"); setPwNote("");
+    try {
+      const { data } = await api.get<any>(`/admin/users/${user.id}/password`);
+      setShownPassword(data.password);
+    } catch (e: any) {
+      setShownPassword(null);
+      setPwNote(formatApiError(e));
+    } finally { setPwBusy(""); }
+  };
+
+  const resetPassword = async () => {
+    setPwBusy("reset"); setPwNote("");
+    try {
+      const { data } = await api.post<any>(`/admin/users/${user.id}/password/reset-reveal`, {});
+      setShownPassword(data.password);
+      setPwNote("New password set — share it with the user.");
+    } catch (e: any) {
+      setPwNote(formatApiError(e));
+    } finally { setPwBusy(""); }
+  };
+
   const isSelf = currentAdminId === user.id;
 
   return (
@@ -683,6 +710,47 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
             <Field label="Name"><TextInput testID="edit-name" value={name} onChangeText={setName} style={modalStyles.input} placeholderTextColor={colors.textMuted} /></Field>
             <Field label="Email"><TextInput testID="edit-email" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" style={modalStyles.input} placeholderTextColor={colors.textMuted} /></Field>
             <Field label="Phone"><TextInput testID="edit-phone" value={phone} onChangeText={setPhone} keyboardType="phone-pad" style={modalStyles.input} placeholderTextColor={colors.textMuted} /></Field>
+
+            {/* ── Sep 2026 — PASSWORD (owner request) ──────────────────
+                Logins stay bcrypt-hashed; a super admin can read the
+                password back because we also keep an encrypted copy from the
+                moment it is set. Accounts whose password predates this get a
+                clear message and the one-tap reset instead. */}
+            <Text style={modalStyles.section}>PASSWORD</Text>
+            <View style={modalStyles.pwCard}>
+              {shownPassword ? (
+                <View style={modalStyles.pwRow}>
+                  <Text style={modalStyles.pwValue} selectable testID="edit-password-value">{shownPassword}</Text>
+                  <TouchableOpacity onPress={() => setShownPassword(null)} style={modalStyles.pwHide}>
+                    <Feather name="eye-off" size={15} color={colors.textMuted} />
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <Text style={modalStyles.labelHint}>
+                  {pwNote || "Hidden. Tap “Show password” to reveal it, or set a new one and share it with the user."}
+                </Text>
+              )}
+              <View style={modalStyles.pwBtnRow}>
+                <TouchableOpacity
+                  onPress={revealPassword}
+                  disabled={pwBusy !== ""}
+                  style={[modalStyles.pwBtn, pwBusy !== "" && { opacity: 0.5 }]}
+                  testID="edit-password-show"
+                >
+                  {pwBusy === "show" ? <ActivityIndicator size="small" color={colors.primary} /> : <Feather name="eye" size={14} color={colors.primary} />}
+                  <Text style={modalStyles.pwBtnText}>Show password</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={resetPassword}
+                  disabled={pwBusy !== ""}
+                  style={[modalStyles.pwBtn, modalStyles.pwBtnSolid, pwBusy !== "" && { opacity: 0.5 }]}
+                  testID="edit-password-reset"
+                >
+                  {pwBusy === "reset" ? <ActivityIndicator size="small" color="#fff" /> : <Feather name="refresh-cw" size={14} color="#fff" />}
+                  <Text style={[modalStyles.pwBtnText, { color: "#fff" }]}>Reset &amp; reveal</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
 
             <Text style={modalStyles.section}>ROLE & STATUS</Text>
             <View style={modalStyles.row}>
@@ -1302,6 +1370,25 @@ const styles = StyleSheet.create({
 });
 
 const modalStyles = StyleSheet.create({
+  pwCard: {
+    backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1,
+    borderColor: colors.border, padding: 12, gap: 10, marginBottom: 8,
+  },
+  pwRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  pwValue: {
+    flex: 1, fontSize: 16, fontWeight: "800", color: colors.textMain,
+    letterSpacing: 1, backgroundColor: colors.surfaceMuted,
+    paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10,
+  },
+  pwHide: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+  pwBtnRow: { flexDirection: "row", gap: 8 },
+  pwBtn: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    minHeight: 44, borderRadius: radii.button, borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.surfaceMuted,
+  },
+  pwBtnSolid: { backgroundColor: colors.primary, borderColor: colors.primary },
+  pwBtnText: { fontSize: 12.5, fontWeight: "800", color: colors.primary },
   safe: { flex: 1, backgroundColor: colors.background },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.screen, paddingBottom: 8 },
   iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },

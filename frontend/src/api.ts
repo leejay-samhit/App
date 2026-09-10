@@ -1,7 +1,7 @@
 import axios, { AxiosError, AxiosRequestConfig } from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-import { getDeviceFingerprint } from "./device";
+import { getDeviceFingerprint, getDeviceName } from "./device";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -45,6 +45,15 @@ api.interceptors.request.use(async (config) => {
       (config.headers as any)["X-Device-FP"] = fp;
     }
   } catch { /* fingerprint failure must never break the request */ }
+  try {
+    // Human device label so "Login activity" can name the device
+    // ("Samsung SM-G991B · Android") instead of a raw user-agent.
+    const name = getDeviceName();
+    if (name) {
+      config.headers = config.headers || {};
+      (config.headers as any)["X-Device-Name"] = name;
+    }
+  } catch { /* label is cosmetic — never break the request */ }
   return config;
 });
 

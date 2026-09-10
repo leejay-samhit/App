@@ -1,0 +1,47 @@
+{
+  "summary": "Iteration 68 — Backend 17/17 pytest PASS covering: login-history CRUD + revoke-single/revoke-others behaviour, NEW-device notification alert, super-admin-only /admin/users/{id}/login-history (403 for scoped managers), scoped RBAC (products/layout/order/vendor_service managers can hit only their own area, everything else 403), NEW method-scoped rule (layout_manager GETs /admin/products but POST/PATCH/DELETE 403), password reveal + reset-reveal super-admin flow with login using new password, /auth/me strips password_recovery_ciphertext AND _sid, multi-vendor checkout splits into SC-<ref>-1 / SC-<ref>-2 orders. Frontend verified: (a) /login-history renders 'Login activity' title, THIS DEVICE pill, and 'Sign out all other devices' bigBtn (testID login-signout-others) — button correctly disabled when only 1 active device; (b) /admin/manager-home for productsmanager@test.com shows LIMITED ACCESS card + only 'My section' + 'Profile' tabs at bottom (no Home/Users/Shop/Payouts) — matches the requested scoped-manager landing; (c) /orders for testbuyer PERFECTLY renders the multi-vendor split: '1 checkout · 2 sellers' group header, '₹350 total · each seller ships and updates separately', 'Test Vendor · SC-9D8B50-1 · Order 1 of 2' at ₹100, 'Vendor Two Store · SC-9D8B50-2 · Order 2 of 2' at ₹250, with each card having its own Placed→Shipped→Delivered tracker; (d) /notifications shows 24× 'New device signed in' bell entries — the alert half of login-history works. ONE FRONTEND BUG: dashboard-avatar TouchableOpacity onPress does NOT fire on web — clicking the 'B' circular avatar (testID dashboard-avatar) leaves the URL at /dashboard, and the target Profile screen never mounts (profile-login-history-link never appears). The code (onPress={() => router.push('/(tabs)/profile')}) is correct-looking, so this is likely a hit-testing issue on RN-Web (nested Image inside the TouchableOpacity swallowing the tap) — the review request explicitly asked us to verify this navigation and it does not work. No deprecated-package issues (only carryover shadow*/pointerEvents deprecation warnings, unchanged).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "app/(tabs)/dashboard.tsx dashboard-avatar", "issue": "TouchableOpacity onPress does not navigate to /profile — clicking the top-right circular initials avatar leaves URL at /dashboard and no navigation event fires. Reproduced twice with fresh page.goto and 3-second post-load wait. Likely a hit-testing issue on RN-Web where a nested Image/Text inside the TouchableOpacity captures the pointerEvents. Suggested fix: add hitSlop, or wrap the initials Text in pointerEvents='none', or replace TouchableOpacity with Pressable.", "testID": "dashboard-avatar", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "Style props (carryover)", "issue": "'shadow*' style props deprecated on RN-Web — pre-existing, no new occurrences from iteration 68 code."},
+      {"component": "props.pointerEvents (carryover)", "issue": "props.pointerEvents deprecated warning — pre-existing."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter68_login_history.py",
+    "/app/test_reports/pytest/iter68_login_history.xml",
+    "/app/test_reports/iter68_login_history.png",
+    "/app/test_reports/iter68_notifs.png",
+    "/app/test_reports/iter68_dashboard.png",
+    "/app/test_reports/iter68_after_avatar_v2.png",
+    "/app/test_reports/iter68_manager_home.png",
+    "/app/test_reports/iter68_orders.png"
+  ],
+  "action_items": [
+    "FIX dashboard-avatar navigation: onPress on the circular avatar (TouchableOpacity in app/(tabs)/dashboard.tsx line ~244-248) does NOT fire on RN-Web. The URL stays at /dashboard after tap. Try: (1) wrap Text/Image inside with pointerEvents='none', OR (2) switch to Pressable, OR (3) add explicit hitSlop and larger touchable area, OR (4) verify no absolutely-positioned sibling is covering it. Retest with `page.click('[data-testid=\"dashboard-avatar\"]')` — after the fix the URL should resolve to /profile within 2s.",
+    "OPTIONAL: seed_iter67_managers.py had to be re-run at test start (accounts hash-only got overwritten) — call it idempotently from server startup or a pytest fixture to avoid ordering issues.",
+    "OPTIONAL: /auth/login is rate-limited to 10 req/min, which forced module-level token caching in tests. Consider excluding automated test IPs or bumping the limit for the /login route during E2E runs."
+  ],
+  "critical_code_review_comments": [
+    "core/login_history.py correctly marks the FIRST-ever login as is_new_device=False (had_any check) so the very first sign-in on a fresh account is NOT alerted — matches the spec.",
+    "routes/login_history.py revoke_device rejects the caller's own sid with 400 (line 62-63) and revoke-others keeps the current sid alive (line 71-75) — behaviour matches acceptance criteria.",
+    "core/security.require_admin's rule matcher supports 'METHOD /path' entries (line 337-341); layout_manager's 'GET /admin/products' entry lets the layout builder read products while POST/PATCH/DELETE stay blocked — verified in test_b3.",
+    "core/utils.serialize_user now pops both `password_recovery_ciphertext` AND `_sid`, matching the review requirement. Confirmed on /api/auth/me in test_c1.",
+    "Multi-vendor split works end-to-end: orders come back in the expected SC-<ref>-1 / SC-<ref>-2 pattern, the frontend renders a shared 'X checkout · Y sellers' group summary and per-seller tracker (verified in the /orders screenshot).",
+    "Rate-limit friction: /api/auth/login at 10 req/min hit us hard in the first test run — this is fine for prod but the fixture story would improve with a dedicated bypass header or a test-only annotation."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter68_login_history.py (NEW — 17 tests, 100% pass)"
+  ],
+  "success_rate": {"backend": "100% (17/17 pytest cases)", "frontend": "5/6 verified — Login activity screen, notifications 'New device signed in', scoped manager landing, multi-vendor order split, profile row navigation OK. FAILED: dashboard-avatar tap does not navigate to /profile."},
+  "seed_data_creation": "Re-ran /app/backend/tests/seed_iter67_managers.py to promote productsmanager/layoutmanager/ordermanager/vendorservicemanager accounts to their scoped admin roles (they existed but with admin_role null). test_c3 creates a fresh iter68pw_<hex>@test.com user; not cleaned up (adds one row per run, negligible).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "test_iter68_login_history.py runs in ~45s and is safe to re-run — it uses module-level token caching to stay under the 10 req/min /auth/login limit, but if two test files run back-to-back you MUST sleep 30-45s between. The multi-vendor split test relies on 'Vendor One Widget' (testvendor@test.com) and 'Vendor Two Gadget' (testvendor2@test.com) both being seeded at pincode 517644 — re-seed with `python /app/backend/tests/seed_iter55.py` if the products go missing. Frontend headless-web caveat: /auth/login form does NOT navigate under Playwright — pattern that works is POST /api/auth/login (User-Agent: curl/8.5.0) + localStorage.setItem('auth_token', tok) then page.goto the target route. The 'Slangcart' splash overlay swallows the FIRST tap after page.goto — always wait_for_selector on a screen-specific testID + 3s buffer before your first click. Every login writes a new login_history row and 24+ 'New device signed in' notifications for testbuyer already exist in the DB — consider a targeted cleanup if the notification bell list grows unwieldy in the UI.",
+  "rca_of_issue": "dashboard-avatar navigation bug — onPress={() => router.push('/(tabs)/profile')} in app/(tabs)/dashboard.tsx renders correctly and the element is present (testID dashboard-avatar visible & clickable), but a Playwright force click does not trigger the router push. Most probable cause: the TouchableOpacity children (a nested Text with the initial letter 'B') captures the pointerEvents on RN-Web and swallows the click before the parent onPress fires. Fix: add `pointerEvents='none'` to the inner Text/View, OR use Pressable with android_ripple/hitSlop, OR wrap the entire clickable area in a Pressable with `style={StyleSheet.absoluteFillObject}` accepting all pointer events. Reproduction: log in as testbuyer, go to /dashboard, tap the 'B' circular avatar — you'll stay on /dashboard instead of landing on /profile."
+}

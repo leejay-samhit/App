@@ -15,6 +15,7 @@ import { useRouter, Link } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../src/auth";
+import { isScopedAdmin } from "../src/admin-roles";
 import { useBranding } from "../src/branding";
 import { colors, radii, spacing, useResponsiveContainer } from "../src/theme";
 import { formatApiError } from "../src/api";
@@ -79,7 +80,7 @@ export default function Login() {
       : null;
 
   const navigateAfter = (u: any) => {
-    if (u.role === "admin") router.replace("/admin/home");
+    if (u.role === "admin") router.replace(isScopedAdmin(u) ? "/admin/manager-home" : "/admin/home");
     else if (!u.registration_paid && !u.subscription_skipped) router.replace("/payment");
     // Approved customers land directly on the Shop tab so they can start
     // browsing immediately. Dashboard is one tap away via the bottom nav.

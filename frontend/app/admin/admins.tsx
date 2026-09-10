@@ -22,14 +22,33 @@ type AdminUser = {
   created_at?: string;
 };
 
-type SubRole = "super_admin" | "manager" | "support" | "finance";
+type SubRole =
+  | "super_admin"
+  | "products_manager" | "layout_manager" | "order_manager" | "vendor_service_manager"
+  | "finance"
+  // Legacy roles — still honoured for admins promoted before Sep 2026, but no
+  // longer offered when promoting someone new.
+  | "manager" | "support";
 
-const ROLES: { key: SubRole; label: string; tint: string; desc: string }[] = [
-  { key: "super_admin", label: "Super Admin", tint: "#143D2E", desc: "Full access — settings, payouts, admin management" },
-  { key: "manager", label: "Manager", tint: "#1E6B4F", desc: "All operational access; cannot edit settings or admins" },
-  { key: "support", label: "Support", tint: "#A07A2C", desc: "Operational access; cannot edit settings or admins" },
-  { key: "finance", label: "Finance", tint: "#3D5A80", desc: "Treasury powers — UTR deposits to system wallet, credit/debit user wallets, approve withdrawals." },
+/**
+ * Sep 2026 — the promote screen used to hand out blanket "manager"/"support"
+ * access, which showed the WHOLE admin panel. It now offers scoped roles:
+ * each one unlocks exactly one section of the panel (and the backend blocks
+ * the rest — core/security.ADMIN_AREAS).
+ */
+const ROLES: { key: SubRole; label: string; tint: string; desc: string; legacy?: boolean }[] = [
+  { key: "super_admin", label: "Super Admin", tint: "#143D2E", desc: "Full access — settings, payouts, resets, admin management" },
+  { key: "products_manager", label: "Products Manager", tint: "#1E6B4F", desc: "Products only — add, edit, price and publish. Nothing else in the panel." },
+  { key: "layout_manager", label: "Shop Layout Manager", tint: "#2C6E7F", desc: "Shop layout & banners only — builds the home screen." },
+  { key: "order_manager", label: "Order Manager", tint: "#8C5A2B", desc: "Orders only — track, update status and download order data." },
+  { key: "vendor_service_manager", label: "Vendor & Service Manager", tint: "#5B3E8C", desc: "Approvals, vendor applications & edit requests, all vendors, service applications, management, analytics and KYC." },
+  { key: "finance", label: "Finance", tint: "#3D5A80", desc: "Treasury powers — UTR deposits, wallet credit/debit, withdrawals." },
+  { key: "manager", label: "Manager (legacy)", tint: "#6B7280", desc: "Old blanket role — kept for existing admins only.", legacy: true },
+  { key: "support", label: "Support (legacy)", tint: "#6B7280", desc: "Old blanket role — kept for existing admins only.", legacy: true },
 ];
+
+/** What a super admin can hand out today. */
+const ASSIGNABLE = ROLES.filter((r) => !r.legacy);
 
 export default function AdminAdmins() {
   const router = useRouter();
@@ -46,14 +65,14 @@ export default function AdminAdmins() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [phone, setPhone] = useState("");
-  const [createRole, setCreateRole] = useState<SubRole>("manager");
+  const [createRole, setCreateRole] = useState<SubRole>("products_manager");
 
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteEmail, setPromoteEmail] = useState("");
-  const [promoteRole, setPromoteRole] = useState<SubRole>("manager");
+  const [promoteRole, setPromoteRole] = useState<SubRole>("products_manager");
 
   const [editFor, setEditFor] = useState<AdminUser | null>(null);
-  const [editRole, setEditRole] = useState<SubRole>("manager");
+  const [editRole, setEditRole] = useState<SubRole>("products_manager");
 
   // Danger PIN (6-digit) — gates Wipe + Restore
   const [pinStatus, setPinStatus] = useState<{ is_set: boolean; format: string } | null>(null);
@@ -128,7 +147,7 @@ export default function AdminAdmins() {
         phone: phone.trim() || undefined,
       });
       setCreateOpen(false);
-      setName(""); setEmail(""); setPassword(""); setPhone(""); setCreateRole("manager");
+      setName(""); setEmail(""); setPassword(""); setPhone(""); setCreateRole("products_manager");
       await load();
       Alert.alert("Admin created", `${email.trim()} has been added as ${createRole}.`);
     } catch (e) {
@@ -146,7 +165,7 @@ export default function AdminAdmins() {
       if (!target) throw new Error("User not found");
       await api.post(`/admin/users/${target.id}/promote`, { admin_role: promoteRole });
       setPromoteOpen(false);
-      setPromoteEmail(""); setPromoteRole("manager");
+      setPromoteEmail(""); setPromoteRole("products_manager");
       await load();
       Alert.alert("Promoted", `${target.email} is now ${promoteRole}.`);
     } catch (e: any) {
@@ -297,7 +316,7 @@ export default function AdminAdmins() {
                 {isSuper && !isSelf && (
                   <View style={styles.cardActions}>
                     <TouchableOpacity
-                      onPress={() => { setEditFor(item); setEditRole((item.admin_role as SubRole) || "manager"); }}
+                      onPress={() => { setEditFor(item); setEditRole((item.admin_role as SubRole) || "products_manager"); }}
                       style={[styles.miniBtn, { backgroundColor: colors.surfaceMuted }]}
                       disabled={busy === item.id}
                       testID={`admin-${item.id}-role`}
@@ -355,7 +374,7 @@ export default function AdminAdmins() {
               <TextInput value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="+91 ..." placeholderTextColor={colors.textMuted} style={styles.input} testID="new-admin-phone" />
               <Text style={styles.fieldLabel}>Role</Text>
               <View style={styles.roleRow}>
-                {ROLES.map((r) => (
+                {ASSIGNABLE.map((r) => (
                   <TouchableOpacity
                     key={r.key}
                     onPress={() => setCreateRole(r.key)}
@@ -366,7 +385,7 @@ export default function AdminAdmins() {
                   </TouchableOpacity>
                 ))}
               </View>
-              <Text style={styles.roleHint}>{ROLES.find((r) => r.key === createRole)?.desc}</Text>
+              <Text style={styles.roleHint}>{ASSIGNABLE.find((r) => r.key === createRole)?.desc}</Text>
             </ScrollView>
             <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
               <TouchableOpacity onPress={() => setCreateOpen(false)} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
@@ -390,7 +409,7 @@ export default function AdminAdmins() {
             <TextInput value={promoteEmail} onChangeText={setPromoteEmail} autoCapitalize="none" keyboardType="email-address" placeholder="user@example.com" placeholderTextColor={colors.textMuted} style={styles.input} testID="promote-email" />
             <Text style={styles.fieldLabel}>Role</Text>
             <View style={styles.roleRow}>
-              {ROLES.map((r) => (
+              {ASSIGNABLE.map((r) => (
                 <TouchableOpacity
                   key={r.key}
                   onPress={() => setPromoteRole(r.key)}
@@ -420,7 +439,7 @@ export default function AdminAdmins() {
             <Text style={styles.modalTitle}>Change role</Text>
             <Text style={styles.modalSub}>{editFor?.email}</Text>
             <View style={[styles.roleRow, { marginTop: 14 }]}>
-              {ROLES.map((r) => (
+              {ASSIGNABLE.map((r) => (
                 <TouchableOpacity
                   key={r.key}
                   onPress={() => setEditRole(r.key)}

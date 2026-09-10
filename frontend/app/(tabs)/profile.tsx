@@ -314,6 +314,15 @@ export default function ProfileScreen() {
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
             <View style={styles.rowDivider} />
+            <TouchableOpacity onPress={() => router.push("/login-history" as any)} style={styles.rowItem} testID="profile-login-history-link">
+              <View style={[styles.kycDot, { backgroundColor: "#8B5CF6" }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>Login activity</Text>
+                <Text style={styles.kycSub}>DEVICES SIGNED IN · SIGN OTHERS OUT</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
             <TouchableOpacity onPress={() => router.push("/more" as any)} style={styles.rowItem} testID="profile-more-link">
               <View style={[styles.kycDot, { backgroundColor: colors.textMuted }]} />
               <View style={{ flex: 1 }}>

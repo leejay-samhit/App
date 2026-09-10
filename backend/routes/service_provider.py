@@ -141,7 +141,7 @@ async def update_my_service(
     except Exception:
         pass
 
-    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     return {"ok": True, "user": fresh}
 
 

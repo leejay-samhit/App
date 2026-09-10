@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import { useAuth } from "../src/auth";
+import { adminLanding } from "../src/admin-roles";
 import { colors } from "../src/theme";
 
 export default function Index() {
@@ -13,9 +14,10 @@ export default function Index() {
     if (user === null) {
       router.replace("/login");
     } else if (user.role === "admin") {
-      // Admin's default landing tab is Shop (per product spec) — admin
-      // sees the store from a customer's perspective on login.
-      router.replace("/admin/shop");
+      // Scoped managers (products / layout / order / vendor+service) only
+      // have their own section — the full admin tabs are hidden and the API
+      // 403s them, so send them straight to it.
+      router.replace(adminLanding(user));
     } else if (!user.registration_paid && !(user as any).subscription_skipped) {
       // Subscription upsell first (Aug-2026). Once the user chooses
       // "Continue without subscription" we never wall them again — they

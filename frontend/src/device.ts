@@ -16,6 +16,7 @@
 // app — which is exactly the behaviour we want.
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
+import * as Device from "expo-device";
 
 const KEY = "@app/deviceFingerprint";
 
@@ -45,4 +46,20 @@ export async function getDeviceFingerprint(): Promise<string> {
   cached = fp;
   try { await AsyncStorage.setItem(KEY, fp); } catch { /* best effort */ }
   return fp;
+}
+
+/** Human-readable device label sent as X-Device-Name (login activity list). */
+export function getDeviceName(): string {
+  if (Platform.OS === "web") {
+    const ua = typeof navigator !== "undefined" ? navigator.userAgent || "" : "";
+    if (/iPhone/i.test(ua)) return "iPhone browser";
+    if (/iPad/i.test(ua)) return "iPad browser";
+    if (/Android/i.test(ua)) return "Android browser";
+    if (/Macintosh/i.test(ua)) return "Mac browser";
+    if (/Windows/i.test(ua)) return "Windows browser";
+    return "Web browser";
+  }
+  const model = Device.modelName || Device.deviceName || "";
+  const os = `${Device.osName || Platform.OS}${Device.osVersion ? ` ${Device.osVersion}` : ""}`;
+  return [model, os].filter(Boolean).join(" · ").slice(0, 80) || Platform.OS;
 }

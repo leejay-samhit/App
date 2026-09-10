@@ -701,6 +701,23 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
         "message": _serialize(dict(doc)),
     })
 
+    # ── Sep 2026 — in-app notification for EVERY message ────────────────
+    # Only a phone push existed, and it was skipped whenever the recipient
+    # had a socket open — so a user who wasn't looking at the chat screen
+    # got no bell entry at all and thought chat was broken. The bell row is
+    # always written; the push still only fires when they're offline.
+    if other_id:
+        try:
+            from core.notifications import create_notification
+            sender = user.get("name") or user.get("email") or "Someone"
+            await create_notification(
+                other_id, "chat", f"New message from {sender}",
+                (text if text else "📷 Photo")[:180],
+                extra={"thread_id": thread_id, "action_url": f"/chat/{thread_id}"},
+            )
+        except Exception as e:
+            logger.warning(f"chat notification failed (non-blocking): {e}")
+
     # ── Push notification to the recipient (best-effort, never blocks).
     # Skipped if the recipient is currently online via WS — they already
     # got the message in real-time and a push would be noisy.
