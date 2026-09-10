@@ -9010,3 +9010,30 @@ agent_communication:
 
       3. Vendor dashboard has NO "Sales" quick-link tile (confirmed by
          testing agent, iteration_70.json).
+
+  - agent: "main"
+    message: |
+      Legal pages bug batch (Sep 2026):
+
+      1. **About us was NOT admin-editable** — `app/legal/about.tsx` was a
+         fully hardcoded screen, so nothing the owner typed in Admin → Legal
+         pages could ever appear. Added kind `"about"` to
+         backend/routes/legal_pages.py (VALID_KINDS + a Slangcart-specific
+         DEFAULT), added an "About us" tab to app/admin/legal-pages.tsx, and
+         rewrote app/legal/about.tsx to render <LegalPageView kind="about" />.
+
+      2. **Contact us was two different screens** — pre-login (login footer)
+         went to `/legal/contact` (hardcoded card UI) while post-login
+         (Profile → More) went to `/legal/contact-us` (admin-editable). They
+         could never match. Now ONE screen: `/legal/contact` renders the
+         admin-editable `contact_us` text via LegalPageView plus the two
+         support-ticket action cards (new optional `footer` prop on
+         LegalPageView). Deleted app/legal/contact-us.tsx and repointed
+         more.tsx. Added an "About" link to the login footer so pre-login
+         exposes all five pages (Terms · Privacy · Refund · Contact · About).
+
+      Verified: PUT /api/admin/legal/about → 200, public GET /api/legal/about
+      returns the edited text, /legal/about renders it, /legal/contact renders
+      identical content from both the login footer and Profile → More, and the
+      admin editor shows 5 tabs (about, contact_us, privacy, refund, terms).
+      Test doc removed afterwards so About is back on the system default.

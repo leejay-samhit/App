@@ -1,4 +1,4 @@
-// Admin screen — edit all 4 legal pages (Contact Us, Refund, Privacy, T&C)
+// Admin screen — edit all 5 legal pages (About, Contact Us, Refund, Privacy, T&C)
 // stored in `legal_pages` collection. Plain-text editor (use `## ` for headings).
 import { useEffect, useState } from "react";
 import {
@@ -19,7 +19,7 @@ import { router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
 
-type Kind = "contact_us" | "refund" | "privacy" | "terms";
+type Kind = "contact_us" | "refund" | "privacy" | "terms" | "about";
 type Page = {
   kind: Kind;
   content_text: string;
@@ -29,6 +29,7 @@ type Page = {
 };
 
 const TABS: { kind: Kind; label: string; icon: any }[] = [
+  { kind: "about",      label: "About us",               icon: "info" },
   { kind: "contact_us", label: "Contact Us",              icon: "phone" },
   { kind: "refund",     label: "Refund / Cancellation",   icon: "rotate-ccw" },
   { kind: "privacy",    label: "Privacy Policy",          icon: "shield" },

@@ -308,6 +308,8 @@ export default function Login() {
             <Link href={"/legal/refund" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Refund</Text></TouchableOpacity></Link>
             <Text style={styles.muted}> · </Text>
             <Link href={"/legal/contact" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Contact</Text></TouchableOpacity></Link>
+            <Text style={styles.muted}> · </Text>
+            <Link href={"/legal/about" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>About</Text></TouchableOpacity></Link>
           </View>
           </Animated.View>
         </ScrollView>

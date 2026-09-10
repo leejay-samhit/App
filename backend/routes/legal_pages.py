@@ -21,7 +21,7 @@ from core.utils import now_utc
 
 router = APIRouter()
 
-VALID_KINDS = {"privacy", "terms", "refund", "contact_us"}
+VALID_KINDS = {"privacy", "terms", "refund", "contact_us", "about"}
 
 # Sensible defaults used when the admin hasn't customized a page yet.
 DEFAULTS: Dict[str, str] = {
@@ -77,6 +77,30 @@ DEFAULTS: Dict[str, str] = {
         "For grievances under the IT Act, please email the support address "
         "above and include the word \"Grievance\" in the subject. We respond "
         "within 30 days."
+    ),
+    "about": (
+        "## Who we are\n\n"
+        "Slangcart is a neighbourhood commerce platform. Customers shop from "
+        "verified local vendors, book trusted service professionals nearby, "
+        "and grow a referral network that earns rewards in the in-app "
+        "wallet.\n\n"
+        "## What we offer\n\n"
+        "A location-aware shop that only shows vendors who actually deliver "
+        "to your pincode.\n"
+        "A services marketplace of verified local professionals with clear "
+        "pricing and coverage areas.\n"
+        "A reward wallet with transparent earnings history and "
+        "admin-reviewed withdrawals to UPI or bank.\n\n"
+        "## Our principles\n\n"
+        "Every vendor, service provider and member is admin-reviewed before "
+        "going live.\n"
+        "No guaranteed income — every reward tier is disclosed inside the "
+        "app.\n"
+        "Full KYC before any withdrawal is released.\n"
+        "No forced purchases and no mandatory recruitment.\n\n"
+        "## Reach us\n\n"
+        "Use Contact us inside the app to raise a support ticket — we reply "
+        "within 48 hours."
     ),
 }
 

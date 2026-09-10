@@ -11,7 +11,7 @@ type Tile = { key: string; label: string; icon: any; route: string; desc?: strin
 
 const TILES: Tile[] = [
   { key: "about",      label: "About us",              icon: "info",       route: "/legal/about" },
-  { key: "contact",    label: "Contact us",            icon: "phone",      route: "/legal/contact-us" },
+  { key: "contact",    label: "Contact us",            icon: "phone",      route: "/legal/contact" },
   { key: "terms",      label: "Terms & Conditions",    icon: "file-text",  route: "/legal/terms" },
   { key: "privacy",    label: "Privacy Policy",        icon: "shield",     route: "/legal/privacy" },
   { key: "refund",     label: "Refund / Cancellation", icon: "rotate-ccw", route: "/legal/refund" },

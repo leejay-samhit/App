@@ -1,7 +1,7 @@
 // Shared component that fetches a legal page from /api/legal/{kind} and
 // renders it. Lines starting with `## ` become headings, blank lines
 // separate paragraphs. Falls back gracefully if the API errors.
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -10,11 +10,13 @@ import { api } from "../src/api";
 import { colors, spacing } from "../src/theme";
 
 type Props = {
-  kind: "privacy" | "terms" | "refund" | "contact_us";
+  kind: "privacy" | "terms" | "refund" | "contact_us" | "about";
   title: string;
+  /** Optional extra UI rendered under the text (e.g. Contact-us action cards). */
+  footer?: ReactNode;
 };
 
-export default function LegalPageView({ kind, title }: Props) {
+export default function LegalPageView({ kind, title, footer }: Props) {
   const router = useRouter();
   const [text, setText] = useState<string>("");
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
@@ -60,6 +62,7 @@ export default function LegalPageView({ kind, title }: Props) {
             }
             return <Text key={idx} style={styles.p}>{trimmed}</Text>;
           })}
+          {footer}
         </ScrollView>
       )}
     </SafeAreaView>
