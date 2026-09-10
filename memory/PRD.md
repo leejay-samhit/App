@@ -1109,3 +1109,26 @@ delivery needs a published build.
   `audit_image_data_url` and stamp `deleted_at` / `deleted_by` before wiping
   the live fields. Participants still see "deleted". Messages deleted BEFORE
   this change are NOT recoverable and are reported as such.
+
+### 10. Suspicious-word flagging (chat review queue)
+- `core/chat_flags.py`: `ABUSE_WORDS` (also the send-time block list used by
+  `routes/chat.py`) + ~60 `SCAM_PHRASES` (OTP/PIN/CVV harvesting, QR & money
+  transfer bait, guaranteed-income / crypto / lottery bait, off-platform
+  pulls). `scan(text)` → `{categories, words}`.
+- `chat_flags` collection: one upserted doc per message
+  (`kind="message"`) plus `kind="blocked_attempt"` rows capturing abusive
+  text the send filter REJECTED (never delivered, but the attempt is the
+  signal). Fields: thread_id, message_id, sender_id, categories, words,
+  text, status open|reviewed, reviewed_by/at.
+- Scam wording is deliberately NOT blocked (evidence + blocking only teaches
+  rephrasing); abuse stays blocked at send AND flagged.
+- Admin endpoints (super admin only):
+  `GET /admin/chat-audit/flags?status=open|reviewed|all&category=`,
+  `POST /admin/chat-audit/flags/{id}/review`,
+  `POST /admin/chat-audit/rescan` (re-scans all history incl. archived
+  deleted text; idempotent).
+- Chat records UI gained a "Conversations | ⚠ Flagged (N)" switch, a
+  To review / Reviewed filter, cards with ABUSE / SCAM / "BLOCKED — not
+  delivered" badges + matched words + Open chat / Mark reviewed, an
+  "⚠ N to review" chip on conversation cards and a SCAM/ABUSE badge on the
+  offending bubble inside the transcript.

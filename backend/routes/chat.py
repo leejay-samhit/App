@@ -77,27 +77,17 @@ class ReportIn(BaseModel):
     message_id: Optional[str] = None
 
 
-# Minimal offensive-word filter — server-side gate so blocked words can
-# never enter chat_messages. Kept short on purpose; expand via admin
-# settings later if needed. Match is case-insensitive and word-boundary.
-OFFENSIVE_WORDS = {
-    "fuck", "shit", "bitch", "bastard", "asshole", "dick", "pussy",
-    "nigger", "faggot", "slut", "whore", "rape", "cunt",
-    # Hindi/Telugu transliterations frequently flagged in MLM spam reports
-    "madarchod", "behenchod", "chutiya", "lavda", "lund", "gandu",
-}
-
-import re  # noqa: E402  (kept module-local since the regex is only built once)
-_OFFENSIVE_RE = re.compile(
-    r"\b(" + "|".join(re.escape(w) for w in OFFENSIVE_WORDS) + r")\b",
-    re.IGNORECASE,
+# Offensive-word filter — server-side gate so blocked words can never enter
+# chat_messages. The list lives in core/chat_flags.py so the same vocabulary
+# powers the admin "flagged for review" queue.
+from core.chat_flags import (  # noqa: E402
+    ABUSE_WORDS as OFFENSIVE_WORDS,
+    contains_abuse as _contains_offensive,
+    flag_blocked_attempt,
+    flag_message,
 )
 
-
-def _contains_offensive(text: str) -> bool:
-    if not text:
-        return False
-    return bool(_OFFENSIVE_RE.search(text))
+import re  # noqa: E402  (kept module-local since the regex is only built once)
 
 
 # ============== Helpers ==============
@@ -630,6 +620,9 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
     # in chat_messages. Returns 422 (custom) so the client can show a
     # friendly tooltip instead of a generic error.
     if _contains_offensive(text):
+        # Keep the evidence for the admin review queue even though the
+        # message is never delivered.
+        await flag_blocked_attempt(thread_id, user["id"], text)
         raise HTTPException(status_code=422, detail="Your message contains language that's not allowed.")
 
     # ── Block list check — both directions. If either party has blocked
@@ -700,6 +693,9 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
     }
     await db.chat_messages.insert_one(doc.copy())
     await db.chat_threads.update_one({"id": thread_id}, {"$set": {"last_message_at": _now()}})
+    # Scam / abuse wording → admin review queue (never blocks the send;
+    # scam phrasing is deliberately delivered so the evidence survives).
+    await flag_message(doc)
 
     # If the other party is currently connected via WS, mark delivered now.
     other = other_id or ""

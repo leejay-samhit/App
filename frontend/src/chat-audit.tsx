@@ -32,6 +32,22 @@ type ThreadRow = {
   last_message_at?: string | null;
   last_preview?: string;
   is_announcement?: boolean;
+  flag_count?: number;
+};
+
+type FlagRow = {
+  id: string;
+  thread_id: string;
+  message_id?: string | null;
+  kind: "message" | "blocked_attempt";
+  categories: string[];
+  words: string[];
+  text: string;
+  status: "open" | "reviewed";
+  created_at_ist: string;
+  reviewed_by?: string | null;
+  sender: Party;
+  participants: Party[];
 };
 
 type AuditMessage = {
@@ -47,6 +63,8 @@ type AuditMessage = {
   reply_to_id?: string | null;
   created_at_ist: string;
   deleted_at_ist?: string | null;
+  flag_categories: string[];
+  flag_words: string[];
 };
 
 const fmtWhen = (iso?: string | null) => {
@@ -54,7 +72,14 @@ const fmtWhen = (iso?: string | null) => {
   try { return new Date(iso).toLocaleString(); } catch { return "—"; }
 };
 
+type RecordsView = "threads" | "flagged";
+
 export default function ChatRecords() {
+  const [view, setView] = useState<RecordsView>("threads");
+  const [flags, setFlags] = useState<FlagRow[]>([]);
+  const [openFlagCount, setOpenFlagCount] = useState(0);
+  const [flagStatus, setFlagStatus] = useState<"open" | "reviewed">("open");
+  const [flagsLoading, setFlagsLoading] = useState(false);
   const [rows, setRows] = useState<ThreadRow[]>([]);
   const [total, setTotal] = useState(0);
   const [query, setQuery] = useState("");
@@ -81,7 +106,38 @@ export default function ChatRecords() {
     } finally { setLoading(false); setRefreshing(false); }
   }, []);
 
-  useEffect(() => { load(""); }, [load]);
+  const loadFlags = useCallback(async (status: "open" | "reviewed") => {
+    setFlagsLoading(true);
+    try {
+      const { data } = await api.get<{ flags: FlagRow[]; open_count: number }>(
+        "/admin/chat-audit/flags", { params: { status, limit: 150 } },
+      );
+      setFlags(data?.flags || []);
+      setOpenFlagCount(data?.open_count || 0);
+    } catch (e) {
+      Alert.alert("Couldn't load flagged chats", formatApiError(e));
+    } finally { setFlagsLoading(false); }
+  }, []);
+
+  useEffect(() => { load(""); loadFlags("open"); }, [load, loadFlags]);
+
+  const markReviewed = async (f: FlagRow) => {
+    try {
+      await api.post(`/admin/chat-audit/flags/${f.id}/review`);
+      setFlags((prev) => prev.filter((x) => x.id !== f.id));
+      setOpenFlagCount((n) => Math.max(0, n - 1));
+      load(query);
+    } catch (e) { Alert.alert("Couldn't update", formatApiError(e)); }
+  };
+
+  const openFlagThread = async (f: FlagRow) => {
+    const existing = rows.find((r) => r.id === f.thread_id);
+    await openTranscript(existing || {
+      id: f.thread_id,
+      participants: f.participants,
+      message_count: 0, deleted_count: 0, media_count: 0,
+    });
+  };
 
   const openTranscript = async (t: ThreadRow) => {
     setOpenThread(t);
@@ -152,6 +208,37 @@ export default function ChatRecords() {
 
   return (
     <View style={{ flex: 1 }}>
+      <View style={styles.viewTabs}>
+        <TouchableOpacity
+          onPress={() => setView("threads")}
+          style={[styles.viewTab, view === "threads" && styles.viewTabActive]}
+          testID="chat-records-view-threads"
+        >
+          <Text style={[styles.viewTabText, view === "threads" && styles.viewTabTextActive]}>Conversations</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => { setView("flagged"); loadFlags(flagStatus); }}
+          style={[styles.viewTab, view === "flagged" && styles.viewTabActive]}
+          testID="chat-records-view-flagged"
+        >
+          <Feather name="alert-triangle" size={12} color={view === "flagged" ? colors.primaryFg : "#B42318"} />
+          <Text style={[styles.viewTabText, view === "flagged" && styles.viewTabTextActive]}>
+            Flagged{openFlagCount ? ` (${openFlagCount})` : ""}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {view === "flagged" ? (
+        <FlaggedList
+          flags={flags}
+          loading={flagsLoading}
+          status={flagStatus}
+          onStatus={(s) => { setFlagStatus(s); loadFlags(s); }}
+          onOpen={openFlagThread}
+          onReview={markReviewed}
+        />
+      ) : (
+      <View style={{ flex: 1 }}>
       <View style={styles.searchWrap}>
         <Feather name="search" size={15} color={colors.textMuted} />
         <TextInput
@@ -217,12 +304,19 @@ export default function ChatRecords() {
                 {t.media_count > 0 ? (
                   <View style={styles.chip}><Text style={styles.chipText}>{t.media_count} photos</Text></View>
                 ) : null}
+                {(t.flag_count || 0) > 0 ? (
+                  <View style={[styles.chip, styles.chipWarn]}>
+                    <Text style={[styles.chipText, styles.chipWarnText]}>⚠ {t.flag_count} to review</Text>
+                  </View>
+                ) : null}
                 <Text style={styles.whenText}>{fmtWhen(t.last_message_at)}</Text>
               </View>
             </TouchableOpacity>
           );
         })}
       </ScrollView>
+      </View>
+      )}
 
       {/* ── Transcript ─────────────────────────────────────────────── */}
       <Modal visible={!!openThread} animationType="slide" onRequestClose={() => setOpenThread(null)}>
@@ -266,6 +360,14 @@ export default function ChatRecords() {
                           <Text style={styles.deletedTagText}>
                             DELETED {m.deleted_at_ist ? `· ${m.deleted_at_ist}` : ""}
                             {m.recovered ? " · recovered" : " · content not recoverable"}
+                          </Text>
+                        </View>
+                      ) : null}
+                      {m.flag_categories?.length ? (
+                        <View style={styles.flagTag}>
+                          <Feather name="alert-triangle" size={11} color="#B54708" />
+                          <Text style={styles.flagTagText}>
+                            {m.flag_categories.join(" + ").toUpperCase()} · {m.flag_words.join(", ")}
                           </Text>
                         </View>
                       ) : null}
@@ -323,7 +425,116 @@ export default function ChatRecords() {
   );
 }
 
+/**
+ * Review queue — every chat that matched an abusive or scam word, newest
+ * first. `blocked_attempt` rows are messages the send filter refused to
+ * deliver: the other user never saw them, but the attempt is the signal.
+ */
+function FlaggedList({
+  flags, loading, status, onStatus, onOpen, onReview,
+}: {
+  flags: FlagRow[];
+  loading: boolean;
+  status: "open" | "reviewed";
+  onStatus: (s: "open" | "reviewed") => void;
+  onOpen: (f: FlagRow) => void;
+  onReview: (f: FlagRow) => void;
+}) {
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={styles.filterRow}>
+        {(["open", "reviewed"] as const).map((s) => (
+          <TouchableOpacity
+            key={s}
+            onPress={() => onStatus(s)}
+            style={[styles.filterPill, status === s && styles.filterPillActive]}
+            testID={`chat-flags-${s}`}
+          >
+            <Text style={[styles.filterPillText, status === s && { color: colors.primaryFg }]}>
+              {s === "open" ? "To review" : "Reviewed"}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {loading ? (
+        <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
+      ) : (
+        <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 60 }}>
+          {flags.length === 0 ? (
+            <Text style={styles.empty}>
+              {status === "open" ? "Nothing to review — no chat matched an abusive or scam word." : "Nothing reviewed yet."}
+            </Text>
+          ) : flags.map((f) => (
+            <View key={f.id} style={[styles.card, styles.flagCard]} testID={`chat-flag-${f.id}`}>
+              <View style={styles.chipRow}>
+                {f.categories.map((c) => (
+                  <View key={c} style={[styles.chip, c === "abuse" ? styles.chipWarn : styles.chipScam]}>
+                    <Text style={[styles.chipText, c === "abuse" ? styles.chipWarnText : styles.chipScamText]}>
+                      {c.toUpperCase()}
+                    </Text>
+                  </View>
+                ))}
+                {f.kind === "blocked_attempt" ? (
+                  <View style={styles.chip}><Text style={styles.chipText}>BLOCKED — not delivered</Text></View>
+                ) : null}
+                <Text style={styles.whenText}>{f.created_at_ist}</Text>
+              </View>
+              <Text style={styles.flagSender} numberOfLines={1}>
+                {f.sender.name} · {f.sender.email || "no email"} · {f.sender.phone || "no phone"}
+              </Text>
+              <Text style={styles.flagPair} numberOfLines={1}>
+                in chat: {f.participants.map((p) => p.name).join("  ⇄  ") || "unknown"}
+              </Text>
+              <Text style={styles.flagText}>{f.text}</Text>
+              <Text style={styles.flagWords}>matched: {f.words.join(", ")}</Text>
+              {f.status === "reviewed" && f.reviewed_by ? (
+                <Text style={styles.flagWords}>reviewed by {f.reviewed_by}</Text>
+              ) : null}
+              <View style={styles.flagActions}>
+                <TouchableOpacity style={styles.flagOpenBtn} onPress={() => onOpen(f)} testID={`chat-flag-open-${f.id}`}>
+                  <Feather name="message-square" size={13} color={colors.primary} />
+                  <Text style={styles.flagOpenText}>Open chat</Text>
+                </TouchableOpacity>
+                {f.status === "open" ? (
+                  <TouchableOpacity style={styles.flagDoneBtn} onPress={() => onReview(f)} testID={`chat-flag-review-${f.id}`}>
+                    <Feather name="check" size={13} color={colors.primaryFg} />
+                    <Text style={styles.flagDoneText}>Mark reviewed</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+      )}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  viewTabs: { flexDirection: "row", gap: 8, paddingHorizontal: spacing.screen, paddingTop: 6 },
+  viewTab: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, height: 40, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  viewTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  viewTabText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+  viewTabTextActive: { color: colors.primaryFg },
+  filterRow: { flexDirection: "row", gap: 8, paddingHorizontal: spacing.screen, paddingTop: 10 },
+  filterPill: { paddingHorizontal: 14, height: 36, borderRadius: 999, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  filterPillActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  filterPillText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+  flagCard: { borderColor: "#F9DBD8" },
+  flagSender: { fontSize: 13, fontWeight: "800", color: colors.textMain, marginTop: 8 },
+  flagPair: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  flagText: { fontSize: 13, color: colors.textMain, marginTop: 8, lineHeight: 19 },
+  flagWords: { fontSize: 11, color: "#B54708", fontWeight: "800", marginTop: 6 },
+  flagActions: { flexDirection: "row", gap: 8, marginTop: 12 },
+  flagOpenBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 14, minHeight: 44, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  flagOpenText: { fontSize: 12, fontWeight: "800", color: colors.primary },
+  flagDoneBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, minHeight: 44, borderRadius: 999, backgroundColor: colors.primary },
+  flagDoneText: { fontSize: 12, fontWeight: "900", color: colors.primaryFg },
+  chipScam: { backgroundColor: "#FFFAEB", borderColor: "#FEDF89" },
+  chipScamText: { color: "#B54708" },
+  flagTag: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 6 },
+  flagTagText: { flex: 1, fontSize: 10, fontWeight: "900", color: "#B54708" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 40 },
   searchWrap: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: spacing.screen, marginTop: 10, paddingHorizontal: 12, height: 44, borderRadius: radii.button, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   searchInput: { flex: 1, fontSize: 13, color: colors.textMain },

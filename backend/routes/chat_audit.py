@@ -35,6 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 from core.db import db
+from core.chat_flags import flag_message
 from core.security import require_admin_role
 from core.utils import audit_log
 
@@ -171,6 +172,9 @@ async def audit_threads(
                 {"audit_image_data_url": {"$nin": ["", None]}},
             ],
         })
+        flagged_open = await db.chat_flags.count_documents({
+            "thread_id": t["id"], "status": "open",
+        })
         last = await db.chat_messages.find_one(
             {"thread_id": t["id"]}, {"_id": 0}, sort=[("created_at", -1)],
         )
@@ -187,6 +191,7 @@ async def audit_threads(
             "message_count": total_msgs,
             "deleted_count": deleted_msgs,
             "media_count": media,
+            "flag_count": flagged_open,
             "last_message_at": _iso(t.get("last_message_at") or t.get("created_at")),
             "last_preview": preview,
         })
@@ -221,9 +226,17 @@ async def audit_thread_messages(
         ).to_list(limit)
     }
 
+    flags = {
+        f["message_id"]: f for f in await db.chat_flags.find(
+            {"thread_id": thread_id, "kind": "message"},
+            {"_id": 0, "message_id": 1, "categories": 1, "words": 1, "status": 1},
+        ).to_list(2000) if f.get("message_id")
+    }
+
     msgs: List[Dict[str, Any]] = []
     for m in rows:
         c = _content(m)
+        fl = flags.get(m.get("id")) or {}
         sender = people.get(m.get("sender_id"))
         msgs.append({
             "id": m.get("id"),
@@ -239,6 +252,9 @@ async def audit_thread_messages(
             "created_at": _iso(m.get("created_at")),
             "created_at_ist": _ist(m.get("created_at")),
             "deleted_at_ist": _ist(m.get("deleted_at")) if m.get("deleted_at") else None,
+            "flag_categories": fl.get("categories") or [],
+            "flag_words": fl.get("words") or [],
+            "flag_status": fl.get("status"),
         })
 
     await audit_log(
@@ -295,6 +311,112 @@ async def audit_message_image_data(
         raise HTTPException(status_code=404, detail="No image on this message")
     return {"message_id": msg_id, "data_url": data_url,
             "was_deleted": bool(m.get("deleted"))}
+
+
+# ============== suspicious-word review queue ==============
+
+@router.get("/admin/chat-audit/flags")
+async def audit_flags(
+    status: str = Query("open", pattern="^(open|reviewed|all)$"),
+    category: str = Query("all", pattern="^(all|abuse|scam)$"),
+    limit: int = Query(100, ge=1, le=300),
+    admin: Dict[str, Any] = Depends(super_admin_only),
+):
+    """Chats that matched an abusive or scam word, newest first.
+
+    `kind="blocked_attempt"` rows are messages the send filter REFUSED to
+    deliver — the other user never saw them, but the attempt is exactly what
+    an admin wants to review.
+    """
+    q: Dict[str, Any] = {}
+    if status != "all":
+        q["status"] = status
+    if category != "all":
+        q["categories"] = category
+    rows = await db.chat_flags.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+
+    people = await _users_by_ids([r.get("sender_id") for r in rows])
+    thread_ids = list({r.get("thread_id") for r in rows if r.get("thread_id")})
+    threads = {
+        t["id"]: t for t in await db.chat_threads.find(
+            {"id": {"$in": thread_ids}}, {"_id": 0, "id": 1, "participants": 1},
+        ).to_list(len(thread_ids) + 10)
+    }
+    others = await _users_by_ids([
+        p for t in threads.values() for p in (t.get("participants") or [])
+    ])
+
+    out = []
+    for r in rows:
+        t = threads.get(r.get("thread_id")) or {}
+        parts = [p for p in (t.get("participants") or [])]
+        out.append({
+            "id": r.get("id"),
+            "thread_id": r.get("thread_id"),
+            "message_id": r.get("message_id"),
+            "kind": r.get("kind"),
+            "categories": r.get("categories") or [],
+            "words": r.get("words") or [],
+            "text": r.get("text") or "",
+            "status": r.get("status") or "open",
+            "created_at": _iso(r.get("created_at")),
+            "created_at_ist": _ist(r.get("created_at")),
+            "reviewed_at_ist": _ist(r.get("reviewed_at")) if r.get("reviewed_at") else None,
+            "reviewed_by": r.get("reviewed_by"),
+            "sender": _party(people.get(r.get("sender_id")), r.get("sender_id") or ""),
+            "participants": [_party(others.get(p), p) for p in parts],
+        })
+    open_count = await db.chat_flags.count_documents({"status": "open"})
+    return {"flags": out, "open_count": open_count}
+
+
+@router.post("/admin/chat-audit/flags/{flag_id}/review")
+async def review_flag(
+    flag_id: str,
+    admin: Dict[str, Any] = Depends(super_admin_only),
+):
+    """Mark one flagged chat as reviewed (it leaves the open queue)."""
+    r = await db.chat_flags.find_one({"id": flag_id}, {"_id": 0})
+    if not r:
+        raise HTTPException(status_code=404, detail="Flag not found")
+    await db.chat_flags.update_one({"id": flag_id}, {"$set": {
+        "status": "reviewed",
+        "reviewed_by": admin.get("email") or admin.get("id"),
+        "reviewed_at": datetime.now(timezone.utc),
+    }})
+    await audit_log(
+        admin, "chat_audit.review_flag",
+        target_type="chat_flag", target_id=flag_id,
+        details={"thread_id": r.get("thread_id"), "words": r.get("words")},
+    )
+    return {"ok": True, "status": "reviewed"}
+
+
+@router.post("/admin/chat-audit/rescan")
+async def rescan_flags(
+    admin: Dict[str, Any] = Depends(super_admin_only),
+):
+    """Re-scan the whole message history for abusive / scam wording.
+
+    Needed once after the feature shipped (older messages were never
+    scanned) and handy whenever the word list grows. Idempotent — flags are
+    upserted per message, and deleted messages are scanned through their
+    compliance archive.
+    """
+    scanned = flagged = 0
+    async for m in db.chat_messages.find({}, {"_id": 0}):
+        scanned += 1
+        body = m.get("text") or m.get("audit_text") or ""
+        if not body:
+            continue
+        if await flag_message(m, text=body):
+            flagged += 1
+    await audit_log(
+        admin, "chat_audit.rescan",
+        target_type="chat_flags", target_id="all",
+        details={"scanned": scanned, "flagged": flagged},
+    )
+    return {"ok": True, "scanned": scanned, "flagged": flagged}
 
 
 # ============== .txt legal export ==============

@@ -9068,3 +9068,25 @@ agent_communication:
       transcript modal renders the DELETED bubble, photo viewer opens, and
       the browser download produced
       slangcart-chat-Buyer-and-Buyer-20260911-0451.txt.
+
+  - agent: "main"
+    message: |
+      Suspicious-word flagging (Sep 2026) — verified end-to-end.
+
+      Backend: core/chat_flags.py (abuse list moved out of routes/chat.py +
+      ~60 scam phrases), chat_flags collection, flag on send, flag on
+      blocked abusive attempt, and 3 super-admin endpoints (flags list,
+      review, rescan). Live test: a scam message ("send me your OTP … scan
+      this qr … guaranteed income") was DELIVERED and flagged scam with all
+      3 phrases; an abusive message was blocked 422 AND recorded as
+      kind=blocked_attempt with the typed text; rescan of 70 historic
+      messages flagged 1 older abusive message; review flips status and
+      drops it out of the open queue (open_count 3 → 2);
+      products_manager 403.
+
+      Frontend (Playwright): Chat records now has Conversations | Flagged(N)
+      switch; flagged cards show SCAM / ABUSE / "BLOCKED — not delivered"
+      badges, matched words, sender + chat pair; "Open chat" jumps into the
+      transcript where the offending bubble carries a SCAM badge;
+      "Mark reviewed" moves the row to the Reviewed filter with
+      "reviewed by support@slangcart.com".
