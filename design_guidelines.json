@@ -1,133 +1,133 @@
 {
-  "project_name": "Referral & E-commerce Platform Mobile App",
-  "theme_and_archetype": {
-    "theme": "Light",
-    "archetype": "Archetype 1 (Organic & Earthy)",
-    "rationale": "For an Indian referral and e-commerce platform dealing with money (₹100 registration, payouts), we must project absolute trust, stability, and growth. Avoiding generic tech-bro neon or dark themes. We use a grounded, organic palette based on Deep Forest Green and warm Off-Whites to make the app feel established, premium, and safe."
-  },
-  "colors": {
-    "background": "#FAF9F6",
+  "app_name": "Slangcart",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A premium, clean, and trustworthy e-commerce experience that puts the product at the absolute center.",
+  "color": {
+    "surfaceSecondary": "#FAF9F6",
+    "onSurfaceSecondary": "#1A1A1A",
     "surface": "#FFFFFF",
-    "surface_muted": "#F3F1EC",
-    "primary": "#143D2E",
-    "primary_foreground": "#FFFFFF",
-    "accent": "#E57A44",
-    "accent_foreground": "#FFFFFF",
-    "success": "#2E7D52",
-    "warning": "#D9A05B",
-    "text_main": "#1C2520",
-    "text_muted": "#6B7280",
-    "border": "#E5E4E0",
-    "tailwind_config_extension": {
-      "brand": {
-        "50": "#F1F5F3",
-        "100": "#DDE8E2",
-        "500": "#2C6B50",
-        "900": "#143D2E",
-        "accent": "#E57A44",
-        "bg": "#FAF9F6"
-      }
-    }
+    "onSurface": "#1A1A1A",
+    "surfaceTertiary": "#F2F2F2",
+    "onSurfaceTertiary": "#1A1A1A",
+    "surfaceInverse": "#1A1A1A",
+    "onSurfaceInverse": "#FFFFFF",
+    "brand": "#143D2E",
+    "brandPrimary": "#143D2E",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#E8F0EC",
+    "onBrandSecondary": "#143D2E",
+    "brandTertiary": "#F2F5F4",
+    "onBrandTertiary": "#143D2E",
+    "success": "#2E6B4F",
+    "onSuccess": "#FFFFFF",
+    "warning": "#B38600",
+    "onWarning": "#FFFFFF",
+    "error": "#B02C2C",
+    "onError": "#FFFFFF",
+    "info": "#404040",
+    "onInfo": "#FFFFFF",
+    "border": "#E5E5E5",
+    "borderStrong": "#143D2E",
+    "divider": "#E5E5E5",
+    "muted": "#737373",
+    "onBrand": "#FFFFFF"
   },
   "typography": {
-    "fonts": {
-      "heading": "Outfit",
-      "body": "Manrope"
-    },
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
     "scale": {
-      "h1": "text-5xl tracking-tight leading-tight",
-      "h2": "text-3xl tracking-tight",
-      "h3": "text-xl font-semibold tracking-tight",
-      "body": "text-base leading-relaxed",
-      "label": "text-xs tracking-[0.1em] uppercase font-bold text-gray-500"
-    },
-    "rules": [
-      "Headings MUST use the Outfit font with tight letter spacing.",
-      "Never use pure black; text is #1C2520.",
-      "Overlines for sections (like 'YOUR NETWORK') must be uppercase, tiny, and widely spaced."
-    ]
-  },
-  "spacing_and_layout": {
-    "philosophy": "Generous Spacing Philosophy. Native mobile screens shouldn't feel cramped.",
-    "screen_padding": "px-6",
-    "section_gap": "gap-8",
-    "card_padding": "p-5",
-    "border_radius": {
-      "cards": "rounded-2xl",
-      "buttons": "rounded-full",
-      "inputs": "rounded-xl"
-    },
-    "surfaces": {
-      "cards": "bg-white border border-[#E5E4E0] shadow-sm",
-      "floating_nav": "bg-white/90 border border-white/20 shadow-[0_8px_32px_rgba(20,61,46,0.1)]"
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
     }
   },
-  "media": {
-    "onboarding_hero": {
-      "url": "https://images.pexels.com/photos/5849577/pexels-photo-5849577.jpeg",
-      "description": "Illustration of wallet with money banknotes coins and bank card, arrows up. Use for onboarding or empty state of wallet."
-    },
-    "avatars": [
-      {
-        "url": "https://images.unsplash.com/photo-1649433658557-54cf58577c68",
-        "description": "Indian professional man smiling (User avatar 1)"
-      },
-      {
-        "url": "https://images.unsplash.com/photo-1598411435746-47bfecc3ea98",
-        "description": "Indian professional man in black shirt (User avatar 2)"
-      },
-      {
-        "url": "https://images.pexels.com/photos/7580822/pexels-photo-7580822.jpeg",
-        "description": "Confident Indian professional woman (User avatar 3)"
-      },
-      {
-        "url": "https://images.pexels.com/photos/7580940/pexels-photo-7580940.jpeg",
-        "description": "Smiling Indian professional man in vest (User avatar 4)"
-      }
+  "spacing": {
+    "rule": "Use 8pt grid system. Maintain generous spacing between distinct functional blocks. Ensure touch targets are at least 44x44pt.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "1",
+  "navigation": "stack_only",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": "true",
+    "do's": [
+      "Use on the pager indicator pill over the hero image",
+      "Use on the Wishlist FAB inside the hero card",
+      "Use on the sticky bottom action bar (Add to Cart / Buy Now) to allow content to slide underneath"
     ],
-    "products": [
-      {
-        "url": "https://images.pexels.com/photos/5650016/pexels-photo-5650016.jpeg",
-        "description": "White shopping bag with red sale tag and mini shopping cart (E-com product placeholder 1)"
-      },
-      {
-        "url": "https://images.pexels.com/photos/5632407/pexels-photo-5632407.jpeg",
-        "description": "Shopping cart with cosmetics and white paper bag (E-com product placeholder 2)"
-      }
+    "dont's": [
+      "Do not use on standard list items or cards",
+      "Do not use on variant chips"
     ]
   },
-  "screens": {
-    "authentication": {
-      "layout": "Clean white background. Large typography for 'Join the Network'.",
-      "features": "Phone number/Email login, OTP verification. ₹100 Registration Fee payment modal using Razorpay/UPI intent styling."
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
     },
-    "user_dashboard": {
-      "hero": "Large numerical display of 'Total Earnings' (e.g., ₹12,450) using text-5xl Outfit, with a subtle 'Withdraw' text button.",
-      "bento_stats": "2x2 flex grid mapping out 'Direct Referrals', 'Team Size', 'Pending Payout', 'Rank'. Flat white cards with #143D2E text.",
-      "actions": "Quick action row for 'Copy Invite Link' and 'Update UPI'."
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Product Detail Page",
+      "purpose": "A high-conversion product display screen that showcases images flawlessly, handles variant selection elegantly, and presents dense specs cleanly.",
+      "states": {
+        "loading": "Skeleton UI for the hero card and specification rows, retaining the layout footprint.",
+        "empty": "Illustration of an empty box with 'Product not found', and a 'Back to Shop' CTA.",
+        "error": "Readable error message stating 'Unable to load product details' with a prominent 'Retry' button."
+      },
+      "layout": "1. SCREEN ROOT: Use a ScrollView with a sticky bottom container outside of it for actions. Set ScrollView background to surfaceSecondary (#FAF9F6). Apply safe area to top and bottom.\n2. BREADCRUMBS: Subtle row at the top (under header), textMuted, sm size.\n3. HERO CARD: Inset card with margin lg (16px) left/right. Background surface. Radius md (12px), subtle shadow (tier 1). Image height ~340px, aspect ratio 4:5 or 1:1. Use resizeMode: 'contain' with padding inside the Image container so phone edges are NEVER cut off. \n4. HERO OVERLAYS: Wishlist FAB top-right (glass or solid white). Pager indicator bottom-right (glass pill, e.g., '1/5'). \n5. THUMBNAILS: Below hero card, a horizontally scrolling list of 48x48 rounded squares (radius sm). Active state has a 2px borderStrong outline.\n6. TITLE & PRICE: Housed in a surface card. Price uses xl or 2xl typography with a smaller 'from' prefix aligned to baseline or stacked directly above in textMuted.\n7. BOX SYSTEM: All subsequent sections (RAM/Storage, Quantity, Details, Specs, Reviews) use identical cards: outer margin lg, inner padding lg, radius md, background surface, 1px border. Vertical gap between cards is md (12px). Section headers are 12px uppercase, textMuted, letter spacing 0.5px.\n8. VARIANT CHIPS: Flex-wrap grid with gap sm (8px). Selected: brandPrimary 1.5px border, brandSecondary (light green) background. Unselected: 1px border outline, transparent bg. Out-of-stock: dashed border, opacity 0.5. Include sub-text in chips for price hints.\n9. TEXT ALIGNMENT: Key-value rows (Specs/Details): left align label, right align value. IF value exceeds 20 characters (like long network bands), stack them vertically (label top, value bottom left-aligned) to prevent ragged text wrapping. Empty values show '—' in textMuted.\n10. BOTTOM BAR: Sticky bottom container. Glassmorphism enabled. Two equal width buttons (flex 1) separated by md gap. Left button: Outlined 'Add to Cart' (brandPrimary border & text). Right button: Filled 'Buy Now' (brandPrimary bg, white text). Button heights must be minimum 48pt."
+    }
+  ],
+  "images": {
+    "hero_image_1": {
+      "url": "https://images.unsplash.com/photo-1598327105666-5b89351aff97?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHwxfHxYaWFvbWklMjBSZWRtaSUyMHNtYXJ0cGhvbmUlMjBoaWdoJTIwcXVhbGl0eXxlbnwwfHx8fDE3ODkwNDUzOTF8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Xiaomi Redmi Smartphone Front"
     },
-    "referral_tree": {
-      "layout": "Vertical tiered list instead of a messy horizontal graph. Root node at top (current user). Vertical line drawn using a 2px View or SVG, connecting to 4 direct child cards.",
-      "cards": "Each child card shows Avatar, Name, Join Date, and an 'Expand' chevron to see their downline. Use nested FlatLists or accordions."
+    "hero_image_2": {
+      "url": "https://images.unsplash.com/photo-1608547492989-e91bab9ce286?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2OTV8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBzbWFydHBob25lJTIwYmFjayUyMGNhbWVyYSUyMGRlc2lnbnxlbnwwfHx8fDE3ODkwNDUzOTZ8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Xiaomi Redmi Smartphone Camera Detail"
     },
-    "wallet_and_payouts": {
-      "layout": "Split view: Top half shows Available Balance with Terracotta (#E57A44) CTA button 'Request Withdrawal'. Bottom half is a Transaction History list.",
-      "inputs": "Bank/UPI update screen with clear, large text inputs, rounded-xl, subtle border."
-    },
-    "ecommerce_shop": {
-      "layout": "2-column Masonry or flat grid for product catalog. Large images (max height 200px), minimal text (Title, Price). Add to cart button is just a minimal '+' icon button."
-    },
-    "admin_dashboard": {
-      "layout": "List-heavy view. Segments for 'Pending Payouts', 'User Management', 'Transactions'. Focus on bulk approval UI (Checkboxes + 'Approve Selected' sticky bottom button)."
+    "brand_logo": {
+      "url": "https://images.unsplash.com/photo-1662948100180-7bc43f6fcab3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHwyfHxYaWFvbWklMjBSZWRtaSUyMHNtYXJ0cGhvbmUlMjBoaWdoJTIwcXVhbGl0eXxlbnwwfHx8fDE3ODkwNDUzOTF8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Xiaomi Logo"
+    }
+  },
+  "haptics": {
+    "events": {
+      "wishlist_toggle": "impactLight",
+      "variant_select": "selection",
+      "quantity_change": "selection",
+      "add_to_cart": "impactMedium",
+      "buy_now": "impactHeavy",
+      "carousel_swipe": "selection"
     }
   },
   "instructions_to_main_agent": [
-    "TECH STACK: Expo React Native. Use NativeWind for Tailwind styling. NEVER use web-only HTML/CSS like <div> or <p>.",
-    "ICONS: Use @expo/vector-icons (Feather or Ionicons) or lucide-react-native. DO NOT USE EMOJIS.",
-    "NAVIGATION: Use a floating Bottom Tab Navigation style. A floating pill anchored to the bottom (e.g., bottom-6, mx-6, rounded-full, blurred background if possible).",
-    "REFERRAL TREE: Do not try to find a 3rd party tree library. Build a custom vertical hierarchy using nested Views/Flatlists and vertical borders (border-l-2) to simulate branches.",
-    "IMAGES: ONLY use the provided URLs in the media section. Do NOT use placeholder domains (no via.placeholder.com).",
-    "COLORS: Stick to the Organic Earthy palette. No generic neon purple or blue gradients. Use #143D2E for Primary brand moments and #E57A44 for CTAs.",
-    "TESTING: Ensure interactive elements have standard React Native testID attributes (e.g., testID=\"login-submit-button\")."
+    "Fix Image Cropping: The current hero carousel cuts off edges. Use resizeMode: 'contain' inside a square container with padding (e.g., p-4 or p-6) so the entire device is always visible. The container should be an inset card, not full-bleed.",
+    "Implement Box System: All sections (Variants, Quantity, Specs, Reviews) must share the exact same container style: surface background, lg margin horizontal, lg padding internal, md radius, and a 1px border (#E5E5E5). Do not mix flat rows with bordered cards.",
+    "Text Wrapping Rules: Do not allow long spec values to right-align and wrap awkwardly. Check length, and if it wraps, change flex direction to column with left-alignment. Display empty specs as '—'.",
+    "Variant Chip States: Selected state gets brandPrimary border and brandSecondary background. Ensure price delta is visible in 10px text underneath the size.",
+    "Sticky Bottom Bar: Use a fixed container at the bottom (outside the ScrollView) that incorporates safe area insets. Make sure the ScrollView has adequate bottom padding so content doesn't hide behind the sticky bar.",
+    "Use Phosphor icons consistently, outlined for regular items, filled for active/selected states."
   ]
 }

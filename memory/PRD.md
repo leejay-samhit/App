@@ -817,3 +817,30 @@ centred column.
   vendor gallery multi-select.
 - Backlog: multi-vendor order splitting, wallet+COD combo, device login
   history, Razorpay (deferred).
+
+### Sep 2026 — Product page "advanced look" redesign (owner request, iteration 66b)
+Design blueprint: `/app/design_guidelines.json` (personality: iOS-Native Clean).
+Implemented in `app/product/[id].tsx`:
+- **Hero card** — was a full-bleed square with `resizeMode: "cover"`, which
+  sliced the sides off phone photos (owner's screenshot). Now an inset,
+  elevated white card sharing the page's left/right edge, radius 20, 1:1
+  canvas, each slide `contain`-fitted with 14px breathing room. Gallery pages
+  are CARD width (`heroW = contentWidth − 2×screen`) so paging lands centred.
+  Wishlist FAB is 44×44, the pager shows both dots (brand green) and a
+  translucent "1/n" pill, and the thumbnail strip (48×48, 2px active border)
+  now lives INSIDE the hero card.
+- **One box recipe** — `styles.card` / `tableCard` (surface, radius 16, 1px
+  border, 16px padding) for title+price, variants, quantity, details, specs,
+  description, reviews; `infoWrap` gives a 12px rhythm and the single 16px
+  outer margin, so every box lines up on the same edge.
+- **Text alignment** — key-value rows keep label-left / value-right for short
+  values, but STACK (label above, value left-aligned) when the value is > 24
+  characters (SIM strings, network band lists) instead of wrapping raggedly;
+  empty values render "—" (fixes the blank "Custom UI" row). Spec tables reuse
+  the same `DetailRow`. Price shows "STARTING FROM" as a micro-label above the
+  amount so the number keeps its baseline.
+- **Variant chips** — selected is a green outline + `brand100` tint (not a
+  filled slab), out-of-stock is dashed + struck through, and every chip carries
+  its own price hint so options can be compared without tapping.
+- **Sticky bar** — 50pt buttons, 12px gap, top shadow/elevation, and
+  `insets.bottom` safe-area padding.

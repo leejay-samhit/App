@@ -11,7 +11,7 @@ import {
   Alert, RefreshControl, TextInput, Modal, Pressable, KeyboardAvoidingView, Platform,
   NativeSyntheticEvent, NativeScrollEvent,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
@@ -78,8 +78,11 @@ export default function ProductDetailScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [activeImageIdx, setActiveImageIdx] = useState(0);
   const heroScrollRef = useRef<ScrollView>(null);
+  const insets = useSafeAreaInsets();
   // Width of the column this screen paints into (capped on tablets).
   const windowWidth = useContentWidth();
+  // The hero is an inset card, so a gallery "page" is the CARD width.
+  const heroW = windowWidth - spacing.screen * 2;
   const [qty, setQty] = useState(1);
   // Jun 2026 — variants
   const [variantId, setVariantId] = useState<string | null>(null);
@@ -249,7 +252,7 @@ export default function ProductDetailScreen() {
         <TouchableOpacity onPress={() => router.push("/cart" as any)} style={styles.iconBtn}><Feather name="shopping-cart" size={18} color={colors.textMain} /></TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 130 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
+      <ScrollView contentContainerStyle={{ paddingBottom: 150 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
         {/* UPDATE 1 (June 2026) — Owner-facing notice: if a vendor lands on
             their own product page (via a direct link or a notification), let
             them know they can edit it via the Vendor panel — they can't buy
@@ -276,104 +279,125 @@ export default function ProductDetailScreen() {
           </View>
         ) : null}
 
-        {/* Hero image — horizontal swipeable gallery with paging dots.
-            Tapping a thumbnail also scrolls the page. */}
-        <View style={styles.heroWrap}>
-          {gallery.length ? (
-            <ScrollView
-              ref={heroScrollRef}
-              horizontal
-              pagingEnabled
-              showsHorizontalScrollIndicator={false}
-              onMomentumScrollEnd={(e: NativeSyntheticEvent<NativeScrollEvent>) => {
-                const w = e.nativeEvent.layoutMeasurement.width || windowWidth;
-                const idx = Math.round(e.nativeEvent.contentOffset.x / w);
-                if (idx !== activeImageIdx) setActiveImageIdx(idx);
-              }}
-              scrollEventThrottle={16}
-              style={StyleSheet.absoluteFill}
-            >
+        {/* ── HERO CARD (Sep 2026 redesign) ─────────────────────────────
+            The gallery used to be a full-bleed square with resizeMode
+            "cover", which sliced the sides off phone photos (the owner's
+            screenshot showed two handsets cut in half). It is now an inset
+            white card the same width as every other box on the page, and
+            each slide is CONTAINED inside it with breathing room, so no
+            product is ever cropped. Pages are card-width, not screen-width,
+            so paging lands dead centre. */}
+        <View style={styles.heroCard}>
+          <View style={styles.heroCanvas}>
+            {gallery.length ? (
+              <ScrollView
+                ref={heroScrollRef}
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                onMomentumScrollEnd={(e: NativeSyntheticEvent<NativeScrollEvent>) => {
+                  const w = e.nativeEvent.layoutMeasurement.width || heroW;
+                  const idx = Math.round(e.nativeEvent.contentOffset.x / w);
+                  if (idx !== activeImageIdx) setActiveImageIdx(idx);
+                }}
+                scrollEventThrottle={16}
+                style={StyleSheet.absoluteFill}
+              >
+                {gallery.map((src, i) => (
+                  <View key={`hero-${i}`} style={{ width: heroW, height: "100%", padding: 14 }}>
+                    <Image
+                      source={{ uri: src }}
+                      style={{ width: "100%", height: "100%" }}
+                      resizeMode="contain"
+                    />
+                  </View>
+                ))}
+              </ScrollView>
+            ) : (
+              <View style={[styles.heroImg, { alignItems: "center", justifyContent: "center" }]}>
+                <Feather name="image" size={40} color={colors.textMuted} />
+              </View>
+            )}
+            {!inStock ? <View style={styles.heroOOSBadge}><Text style={styles.heroOOSText}>SOLD OUT</Text></View> : null}
+            <TouchableOpacity onPress={onToggleSave} style={styles.heartBtn} testID="save-btn">
+              <Feather name="heart" size={18} color={saved ? "#DC2626" : colors.textMain} />
+            </TouchableOpacity>
+            {/* Page indicator dots */}
+            {gallery.length > 1 ? (
+              <View style={styles.heroDots}>
+                {gallery.map((_, i) => (
+                  <View key={`dot-${i}`} style={[styles.heroDot, i === activeImageIdx && styles.heroDotActive]} />
+                ))}
+              </View>
+            ) : null}
+            {/* Page counter chip */}
+            {gallery.length > 1 ? (
+              <View style={styles.heroCounter}>
+                <Text style={styles.heroCounterText}>{activeImageIdx + 1}/{gallery.length}</Text>
+              </View>
+            ) : null}
+          </View>
+
+          {/* Thumbnail strip — lives INSIDE the hero card so it shares the
+              card's left edge instead of floating on the page background. */}
+          {gallery.length > 1 ? (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.thumbsRow}>
               {gallery.map((src, i) => (
-                <Image
-                  key={`hero-${i}`}
-                  source={{ uri: src }}
-                  style={{ width: windowWidth, height: "100%" }}
-                  resizeMode="cover"
-                />
+                <TouchableOpacity
+                  key={`thumb-${i}`}
+                  onPress={() => {
+                    setActiveImageIdx(i);
+                    heroScrollRef.current?.scrollTo({ x: i * heroW, animated: true });
+                  }}
+                  style={[styles.thumb, i === activeImageIdx && styles.thumbActive]}
+                >
+                  <Image source={{ uri: src }} style={styles.thumbImg} resizeMode="cover" />
+                </TouchableOpacity>
               ))}
             </ScrollView>
-          ) : (
-            <View style={[styles.heroImg, { alignItems: "center", justifyContent: "center" }]}>
-              <Feather name="image" size={40} color={colors.textMuted} />
-            </View>
-          )}
-          {!inStock ? <View style={styles.heroOOSBadge}><Text style={styles.heroOOSText}>SOLD OUT</Text></View> : null}
-          <TouchableOpacity onPress={onToggleSave} style={styles.heartBtn} testID="save-btn">
-            <Feather name={saved ? "heart" : "heart"} size={18} color={saved ? "#DC2626" : colors.textMain} fill={saved ? "#DC2626" : "none" as any} />
-          </TouchableOpacity>
-          {/* Page indicator dots */}
-          {gallery.length > 1 ? (
-            <View style={styles.heroDots}>
-              {gallery.map((_, i) => (
-                <View key={`dot-${i}`} style={[styles.heroDot, i === activeImageIdx && styles.heroDotActive]} />
-              ))}
-            </View>
-          ) : null}
-          {/* Page counter chip */}
-          {gallery.length > 1 ? (
-            <View style={styles.heroCounter}>
-              <Text style={styles.heroCounterText}>{activeImageIdx + 1}/{gallery.length}</Text>
-            </View>
           ) : null}
         </View>
 
-        {/* Thumbnail strip — synced with paged scroll */}
-        {gallery.length > 1 ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.thumbsRow}>
-            {gallery.map((src, i) => (
-              <TouchableOpacity
-                key={`thumb-${i}`}
-                onPress={() => {
-                  setActiveImageIdx(i);
-                  heroScrollRef.current?.scrollTo({ x: i * windowWidth, animated: true });
-                }}
-                style={[styles.thumb, i === activeImageIdx && styles.thumbActive]}
-              >
-                <Image source={{ uri: src }} style={styles.thumbImg} resizeMode="cover" />
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        ) : null}
-
         <View style={styles.infoWrap}>
-          <Text style={styles.productName}>{product.name}</Text>
+          {/* ── TITLE + PRICE CARD ─────────────────────────────────────
+              Name, highlights, price and rating now live in one card so
+              they share the page's left edge and read as a single block
+              instead of floating text. */}
+          <View style={styles.card}>
+            <Text style={styles.productName}>{product.name}</Text>
 
-          {/* Sub-features bullets */}
-          {(product.sub_features || []).length ? (
-            <View style={styles.bulletList}>
-              {product.sub_features!.slice(0, 8).map((f, i) => (
-                <View key={`f-${i}`} style={styles.bulletRow}>
-                  <View style={styles.bulletDot} />
-                  <Text style={styles.bulletText}>{f}</Text>
-                </View>
-              ))}
-            </View>
-          ) : null}
-
-          {/* Price + rating row */}
-          <View style={styles.priceRow}>
-            {/* Jun 2026 — headline price follows the chosen size; before a
-                size is picked we show "from ₹X" (the cheapest option) so
-                the customer is never surprised at checkout. */}
-            <Text style={styles.price}>
-              {hasVariants && !selected ? `from ${formatINR(product.price)}` : formatINR(unitPrice)}
-            </Text>
-            {reviewStats.total > 0 ? (
-              <View style={styles.ratingChip}>
-                <Feather name="star" size={11} color="#F59E0B" />
-                <Text style={styles.ratingChipText}>{reviewStats.average} · {reviewStats.total}</Text>
+            {/* Sub-features bullets */}
+            {(product.sub_features || []).length ? (
+              <View style={styles.bulletList}>
+                {product.sub_features!.slice(0, 8).map((f, i) => (
+                  <View key={`f-${i}`} style={styles.bulletRow}>
+                    <View style={styles.bulletDot} />
+                    <Text style={styles.bulletText}>{f}</Text>
+                  </View>
+                ))}
               </View>
             ) : null}
+
+            {/* Price + rating row.
+                Jun 2026 — headline price follows the chosen size; before a
+                size is picked we show "from ₹X" (the cheapest option) so
+                the customer is never surprised at checkout. The "from"
+                prefix is a small muted line ABOVE the amount, so the
+                number itself always starts on the same baseline. */}
+            <View style={styles.priceRow}>
+              <View style={{ flexShrink: 1 }}>
+                {hasVariants && !selected ? <Text style={styles.priceFrom}>STARTING FROM</Text> : null}
+                <Text style={styles.price}>
+                  {hasVariants && !selected ? formatINR(product.price) : formatINR(unitPrice)}
+                </Text>
+              </View>
+              {reviewStats.total > 0 ? (
+                <View style={styles.ratingChip}>
+                  <Feather name="star" size={11} color="#F59E0B" />
+                  <Text style={styles.ratingChipText}>{reviewStats.average} · {reviewStats.total}</Text>
+                </View>
+              ) : null}
+            </View>
           </View>
 
           {/* Styled summary blocks — only show those the admin/vendor filled in */}
@@ -433,9 +457,16 @@ export default function ProductDetailScreen() {
                     >
                       <Text style={[
                         styles.sizeChipText,
-                        isSel && { color: colors.primaryFg },
+                        isSel && { color: colors.primary },
                         !v.in_stock && styles.sizeChipTextOOS,
                       ]}>{v.label}</Text>
+                      {/* Price hint per option — the shopper can compare
+                          without tapping through every chip. */}
+                      {v.in_stock ? (
+                        <Text style={[styles.sizeChipPrice, isSel && { color: colors.primary }]}>{formatINR(v.price)}</Text>
+                      ) : (
+                        <Text style={styles.sizeChipPriceOOS}>Sold out</Text>
+                      )}
                     </TouchableOpacity>
                   );
                 })}
@@ -496,7 +527,7 @@ export default function ProductDetailScreen() {
             return (
               <>
                 <Text style={styles.sectionTitle}>Product Details</Text>
-                <View style={styles.detailsCard}>
+                <View style={styles.tableCard}>
                   {visible.map(([k, v]) => <DetailRow key={k} label={k} value={v} />)}
                 </View>
               </>
@@ -515,19 +546,16 @@ export default function ProductDetailScreen() {
           {(product.spec_tabs || []).length ? (
             <>
               <Text style={styles.sectionTitle}>Specifications</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingBottom: 2 }}>
                 {product.spec_tabs!.map((t, i) => (
                   <TouchableOpacity key={`st-${i}`} onPress={() => setActiveSpecTab(i)} style={[styles.specTab, i === activeSpecTab && styles.specTabActive]}>
                     <Text style={[styles.specTabText, i === activeSpecTab && { color: colors.primaryFg }]}>{t.name || `Tab ${i + 1}`}</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
-              <View style={styles.specPanel}>
+              <View style={[styles.tableCard, { marginTop: 10 }]}>
                 {(product.spec_tabs![activeSpecTab]?.rows || []).map((r, i) => (
-                  <View key={`sr-${i}`} style={styles.specRow}>
-                    <Text style={styles.specLabel}>{r.label}</Text>
-                    <Text style={styles.specValue}>{r.value}</Text>
-                  </View>
+                  <DetailRow key={`sr-${i}`} label={r.label} value={r.value} />
                 ))}
               </View>
             </>
@@ -551,7 +579,7 @@ export default function ProductDetailScreen() {
           ) : null}
 
           {/* Reviews */}
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 18 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
             <Text style={[styles.sectionTitle, { marginTop: 0 }]}>Customer Reviews ({reviewStats.total})</Text>
             <TouchableOpacity onPress={() => setReviewOpen(true)} style={styles.writeReviewBtn}>
               <Feather name="edit-3" size={12} color={colors.primaryFg} />
@@ -615,7 +643,7 @@ export default function ProductDetailScreen() {
       </ScrollView>
 
       {/* Sticky bottom CTA */}
-      <View style={styles.stickyCta}>
+      <View style={[styles.stickyCta, { paddingBottom: Math.max(insets.bottom, 12) + 4 }]}>
         {hydrating ? (
           /* Jun 2026 — the page is live from the preview, but we don't know
              the real stock / options yet, so the buy actions stay inert for
@@ -734,11 +762,33 @@ function StyledBlock({ icon, label, block }: { icon: any; label: string; block?:
 }
 
 function DetailRow({ label, value }: { label: string; value?: string }) {
-  if (!value) return null;
+  // Sep 2026 alignment rule — short values sit right-aligned on the same
+  // line as their label; long ones (SIM strings, network band lists) STACK
+  // under the label, left-aligned, instead of wrapping into a ragged
+  // right-hand column. Empty values render an em dash so a row never looks
+  // broken (the owner's screenshot had a blank "Custom UI" row).
+  const text = (value ?? "").trim();
+  const stacked = text.length > 24;
+  if (!text) {
+    return (
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{label}</Text>
+        <Text style={[styles.detailValue, { color: colors.textMuted, fontWeight: "600" }]}>—</Text>
+      </View>
+    );
+  }
+  if (stacked) {
+    return (
+      <View style={styles.detailRowStacked}>
+        <Text style={styles.detailLabel}>{label}</Text>
+        <Text style={styles.detailValueStacked}>{text}</Text>
+      </View>
+    );
+  }
   return (
     <View style={styles.detailRow}>
       <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={styles.detailValue}>{value}</Text>
+      <Text style={styles.detailValue}>{text}</Text>
     </View>
   );
 }
@@ -867,7 +917,22 @@ const styles = StyleSheet.create({
   },
   ownerBannerTitle: { fontSize: 13, fontWeight: "800", color: colors.primary },
   ownerBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-  heroWrap: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative", overflow: "hidden" },
+  // ── HERO CARD (Sep 2026) ─────────────────────────────────────────────
+  // Inset, elevated, and the SAME width as every other box on the page, so
+  // the whole screen shares one left/right edge. Photos are contained on a
+  // soft wash instead of being cropped to fill.
+  heroCard: {
+    marginHorizontal: spacing.screen, marginTop: 10,
+    backgroundColor: colors.surface,
+    borderRadius: 20, borderWidth: 1, borderColor: colors.border,
+    paddingBottom: 4, overflow: "hidden",
+    ...Platform.select({
+      ios: { shadowColor: "#0F172A", shadowOpacity: 0.06, shadowRadius: 12, shadowOffset: { width: 0, height: 4 } },
+      android: { elevation: 2 },
+      default: {},
+    }),
+  },
+  heroCanvas: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceMuted, position: "relative", overflow: "hidden" },
   heroImg: { width: "100%", height: "100%" },
   heroDots: {
     position: "absolute", left: 0, right: 0, bottom: 12,
@@ -875,57 +940,73 @@ const styles = StyleSheet.create({
   },
   heroDot: {
     width: 6, height: 6, borderRadius: 3,
-    backgroundColor: "rgba(255,255,255,0.55)",
+    backgroundColor: "rgba(20,61,46,0.25)",
   },
   heroDotActive: {
     width: 18, height: 6, borderRadius: 3,
-    backgroundColor: "#FFFFFF",
+    backgroundColor: colors.primary,
   },
   heroCounter: {
     position: "absolute", right: 12, bottom: 12,
     paddingHorizontal: 10, paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: "rgba(17,24,39,0.62)",
   },
   heroCounterText: { color: "#FFFFFF", fontSize: 11, fontWeight: "800", letterSpacing: 0.3 },
-  heroOOSBadge: { position: "absolute", top: 16, left: 16, backgroundColor: "#B91C1C", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
+  heroOOSBadge: { position: "absolute", top: 14, left: 14, backgroundColor: "#B91C1C", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
   heroOOSText: { fontSize: 10, fontWeight: "900", color: "#fff", letterSpacing: 1.2 },
-  heartBtn: { position: "absolute", top: 14, right: 14, width: 38, height: 38, borderRadius: 19, backgroundColor: "rgba(255,255,255,0.95)", alignItems: "center", justifyContent: "center" },
-  thumbsRow: { gap: 8, paddingHorizontal: spacing.screen, paddingVertical: 10 },
-  thumb: { width: 52, height: 52, borderRadius: 8, overflow: "hidden", borderWidth: 2, borderColor: "transparent" },
+  heartBtn: {
+    position: "absolute", top: 12, right: 12,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.94)",
+    borderWidth: 1, borderColor: colors.border,
+    alignItems: "center", justifyContent: "center",
+  },
+  thumbsRow: { gap: 8, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 12 },
+  thumb: { width: 48, height: 48, borderRadius: 10, overflow: "hidden", borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surfaceMuted },
   thumbActive: { borderColor: colors.primary },
   thumbImg: { width: "100%", height: "100%" },
-  infoWrap: { padding: spacing.screen, gap: 10 },
-  productName: { fontSize: 22, fontWeight: "900", color: colors.textMain, letterSpacing: -0.5, lineHeight: 28 },
-  bulletList: { marginTop: 2, gap: 4 },
+  infoWrap: { paddingHorizontal: spacing.screen, paddingTop: 12, paddingBottom: 8, gap: 12 },
+  // ── ONE BOX RECIPE for every section on the page ─────────────────────
+  card: {
+    backgroundColor: colors.surface, borderRadius: 16,
+    borderWidth: 1, borderColor: colors.border, padding: 16,
+  },
+  productName: { fontSize: 20, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4, lineHeight: 27 },
+  bulletList: { marginTop: 8, gap: 4 },
   bulletRow: { flexDirection: "row", alignItems: "flex-start", gap: 6 },
   bulletDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: colors.primary, marginTop: 7 },
   bulletText: { fontSize: 13, color: colors.textMain, flex: 1, lineHeight: 19 },
-  priceRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 },
-  price: { fontSize: 26, fontWeight: "900", color: colors.primary, letterSpacing: -0.5 },
-  ratingChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: "#FEF3C7" },
+  priceRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 12, gap: 8 },
+  priceFrom: { fontSize: 9.5, fontWeight: "900", letterSpacing: 1.1, color: colors.textMuted, marginBottom: 2 },
+  price: { fontSize: 26, fontWeight: "900", color: colors.primary, letterSpacing: -0.6 },
+  ratingChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: "#FEF3C7" },
   ratingChipText: { fontSize: 11, fontWeight: "800", color: "#92400E" },
-  summaryBlock: { backgroundColor: colors.surface, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.border },
+  summaryBlock: { backgroundColor: colors.surface, padding: 14, borderRadius: 16, borderWidth: 1, borderColor: colors.border },
   summaryLabel: { fontSize: 9, fontWeight: "900", letterSpacing: 1.2, color: colors.primary },
   // ── Jun 2026 — Size / option picker + size-guide sheet ──────────────
   sizeCard: {
-    marginTop: 8, padding: 12, backgroundColor: colors.surface,
-    borderRadius: 14, borderWidth: 1, borderColor: colors.border,
+    padding: 16, backgroundColor: colors.surface,
+    borderRadius: 16, borderWidth: 1, borderColor: colors.border,
   },
   sizeHeadRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
   sizeGuideLink: { fontSize: 12, fontWeight: "800", color: colors.primary, textDecorationLine: "underline" },
-  sizeWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  sizeWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 },
+  // Chips: selected = green outline + light-green tint (not a filled slab),
+  // so a wrapped grid of them stays calm and the price hint stays readable.
   sizeChip: {
-    minWidth: 48, minHeight: 44, paddingHorizontal: 14,
-    alignItems: "center", justifyContent: "center",
-    borderRadius: 10, borderWidth: 1.5, borderColor: colors.border,
+    minWidth: 92, minHeight: 52, paddingHorizontal: 14, paddingVertical: 8,
+    alignItems: "center", justifyContent: "center", gap: 1,
+    borderRadius: 12, borderWidth: 1.5, borderColor: colors.border,
     backgroundColor: colors.surface,
   },
-  sizeChipSel: { backgroundColor: colors.primary, borderColor: colors.primary },
-  sizeChipOOS: { backgroundColor: colors.surfaceMuted, borderColor: colors.border, opacity: 0.55 },
+  sizeChipSel: { backgroundColor: colors.brand100, borderColor: colors.primary },
+  sizeChipOOS: { backgroundColor: colors.surfaceMuted, borderColor: colors.border, borderStyle: "dashed", opacity: 0.6 },
   sizeChipText: { fontSize: 13.5, fontWeight: "800", color: colors.textMain },
   sizeChipTextOOS: { color: colors.textMuted, textDecorationLine: "line-through" },
-  sizeMeta: { fontSize: 12, color: colors.textMuted, marginTop: 10, fontWeight: "600" },
+  sizeChipPrice: { fontSize: 11, fontWeight: "700", color: colors.textMuted },
+  sizeChipPriceOOS: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.3 },
+  sizeMeta: { fontSize: 12, color: colors.textMuted, marginTop: 12, fontWeight: "600" },
   sheetOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
   guideSheet: {
     backgroundColor: colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20,
@@ -943,44 +1024,44 @@ const styles = StyleSheet.create({
   guideCell: { flex: 1, fontSize: 12, color: colors.textMain, textAlign: "center" },
   guideCellHead: { fontSize: 10.5, fontWeight: "900", color: colors.textMuted, letterSpacing: 0.3 },
   guideNote: { fontSize: 11.5, color: colors.textMuted, marginTop: 14, lineHeight: 17 },
-  qtyCard: { marginTop: 8, padding: 12, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border },
-  qtyLabel: { fontSize: 10, fontWeight: "800", letterSpacing: 1, color: colors.textMuted, marginBottom: 8 },
+  qtyCard: { padding: 16, backgroundColor: colors.surface, borderRadius: 16, borderWidth: 1, borderColor: colors.border },
+  qtyLabel: { fontSize: 10, fontWeight: "900", letterSpacing: 1.1, color: colors.textMuted, marginBottom: 8 },
   qtyRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  qtyBtn: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
-  qtyText: { fontSize: 16, fontWeight: "900", color: colors.textMain, minWidth: 26, textAlign: "center" },
-  qtySubLabel: { fontSize: 10, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.6, marginRight: 4 },
-  qtySubAmount: { fontSize: 16, fontWeight: "900", color: colors.primary },
-  actionRow: { flexDirection: "row", gap: 8, marginTop: 6 },
-  actionBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
-  actionText: { fontSize: 12, fontWeight: "800", color: colors.primary },
-  sectionTitle: { fontSize: 16, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4, marginTop: 14, marginBottom: 8 },
-  detailsCard: { backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 4 },
-  detailRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border },
-  detailLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "700", flex: 1 },
-  detailValue: { fontSize: 13, color: colors.textMain, fontWeight: "700", textAlign: "right", flex: 1 },
-  descBox: { backgroundColor: colors.surface, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.border },
-  descText: { fontSize: 13, color: colors.textMain, lineHeight: 21 },
-  specTab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  qtyBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  qtyText: { fontSize: 16, fontWeight: "900", color: colors.textMain, minWidth: 32, textAlign: "center" },
+  qtySubLabel: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.6, marginRight: 6 },
+  qtySubAmount: { fontSize: 17, fontWeight: "900", color: colors.primary, letterSpacing: -0.3 },
+  actionRow: { flexDirection: "row", gap: 10 },
+  actionBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, minHeight: 46, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  actionText: { fontSize: 12.5, fontWeight: "800", color: colors.primary },
+  sectionTitle: { fontSize: 16, fontWeight: "900", color: colors.textMain, letterSpacing: -0.4, marginTop: 6, marginBottom: 2 },
+  // Key-value table card — rows are divided, the last row has no divider so
+  // the card never ends on a stray line.
+  tableCard: { backgroundColor: colors.surface, borderRadius: 16, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 16, paddingVertical: 4 },
+  detailRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: colors.border },
+  detailRowStacked: { paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 3 },
+  detailLabel: { fontSize: 12.5, color: colors.textMuted, fontWeight: "700" },
+  detailValue: { fontSize: 13, color: colors.textMain, fontWeight: "700", textAlign: "right", flexShrink: 1 },
+  detailValueStacked: { fontSize: 13, color: colors.textMain, fontWeight: "700", textAlign: "left", lineHeight: 19 },
+  descBox: { backgroundColor: colors.surface, padding: 16, borderRadius: 16, borderWidth: 1, borderColor: colors.border },
+  descText: { fontSize: 13.5, color: colors.textMain, lineHeight: 22 },
+  specTab: { paddingHorizontal: 16, minHeight: 40, alignItems: "center", justifyContent: "center", borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   specTabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  specTabText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
-  specPanel: { backgroundColor: colors.surface, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.border, marginTop: 8 },
-  specRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
-  specLabel: { fontSize: 12, color: colors.textMuted, flex: 1 },
-  specValue: { fontSize: 12, color: colors.textMain, fontWeight: "700", flex: 1, textAlign: "right" },
+  specTabText: { fontSize: 12.5, fontWeight: "800", color: colors.textMain },
   boxGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   boxItem: { width: "31%", alignItems: "center", gap: 4 },
   boxThumb: { width: "100%", aspectRatio: 1, borderRadius: 10, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center", overflow: "hidden" },
   boxImg: { width: "100%", height: "100%" },
   boxName: { fontSize: 10, color: colors.textMain, fontWeight: "700", textAlign: "center" },
   // Reviews
-  writeReviewBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.primary },
+  writeReviewBtn: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 14, minHeight: 36, justifyContent: "center", borderRadius: 999, backgroundColor: colors.primary },
   writeReviewText: { fontSize: 11, fontWeight: "800", color: colors.primaryFg },
-  reviewStats: { flexDirection: "row", alignItems: "center", gap: 6, padding: 10, borderRadius: 10, backgroundColor: colors.brand100, marginBottom: 8 },
+  reviewStats: { flexDirection: "row", alignItems: "center", gap: 6, padding: 14, borderRadius: 16, backgroundColor: colors.brand100 },
   reviewAvg: { fontSize: 22, fontWeight: "900", color: colors.primary, letterSpacing: -0.3 },
   reviewMeta: { fontSize: 11, color: colors.textMuted, fontWeight: "700" },
-  emptyReviews: { alignItems: "center", padding: 20, gap: 6 },
+  emptyReviews: { alignItems: "center", paddingVertical: 28, paddingHorizontal: 16, gap: 8, backgroundColor: colors.surface, borderRadius: 16, borderWidth: 1, borderColor: colors.border, borderStyle: "dashed" },
   emptyReviewsText: { fontSize: 12, color: colors.textMuted },
-  reviewCard: { backgroundColor: colors.surface, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  reviewCard: { backgroundColor: colors.surface, padding: 16, borderRadius: 16, borderWidth: 1, borderColor: colors.border },
   reviewAvatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
   reviewAvatarText: { fontSize: 12, fontWeight: "900", color: colors.primary },
   reviewName: { fontSize: 13, fontWeight: "800", color: colors.textMain },
@@ -999,12 +1080,24 @@ const styles = StyleSheet.create({
   },
   helpfulBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   helpfulText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
-  // Sticky CTA
-  stickyCta: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: spacing.screen, paddingTop: 10, paddingBottom: 18, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border, flexDirection: "row", gap: 10 },
-  cartBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 13, borderRadius: 999, borderWidth: 2, borderColor: colors.primary, backgroundColor: "#fff" },
-  cartBtnText: { fontSize: 13, fontWeight: "900", color: colors.primary },
-  buyBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 13, borderRadius: 999, backgroundColor: colors.primary },
-  buyBtnText: { fontSize: 13, fontWeight: "900", color: colors.primaryFg },
+  // Sticky CTA — elevated so page content clearly slides beneath it, with
+  // the home-indicator inset handled by the screen (see insets.bottom).
+  stickyCta: {
+    position: "absolute", left: 0, right: 0, bottom: 0,
+    paddingHorizontal: spacing.screen, paddingTop: 12,
+    backgroundColor: colors.surface,
+    borderTopWidth: 1, borderTopColor: colors.border,
+    flexDirection: "row", gap: 12,
+    ...Platform.select({
+      ios: { shadowColor: "#0F172A", shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: -3 } },
+      android: { elevation: 12 },
+      default: {},
+    }),
+  },
+  cartBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 50, borderRadius: 999, borderWidth: 1.5, borderColor: colors.primary, backgroundColor: colors.surface },
+  cartBtnText: { fontSize: 13.5, fontWeight: "900", color: colors.primary },
+  buyBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 50, borderRadius: 999, backgroundColor: colors.primary },
+  buyBtnText: { fontSize: 13.5, fontWeight: "900", color: colors.primaryFg },
   // Modal
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
   modalSheet: { backgroundColor: colors.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: "75%" },
