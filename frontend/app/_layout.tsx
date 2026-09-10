@@ -139,6 +139,21 @@ function PushReRegister() {
       registerForPush(user.id).catch(() => {});
     }
   }, [user?.id]);
+
+  // Tapping a notification in the phone's tray should land the user on the
+  // right screen (chat thread, order, login activity). The payload carries
+  // `action_url` — see backend core/notifications.py.
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
+      const data: any = resp?.notification?.request?.content?.data || {};
+      const url = data.action_url || data.url;
+      if (url && typeof url === "string" && url.startsWith("/")) {
+        try { expoRouter.push(url as any); } catch { /* ignore bad routes */ }
+      }
+    });
+    return () => { try { sub.remove(); } catch { /* ignore */ } };
+  }, []);
   return null;
 }
 

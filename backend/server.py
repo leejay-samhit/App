@@ -104,6 +104,7 @@ from core.security import (  # noqa: E402
     register_session,
     revoke_session,
     rotate_session,
+    rotation_target,
     get_current_user,
     require_admin,
     require_admin_role,
@@ -668,6 +669,16 @@ async def refresh_token(request: Request, payload: _RefreshPayload):
     legacy_sid = user.get("active_session_id")
     sid_known = (sid in active_sids) or (not active_sids and legacy_sid == sid)
     if not sid_known:
+        # Grace path: this device's token was rotated moments ago but it never
+        # received the new one (app killed mid-refresh, weak signal, or two
+        # refreshes raced). Hand it the CURRENT session instead of signing the
+        # user out — the owner's rule is "only a manual logout signs me out".
+        target = rotation_target(user, sid)
+        if target:
+            return {
+                "token": create_access_token(user_id, user.get("email", ""), user.get("role", "user"), sid=target),
+                "refresh_token": create_refresh_token(user_id, target),
+            }
         raise HTTPException(status_code=401, detail="session_revoked")
     # Rotate within this device's slot — new sid replaces old, other
     # devices' sids remain untouched.
@@ -4534,6 +4545,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                     admin_doc["id"], "order", "New order",
                     f"{order_number} · ₹{sub_total:.0f} from {user.get('name') or user.get('email')}",
                     extra={"order_id": order_id, "action_url": "/admin/orders"},
+                    push=False,  # covered by the batched send_push below
                 )
                 push_targets.append(admin_doc["id"])
             from routes.push import send_push
@@ -6081,7 +6093,56 @@ async def admin_list_orders(_: Dict[str, Any] = Depends(require_admin), status: 
     if status:
         q["status"] = status
     items = await db.orders.find(q, {"_id": 0}).sort("created_at", -1).limit(1000).to_list(1000)
-    return items
+    return await _attach_order_parties(items)
+
+
+async def _attach_order_parties(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Add buyer + seller identity to order rows (Sep 2026, owner request).
+
+    The admin order screen showed only an id and the products, so nobody knew
+    WHO bought it or WHICH shop has to ship it. Names/phones are read in one
+    batched query so the list stays fast.
+    """
+    if not orders:
+        return orders
+    ids = {o.get("user_id") for o in orders if o.get("user_id")}
+    ids |= {o.get("vendor_id") for o in orders if o.get("vendor_id")}
+    people: Dict[str, Dict[str, Any]] = {}
+    if ids:
+        rows = await db.users.find(
+            {"id": {"$in": [i for i in ids if i]}},
+            {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "store_name": 1, "shop_name": 1},
+        ).to_list(2000)
+        people = {r["id"]: r for r in rows}
+    for o in orders:
+        buyer = people.get(o.get("user_id") or "") or {}
+        addr = o.get("shipping_address") or {}
+        o["buyer_name"] = buyer.get("name") or addr.get("name") or "Customer"
+        o["buyer_email"] = buyer.get("email") or ""
+        o["buyer_phone"] = buyer.get("phone") or addr.get("phone") or ""
+        seller = people.get(o.get("vendor_id") or "") or {}
+        o["vendor_name"] = o.get("vendor_name") or seller.get("store_name") or seller.get("shop_name") or seller.get("name") or ""
+        o["vendor_email"] = seller.get("email") or ""
+        o["vendor_phone"] = seller.get("phone") or ""
+    return orders
+
+
+@api_router.get("/admin/orders/{order_id}")
+async def admin_order_detail(order_id: str, _: Dict[str, Any] = Depends(require_admin)):
+    """Everything about one order — used by the admin order-details sheet."""
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    (order,) = await _attach_order_parties([order])
+    # Sibling sub-orders from the same checkout (multi-vendor split).
+    siblings: List[Dict[str, Any]] = []
+    if order.get("group_id"):
+        rows = await db.orders.find(
+            {"group_id": order["group_id"], "id": {"$ne": order_id}},
+            {"_id": 0, "id": 1, "order_number": 1, "vendor_name": 1, "total": 1, "status": 1},
+        ).to_list(20)
+        siblings = rows
+    return {"order": order, "siblings": siblings}
 
 
 @api_router.patch("/admin/orders/{order_id}/status")
@@ -6269,6 +6330,7 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                     order["vendor_id"], "vendor", f"Order {payload.status}",
                     f"{order.get('order_number') or order['id'][:8]} is now {payload.status}.",
                     extra={"order_id": order["id"], "action_url": "/vendor/orders"},
+                    push=False,  # covered by the batched send_push below
                 )
                 targets.append(order["vendor_id"])
             await send_push(

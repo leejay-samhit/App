@@ -145,12 +145,70 @@ async def revoke_session(user_id: str, sid: str) -> None:
 async def rotate_session(user_id: str, old_sid: str, new_sid: str) -> None:
     """Refresh-token rotation: replace `old_sid` with `new_sid` atomically
     in the active set so the device keeps its slot without inflating the
-    count and without other devices noticing."""
+    count and without other devices noticing.
+
+    The swap is also remembered for ROTATION_GRACE_SECONDS. A phone that
+    loses the refresh RESPONSE (killed app, tunnel drop, two parallel
+    refreshes) still holds the old token; without this memory its next call
+    looked like a revoked session and the user was silently signed out.
+    """
     await db.users.update_one(
         {"id": user_id},
-        {"$pull": {"active_session_ids": old_sid}},
+        {
+            "$pull": {"active_session_ids": old_sid},
+        },
+    )
+    await db.users.update_one(
+        {"id": user_id},
+        {
+            "$push": {
+                "session_rotations": {
+                    "$each": [{
+                        "old": old_sid,
+                        "new": new_sid,
+                        "at": datetime.now(timezone.utc).isoformat(),
+                    }],
+                    "$slice": -30,
+                }
+            }
+        },
     )
     await register_session(user_id, new_sid)
+
+
+# How long a just-rotated refresh token may still be replayed (seconds).
+ROTATION_GRACE_SECONDS = int(os.environ.get("ROTATION_GRACE_SECONDS", "300"))
+
+
+def rotation_target(user: Dict[str, Any], sid: str) -> Optional[str]:
+    """Return the session id that replaced `sid`, if it was rotated recently.
+
+    Follows the chain (a device can rotate several times) and only accepts a
+    hand-off that happened within the grace window, so a truly old token
+    still gets rejected.
+    """
+    rotations = user.get("session_rotations") or []
+    if not rotations:
+        return None
+    by_old = {r.get("old"): r for r in rotations if r.get("old")}
+    active = set(user.get("active_session_ids") or [])
+    cur = sid
+    for _ in range(6):
+        row = by_old.get(cur)
+        if not row:
+            return None
+        try:
+            at = datetime.fromisoformat(str(row.get("at")).replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+        if (datetime.now(timezone.utc) - at).total_seconds() > ROTATION_GRACE_SECONDS:
+            return None
+        cur = row.get("new")
+        if cur in active:
+            return cur
+    return None
 
 
 def create_access_token(user_id: str, email: str, role: str, sid: Optional[str] = None) -> str:
@@ -301,6 +359,9 @@ ADMIN_AREAS: Dict[str, Any] = {
     "products_manager": [
         "/admin/products", "/admin/product", "/admin/bulk-products", "/admin/categories",
         "/admin/shop-categories", "/admin/brands", "/admin/ai-tools", "/admin/master-products",
+        # The product list's "Filter by vendor" picker reads the vendor
+        # roster — read-only, so no vendor can be approved or edited here.
+        "GET /admin/vendors",
     ],
     "layout_manager": [
         "/admin/shop-layout", "/admin/promo-banners", "/admin/branding", "/admin/shop-categories",

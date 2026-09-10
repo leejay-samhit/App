@@ -20,6 +20,7 @@ Collections:
                     edited, created_at, updated_at}
 """
 from __future__ import annotations
+import json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -226,6 +227,12 @@ class _ConnectionManager:
 
     def __init__(self) -> None:
         self._conns: Dict[str, Set[WebSocket]] = {}
+        # user_id → thread_id the user currently has OPEN on screen. Used to
+        # decide whether a phone push would be redundant. A socket being
+        # merely connected is NOT enough: on Android the app keeps a live
+        # socket while backgrounded (location service), which used to
+        # swallow every chat push (owner report, Sep 2026).
+        self._viewing: Dict[str, str] = {}
 
     async def connect(self, user_id: str, ws: WebSocket) -> None:
         await ws.accept()
@@ -250,6 +257,15 @@ class _ConnectionManager:
     def is_online(self, user_id: str) -> bool:
         """Truthy if at least one live WS connection exists for this user."""
         return bool(self._conns.get(user_id))
+
+    def set_viewing(self, user_id: str, thread_id: Optional[str]) -> None:
+        if thread_id:
+            self._viewing[user_id] = thread_id
+        else:
+            self._viewing.pop(user_id, None)
+
+    def is_viewing(self, user_id: str, thread_id: str) -> bool:
+        return self._viewing.get(user_id) == thread_id
 
 
 manager = _ConnectionManager()
@@ -714,14 +730,17 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
                 other_id, "chat", f"New message from {sender}",
                 (text if text else "📷 Photo")[:180],
                 extra={"thread_id": thread_id, "action_url": f"/chat/{thread_id}"},
+                # The tray push is fired below with the "is the user reading
+                # this thread right now?" check — don't double-send here.
+                push=False,
             )
         except Exception as e:
             logger.warning(f"chat notification failed (non-blocking): {e}")
 
     # ── Push notification to the recipient (best-effort, never blocks).
-    # Skipped if the recipient is currently online via WS — they already
-    # got the message in real-time and a push would be noisy.
-    if other_id and not manager.is_online(other_id):
+    # Only skipped when they literally have THIS thread open on screen —
+    # a merely-connected socket (backgrounded app) still gets the push.
+    if other_id and not manager.is_viewing(other_id, thread_id):
         try:
             sender_name = user.get("name") or "Someone"
             preview = text if text else "📷 Photo"
@@ -1117,12 +1136,23 @@ async def websocket_chat(ws: WebSocket, token: str = Query(...)):
                 msg = await ws.receive_text()
                 if msg == "ping":
                     await ws.send_text("pong")
+                    continue
+                # {"type":"viewing","thread_id":"…"|null} — the app tells us
+                # which thread is on screen so we don't push a message the
+                # user is already reading.
+                try:
+                    data = json.loads(msg)
+                except Exception:
+                    data = None
+                if isinstance(data, dict) and data.get("type") == "viewing":
+                    manager.set_viewing(user_id, data.get("thread_id") or None)
             except WebSocketDisconnect:
                 break
     except WebSocketDisconnect:
         pass
     finally:
         manager.disconnect(user_id, ws)
+        manager.set_viewing(user_id, None)
         try:
             await db.users.update_one({"id": user_id}, {"$set": {"last_seen_at": _now()}})
         except Exception:

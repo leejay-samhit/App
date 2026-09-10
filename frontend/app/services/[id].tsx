@@ -17,7 +17,7 @@ import {
   Platform,
   Linking,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather, MaterialIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
@@ -60,6 +60,7 @@ const LANG_LABEL: Record<string, string> = { en: "English", te: "Telugu", hi: "H
 export default function ProviderProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [p, setP] = useState<Provider | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -407,62 +408,63 @@ export default function ProviderProfileScreen() {
         </View>
       </ScrollView>
 
-      {/* Get-Phone-Number CTA */}
-      <View style={styles.ctaBar}>
-        <View style={{ flex: 1 }}>
+      {/* Sticky action bar — info line on top, two equal-width buttons below.
+          Was a single row with a flexible price block plus two fixed-width
+          pills, which overflowed and looked messy on small phones. */}
+      <View style={[styles.ctaBar, { paddingBottom: Math.max(insets.bottom, 12) + 8 }]}>
+        <View style={styles.ctaInfoRow}>
           {revealedPhone ? (
             <>
-              <Text style={[styles.ctaPrice, { fontSize: 16 }]}>{revealedPhone}</Text>
-              <Text style={styles.ctaSub}>Tap to call</Text>
+              <Feather name="phone-call" size={14} color={colors.primary} />
+              <Text style={styles.ctaPhone} numberOfLines={1}>{revealedPhone}</Text>
+              <Text style={styles.ctaSub}>UNLOCKED</Text>
             </>
           ) : (
             <>
-              <Text style={styles.ctaPrice}>
+              <Feather name="lock" size={13} color={colors.textMuted} />
+              <Text style={styles.ctaPrice} numberOfLines={1}>
                 {revealConfig ? formatINR(revealConfig.total) : "₹1 + GST"}
               </Text>
-              <Text style={styles.ctaSub}>
-                {revealConfig
-                  ? `₹${revealConfig.fee.toFixed(2)} fee + ₹${revealConfig.gst_amount.toFixed(2)} GST`
-                  : "to unlock phone"}
+              <Text style={styles.ctaSub} numberOfLines={1}>
+                {revealConfig && revealConfig.total > 0
+                  ? `₹${revealConfig.fee.toFixed(2)} + ₹${revealConfig.gst_amount.toFixed(2)} GST`
+                  : "to unlock phone & chat"}
               </Text>
             </>
           )}
         </View>
-        <TouchableOpacity
-          onPress={handleReveal}
-          disabled={revealing}
-          style={[styles.ctaBtn, revealing && { opacity: 0.6 }]}
-          testID="get-phone-btn"
-        >
-          <Feather name={revealedPhone ? "phone-call" : "phone"} size={16} color="#fff" />
-          <Text style={styles.ctaBtnText}>
-            {revealing
-              ? "Processing…"
-              : revealedPhone
-                ? "Call now"
-                : "Get phone number"}
-          </Text>
-        </TouchableOpacity>
-        {/* Sep 2026 — Chat is ALWAYS offered. If this provider hasn't been
-            unlocked yet, tapping it runs the same pay-and-unlock sheet (or
-            opens straight away when the admin has set the unlock fee to ₹0)
-            and then drops the customer into the thread. Previously the
-            button only appeared after a phone reveal, and even then the
-            request was rejected by the server — so "chat after paying
-            ₹1.18" did nothing. */}
-        {p?.id ? (
+        <View style={styles.ctaBtnRow}>
           <TouchableOpacity
-            onPress={openChat}
-            disabled={chatOpening}
-            style={[styles.ctaBtn, { marginLeft: 8, backgroundColor: "#16A34A" }, chatOpening && { opacity: 0.6 }]}
-            testID="start-chat-btn"
+            onPress={handleReveal}
+            disabled={revealing}
+            style={[styles.ctaBtn, revealing && { opacity: 0.6 }]}
+            testID="get-phone-btn"
           >
-            {chatOpening
+            {revealing
               ? <ActivityIndicator color="#fff" size="small" />
-              : <Feather name="message-circle" size={16} color="#fff" />}
-            <Text style={styles.ctaBtnText}>{chatOpening ? "Opening…" : "Start Chat"}</Text>
+              : <Feather name={revealedPhone ? "phone-call" : "phone"} size={15} color="#fff" />}
+            <Text style={styles.ctaBtnText} numberOfLines={1}>
+              {revealing ? "Processing…" : revealedPhone ? "Call now" : "Get number"}
+            </Text>
           </TouchableOpacity>
-        ) : null}
+          {/* Sep 2026 — Chat is ALWAYS offered. If this provider hasn't been
+              unlocked yet, tapping it runs the same pay-and-unlock sheet (or
+              opens straight away when the admin has set the unlock fee to ₹0)
+              and then drops the customer into the thread. */}
+          {p?.id ? (
+            <TouchableOpacity
+              onPress={openChat}
+              disabled={chatOpening}
+              style={[styles.ctaBtn, { backgroundColor: "#16A34A" }, chatOpening && { opacity: 0.6 }]}
+              testID="start-chat-btn"
+            >
+              {chatOpening
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Feather name="message-circle" size={15} color="#fff" />}
+              <Text style={styles.ctaBtnText} numberOfLines={1}>{chatOpening ? "Opening…" : "Start Chat"}</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
       </View>
 
       {/* Confirm reveal modal — shows breakdown + T&C checkbox + Pay button */}
@@ -528,10 +530,11 @@ export default function ProviderProfileScreen() {
                 </Text>
               </View>
             </View>
-            {/* T&C */}
+            {/* T&C — boxed so the checkbox, the amount and the sentence all
+                sit on one tidy card instead of floating against the sheet. */}
             <TouchableOpacity
               onPress={() => setTermsAccepted((v) => !v)}
-              style={styles.tncRow}
+              style={[styles.tncRow, termsAccepted && styles.tncRowOn]}
               testID="reveal-tnc-checkbox"
             >
               <View style={[styles.tncBox, termsAccepted && styles.tncBoxOn]}>
@@ -542,8 +545,8 @@ export default function ProviderProfileScreen() {
                 <Text style={{ fontWeight: "800", color: colors.textMain }}>
                   {revealConfig ? formatINR(revealConfig.total) : "the fee"}
                 </Text>{" "}
-                will be deducted from my wallet to unlock the provider's phone number.
-                Terms & conditions apply.
+                will be deducted from my wallet to unlock this provider’s phone
+                number and chat. Terms &amp; conditions apply.
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -657,11 +660,14 @@ const styles = StyleSheet.create({
   reviewerName: { fontSize: 13, fontWeight: "800", color: colors.textMain },
   reviewDate: { fontSize: 10, color: colors.textMuted, fontWeight: "700" },
   reviewComment: { fontSize: 13, color: colors.textMain, marginTop: 8, lineHeight: 18 },
-  ctaBar: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: spacing.screen, paddingVertical: 12, paddingBottom: 24, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  ctaPrice: { fontSize: 18, fontWeight: "900", color: colors.textMain },
-  ctaSub: { fontSize: 11, color: colors.textMuted, fontWeight: "700" },
-  ctaBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.primary, paddingHorizontal: 22, paddingVertical: 12, borderRadius: 999 },
-  ctaBtnText: { color: "#fff", fontWeight: "900", fontSize: 14, letterSpacing: 0.3 },
+  ctaBar: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: spacing.screen, paddingTop: 10, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border, gap: 10 },
+  ctaInfoRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  ctaPrice: { fontSize: 16, fontWeight: "900", color: colors.textMain },
+  ctaPhone: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: 0.4 },
+  ctaSub: { flex: 1, fontSize: 11, color: colors.textMuted, fontWeight: "700" },
+  ctaBtnRow: { flexDirection: "row", gap: 10 },
+  ctaBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: colors.primary, paddingHorizontal: 12, minHeight: 50, borderRadius: 999 },
+  ctaBtnText: { color: "#fff", fontWeight: "900", fontSize: 13.5, letterSpacing: 0.2 },
   // Review modal
   modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
   modalSheet: { backgroundColor: colors.background, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 24 },
@@ -682,8 +688,9 @@ const styles = StyleSheet.create({
   feeTotalRow: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: 4, paddingTop: 10 },
   feeTotalLabel: { fontSize: 14, color: colors.textMain, fontWeight: "900" },
   feeTotalValue: { fontSize: 16, color: colors.primary, fontWeight: "900" },
-  tncRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, paddingHorizontal: 4, paddingVertical: 8 },
-  tncBox: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.border, alignItems: "center", justifyContent: "center", marginTop: 2 },
+  tncRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 12 },
+  tncRowOn: { borderColor: colors.primary, backgroundColor: colors.brand100 },
+  tncBox: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.border, alignItems: "center", justifyContent: "center", marginTop: 1, backgroundColor: colors.surface },
   tncBoxOn: { backgroundColor: colors.primary, borderColor: colors.primary },
   tncText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 18 },
 });

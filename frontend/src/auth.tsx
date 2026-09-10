@@ -120,9 +120,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     try {
       const { data } = await api.get<User>("/auth/me");
       setUser(data);
-    } catch {
-      setUser(null);
-      await setSessionTokens(null, null);
+    } catch (e: any) {
+      // Only a genuine auth rejection signs the user out. A network blip,
+      // a 5xx or a cold-start timeout must NEVER drop the session — that
+      // was the "app logs me out by itself" bug (owner report, Sep 2026).
+      const status = e?.response?.status;
+      if (status === 401 || status === 403) {
+        setUser(null);
+        await setSessionTokens(null, null);
+        return;
+      }
+      // Offline / server hiccup: keep the stored tokens and let the user in
+      // with whatever we already know. The next successful call hydrates.
+      setUser((prev) => (prev === undefined ? null : prev));
     }
   };
 
@@ -300,15 +310,26 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     // This is different from a cold app launch — closing the app preserves
     // the biometric cache so the fingerprint screen can resume the session
     // (see useEffect in AuthProvider for that flow).
-    try { await api.post("/auth/logout"); } catch { /* ignore offline */ }
-    // Stop background location heartbeat (no-op for customers / web).
-    try { const bg = await import("./bg-location"); await bg.stopBackgroundProviderLocation(); } catch {}
+    // Local sign-out happens FIRST so the button never feels stuck: the
+    // owner reported "logout takes time / force closes". The server call is
+    // fire-and-forget with a short timeout.
+    const tokenForServer = await getAuthToken();
     await setSessionTokens(null, null);
-    await disableBiometricLogin().catch(() => {});
-    await refreshBiometricStatus();
-    clearPushRegistrationCache();
     setUser(null);
     setSessionEndReason(null);
+    clearPushRegistrationCache();
+    if (tokenForServer) {
+      // Explicit header — local tokens are already cleared, so the request
+      // interceptor has nothing left to attach.
+      api.post("/auth/logout", null, {
+        timeout: 8000,
+        headers: { Authorization: `Bearer ${tokenForServer}` },
+      }).catch(() => { /* offline is fine — the token expires on its own */ });
+    }
+    disableBiometricLogin().then(refreshBiometricStatus).catch(() => {});
+    import("./bg-location")
+      .then((bg) => bg.stopBackgroundProviderLocation())
+      .catch(() => {});
   };
 
   const clearSessionEnd = () => setSessionEndReason(null);

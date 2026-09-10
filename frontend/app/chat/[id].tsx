@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, KeyboardAvoidingView,
-  Platform, Image, Alert, ActivityIndicator, Pressable, Modal,
+  Platform, Image, Alert, ActivityIndicator, Pressable, Modal, AppState,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -174,7 +174,7 @@ export default function ChatThreadScreen() {
   useEffect(() => { load(); }, [load]);
 
   // Realtime updates
-  useChatSocket((ev) => {
+  const { setViewingThread } = useChatSocket((ev) => {
     if (!threadId) return;
     if (ev.type === "message.new" && ev.thread_id === threadId) {
       setMessages((prev) => [...prev.filter((m) => m.id !== ev.message.id), ev.message]);
@@ -194,6 +194,22 @@ export default function ChatThreadScreen() {
       setProfileDetail({ media_count: 0, starred_count: 0 });
     }
   });
+
+  // Tell the server this thread is on screen (and that it isn't, on blur /
+  // when the app goes to the background) so chat pushes reach the phone's
+  // notification bar whenever the user is NOT reading this conversation.
+  useEffect(() => {
+    if (!threadId) return;
+    setViewingThread(threadId);
+    const sub = AppState.addEventListener("change", (s) => {
+      setViewingThread(s === "active" ? threadId : null);
+    });
+    return () => {
+      setViewingThread(null);
+      try { sub.remove(); } catch { /* ignore */ }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId]);
 
   const isMine = (m: Message) => m.sender_id === myId;
 

@@ -258,37 +258,68 @@ export default function ShopScreen() {
         keyboardShouldPersistTaps="handled"
         stickyHeaderIndices={[0]}
       >
-        <View style={styles.topHeader}>
-          <View style={styles.servicesTitleWrap}>
-            <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
-            <Text style={styles.topHeaderTitle}>Find local talent</Text>
+        {/* Pinned header — title, filters and the "near me" toggle stay put
+            while the category grid scrolls under them (owner request:
+            near-me results must sit ABOVE Browse by category, locked). */}
+        <View style={styles.stickyTop}>
+          <View style={styles.topHeader}>
+            <View style={styles.servicesTitleWrap}>
+              <Text style={styles.topHeaderEyebrow}>SERVICES</Text>
+              <Text style={styles.topHeaderTitle}>Find local talent</Text>
+            </View>
           </View>
-        </View>
 
-        {/* Filters */}
-        <View style={styles.filterRow}>
-          <View style={styles.searchBox}>
-            <Feather name="search" size={14} color={colors.textMuted} />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Service or name"
-              placeholderTextColor={colors.textMuted}
-              value={searchQ}
-              onChangeText={setSearchQ}
-            />
+          {/* Filters */}
+          <View style={styles.filterRow}>
+            <View style={styles.searchBox}>
+              <Feather name="search" size={14} color={colors.textMuted} />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Service or name"
+                placeholderTextColor={colors.textMuted}
+                value={searchQ}
+                onChangeText={setSearchQ}
+              />
+            </View>
+            <View style={[styles.searchBox, { width: 100 }]}>
+              <Feather name="map-pin" size={14} color={colors.textMuted} />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Pincode"
+                placeholderTextColor={colors.textMuted}
+                value={pincodeQ}
+                onChangeText={setPincodeQ}
+                keyboardType="numeric"
+                maxLength={6}
+              />
+            </View>
           </View>
-          <View style={[styles.searchBox, { width: 100 }]}>
-            <Feather name="map-pin" size={14} color={colors.textMuted} />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Pincode"
-              placeholderTextColor={colors.textMuted}
-              value={pincodeQ}
-              onChangeText={setPincodeQ}
-              keyboardType="numeric"
-              maxLength={6}
+
+          <TouchableOpacity
+            onPress={useMyLocation}
+            disabled={locating}
+            style={[styles.locBtn, myCoords && styles.locBtnActive]}
+            testID="services-use-location"
+          >
+            {locating ? (
+              <ActivityIndicator size="small" color={myCoords ? colors.primaryFg : colors.primary} />
+            ) : (
+              <Feather name={myCoords ? "navigation" : "navigation-2"} size={15} color={myCoords ? colors.primaryFg : colors.primary} />
+            )}
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.locBtnText, myCoords && styles.locBtnTextActive]}>
+                {myCoords ? "Showing nearby first" : "Use my location"}
+              </Text>
+              <Text style={[styles.locBtnHint, myCoords && { color: "rgba(255,255,255,0.85)" }]}>
+                {myCoords ? "Tap to clear and see everyone" : "Nearest service providers first"}
+              </Text>
+            </View>
+            <Feather
+              name={myCoords ? "x" : "chevron-right"}
+              size={15}
+              color={myCoords ? colors.primaryFg : colors.textMuted}
             />
-          </View>
+          </TouchableOpacity>
         </View>
 
         {categories.length > 0 && (
@@ -329,22 +360,6 @@ export default function ShopScreen() {
             </View>
           </View>
         )}
-
-        <TouchableOpacity
-          onPress={useMyLocation}
-          disabled={locating}
-          style={[styles.locBtn, myCoords && styles.locBtnActive, { marginTop: 8 }]}
-          testID="services-use-location"
-        >
-          {locating ? (
-            <ActivityIndicator size="small" color={myCoords ? colors.primaryFg : colors.primary} />
-          ) : (
-            <Feather name={myCoords ? "navigation" : "navigation-2"} size={14} color={myCoords ? colors.primaryFg : colors.primary} />
-          )}
-          <Text style={[styles.locBtnText, myCoords && styles.locBtnTextActive]}>
-            {myCoords ? "  Showing nearby workers (tap to clear)" : "  Use my location for nearby-first results"}
-          </Text>
-        </TouchableOpacity>
 
         <Modal visible={langModalOpen} transparent animationType="slide" onRequestClose={() => setLangModalOpen(false)}>
           <View style={styles.langModalOverlay}>
@@ -600,6 +615,17 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   container: { paddingHorizontal: 12, paddingTop: spacing.screen, paddingBottom: 60 },
 
+  // The pinned services header (title + filters + near-me). Sticky, so it
+  // never scrolls away and the near-me toggle always sits above the
+  // category grid.
+  stickyTop: {
+    backgroundColor: colors.background,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border + "66",
+    paddingBottom: 4,
+    marginBottom: 12,
+  },
+
   topHeader: {
     width: "100%",
     flexDirection: "row",
@@ -740,15 +766,17 @@ const styles = StyleSheet.create({
 
   // Location button + LIVE badge
   locBtn: {
-    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    flexDirection: "row", alignItems: "center", gap: 10,
     paddingVertical: 10, paddingHorizontal: 12,
     borderRadius: 12,
     backgroundColor: colors.primary + "15",
     borderWidth: 1, borderColor: colors.primary + "44",
-    marginBottom: 14,
+    marginBottom: 12,
+    minHeight: 52,
   },
   locBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  locBtnText: { fontSize: 12, fontWeight: "700", color: colors.primary },
+  locBtnText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  locBtnHint: { fontSize: 10.5, color: colors.textMuted, marginTop: 1 },
   locBtnTextActive: { color: colors.primaryFg },
   activeDot: {
     flexDirection: "row", alignItems: "center", gap: 4,

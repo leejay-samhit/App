@@ -103,6 +103,14 @@ async function _refreshAccessToken(): Promise<string | null> {
     if (!data.token || !data.refresh_token) return null;
     await AsyncStorage.setItem(ACCESS_KEY, data.token);
     await AsyncStorage.setItem(REFRESH_KEY, data.refresh_token);
+    // Keep the fingerprint-login cache in step with the rotation. Without
+    // this the SecureStore copy went stale within 15 minutes and the next
+    // fingerprint unlock fell back to "please login with password once"
+    // (owner report, Sep 2026).
+    try {
+      const { syncBiometricTokens } = await import("./biometric");
+      await syncBiometricTokens(data.token, data.refresh_token);
+    } catch { /* cache sync is best-effort */ }
     return data.token;
   } catch (e: any) {
     // Distinguish session_revoked (terminal) from transient failures.

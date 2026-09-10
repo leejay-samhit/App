@@ -36,6 +36,22 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
   const [connected, setConnected] = useState(false);
+  // Which thread the user has OPEN. Sent to the server so it can skip the
+  // phone push for a message the user is already reading (and, crucially,
+  // still push when the app is merely connected in the background).
+  const viewingRef = useRef<string | null>(null);
+
+  const sendViewing = (threadId: string | null) => {
+    viewingRef.current = threadId;
+    try {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "viewing", thread_id: threadId }));
+      }
+    } catch { /* socket will re-announce on reconnect */ }
+  };
+  const sendViewingRef = useRef(sendViewing);
+  sendViewingRef.current = sendViewing;
 
   useEffect(() => {
     let cancelled = false;
@@ -70,6 +86,10 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
           reconnectRef.current = 0;
           setConnected(true);
           startHeartbeat();
+          // Re-announce the open thread after every reconnect.
+          if (viewingRef.current) {
+            try { ws.send(JSON.stringify({ type: "viewing", thread_id: viewingRef.current })); } catch { /* ignore */ }
+          }
         };
         ws.onmessage = (e) => {
           // Text "pong" is the heartbeat reply — ignore.
@@ -132,5 +152,5 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
     };
   }, []);
 
-  return { connected };
+  return { connected, setViewingThread: (threadId: string | null) => sendViewingRef.current(threadId) };
 }

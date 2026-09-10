@@ -33,9 +33,11 @@ const ROLE_LINKS: Record<string, Link[]> = {
     { label: "Products", hint: "Add, edit, price and publish every product", icon: "package", href: "/admin/products" },
     { label: "Categories", hint: "Shop categories and sub-categories", icon: "list", href: "/admin/shop-categories" },
     { label: "AI tools", hint: "Generate product copy and specs", icon: "cpu", href: "/admin/ai-tools" },
+    { label: "Shop live preview", hint: "See the store exactly as customers do", icon: "eye", href: "/admin/shop" },
   ],
   layout_manager: [
     { label: "Shop layout", hint: "Build the home screen — banners, sliders, grids", icon: "layout", href: "/admin/shop-layout" },
+    { label: "Shop live preview", hint: "Cross-check the layout you published, live", icon: "eye", href: "/admin/shop" },
     { label: "Promo banners", hint: "Offer strips and promo artwork", icon: "image", href: "/admin/promo-banners" },
   ],
   order_manager: [

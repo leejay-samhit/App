@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="19" time="75.789" timestamp="2026-09-10T21:49:11.935110+00:00" hostname="agent-env-5620fa10-828d-4db7-8eeb-df99f54eceec"><testcase classname="tests.test_iter69_session_orders_push.TestRefreshGrace" name="test_a1_original_refresh_replay_within_grace" time="0.342" /><testcase classname="tests.test_iter69_session_orders_push.TestRefreshGrace" name="test_a2_unknown_sid_still_revoked" time="0.252" /><testcase classname="tests.test_iter69_session_orders_push.TestPerDeviceEviction" name="test_b1_login_a_multiple_times_b_survives" time="2.455" /><testcase classname="tests.test_iter69_session_orders_push.TestPerDeviceEviction" name="test_b2_relogin_same_device_invalidates_old_token" time="0.776" /><testcase classname="tests.test_iter69_session_orders_push.TestLogoutScope" name="test_c1_logout_only_kills_calling_device" time="0.498" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminRBACSubroles" name="test_d1_products_manager_can_get_vendors" time="70.240" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminRBACSubroles" name="test_d2_products_manager_cannot_post_vendor_endpoints" time="0.003" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminRBACSubroles" name="test_d3_layout_manager_can_get_products" time="0.235" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminRBACSubroles" name="test_d4_layout_manager_cannot_post_products" time="0.003" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminRBACSubroles" name="test_d5_layout_manager_blocked_outside_area" time="0.002" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminRBACSubroles" name="test_d6_products_manager_blocked_outside_area" time="0.002" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminOrdersEnrichment" name="test_e1_list_has_buyer_and_vendor_fields" time="0.237" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminOrdersEnrichment" name="test_e2_detail_returns_order_and_siblings" time="0.013" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminOrdersEnrichment" name="test_e3_order_manager_can_read_orders" time="0.241" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminOrdersEnrichment" name="test_e4_products_manager_cannot_read_orders" time="0.003" /><testcase classname="tests.test_iter69_session_orders_push.TestAdminOrdersEnrichment" name="test_e5_layout_manager_cannot_read_orders_detail" time="0.003" /><testcase classname="tests.test_iter69_session_orders_push.TestNotificationsPushDefault" name="test_f1_create_notification_calls_send_push_by_default" time="0.332" /><testcase classname="tests.test_iter69_session_orders_push.TestNotificationsPushDefault" name="test_f2_push_false_suppresses" time="0.001"><failure message="RuntimeError: Event loop is closed">tests/test_iter69_session_orders_push.py:351: in test_f2_push_false_suppresses
+    asyncio.run(_run())
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_iter69_session_orders_push.py:349: in _run
+    await create_notification("u", "test", "t", "b", push=False)
+core/notifications.py:50: in create_notification
+    await db.notifications.insert_one(doc)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/motor/metaprogramming.py:74: in method
+    return framework.run_on_executor(
+/root/.venv/lib/python3.11/site-packages/motor/frameworks/asyncio/__init__.py:85: in run_on_executor
+    return loop.run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:817: in run_in_executor
+    self._check_closed()
+/usr/local/lib/python3.11/asyncio/base_events.py:520: in _check_closed
+    raise RuntimeError('Event loop is closed')
+E   RuntimeError: Event loop is closed</failure></testcase><testcase classname="tests.test_iter69_session_orders_push.TestChatViewingRegistry" name="test_g1_viewing_registry_toggle" time="0.013" /></testsuite></testsuites>

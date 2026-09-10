@@ -7,11 +7,14 @@ a user (welcome, payout, withdrawal status, ticket replies, etc.).
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Optional
 
 from .db import db
 from .utils import now_utc
+
+logger = logging.getLogger(__name__)
 
 
 async def create_notification(
@@ -21,10 +24,15 @@ async def create_notification(
     body: str,
     *,
     extra: Optional[dict] = None,
+    push: bool = True,
 ) -> str:
     """Insert a notification doc and return its id.
 
     extra: optional dict merged into the notification (e.g. {"ticket_id": ...}).
+    push: also deliver it to the phone's notification bar (default). Orders,
+    chat and account alerts must reach the tray even when the app is closed —
+    an in-app bell row alone is invisible to the user (owner report, Sep 2026).
+    Push is best-effort and never raises.
     """
     doc = {
         "id": str(uuid.uuid4()),
@@ -40,4 +48,14 @@ async def create_notification(
             if k not in doc:
                 doc[k] = v
     await db.notifications.insert_one(doc)
+    if push:
+        try:
+            from routes.push import send_push
+            data = {"title": title, "message": body[:240]}
+            action_url = (extra or {}).get("action_url")
+            if action_url:
+                data["action_url"] = action_url
+            await send_push(recipients=[user_id], data=data, idempotency_key=f"notif-{doc['id']}")
+        except Exception as e:  # pragma: no cover — push is best-effort
+            logger.info(f"notification push skipped: {e}")
     return doc["id"]

@@ -22,6 +22,9 @@ import { formatApiError } from "../src/api";
 import { GradientCard } from "../src/gradient-card";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
+/** Failed fingerprint scans allowed before the password form opens itself. */
+const MAX_BIO_TRIES = 3;
+
 export default function Login() {
   const {
     login,
@@ -46,6 +49,9 @@ export default function Login() {
   // password fields. Tracked separately from biometricReady so we don't
   // accidentally flicker the UI mid-disable.
   const [forcePassword, setForcePassword] = useState(false);
+  // Fingerprint attempt budget — after MAX_BIO_TRIES failed scans the
+  // password form is revealed automatically instead of looping the sheet.
+  const [bioTries, setBioTries] = useState(0);
 
   // Auto-prompt fingerprint when the login screen mounts AND the user has
   // previously enabled biometric. We only do this once per mount so it
@@ -109,9 +115,20 @@ export default function Login() {
     setBioLoading(true);
     try {
       const u = await loginWithBiometric();
+      setBioTries(0);
       navigateAfter(u);
     } catch (e: any) {
-      setError(e?.message || "Fingerprint login failed");
+      // 3 scan attempts, then the password form opens by itself so nobody
+      // is stuck tapping a fingerprint that won't read (owner request).
+      const tries = bioTries + 1;
+      setBioTries(tries);
+      const left = MAX_BIO_TRIES - tries;
+      if (left > 0) {
+        setError(`${e?.message || "Fingerprint login failed"} (${left} attempt${left === 1 ? "" : "s"} left)`);
+      } else {
+        setError(`${e?.message || "Fingerprint didn't work"} — please sign in with your password.`);
+        setForcePassword(true);
+      }
     } finally {
       setBioLoading(false);
     }

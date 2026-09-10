@@ -11,11 +11,24 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { ShopHome } from "../../src/shop-home";
+import { useAuth } from "../../src/auth";
+import { SCOPED_ADMIN_ROLES } from "../../src/admin-roles";
 import { colors } from "../../src/theme";
 import { useDoubleTapExit } from "../../src/use-double-tap-exit";
 
 export default function AdminShop() {
   const router = useRouter();
+  const { user } = useAuth();
+  // A scoped manager may open this screen to cross-check the live shop, so
+  // only show the quick-manage chips their role can actually use.
+  const role = String((user as any)?.admin_role || "super_admin");
+  const can = (area: "products" | "layout" | "categories" | "orders") => {
+    if (!SCOPED_ADMIN_ROLES.includes(role)) return true;
+    if (role === "products_manager") return area === "products" || area === "categories";
+    if (role === "layout_manager") return area === "layout" || area === "categories";
+    if (role === "order_manager") return area === "orders";
+    return false;
+  };
   // Shop is now the admin's landing tab — apply double-tap-back to exit
   // (Indian-app standard, replaces the old 3-option popup).
   useDoubleTapExit();
@@ -25,6 +38,7 @@ export default function AdminShop() {
       {/* Admin quick-manage bar — only visible to admin */}
       <View style={styles.adminBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.adminBarRow}>
+          {can("products") ? (
           <TouchableOpacity
             style={styles.adminChip}
             onPress={() => router.push("/admin/products")}
@@ -33,6 +47,8 @@ export default function AdminShop() {
             <Feather name="package" size={13} color={colors.primaryFg} />
             <Text style={styles.adminChipText}>Products</Text>
           </TouchableOpacity>
+          ) : null}
+          {can("layout") ? (
           <TouchableOpacity
             style={[styles.adminChip, { backgroundColor: "#7C3AED" }]}
             onPress={() => router.push("/admin/shop-layout")}
@@ -41,6 +57,8 @@ export default function AdminShop() {
             <Feather name="layout" size={13} color="#fff" />
             <Text style={styles.adminChipText}>Layout</Text>
           </TouchableOpacity>
+          ) : null}
+          {can("categories") ? (
           <TouchableOpacity
             style={[styles.adminChip, { backgroundColor: "#F59E0B" }]}
             onPress={() => router.push("/admin/shop-categories")}
@@ -49,6 +67,8 @@ export default function AdminShop() {
             <MaterialCommunityIcons name="shape-outline" size={13} color="#fff" />
             <Text style={styles.adminChipText}>Categories</Text>
           </TouchableOpacity>
+          ) : null}
+          {can("orders") ? (
           <TouchableOpacity
             style={[styles.adminChip, { backgroundColor: "#0EA5E9" }]}
             onPress={() => router.push("/admin/orders")}
@@ -57,6 +77,7 @@ export default function AdminShop() {
             <Feather name="shopping-bag" size={13} color="#fff" />
             <Text style={styles.adminChipText}>Orders</Text>
           </TouchableOpacity>
+          ) : null}
         </ScrollView>
       </View>
 

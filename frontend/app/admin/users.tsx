@@ -544,6 +544,14 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
   const [pendingReferral, setPendingReferral] = useState<boolean | null>(null);
   const [referralNote, setReferralNote] = useState("");
   const [referralBusy, setReferralBusy] = useState(false);
+  // Password reveal / reset (super admin only, audited server-side).
+  // MUST stay above the `if (!user) return null` bail-out below — declaring
+  // these after it made the hook count change between renders and crashed
+  // the screen ("Rendered more hooks than during the previous render") the
+  // moment an admin tapped a user row.
+  const [shownPassword, setShownPassword] = useState<string | null>(null);
+  const [pwNote, setPwNote] = useState("");
+  const [pwBusy, setPwBusy] = useState<"" | "show" | "reset">("");
 
   // Reset form when user changes
   if (user && (name === "" || email === "" || (user.email !== email && msg === ""))) {
@@ -566,6 +574,8 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
     setHolder(u.account_holder || "");
     setNewPassword("");
     setMsg("");
+    setShownPassword(null);
+    setPwNote("");
   };
 
   // initialize once when user becomes set
@@ -660,10 +670,6 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
   };
 
   // Password reveal / reset (super admin only, audited server-side).
-  const [shownPassword, setShownPassword] = useState<string | null>(null);
-  const [pwNote, setPwNote] = useState("");
-  const [pwBusy, setPwBusy] = useState<"" | "show" | "reset">("");
-
   const revealPassword = async () => {
     setPwBusy("show"); setPwNote("");
     try {

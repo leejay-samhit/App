@@ -1,0 +1,52 @@
+{
+  "summary": "Iteration 69 — Backend 19/19 pytest PASS in /app/backend/tests/test_iter69_session_orders_push.py covering (A) /auth/refresh grace path: replaying the ORIGINAL refresh token after a legitimate rotation returns 200 + usable access token; a truly unknown/revoked sid still 401s. (B) Per-device eviction: 3 back-to-back logins on X-Device-FP 'A' do NOT invalidate device 'B''s access token or refresh; re-login on same FP invalidates the old refresh (stale sid rejected). (C) /auth/logout only kills the calling device's session — other device survives on /auth/me AND /auth/refresh. (D) Scoped RBAC additions: products_manager GET /admin/vendors → 200, POST vendor endpoint blocked; layout_manager GET /admin/products → 200, POST /admin/products → 403; both blocked out-of-area. (E) Admin orders enrichment: /admin/orders rows now carry buyer_name/email/phone + vendor_name/email/phone; /admin/orders/{id} returns {order, siblings}; super_admin AND order_manager can read, other managers 403. (F) core.notifications.create_notification default push=True fires routes.push.send_push (mocked); push=False suppresses; ConnectionManager.set_viewing/is_viewing toggle works (WS-level protocol backing the chat push suppression). FRONTEND VERIFIED via Playwright (390x844 mobile viewport): (1) Services tab (/(tabs)/services) — services-use-location card rendered at Y=127 and BROWSE BY CATEGORY at Y=208 (ABOVE ✓); after scrolling 500px the location card stayed at Y=127 (STICKY ✓). (2) Provider profile — get-phone-btn and start-chat-btn have EQUAL width (174px each) at Y=774 at 390px viewport (no overflow ✓); phone displayed above buttons (9999900000, UNLOCKED tag). (3) Admin → Orders (super_admin) — each card shows the order number (SC-9D8B50-1), Buyer · 9999999999, Test Vendor seller shop line, product hero, per-order status tracker and 'TAP FOR FULL DETAILS' hint; tapping the card opens the detail sheet (testID order-detail-close) with a hero card, CUSTOMER (Name/Phone/Email — Buyer / 9999999999 / testbuyer@test.com), SELLER (Shop/Phone/Email — Test Vendor / 9876543210 / testvendor@test.com), PAYMENT (Method COD, wallet/COD split, order total), ITEMS list, DELIVERY ADDRESS block, and SAME CHECKOUT section listing the sibling sub-order. (4) Scoped managers — layoutmanager@test.com landing at /admin/manager-home shows 'Shop live preview' row that opens /admin/shop; the shop page renders (no 403) and the quick-manage chips are correctly filtered — layout manager sees ONLY Layout + Categories (no Products, no Orders). (5) Regression — dashboard-avatar (testID dashboard-avatar) NAVIGATES to /profile after tap (previous iteration's bug is fixed: hitSlop and pointerEvents='none' on the inner Text now let the parent TouchableOpacity receive the tap); Login activity screen accessible from Profile. (6) Admin → Users tap crash fix — tapped 3 different admin-user-<uuid> rows in sequence, Edit modal opened cleanly each time, PASSWORD card (Show password/Reset & reveal) rendered on each open, NO 'Rendered more hooks than during the previous render' error surfaced in the DOM or console. NOTES: Biometric fingerprint (3-attempt fallback) and phone tray notifications cannot be verified on web/Playwright and are not native-buildable in this env — verified via code-path inspection and the send_push mock assertion instead.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "Style props (carryover)", "issue": "'shadow*' style props deprecated on RN-Web — pre-existing warning; no new occurrences."},
+      {"component": "props.pointerEvents (carryover)", "issue": "props.pointerEvents deprecated warning — still emitted; unchanged from iter 68. Recommend migrating to style.pointerEvents in a future pass."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter69_session_orders_push.py",
+    "/app/test_reports/pytest/iter69_session_orders_push.xml",
+    "/app/test_reports/iter69_services.png",
+    "/app/test_reports/iter69_services_scrolled.png",
+    "/app/test_reports/iter69_dashboard_after_tap.png",
+    "/app/test_reports/iter69_after_avatar.png",
+    "/app/test_reports/iter69_admin_orders_list.png",
+    "/app/test_reports/iter69_admin_order_detail.png",
+    "/app/test_reports/iter69_provider.png",
+    "/app/test_reports/iter69_layout_mgr_home.png",
+    "/app/test_reports/iter69_layout_mgr_shop.png",
+    "/app/test_reports/iter69_user_modal.png"
+  ],
+  "action_items": [
+    "None blocking — all iteration 69 targets verified. OPTIONAL: /auth/login is still rate-limited at 10/min per IP; the test file uses a token cache + 35s backoff, but any additional test suite that logs in freely should reuse tokens or add per-suite pacing.",
+    "OPTIONAL: dashboard-avatar tap now works but STILL requires two forced clicks on the first navigation from a fresh page.goto because the Slangcart splash overlay eats the first tap. Not a functional bug — this is Reanimated + web preview timing. If you want to make Playwright-first tests smoother, either fade the splash out sooner or gate the router push behind a splash-dismissed flag.",
+    "OPTIONAL: /admin/orders card has a proper testID `order-<uuid>` and works; the FlatList container also emits `order-tab-all` / `order-tab-placed`… — consider renaming those filter pills to `order-filter-<slug>` to avoid the two prefix families colliding in tests."
+  ],
+  "critical_code_review_comments": [
+    "server.py refresh grace path (lines 660-691) correctly walks the rotation chain (up to 6 hops) via core.security.rotation_target, honours ROTATION_GRACE_SECONDS (default 300s from env), and mints a NEW access token bound to the CURRENT sid — so a phone that missed the rotation response silently recovers instead of being logged out. Genuinely unknown sids still 401 session_revoked (test_a2).",
+    "core/login_history.py record_login (lines 107-116) pulls stale session IDs belonging to THIS SAME device_fp only, so repeated logins on device A cannot evict device B's sid from the 10-slot active_session_ids pool — verified end-to-end in test_b1.",
+    "core/security.py ADMIN_AREAS (lines 349-380) uses the 'METHOD /path' rule format: layout_manager can 'GET /admin/products' but any POST/PATCH/DELETE on /admin/products is blocked by the same guard. products_manager similarly gets read-only 'GET /admin/vendors'. Confirmed with real HTTP calls in test_d1..d6.",
+    "server.py _attach_order_parties (lines 6099-6127) does ONE batched find({id: {$in: [buyerIds, sellerIds]}}) so the list stays fast; every row is guaranteed to have the six new keys (buyer_name/email/phone + vendor_name/email/phone) — even when the underlying user document is missing (falls back to shipping_address name/phone). Good defensive coding.",
+    "core/notifications.py create_notification (line 27) now defaults push=True and imports routes.push.send_push lazily inside a try/except — a push-relay outage cannot break the notification write. Two callers correctly opt out with push=False: routes/chat.py::send_message (line 735) and the order-placed / order-status helpers (grepped, all pass push=False so they don't double-push after their explicit send_push).",
+    "routes/chat.py::send_message (line 743) now guards the tray push on manager.is_viewing(other_id, thread_id) INSTEAD of manager.is_online. A backgrounded but connected socket now gets the push; only a user actively reading that thread is suppressed. The in-app bell row (create_notification with push=False) fires unconditionally on line 729, so a user who is looking at the chat still gets a bell entry — matches the acceptance criteria."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter69_session_orders_push.py (NEW — 19 pytest cases, 100% pass in ~75s)"
+  ],
+  "success_rate": {
+    "backend": "100% (19/19 pytest cases in test_iter69_session_orders_push.py — grouped: refresh grace, per-device eviction, logout scope, RBAC method rules, orders enrichment & siblings, notifications push default, chat viewing registry)",
+    "frontend": "6/6 verified — services sticky use-location + ordering above BROWSE BY CATEGORY, provider profile equal-width CTA buttons at 390px, admin orders card + full detail sheet (customer/seller/payment/items/address/same-checkout), scoped layout_manager home + filtered /admin/shop, dashboard-avatar → /profile navigation FIXED, admin users edit modal opens without hooks-order crash across 3 different users"
+  },
+  "seed_data_creation": "None — reused testbuyer@test.com, testvendor@test.com, ordermanager@test.com, productsmanager@test.com, layoutmanager@test.com from previous seeding. Multi-vendor split orders (SC-<ref>-1 / SC-<ref>-2 with group_id) from iteration 68 seeding are still present.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "test_iter69_session_orders_push.py is safe to re-run in ~75s (module-level token cache + 35s backoff on 429). If running alongside test_iter68_login_history.py, sleep 45s between suites to avoid hitting the 10/min /auth/login rate limit. The refresh-grace tests DEPEND on ROTATION_GRACE_SECONDS >= 60 (default 300s); if that env var is lowered for other tests, test_a1 will fail intermittently. The notification tests use a SHARED asyncio loop (_SHARED_LOOP) because motor binds to the first loop that touches the db collection — do NOT switch to asyncio.run() inside those tests. Frontend caveat: /admin/orders card testIDs are `order-<uuid>` while the filter-pills use `order-tab-<slug>` — filter DOM queries with a UUID regex when picking a card to tap, or you'll click the ALL pill by mistake (I did this once). The Slangcart splash overlay still eats the FIRST tap after page.goto — always click twice with a 1.5s pause or wait for a screen-specific testID before the first interaction.",
+  "rca_of_issue": "N/A — all P0/P1 items in the review request are verified working. No new failures. The previous iteration's dashboard-avatar bug (iter68) is CONFIRMED FIXED by the addition of pointerEvents='none' on the inner Text and hitSlop on the parent TouchableOpacity in /app/frontend/app/(tabs)/dashboard.tsx (lines 245-256); it takes two forced clicks in Playwright only because the animated splash overlay swallows the first pointer event — real users on a physical device never see the splash + tap-at-the-exact-same-instant race."
+}

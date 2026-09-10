@@ -101,6 +101,19 @@ async def record_login(
             "created_at": now_utc().isoformat(),
         }
         await db.login_history.insert_one(doc)
+        # One live session per device: drop the sids this same device used
+        # before, so repeated logins on one phone can't push OTHER devices
+        # out of the 10-slot session pool (that looked like a random logout).
+        if fp:
+            stale = await db.login_history.find(
+                {"user_id": user_id, "device_fp": fp, "session_id": {"$nin": [sid, None]}},
+                {"_id": 0, "session_id": 1},
+            ).to_list(60)
+            old_sids = [s["session_id"] for s in stale if s.get("session_id") and s["session_id"] != sid]
+            if old_sids:
+                await db.users.update_one(
+                    {"id": user_id}, {"$pullAll": {"active_session_ids": old_sids}},
+                )
         # Keep the collection lean per user.
         extra = await db.login_history.find(
             {"user_id": user_id}, {"_id": 1}

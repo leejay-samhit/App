@@ -972,3 +972,96 @@ pill, `manager-home` shows only "My section"+"Profile" tabs, My Orders shows
 the "1 checkout · 2 sellers" group with both sub-orders, and the dashboard
 avatar now navigates to Profile.
 Seed: `tests/seed_iter67_managers.py` (4 manager logins, `Manager@123`).
+
+---
+
+## Sep 2026 — Session stability, tray notifications, admin orders, services polish (iteration 69)
+
+Owner's batch report: random auto-logout, fingerprint quirks, slow logout,
+Admin→Users crash, services near-me placement, chat/order pushes missing,
+products-manager vendor filter empty, layout-manager can't see the live shop,
+admin orders too thin.
+
+### 1. "The app logs me out by itself" (root causes, all fixed)
+- `auth.tsx refresh()` wiped the tokens on **any** `/auth/me` failure — a
+  network blip, a 5xx or a cold-start timeout signed the user out. It now
+  only signs out on 401/403 and keeps the session on transport errors.
+- `POST /auth/refresh` rotates the refresh token. If the phone never received
+  the response (app killed, weak signal, two parallel refreshes), its stored
+  token was already dead → `session_revoked`. `rotate_session` now records the
+  swap and `rotation_target()` lets a token rotated within
+  `ROTATION_GRACE_SECONDS` (default 300) be replayed once, returning the
+  CURRENT session. A never-issued sid still 401s.
+- Repeated logins on one phone used to fill the 10-slot session pool and evict
+  other devices. `record_login` now pulls the sids that the SAME
+  `X-Device-FP` used before, so it's one live session per device.
+- **Logout is instant**: local tokens/user are cleared first and
+  `/auth/logout` is fired in the background with an explicit Authorization
+  header (the token is captured before the wipe) and an 8 s timeout.
+
+### 2. Fingerprint login
+- `api.ts` now calls `syncBiometricTokens()` after every successful refresh,
+  so the SecureStore copy never goes stale — that stale copy was why
+  fingerprint fell back to "please login with password once".
+- `login.tsx` gives **3 scan attempts** (`MAX_BIO_TRIES`), counting down in
+  the error line, then reveals the password form instead of re-prompting.
+
+### 3. Admin → Users force-close (P0)
+`UserEditModal` declared the password-reveal `useState`s AFTER
+`if (!user) return null`, so the hook count changed between renders →
+"Rendered more hooks than during the previous render" red screen on every
+user tap. Hooks moved above the bail-out; `init()` also resets the revealed
+password when switching users.
+
+### 4. Chat + order notifications in the phone tray
+- `core/notifications.create_notification(..., push=True)` is now the
+  DEFAULT: every bell row also goes to the tray. Call sites that already
+  batch their own `send_push` (order created, order status, chat) pass
+  `push=False` so nothing double-fires.
+- Chat pushes were skipped whenever the recipient had a live socket — on
+  Android the socket survives backgrounding (location service), so pushes
+  never arrived. The WS now carries `{"type":"viewing","thread_id":…}`
+  (sent by `chat/[id].tsx` on focus/AppState, re-announced on reconnect) and
+  the push is suppressed ONLY when that exact thread is on screen.
+- Tapping a tray notification routes to its `action_url`
+  (`addNotificationResponseReceivedListener` in `app/_layout.tsx`).
+- ⚠️ Tray delivery needs a real build: `EMERGENT_PUSH_KEY` is a placeholder
+  in preview and Expo Go can't receive native pushes.
+
+### 5. Admin sub-roles
+- `ADMIN_AREAS` entries may be method-scoped (`"GET /admin/vendors"`):
+  products_manager can now READ the vendor roster (its "Filter by vendor"
+  picker was empty) without gaining vendor write access; layout_manager can
+  READ products for layout blocks.
+- layout_manager (and every scoped role) gets a **Shop live preview** row on
+  `manager-home` → `/admin/shop`; the quick-manage chips on that screen are
+  filtered per role so nobody taps into a 403.
+
+### 6. Admin → Orders
+- `GET /admin/orders` rows are enriched by `_attach_order_parties()` with
+  buyer name/email/phone and seller shop/email/phone (one batched user query).
+- New `GET /admin/orders/{id}` → `{order, siblings}`.
+- Cards show the order number, customer + phone and the seller, and open an
+  **order details sheet**: product hero preview, CUSTOMER / SELLER /
+  PAYMENT (wallet vs cash) / ITEMS / DELIVERY ADDRESS boxes and a
+  "SAME CHECKOUT" list for multi-vendor splits. Phone is shown in full
+  (owner's choice).
+
+### 7. Services UI
+- The services header (title + search + pincode + **Use my location**) is one
+  sticky block, so near-me sits ABOVE "Browse by category" and stays put.
+  The near-me card is a two-line row with a clear/chevron affordance.
+- Provider profile bottom bar rebuilt: info line on top, two equal-width
+  50pt buttons below (Get number · Start Chat) with safe-area padding — it
+  used to overflow. The pay sheet's T&C row is now a bordered card that
+  tints when checked.
+
+### Verified
+`tests/test_iter69_session_orders_push.py` 19/19 PASS (refresh grace, device
+eviction, logout scope, method-scoped RBAC, order enrichment + detail,
+push default/suppression, WS viewing registry) + Playwright: near-me pinned
+above the grid at 390 px, equal CTA buttons, admin order detail sheet with all
+sections, layout-manager shop preview without 403, admin user rows open with
+no crash. Report `test_reports/iteration_69.json`.
+Biometric + tray push are native-build-only — code paths asserted, real
+delivery needs a published build.
