@@ -1291,3 +1291,52 @@ against the current Emergent push playbook and closed the gaps.
 - Cannot be tested in Expo Go or the web preview — needs Publish → Deploy →
   Generate build (iOS also needs an APNs .p8 key; Android a Google service
   account JSON, both prompted in the build UI).
+
+### 15. Notification settings + 5-stage order tracking + chat channel (Jun 2026, iteration 76)
+User picked ALL the offered options, so all of it shipped.
+
+**Notification preferences**
+- `routes/push.py`: `GET/PUT /api/me/notification-prefs` storing
+  `notification_prefs` on the user doc. Categories: `orders`, `chats`,
+  `offers`, `login_alerts`, `vendor_new_order` (seller-only row). Absent or
+  partial dicts mean "everything ON", so existing users keep their alerts.
+- `send_push(..., category=...)` now drops muted recipients via
+  `filter_by_prefs()`. Categories wired at EVERY call site: chat → `chats`,
+  order placed / status change → `orders`, the seller's new-order ping →
+  `vendor_new_order` (a separate send so a shop can mute everything but
+  orders), broadcasts → `offers`, new-device login → `login_alerts`, and
+  `core/notifications.py` maps notification `kind` → the same categories so
+  the bell and the push obey one switch. Omit `category` for must-deliver
+  sends (e.g. the admin's own test push).
+- UI: `app/notification-settings.tsx`, linked from Profile → "Notifications".
+  Optimistic toggles that roll back on failure. Cold deep-link retries once
+  after 1.5 s because the session may still be hydrating (a 401 on the first
+  attempt is normal).
+
+**Five-stage order tracking**
+- Flow is now `placed → confirmed → shipped → out_for_delivery → delivered`
+  (+ `cancelled`), defined once in `server.py` as `ORDER_STATUS_FLOW` /
+  `ORDER_STATUSES` / `COD_PENDING_STATUSES` / `ORDER_STATUS_COPY`.
+- Every real transition appends to `status_history`:
+  `{status, at, by_name, by_role}` (role is `admin`, `seller` or
+  `customer`). Checkout seeds the `placed` entry. Re-saving the same status
+  is a no-op, so the timeline never duplicates.
+- COD "cash pending" totals count all four pre-delivery stages; settlement
+  still fires only on `delivered`.
+- Buyer UI: five progress dots + a live "On the way · 11 Jun, 4:05 pm · by
+  Test Shop" line on the card, and a full vertical TRACKING timeline in the
+  order modal with the existing vendor-set "Arrives by <ETA>".
+- Seller UI: ONE contextual next-stage button (`vnext-<orderId>`) walks
+  Confirm order → Mark shipped → Out for delivery → Mark delivered.
+  Filter tabs, colours and labels (`STATUS_LABEL`, "ON THE WAY") updated for
+  buyer, vendor and admin lists.
+
+**Chat sound**
+- Chats push with `channel_id: "chat"` and `app/_layout.tsx` creates a second
+  Android channel ("Chat messages", MAX importance, own vibration pattern) at
+  module scope, so the owner can set a different sound per channel in phone
+  settings. When a `.wav` is supplied later: add it to the
+  `expo-notifications` plugin `sounds` array, create a NEW channel id
+  (`chat-v2` — Android freezes a channel's sound after creation) and add
+  `sound: "<file>.wav"` to the chat `send_push` data for iOS.
+- Test: `backend/tests/test_notif_prefs_tracking.py`.

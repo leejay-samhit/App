@@ -43,6 +43,71 @@ _client = httpx.AsyncClient(
 router = APIRouter()
 
 
+# ── Notification preferences ──────────────────────────────────────────
+# Jun 2026 — users pick which pushes they want in Profile → Notification
+# settings. Everything is ON by default (an empty/absent prefs dict means
+# "send me everything"), so existing users keep getting their order updates.
+PUSH_CATEGORIES = ("orders", "chats", "offers", "login_alerts", "vendor_new_order")
+DEFAULT_PREFS: Dict[str, bool] = {k: True for k in PUSH_CATEGORIES}
+
+
+def normalise_prefs(raw: Any) -> Dict[str, bool]:
+    prefs = dict(DEFAULT_PREFS)
+    if isinstance(raw, dict):
+        for k in PUSH_CATEGORIES:
+            if k in raw:
+                prefs[k] = bool(raw[k])
+    return prefs
+
+
+async def filter_by_prefs(user_ids: List[str], category: str) -> List[str]:
+    """Drop recipients who switched this notification category off."""
+    from core.db import db  # local import — keeps this module import-light
+
+    if category not in PUSH_CATEGORIES:
+        return user_ids
+    ids = list(dict.fromkeys([u for u in user_ids if u]))
+    if not ids:
+        return []
+    opted_out = set()
+    async for u in db.users.find(
+        {"id": {"$in": ids}, f"notification_prefs.{category}": False},
+        {"_id": 0, "id": 1},
+    ):
+        opted_out.add(u["id"])
+    return [u for u in ids if u not in opted_out]
+
+
+class NotificationPrefsBody(BaseModel):
+    orders: Optional[bool] = None
+    chats: Optional[bool] = None
+    offers: Optional[bool] = None
+    login_alerts: Optional[bool] = None
+    vendor_new_order: Optional[bool] = None
+
+
+@router.get("/me/notification-prefs")
+async def get_notification_prefs(user: Dict[str, Any] = Depends(get_current_user)):
+    return {
+        "prefs": normalise_prefs(user.get("notification_prefs")),
+        "is_vendor": bool(user.get("is_vendor_approved") or user.get("vendor_status") == "approved"),
+    }
+
+
+@router.put("/me/notification-prefs")
+async def update_notification_prefs(
+    body: NotificationPrefsBody,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    from core.db import db
+
+    current = normalise_prefs(user.get("notification_prefs"))
+    for k, v in body.model_dump(exclude_none=True).items():
+        current[k] = bool(v)
+    await db.users.update_one({"id": user["id"]}, {"$set": {"notification_prefs": current}})
+    return {"ok": True, "prefs": current}
+
+
 class RegisterPushBody(BaseModel):
     user_id: str = Field(..., min_length=1)
     platform: str = Field(..., min_length=2, max_length=16)  # "android" | "ios" | "web"
@@ -92,11 +157,19 @@ async def send_push(
     recipients: List[str],
     data: Dict[str, Any],
     idempotency_key: Optional[str] = None,
+    category: Optional[str] = None,
 ) -> None:
     """Fire a push notification to one or many user_ids.
 
     `data` must include `title` and `message`. Optional keys: `subtext`,
-    `image_url` (HTTPS), `action_url` (used as deep-link on tap).
+    `image_url` (HTTPS), `action_url` (used as deep-link on tap),
+    `channel_id` (Android channel, e.g. "chat").
+
+    `category` opts the send into the user's notification preferences
+    (Profile → Notification settings): "orders" | "chats" | "offers" |
+    "login_alerts" | "vendor_new_order". Recipients who switched that
+    category off are dropped before the relay call. Omit it for
+    must-deliver messages (e.g. the admin's own test push).
 
     NEVER raises. Failures are logged-and-swallowed so callers (chat post,
     broadcast, etc.) never break on a push relay hiccup.
@@ -106,6 +179,10 @@ async def send_push(
     if "title" not in data or "message" not in data:
         logger.warning("send_push: missing title/message in payload")
         return
+    if category:
+        recipients = await filter_by_prefs(recipients, category)
+        if not recipients:
+            return
     # Chunk over 100 — playbook hard limit.
     if len(recipients) > 100:
         for i in range(0, len(recipients), 100):

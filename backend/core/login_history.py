@@ -133,6 +133,7 @@ async def record_login(
                     recipients=[user_id],
                     data={"title": "New device signed in", "message": body, "url": "/login-history"},
                     idempotency_key=f"newdev-{doc['id']}",
+                    category="login_alerts",
                 )
             except Exception as e:  # pragma: no cover - push is best-effort
                 logger.info(f"new-device push skipped: {e}")

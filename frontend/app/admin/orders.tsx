@@ -23,8 +23,15 @@ type AdminOrder = {
   shipping_address?: Record<string, any>;
 };
 
-const STATUSES = ["placed", "shipped", "delivered", "cancelled"] as const;
-const STATUS_COLORS: Record<string, string> = { placed: colors.warning, shipped: colors.brand500, delivered: colors.success, cancelled: "#B3261E" };
+const STATUSES = ["placed", "confirmed", "shipped", "out_for_delivery", "delivered", "cancelled"] as const;
+const STATUS_COLORS: Record<string, string> = {
+  placed: colors.warning, confirmed: "#8B5CF6", shipped: colors.brand500,
+  out_for_delivery: "#0EA5E9", delivered: colors.success, cancelled: "#B3261E",
+};
+const STATUS_LABEL: Record<string, string> = {
+  all: "All", placed: "Placed", confirmed: "Confirmed", shipped: "Shipped",
+  out_for_delivery: "On the way", delivered: "Delivered", cancelled: "Cancelled",
+};
 
 export default function AdminOrders() {
   const router = useRouter();
@@ -88,7 +95,7 @@ export default function AdminOrders() {
       <View style={styles.tabs}>
         {["all", ...STATUSES].map((t) => (
           <TouchableOpacity key={t} onPress={() => setFilter(t)} style={[styles.tab, filter === t && styles.tabActive]} testID={`order-tab-${t}`}>
-            <Text style={[styles.tabText, filter === t && styles.tabTextActive]}>{t.toUpperCase()}</Text>
+            <Text style={[styles.tabText, filter === t && styles.tabTextActive]}>{(STATUS_LABEL[t] || t).toUpperCase()}</Text>
           </TouchableOpacity>
         ))}
       </View>
@@ -114,7 +121,7 @@ export default function AdminOrders() {
                   <Text style={styles.orderDate}>{new Date(item.created_at).toLocaleString()}</Text>
                 </View>
                 <View style={[styles.pill, { backgroundColor: STATUS_COLORS[item.status] || colors.textMuted }]}>
-                  <Text style={styles.pillText}>{item.status.toUpperCase()}</Text>
+                  <Text style={styles.pillText}>{(STATUS_LABEL[item.status] || item.status).toUpperCase()}</Text>
                 </View>
               </View>
 
@@ -242,7 +249,7 @@ function OrderDetailSheet({ order, onClose }: { order: AdminOrder | null; onClos
               {(o.items?.length || 0)} item{(o.items?.length || 0) === 1 ? "" : "s"} · {formatINR(o.total)}
             </Text>
             <View style={[styles.pill, { backgroundColor: STATUS_COLORS[o.status] || colors.textMuted, marginTop: 8 }]}>
-              <Text style={styles.pillText}>{o.status.toUpperCase()}</Text>
+              <Text style={styles.pillText}>{(STATUS_LABEL[o.status] || o.status).toUpperCase()}</Text>
             </View>
           </View>
 

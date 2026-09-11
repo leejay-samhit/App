@@ -43,6 +43,16 @@ if (Platform.OS === "android") {
     importance: Notifications.AndroidImportance.MAX,
     sound: "default",
   }).catch(() => {});
+  // Jun 2026 — chats get their OWN channel so the user can give messages a
+  // different sound / vibration from order updates straight from the phone's
+  // notification settings (a custom bundled sound can be added later).
+  Notifications.setNotificationChannelAsync("chat", {
+    name: "Chat messages",
+    description: "Replies from sellers, support and the team",
+    importance: Notifications.AndroidImportance.MAX,
+    sound: "default",
+    vibrationPattern: [0, 120, 80, 120],
+  }).catch(() => {});
 }
 
 // ── Denied-permission nudge ─────────────────────────────────────────────

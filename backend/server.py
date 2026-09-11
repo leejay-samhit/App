@@ -4546,6 +4546,13 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             "online_paid": online_paid,
             "cod_due": cod_due,
             "status": "placed",
+            # Jun 2026 — tracking timeline starts the moment the order lands.
+            "status_history": [{
+                "status": "placed",
+                "at": ts_now,
+                "by_name": user.get("name") or "Customer",
+                "by_role": "customer",
+            }],
             "paid_via": sub_paid_via,
             "payment_status": sub_pay_status,
             "razorpay_payment_id": (online_attempt or {}).get("razorpay_payment_id") if online_paid > 0 else None,
@@ -4600,8 +4607,6 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         # reported across the board.
         try:
             push_targets = [user["id"]]
-            if vendor_id:
-                push_targets.append(vendor_id)
             if admin_doc:
                 await _create_notification(
                     admin_doc["id"], "order", "New order",
@@ -4619,7 +4624,21 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                     "action_url": f"/orders/{order_id}",
                 },
                 idempotency_key=f"order-new-{order_id}",
+                category="orders",
             )
+            # The seller's "New order received" alert is its own preference —
+            # a shop owner may want order pings while muting everything else.
+            if vendor_id:
+                await send_push(
+                    recipients=[vendor_id],
+                    data={
+                        "title": f"🛒 New order {order_number}",
+                        "message": f"₹{sub_total:.0f} · {len(vitems)} item(s) — tap to pack it.",
+                        "action_url": "/vendor/orders",
+                    },
+                    idempotency_key=f"order-new-vendor-{order_id}",
+                    category="vendor_new_order",
+                )
         except Exception as e:
             logging.warning(f"order notification failed (non-blocking): {e}")
 
@@ -6216,15 +6235,51 @@ async def admin_order_detail(order_id: str, _: Dict[str, Any] = Depends(require_
     return {"order": order, "siblings": siblings}
 
 
+# Jun 2026 — Order tracking now has FIVE forward steps so the buyer can
+# follow the parcel instead of guessing between "placed" and "delivered".
+# `cancelled` is terminal and lives outside the flow.
+ORDER_STATUS_FLOW = ("placed", "confirmed", "shipped", "out_for_delivery", "delivered")
+ORDER_STATUSES = ORDER_STATUS_FLOW + ("cancelled",)
+# Anything before delivery still owes cash on a COD order.
+COD_PENDING_STATUSES = ("placed", "confirmed", "shipped", "out_for_delivery")
+
+ORDER_STATUS_COPY = {
+    "placed": ("Order placed", "We've got your order and the seller is reviewing it."),
+    "confirmed": ("Order confirmed", "The seller confirmed your order and is packing it."),
+    "shipped": ("Order shipped", "Your parcel has left the shop."),
+    "out_for_delivery": ("Out for delivery", "Your parcel is on the way to you today."),
+    "delivered": ("Order delivered", "Your parcel has been delivered. Enjoy!"),
+}
+
+
 @api_router.patch("/admin/orders/{order_id}/status")
 async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
-    if payload.status not in ("placed", "shipped", "delivered", "cancelled"):
-        raise HTTPException(status_code=400, detail="Invalid status")
+    if payload.status not in ORDER_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Use one of: {', '.join(ORDER_STATUSES)}")
     order = await db.orders.find_one({"id": order_id})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     prev_status = order.get("status")
+    ts_change = now_utc().isoformat()
+    # Who moved it? The vendor endpoint delegates here with its own user doc.
+    actor_role = "admin" if (admin.get("admin_role") or admin.get("is_admin")) else "seller"
+    actor_name = (
+        admin.get("vendor_business_name") or admin.get("shop_name")
+        or admin.get("name") or admin.get("email") or "Slangcart"
+    )
     await db.orders.update_one({"id": order_id}, {"$set": {"status": payload.status}})
+    # Jun 2026 — append to the tracking timeline the buyer sees. Only real
+    # transitions are recorded, so re-saving the same status is a no-op.
+    if payload.status != prev_status:
+        await db.orders.update_one(
+            {"id": order_id},
+            {"$push": {"status_history": {
+                "status": payload.status,
+                "at": ts_change,
+                "by_name": actor_name,
+                "by_role": actor_role,
+            }}},
+        )
     # Jun 2026 — Stamp the delivery moment so the vendor's "cash collected
     # today" figure keys off when the cash actually changed hands, not when
     # the order was placed.
@@ -6394,15 +6449,18 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
             f"₹{int(order_total)} refunded to your wallet." if paid_via == "wallet" else "Your order was cancelled.",
         )
     elif payload.status != "cancelled":
-        await _create_notification(order["user_id"], "order", f"Order {payload.status}", f"Your order is now {payload.status}.")
+        title, body = ORDER_STATUS_COPY.get(
+            payload.status, (f"Order {payload.status}", f"Your order is now {payload.status}."),
+        )
+        await _create_notification(order["user_id"], "order", title, body, push=False)
         # Sep 2026 — also push it to the phone, and tell the vendor.
         try:
             from routes.push import send_push
             targets = [order["user_id"]]
             if order.get("vendor_id"):
                 await _create_notification(
-                    order["vendor_id"], "vendor", f"Order {payload.status}",
-                    f"{order.get('order_number') or order['id'][:8]} is now {payload.status}.",
+                    order["vendor_id"], "vendor", title,
+                    f"{order.get('order_number') or order['id'][:8]} is now {payload.status.replace('_', ' ')}.",
                     extra={"order_id": order["id"], "action_url": "/vendor/orders"},
                     push=False,  # covered by the batched send_push below
                 )
@@ -6410,11 +6468,12 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
             await send_push(
                 recipients=targets,
                 data={
-                    "title": f"📦 Order {payload.status}",
-                    "message": f"{order.get('order_number') or ''} is now {payload.status}.",
+                    "title": f"📦 {title}",
+                    "message": f"{order.get('order_number') or ''} · {body}".strip(" ·"),
                     "action_url": f"/orders/{order['id']}",
                 },
                 idempotency_key=f"order-status-{order['id']}-{payload.status}",
+                category="orders",
             )
         except Exception as e:
             logging.warning(f"order status push failed (non-blocking): {e}")
@@ -8869,9 +8928,9 @@ async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
     ).to_list(20000)
     cod_pending_total = sum(
         float(o.get("cod_due") or 0) for o in cod_rows
-        if (o.get("status") or "") in ("placed", "shipped")
+        if (o.get("status") or "") in COD_PENDING_STATUSES
     )
-    cod_pending_count = len([o for o in cod_rows if (o.get("status") or "") in ("placed", "shipped")])
+    cod_pending_count = len([o for o in cod_rows if (o.get("status") or "") in COD_PENDING_STATUSES])
     cod_collected_today = sum(
         float(o.get("cod_due") or 0) for o in cod_rows
         if (o.get("status") or "") == "delivered"
@@ -9360,8 +9419,8 @@ async def vendor_update_order_status(
     payload: VendorOrderStatusUpdate,
     vendor: Dict[str, Any] = Depends(require_vendor),
 ):
-    if payload.status not in ("placed", "shipped", "delivered", "cancelled"):
-        raise HTTPException(status_code=400, detail="Invalid status")
+    if payload.status not in ORDER_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Use one of: {', '.join(ORDER_STATUSES)}")
     # Ensure the order has at least one line for this vendor.
     owns = await db.vendor_sales.find_one({"order_id": order_id, "vendor_id": vendor["id"]})
     if not owns:

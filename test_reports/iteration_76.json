@@ -1,0 +1,85 @@
+{
+  "summary": "Iteration 76 — FRONTEND ONLY verification of (1) Notification Settings, (2) five-stage Order Tracking, (3) filter tabs across buyer/vendor/admin. All CORE flows pass end-to-end. Buyer /notification-settings renders exactly 4 rows (orders, chats, offers, login_alerts) — the vendor-only `notif-row-vendor_new_order` is correctly absent, all switches visually ON. Toggling `notif-switch-offers` off + reload keeps it off, toggling back on + reload keeps it on (API round-trip confirmed via network). Profile → 'Notifications' link (testID profile-notifications-link) is present and routes to /notification-settings. Vendor (testvendor@test.com) sees FIVE rows including notif-row-vendor_new_order; toggle+reload persistence verified. Order tracking: a fresh COD-style order (id d2d7eb77-…) was walked by the vendor through EXACTLY four next-stage clicks — button labels progressed 'Confirm order → Mark shipped → Out for delivery → Mark delivered' and after the fourth click the [data-testid=vnext-<id>] element vanished; the vendor card status pill reads DELIVERED. Buyer /orders card shows FIVE progress dots with the live line `order-track-now-<id>` = 'Delivered · Sep 11, 1:52 AM · by Test Shop'. The invoice modal `order-timeline` lists all five stages with a real timestamp AND '· Test Shop' as the who-moved-it name for every stage after Placed (which correctly has no by_name because the customer placed it). Timeline pre-walk: 'Placed Sep 11, 1:41 AM · Confirmed Pending · Shipped Pending · On the way Pending · Delivered Pending' (dots+labels for all 5 stages). Filter tabs: vendor /vendor/orders has all 5 new stages (`vorder-tab-{all,placed,confirmed,shipped,out_for_delivery,delivered,cancelled}`); admin /admin/orders has all 5 (`order-tab-{all,placed,confirmed,shipped,out_for_delivery,delivered,cancelled}`). BUYER /orders filter strip is MISSING two new stages — only `order-filter-{all,placed,shipped,delivered,cancelled}` is rendered; `confirmed` and `out_for_delivery` filter chips are absent even though the underlying order status_history stamps them and the card dots render them. No red-box errors, no blank screens on /orders, /notification-settings, /vendor/orders, /admin/orders. Only warnings observed are the pre-known web-only shadow*/expo-notifications/pointerEvents ones.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "orders.tsx (buyer 'My orders' filter strip)",
+        "issue": "The FILTERS array does not include the two new stages. Because of this the buyer cannot filter by Confirmed or On the way, while the vendor and admin CAN. Reference: /app/frontend/app/orders.tsx:69 — const FILTERS = [\\\"all\\\", \\\"placed\\\", \\\"shipped\\\", \\\"delivered\\\", \\\"cancelled\\\"]. Should be [\\\"all\\\", \\\"placed\\\", \\\"confirmed\\\", \\\"shipped\\\", \\\"out_for_delivery\\\", \\\"delivered\\\", \\\"cancelled\\\"] to match the review request 'status filter tabs include the new stages (Confirmed / On the way where applicable)'.",
+        "testID": "order-filter-confirmed / order-filter-out_for_delivery (missing)",
+        "priority": "MEDIUM"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "verified_flows": {
+    "buyer_notification_settings": {
+      "rows_present": {"orders": 1, "chats": 1, "offers": 1, "login_alerts": 1, "vendor_new_order": 0},
+      "profile_notifications_link": "present (testID profile-notifications-link)",
+      "offers_persistence": "PASS — turned off, reloaded page (hard reload), still off; turned back on, reloaded, still on. Visually confirmed in screenshots.",
+      "note_on_aria_checked": "RN-Web Switch renders as <div role=switch> without aria-checked, so I asserted via visual screenshot + the fact that the api PUT succeeded (no red rollback dialog). Backend round-trip covered by /app/backend/tests/test_notif_prefs_tracking.py."
+    },
+    "vendor_notification_settings": {
+      "rows_present": {"orders": 1, "chats": 1, "offers": 1, "login_alerts": 1, "vendor_new_order": 1},
+      "vendor_new_order_persistence": "PASS — toggled off, reload, still off; toggled back on, reload, still on"
+    },
+    "buyer_order_placement": {
+      "order_id": "d2d7eb77-11ed-4c73-ae73-c9730abf5a96",
+      "order_number": "SC-8BCEEF-1 (Test Shop) — one of a 2-seller checkout split",
+      "track_now_line_after_place": "Placed · Sep 11, 1:41 AM (testID order-track-now-<id>)",
+      "timeline_before_walk": "TRACKING · Placed Sep 11, 1:41 AM · Confirmed Pending · Shipped Pending · On the way Pending · Delivered Pending — five stages all rendered with dots"
+    },
+    "vendor_stage_walk": {
+      "vnext_labels_in_order": ["Confirm order", "Mark shipped", "Out for delivery", "Mark delivered"],
+      "vnext_remaining_after_4_clicks": "None (button removed once state = delivered) — PASS",
+      "final_status_pill": "DELIVERED"
+    },
+    "buyer_final_timeline_and_track_now": {
+      "track_now_line_after_walk": "Delivered · Sep 11, 1:52 AM · by Test Shop",
+      "timeline_final": "TRACKING · Placed Sep 11, 1:41 AM · Confirmed Sep 11, 1:52 AM · Test Shop · Shipped Sep 11, 1:52 AM · Test Shop · On the way Sep 11, 1:52 AM · Test Shop · Delivered Sep 11, 1:52 AM · Test Shop",
+      "who_updated_present_for_every_stage_after_placed": true
+    },
+    "filter_tabs": {
+      "buyer_orders_filters_testids": ["order-filter-all", "order-filter-placed", "order-filter-shipped", "order-filter-delivered", "order-filter-cancelled"],
+      "vendor_orders_filters_testids": ["vorder-tab-all", "vorder-tab-placed", "vorder-tab-confirmed", "vorder-tab-shipped", "vorder-tab-out_for_delivery", "vorder-tab-delivered", "vorder-tab-cancelled"],
+      "admin_orders_filters_testids": ["order-tab-all", "order-tab-placed", "order-tab-confirmed", "order-tab-shipped", "order-tab-out_for_delivery", "order-tab-delivered", "order-tab-cancelled"],
+      "verdict": "Vendor + Admin filter strips include the two new stages. BUYER strip is MISSING confirmed and out_for_delivery."
+    },
+    "regression": {
+      "/orders": "loads, no red screen",
+      "/notification-settings": "loads, no red screen",
+      "/vendor/orders": "loads, no red screen",
+      "/admin/orders": "loads, no red screen"
+    }
+  },
+  "test_report_links": [
+    "/app/test_reports/iter76_screenshots/01_buyer_notifs.png",
+    "/app/test_reports/iter76_screenshots/02_profile.png",
+    "/app/test_reports/iter76_screenshots/03_vendor_notifs.png",
+    "/app/test_reports/iter76_screenshots/05_orders_placed.png",
+    "/app/test_reports/iter76_screenshots/06_timeline_placed.png",
+    "/app/test_reports/iter76_screenshots/07_vendor_orders.png",
+    "/app/test_reports/iter76_screenshots/08_vendor_after_walk.png",
+    "/app/test_reports/iter76_screenshots/09_timeline_final.png",
+    "/app/test_reports/iter76_screenshots/10_admin_orders.png"
+  ],
+  "action_items": [
+    "Update /app/frontend/app/orders.tsx line 69 FILTERS array to include the two new five-stage entries: const FILTERS = [\\\"all\\\", \\\"placed\\\", \\\"confirmed\\\", \\\"shipped\\\", \\\"out_for_delivery\\\", \\\"delivered\\\", \\\"cancelled\\\"] as const;  — the buyer currently cannot filter by Confirmed / On the way, but the vendor and admin can. STATUS_META already has entries for both, so no other change is needed.",
+    "(nit) vendor/orders.tsx line 253: the stage tracker under each vendor card shows the raw status slug ('out_for_delivery') as the label instead of the friendly 'ON THE WAY' — the STATUS_LABEL map exists on the same file, would take one line to swap. Not a blocker."
+  ],
+  "critical_code_review_comments": [
+    "orders.tsx:59 STEPS has all five stages ('placed','confirmed','shipped','out_for_delivery','delivered'); STATUS_META also carries labels/colors for confirmed and out_for_delivery — the only inconsistency is FILTERS at line 69 which still uses the old 4-stage list. Trivial one-line fix.",
+    "vendor/orders.tsx:452-462 the single next-stage button (testID vnext-<id>) correctly disappears at 'delivered' because NEXT_STAGE has no key for delivered — verified end-to-end.",
+    "orders.tsx:609 the timeline correctly hides 'by_name' when by_role === 'customer' (so the initial 'Placed' row has no name), which is why the customer sees 'Placed Sep 11, 1:41 AM' with no attribution — this is intentional, not a bug.",
+    "notification-settings.tsx:69-72 401-retry-once on cold hydration is working — a hard page.goto to /notification-settings after login rendered the rows within ~2s without a stale-token dialog."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "~93% — every requested flow verified end-to-end EXCEPT the buyer /orders filter strip which is missing two of the new five stages"},
+  "seed_data_creation": "None. Existing testbuyer@test.com / testvendor@test.com / support@slangcart.com used read-only, plus one Test Widget added to cart via API. New order SC-8BCEEF-1 (id d2d7eb77…) walked to DELIVERED as part of the test; this leaves the buyer's inventory with one extra 'delivered' order which is normal.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "1) The RN-Web Switch component does NOT expose aria-checked, so assert switch state via visual screenshot / API response, not attribute. 2) The buyer /orders filter chips use testID pattern `order-filter-{key}` (only 5 present today); vendor uses `vorder-tab-{key}` (7 present); admin uses `order-tab-{key}` (7 present). 3) Timeline modal is behind order-open-<id> click; testID inside the modal is `order-timeline`. 4) vnext-<id> is the single vendor next-stage button; NEXT_STAGE map has no entry for 'delivered' so the button is intentionally absent at final. 5) The buyer's live-line 'by <name>' is intentionally suppressed for by_role === 'customer', so the Placed stage never shows 'by …'.",
+  "rca_of_issue": "The buyer /orders filter-strip gap is a leftover from the pre-five-stage code: STEPS and STATUS_META were updated to include 'confirmed' and 'out_for_delivery' (orders.tsx:59, :61-68) but FILTERS at line 69 was not updated in the same edit. Everything downstream (dot rendering, timeline, track-now line) already handles the new stages correctly. Fix is a single-line array edit; no data migration or backend change needed."
+}

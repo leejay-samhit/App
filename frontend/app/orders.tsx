@@ -41,6 +41,7 @@ type Order = {
   };
   // Jul 2026 — Delivery info fields set by the vendor
   estimated_delivery_at?: string | null;
+  status_history?: { status: string; at: string; by_name?: string; by_role?: string }[];
   delivery_person_name?: string | null;
   delivery_person_phone?: string | null;
   delivery_info_updated_at?: string | null;
@@ -54,15 +55,28 @@ const PAY_LABEL: Record<string, string> = {
   wallet_online: "Wallet + Online",
 };
 // Progress steps shown on every live (non-cancelled) order card.
-const STEPS = ["placed", "shipped", "delivered"] as const;
+// Jun 2026 — five stages so the buyer can actually follow the parcel.
+const STEPS = ["placed", "confirmed", "shipped", "out_for_delivery", "delivered"] as const;
 
 const STATUS_META: Record<string, { color: string; label: string; icon: any }> = {
-  placed:    { color: "#F59E0B", label: "Placed",    icon: "clock" },
-  shipped:   { color: "#3B82F6", label: "Shipped",   icon: "truck" },
-  delivered: { color: "#10B981", label: "Delivered", icon: "check-circle" },
-  cancelled: { color: "#EF4444", label: "Cancelled", icon: "x-circle" },
+  placed:           { color: "#F59E0B", label: "Placed",     icon: "clock" },
+  confirmed:        { color: "#8B5CF6", label: "Confirmed",  icon: "check" },
+  shipped:          { color: "#3B82F6", label: "Shipped",    icon: "package" },
+  out_for_delivery: { color: "#0EA5E9", label: "On the way", icon: "truck" },
+  delivered:        { color: "#10B981", label: "Delivered",  icon: "check-circle" },
+  cancelled:        { color: "#EF4444", label: "Cancelled",  icon: "x-circle" },
 };
-const FILTERS = ["all", "placed", "shipped", "delivered", "cancelled"] as const;
+const FILTERS = ["all", "placed", "confirmed", "shipped", "out_for_delivery", "delivered", "cancelled"] as const;
+
+/** "11 Jun, 4:05 pm" — compact enough for a timeline row. */
+function shortWhen(iso?: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    day: "numeric", month: "short", hour: "numeric", minute: "2-digit",
+  });
+}
 
 export default function OrdersScreen() {
   const router = useRouter();
@@ -310,27 +324,44 @@ export default function OrdersScreen() {
 
                 {/* Step tracker */}
                 {!cancelled ? (
-                  <View style={styles.trackRow}>
-                    {STEPS.map((s, i) => {
-                      const done = i <= stepIdx;
-                      const m = STATUS_META[s];
-                      return (
-                        <View key={s} style={styles.trackSeg}>
-                          <View style={styles.trackDotRow}>
-                            <View style={[styles.trackDot, done && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
-                              {done ? <Feather name="check" size={8} color="#fff" /> : null}
+                  <>
+                    <View style={styles.trackRow}>
+                      {STEPS.map((s, i) => {
+                        const done = i <= stepIdx;
+                        const m = STATUS_META[s];
+                        return (
+                          <View key={s} style={styles.trackSeg}>
+                            <View style={styles.trackDotRow}>
+                              <View style={[styles.trackDot, done && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+                                {done ? <Feather name="check" size={8} color="#fff" /> : null}
+                              </View>
+                              {i < STEPS.length - 1 ? (
+                                <View style={[styles.trackLine, i < stepIdx && { backgroundColor: colors.primary }]} />
+                              ) : null}
                             </View>
-                            {i < STEPS.length - 1 ? (
-                              <View style={[styles.trackLine, i < stepIdx && { backgroundColor: colors.primary }]} />
-                            ) : null}
+                            <Text style={[styles.trackLabel, done && { color: colors.textMain, fontWeight: "800" }]} numberOfLines={1}>
+                              {m.label}
+                            </Text>
                           </View>
-                          <Text style={[styles.trackLabel, done && { color: colors.textMain, fontWeight: "800" }]}>
-                            {m.label}
-                          </Text>
-                        </View>
+                        );
+                      })}
+                    </View>
+                    {/* Jun 2026 — live status line: what happened last, when,
+                        and who moved it. Full timeline lives in the modal. */}
+                    {(() => {
+                      const hist = item.status_history || [];
+                      const last = hist.length ? hist[hist.length - 1] : null;
+                      const when = shortWhen(last?.at);
+                      if (!when && !item.estimated_delivery_at) return null;
+                      return (
+                        <Text style={styles.trackNow} testID={`order-track-now-${item.id}`}>
+                          {meta.label}
+                          {when ? ` · ${when}` : ""}
+                          {last?.by_name && last.by_role !== "customer" ? ` · by ${last.by_name}` : ""}
+                        </Text>
                       );
-                    })}
-                  </View>
+                    })()}
+                  </>
                 ) : null}
 
                 {/* Thumbnail strip + amount */}
@@ -545,6 +576,47 @@ export default function OrdersScreen() {
                     </View>
                   </View>
 
+                  {/* Jun 2026 — live tracking timeline: every stage with the
+                      exact time it happened and who moved it. */}
+                  {(preview.status || "placed") !== "cancelled" ? (
+                    <View style={styles.timelineBox} testID="order-timeline">
+                      <Text style={styles.addrLabel}>TRACKING</Text>
+                      {preview.estimated_delivery_at ? (
+                        <Text style={styles.timelineEta}>
+                          Arrives by <Text style={{ fontWeight: "900" }}>{preview.estimated_delivery_at}</Text>
+                        </Text>
+                      ) : null}
+                      {STEPS.map((s, i) => {
+                        const curIdx = STEPS.indexOf((preview.status || "placed") as any);
+                        const done = i <= curIdx;
+                        const entry = (preview.status_history || []).filter((h) => h.status === s).pop();
+                        const m = STATUS_META[s];
+                        return (
+                          <View key={s} style={styles.tlRow}>
+                            <View style={styles.tlRail}>
+                              <View style={[styles.tlDot, done && { backgroundColor: m.color, borderColor: m.color }]}>
+                                {done ? <Feather name="check" size={9} color="#fff" /> : null}
+                              </View>
+                              {i < STEPS.length - 1 ? (
+                                <View style={[styles.tlLine, i < curIdx && { backgroundColor: m.color }]} />
+                              ) : null}
+                            </View>
+                            <View style={{ flex: 1, paddingBottom: 14 }}>
+                              <Text style={[styles.tlTitle, !done && { color: colors.textMuted, fontWeight: "600" }]}>
+                                {m.label}
+                              </Text>
+                              <Text style={styles.tlMeta}>
+                                {entry
+                                  ? `${shortWhen(entry.at)}${entry.by_name && entry.by_role !== "customer" ? ` · ${entry.by_name}` : ""}`
+                                  : done ? "Done" : "Pending"}
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : null}
+
                   {preview.shipping_address ? (
                     <View style={styles.addrBox}>
                       <Text style={styles.addrLabel}>DELIVER TO</Text>
@@ -670,7 +742,21 @@ const styles = StyleSheet.create({
   trackDotRow: { flexDirection: "row", alignItems: "center" },
   trackDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
   trackLine: { flex: 1, height: 2, backgroundColor: colors.border, marginHorizontal: 3 },
-  trackLabel: { fontSize: 9, color: colors.textMuted, fontWeight: "700", marginTop: 5, letterSpacing: 0.3 },
+  trackLabel: { fontSize: 8.5, color: colors.textMuted, fontWeight: "700", marginTop: 5, letterSpacing: 0.1 },
+  trackNow: { fontSize: 10.5, color: colors.textMuted, fontWeight: "700", marginTop: 8, marginLeft: 2 },
+  // Jun 2026 — vertical tracking timeline inside the order modal
+  timelineBox: { marginTop: 12, padding: 12, backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border },
+  timelineEta: { fontSize: 12, color: colors.textMain, marginTop: 6, marginBottom: 10 },
+  tlRow: { flexDirection: "row", gap: 10, marginTop: 8 },
+  tlRail: { width: 18, alignItems: "center" },
+  tlDot: {
+    width: 18, height: 18, borderRadius: 9, borderWidth: 1.5,
+    borderColor: colors.border, backgroundColor: colors.surfaceMuted,
+    alignItems: "center", justifyContent: "center",
+  },
+  tlLine: { flex: 1, width: 2, backgroundColor: colors.border, marginVertical: 2, minHeight: 16 },
+  tlTitle: { fontSize: 12.5, fontWeight: "800", color: colors.textMain },
+  tlMeta: { fontSize: 10.5, color: colors.textMuted, marginTop: 2 },
   bodyRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 12 },
   itemsLine: { fontSize: 12, fontWeight: "800", color: colors.textMain },
   payRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border },

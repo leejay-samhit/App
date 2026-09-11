@@ -55,7 +55,19 @@ async def create_notification(
             action_url = (extra or {}).get("action_url")
             if action_url:
                 data["action_url"] = action_url
-            await send_push(recipients=[user_id], data=data, idempotency_key=f"notif-{doc['id']}")
+            # Map the notification kind onto a preference category so a user
+            # who muted "Order updates" doesn't get them through this path
+            # either. Unknown kinds stay un-categorised (always delivered).
+            category = {
+                "order": "orders", "vendor": "orders",
+                "chat": "chats",
+                "announcement": "offers", "promo": "offers",
+                "security": "login_alerts",
+            }.get(kind)
+            await send_push(
+                recipients=[user_id], data=data,
+                idempotency_key=f"notif-{doc['id']}", category=category,
+            )
         except Exception as e:  # pragma: no cover — push is best-effort
             logger.info(f"notification push skipped: {e}")
     return doc["id"]

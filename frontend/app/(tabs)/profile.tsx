@@ -323,6 +323,15 @@ export default function ProfileScreen() {
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
             <View style={styles.rowDivider} />
+            <TouchableOpacity onPress={() => router.push("/notification-settings" as any)} style={styles.rowItem} testID="profile-notifications-link">
+              <View style={[styles.kycDot, { backgroundColor: "#F59E0B" }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>Notifications</Text>
+                <Text style={styles.kycSub}>ORDERS · CHATS · OFFERS</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
             <TouchableOpacity onPress={() => router.push("/more" as any)} style={styles.rowItem} testID="profile-more-link">
               <View style={[styles.kycDot, { backgroundColor: colors.textMuted }]} />
               <View style={{ flex: 1 }}>

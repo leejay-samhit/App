@@ -212,6 +212,7 @@ async def create_broadcast(
             recipients=user_ids,
             data=push_data,
             idempotency_key=f"broadcast-{broadcast_id}",
+            category="offers",
         )
     except Exception as e:
         logger.warning(f"broadcast push failed (non-blocking): {e}")

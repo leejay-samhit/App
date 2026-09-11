@@ -746,8 +746,13 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
                     "title":      f"💬 {sender_name}",
                     "message":    preview[:240],
                     "action_url": f"/chat/{thread_id}",
+                    # Jun 2026 — chats ride their own Android channel so the
+                    # owner can give messages a different sound/vibration
+                    # than order updates, right from phone settings.
+                    "channel_id": "chat",
                 },
                 idempotency_key=f"chat-{doc['id']}",
+                category="chats",
             )
         except Exception as e:
             logger.warning(f"chat push failed (non-blocking): {e}")

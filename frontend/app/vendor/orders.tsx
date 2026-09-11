@@ -65,15 +65,31 @@ type VendorSale = {
   };
 };
 
-const STATUSES = ["placed", "shipped", "delivered", "cancelled"] as const;
+const STATUSES = ["placed", "confirmed", "shipped", "out_for_delivery", "delivered", "cancelled"] as const;
 // Status tab order — also the sequence the left/right swipe walks through.
 const VORDER_TABS: string[] = ["all", ...STATUSES];
 const STATUS_COLORS: Record<string, string> = {
   placed: colors.warning,
+  confirmed: "#8B5CF6",
   shipped: colors.brand500,
+  out_for_delivery: "#0EA5E9",
   delivered: colors.success,
   cancelled: "#B3261E",
 };
+const STATUS_LABEL: Record<string, string> = {
+  all: "All", placed: "Placed", confirmed: "Confirmed", shipped: "Shipped",
+  out_for_delivery: "On the way", delivered: "Delivered", cancelled: "Cancelled",
+};
+// Jun 2026 — the seller walks the parcel through five stages, so each card
+// shows exactly ONE "next step" button instead of a wall of options.
+const NEXT_STAGE: Record<string, { next: string; label: string; icon: any }> = {
+  placed:           { next: "confirmed",        label: "Confirm order",    icon: "check" },
+  confirmed:        { next: "shipped",          label: "Mark shipped",     icon: "package" },
+  shipped:          { next: "out_for_delivery", label: "Out for delivery", icon: "truck" },
+  out_for_delivery: { next: "delivered",        label: "Mark delivered",   icon: "check-circle" },
+};
+/** Still in flight — cash outstanding, editable, cancellable. */
+const OPEN_STATUSES = ["placed", "confirmed", "shipped", "out_for_delivery"];
 
 /** Normalise the backend row.  Post-June-2026 the /vendor/me/sales
  *  endpoint returns fully-shaped orders (items array, total, status,
@@ -234,7 +250,7 @@ export default function VendorOrders() {
               <View style={[styles.stageDot, (done || isCancel) && { backgroundColor: STATUS_COLORS[s], borderColor: STATUS_COLORS[s] }]}>
                 {(done || isCancel) ? <Feather name={s === "cancelled" ? "x" : "check"} size={9} color="#fff" /> : null}
               </View>
-              <Text style={[styles.stageLabel, (done || isCancel) && { color: STATUS_COLORS[s], fontWeight: "800" }]}>{s}</Text>
+              <Text style={[styles.stageLabel, (done || isCancel) && { color: STATUS_COLORS[s], fontWeight: "800" }]} numberOfLines={1}>{STATUS_LABEL[s] || s}</Text>
             </View>
           );
         })}
@@ -259,7 +275,7 @@ export default function VendorOrders() {
       <View style={styles.tabs}>
         {VORDER_TABS.map((t) => (
           <TouchableOpacity key={t} onPress={() => setFilter(t)} style={[styles.tab, filter === t && styles.tabActive]} testID={`vorder-tab-${t}`}>
-            <Text style={[styles.tabText, filter === t && styles.tabTextActive]}>{t.toUpperCase()}</Text>
+            <Text style={[styles.tabText, filter === t && styles.tabTextActive]}>{(STATUS_LABEL[t] || t).toUpperCase()}</Text>
           </TouchableOpacity>
         ))}
       </View>
@@ -295,7 +311,7 @@ export default function VendorOrders() {
                     ) : null}
                   </View>
                   <View style={[styles.pill, { backgroundColor: STATUS_COLORS[item.status] || colors.textMuted }]}>
-                    <Text style={styles.pillText}>{item.status.toUpperCase()}</Text>
+                    <Text style={styles.pillText}>{(STATUS_LABEL[item.status] || item.status).toUpperCase()}</Text>
                   </View>
                 </View>
                 <View style={styles.divider} />
@@ -322,7 +338,7 @@ export default function VendorOrders() {
                 </View>
                 {/* Jun 2026 — Wallet+COD combos: tell the rider exactly how
                     much cash to collect (0 means fully prepaid). */}
-                {Number(item.cod_due || 0) > 0 && ["placed", "shipped"].includes(item.status) ? (
+                {Number(item.cod_due || 0) > 0 && OPEN_STATUSES.includes(item.status) ? (
                   <View style={styles.codRow}>
                     <Feather name="dollar-sign" size={12} color="#92400E" />
                     <Text style={styles.codRowText}>
@@ -433,19 +449,18 @@ export default function VendorOrders() {
                   ) : null}
 
                   <View style={styles.btnRow}>
-                    {item.status === "placed" && item.channel !== "pos" && (
-                      <TouchableOpacity onPress={() => setStatus(orderId, "shipped")} disabled={busy === orderId} style={styles.primaryBtn} testID={`vship-${orderId}`}>
-                        <Feather name="truck" size={14} color={colors.primaryFg} />
-                        <Text style={styles.primaryBtnText}>Mark shipped</Text>
+                    {item.channel !== "pos" && NEXT_STAGE[item.status] && (
+                      <TouchableOpacity
+                        onPress={() => setStatus(orderId, NEXT_STAGE[item.status].next)}
+                        disabled={busy === orderId}
+                        style={styles.primaryBtn}
+                        testID={`vnext-${orderId}`}
+                      >
+                        <Feather name={NEXT_STAGE[item.status].icon} size={14} color={colors.primaryFg} />
+                        <Text style={styles.primaryBtnText}>{NEXT_STAGE[item.status].label}</Text>
                       </TouchableOpacity>
                     )}
-                    {item.status === "shipped" && item.channel !== "pos" && (
-                      <TouchableOpacity onPress={() => setStatus(orderId, "delivered")} disabled={busy === orderId} style={styles.primaryBtn} testID={`vdeliv-${orderId}`}>
-                        <Feather name="check-circle" size={14} color={colors.primaryFg} />
-                        <Text style={styles.primaryBtnText}>Mark delivered</Text>
-                      </TouchableOpacity>
-                    )}
-                    {item.channel !== "pos" && (item.status === "placed" || item.status === "shipped") && (
+                    {item.channel !== "pos" && OPEN_STATUSES.includes(item.status) && (
                       <TouchableOpacity
                         onPress={() => {
                           setEditingOrder(item);
@@ -461,7 +476,7 @@ export default function VendorOrders() {
                         <Text style={styles.infoBtnText}>Delivery info</Text>
                       </TouchableOpacity>
                     )}
-                    {item.channel !== "pos" && (item.status === "placed" || item.status === "shipped") && (
+                    {item.channel !== "pos" && OPEN_STATUSES.includes(item.status) && (
                       <TouchableOpacity onPress={() => setStatus(orderId, "cancelled")} disabled={busy === orderId} style={styles.ghostBtn} testID={`vcancel-${orderId}`}>
                         <Feather name="x-circle" size={14} color="#B3261E" />
                         <Text style={styles.ghostBtnText}>Cancel & refund</Text>
@@ -612,7 +627,7 @@ const styles = StyleSheet.create({
   stageTracker: { flexDirection: "row", justifyContent: "space-between", gap: 4 },
   stageStep: { flex: 1, alignItems: "center", gap: 4 },
   stageDot: { width: 18, height: 18, borderRadius: 9, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
-  stageLabel: { fontSize: 9, color: colors.textMuted, letterSpacing: 0.3, textTransform: "uppercase", fontWeight: "700" },
+  stageLabel: { fontSize: 8, color: colors.textMuted, letterSpacing: 0, textTransform: "uppercase", fontWeight: "700", textAlign: "center" },
   btnRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, alignItems: "center" },
   primaryBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 99, backgroundColor: colors.primary },
   primaryBtnText: { fontSize: 12, fontWeight: "800", color: colors.primaryFg },
