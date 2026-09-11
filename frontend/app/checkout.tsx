@@ -2,21 +2,24 @@
 // + sticky Place Order button. Posts to /api/orders/checkout which decrements
 // stock atomically and either debits the wallet (wallet) or marks the order
 // `paid_via: "cod"` for cash-on-delivery.
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
-  View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, Alert,
-  ActivityIndicator, KeyboardAvoidingView, Platform, Image,
+  View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity,
+  ActivityIndicator, KeyboardAvoidingView, Platform, Image, Modal, Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Slider from "@react-native-community/slider";
+import { WebView } from "react-native-webview";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { notify } from "../src/notify";
 import OutOfZoneModal from "../src/OutOfZoneModal";
 import { useDeliveryLocation } from "../src/use-delivery-location";
+import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
 
 type CartItem = { id: string; product_id: string; qty: number; product: { name: string; price: number; image_url: string; vendor_id?: string | null; vendor_name?: string | null }; line_total: number };
 
@@ -59,7 +62,7 @@ export default function CheckoutScreen() {
       const Location = await import("expo-location");
       const perm = await Location.requestForegroundPermissionsAsync();
       if (perm.status !== "granted") {
-        Alert.alert(
+        notify(
           "Location required",
           perm.canAskAgain
             ? "Grant location permission to auto-fill your address."
@@ -115,25 +118,38 @@ export default function CheckoutScreen() {
         setTimeout(() => AsyncStorage.setItem(ADDRESS_KEY, JSON.stringify(snapshot)).catch(() => {}), 200);
       } catch { /* ignore */ }
     } catch (e: any) {
-      Alert.alert("Couldn't capture location", e?.message || "Try again in a moment.");
+      notify("Couldn't capture location", e?.message || "Try again in a moment.");
     } finally { setGpsBusy(false); }
   };
   // Payment method — Jun 2026 adds the "wallet_cod" combo where the
-  // wallet covers part of the bill and cash covers the rest.
-  const [paymentMethod, setPaymentMethod] = useState<"wallet" | "cod" | "wallet_cod">("wallet");
+  // wallet covers part of the bill and cash covers the rest, plus the
+  // Razorpay "online" / "wallet_online" options.
+  const [paymentMethod, setPaymentMethod] = useState<"wallet" | "cod" | "wallet_cod" | "online" | "wallet_online">("wallet");
   // How much of the bill the wallet should cover in combo mode.
   const [walletSplit, setWalletSplit] = useState(0);
   const [splitTouched, setSplitTouched] = useState(false);
+  // Razorpay WebView (native only) — resolved through a ref'd promise.
+  const [rzpHtml, setRzpHtml] = useState("");
+  const [rzpVisible, setRzpVisible] = useState(false);
+  const rzpResolver = useRef<((r: RazorpayResult) => void) | null>(null);
+  const [payStage, setPayStage] = useState<"idle" | "creating" | "paying" | "verifying" | "placing">("idle");
+  // A Razorpay payment that was captured but whose order never got placed
+  // (app closed / network drop). We offer to finish it instead of charging again.
+  const [pendingPay, setPendingPay] = useState<
+    { payment_id: string; online_amount: number; wallet_amount: number; total: number } | null
+  >(null);
 
   const load = useCallback(async () => {
     try {
-      const [cRes, meRes] = await Promise.all([
+      const [cRes, meRes, pRes] = await Promise.all([
         api.get<{ items: CartItem[] }>("/cart"),
         api.get<any>("/auth/me"),
+        api.get<any>("/orders/payment/pending").catch(() => ({ data: { pending: null } })),
       ]);
       setItems(cRes.data?.items || []);
       const bal = Number(meRes.data?.wallet_balance || 0);
       setWalletBalance(bal);
+      setPendingPay(pRes.data?.pending || null);
     } catch (e) { /* swallow */ }
     finally { setLoading(false); }
   }, []);
@@ -199,17 +215,178 @@ export default function CheckoutScreen() {
   // wallet can contribute; the slider defaults to that (auto-max) and the
   // buyer can drag it down to ₹0 to pay more in cash.
   const maxWalletUsable = Math.min(walletBalance, total);
-  const walletPart = paymentMethod === "wallet_cod"
-    ? Math.max(0, Math.min(Math.round(walletSplit), Math.floor(maxWalletUsable)))
+  const comboMode = paymentMethod === "wallet_cod" || paymentMethod === "wallet_online";
+  // In the ONLINE combo the gateway must have at least ₹1 left to collect —
+  // otherwise the wallet covers everything and there is nothing to pay
+  // online (that's just the plain Wallet option).
+  const comboMax = Math.floor(
+    paymentMethod === "wallet_online" ? Math.max(0, Math.min(maxWalletUsable, total - 1)) : maxWalletUsable,
+  );
+  const walletPart = comboMode
+    ? Math.max(0, Math.min(Math.round(walletSplit), comboMax))
     : paymentMethod === "wallet" ? total : 0;
   const cashPart = Math.max(0, Math.round((total - walletPart) * 100) / 100);
+  // "Pay online" total — the slice Razorpay must collect.
+  const onlinePart = paymentMethod === "online" ? total : paymentMethod === "wallet_online" ? cashPart : 0;
 
-  // Auto-max the wallet the first time the combo option is selected.
+  // Auto-max the wallet the first time a combo option is selected.  For the
+  // ONLINE combo, when the wallet could cover the whole bill, default to a
+  // 50/50 split instead of "everything-but-₹1" (which is just the Wallet
+  // option with extra steps).
+  const comboDefault = paymentMethod === "wallet_online" && maxWalletUsable >= total
+    ? Math.floor(total / 2)
+    : comboMax;
   useEffect(() => {
-    if (paymentMethod === "wallet_cod" && !splitTouched) {
-      setWalletSplit(Math.floor(maxWalletUsable));
+    if (comboMode && !splitTouched) {
+      setWalletSplit(comboDefault);
     }
-  }, [paymentMethod, maxWalletUsable, splitTouched]);
+  }, [comboMode, comboDefault, splitTouched]);
+
+  // ── Razorpay plumbing ─────────────────────────────────────────────────
+  // Web opens Razorpay's JS checkout directly; native renders their hosted
+  // page inside a WebView and resolves through this ref'd promise.
+  const openNativeRazorpay = (html: string): Promise<RazorpayResult> =>
+    new Promise((resolve) => {
+      rzpResolver.current = resolve;
+      setRzpHtml(html);
+      setRzpVisible(true);
+    });
+
+  const handleRzpMessage = (raw: string) => {
+    let data: any = {};
+    try { data = JSON.parse(raw); } catch { data = {}; }
+    const resolver = rzpResolver.current;
+    rzpResolver.current = null;
+    setRzpVisible(false);
+    setTimeout(() => setRzpHtml(""), 250);
+    if (!resolver) return;
+    if (data.type === "success") {
+      resolver({ ok: true, paymentId: data.payment_id, orderId: data.order_id, signature: data.signature });
+    } else if (data.type === "cancel") {
+      resolver({ ok: false, cancelled: true });
+    } else {
+      resolver({ ok: false, error: data.error || "Payment failed", code: data.code });
+    }
+  };
+
+  /** Run the Razorpay leg and return the verified attempt id (or null if
+   *  the shopper backed out). Throws with a readable message on failure. */
+  const collectOnlinePayment = async (): Promise<string | null> => {
+    setPayStage("creating");
+    const { data: start } = await api.post<{
+      payment_id: string; razorpay_order_id: string; amount_paise: number;
+      key_id: string; is_mock: boolean; description?: string;
+      prefill?: { name?: string; email?: string; contact?: string };
+    }>("/orders/payment/start", {
+      wallet_amount: paymentMethod === "wallet_online" ? walletPart : 0,
+    });
+
+    let result: RazorpayResult;
+    setPayStage("paying");
+    if (start.is_mock) {
+      // Sandbox mode (no Razorpay keys configured yet) — simulate the
+      // gateway round-trip so the rest of the flow is exercised for real.
+      await new Promise((r) => setTimeout(r, 1200));
+      result = {
+        ok: true,
+        paymentId: `pay_MOCK_${Math.random().toString(36).slice(2, 14)}`,
+        orderId: start.razorpay_order_id,
+        signature: `sig_MOCK_${Math.random().toString(36).slice(2, 20)}`,
+      };
+    } else {
+      const opts = {
+        orderId: start.razorpay_order_id,
+        amountPaise: start.amount_paise,
+        keyId: start.key_id,
+        name: "Slangcart",
+        description: start.description || "Slangcart order",
+        prefill: {
+          name: start.prefill?.name || name,
+          email: start.prefill?.email || (user as any)?.email,
+          contact: start.prefill?.contact || phone,
+        },
+        themeColor: colors.primary,
+      };
+      result = Platform.OS === "web"
+        ? await openRazorpayCheckout(opts)
+        : await openNativeRazorpay(buildRazorpayHtml(opts));
+    }
+
+    if (!result.ok) {
+      if (result.cancelled) return null;
+      throw new Error(result.error || "Payment failed");
+    }
+
+    setPayStage("verifying");
+    await api.post("/orders/payment/verify", {
+      payment_id: start.payment_id,
+      razorpay_order_id: result.orderId || start.razorpay_order_id,
+      razorpay_payment_id: result.paymentId,
+      razorpay_signature: result.signature,
+    });
+    return start.payment_id;
+  };
+
+  const announcePlaced = (data: any) => {
+    const splitCount = Number(data?.split_count || 1);
+    const codDue = Number(data?.cod_due || 0);
+    const walletUsed = Number(data?.wallet_paid || 0);
+    const onlineUsed = Number(data?.online_paid || 0);
+    const lines: string[] = [];
+    if (splitCount > 1) {
+      lines.push(`Split into ${splitCount} orders — one per seller, each tracked separately.`);
+    }
+    if (walletUsed > 0) lines.push(`₹${walletUsed.toFixed(0)} debited from your wallet.`);
+    if (onlineUsed > 0) lines.push(`₹${onlineUsed.toFixed(0)} paid online.`);
+    if (codDue > 0) lines.push(`₹${codDue.toFixed(0)} to pay in cash on delivery.`);
+    notify(
+      splitCount > 1 ? `${splitCount} orders placed! 🎉` : "Order placed! 🎉",
+      lines.join("\n") || `₹${Number(data?.grand_total || total).toFixed(0)} confirmed.`,
+      [{ text: "View orders", onPress: () => router.replace("/orders" as any) }],
+    );
+  };
+
+  const addressMissing = () => {
+    const missing: string[] = [];
+    if (!name.trim()) missing.push("Name");
+    if (!phone.trim()) missing.push("Phone");
+    if (!line1.trim()) missing.push("Address line 1");
+    if (!city.trim()) missing.push("City");
+    if (!stateName.trim()) missing.push("State");
+    if (!pincode.trim() || pincode.length < 5) missing.push("Pincode (5-6 digits)");
+    return missing;
+  };
+
+  /** Finish a checkout whose Razorpay money was already captured. */
+  const resumePendingPayment = async () => {
+    if (!pendingPay) return;
+    const missing = addressMissing();
+    if (missing.length) {
+      notify("Please complete the address", missing.join(", "));
+      return;
+    }
+    setPlacing(true);
+    setPayStage("placing");
+    try {
+      const r = await api.post<any>("/orders/checkout", {
+        payment_method: pendingPay.wallet_amount > 0 ? "wallet_online" : "online",
+        wallet_amount: pendingPay.wallet_amount > 0 ? pendingPay.wallet_amount : undefined,
+        payment_id: pendingPay.payment_id,
+        shipping_address: {
+          name: name.trim(), phone: phone.trim(),
+          line1: line1.trim(), line2: line2.trim(),
+          city: city.trim(), state: stateName.trim(),
+          pincode: pincode.trim(),
+          latitude: gpsLat, longitude: gpsLng,
+          district: gpsDistrict || undefined,
+        },
+      });
+      setPendingPay(null);
+      announcePlaced(r.data);
+    } catch (e) {
+      notify("Couldn't complete the order", formatApiError(e));
+    } finally { setPlacing(false); setPayStage("idle"); }
+  };
 
   const onPlaceOrder = async () => {
     // Validate
@@ -221,19 +398,23 @@ export default function CheckoutScreen() {
     if (!stateName.trim()) missing.push("State");
     if (!pincode.trim() || pincode.length < 5) missing.push("Pincode (5-6 digits)");
     if (missing.length) {
-      Alert.alert("Please complete the address", missing.join(", "));
+      notify("Please complete the address", missing.join(", "));
       return;
     }
     if (paymentMethod === "wallet" && !canAffordWallet) {
-      Alert.alert("Insufficient wallet balance", `You need ₹${total.toFixed(0)} but your wallet has ₹${walletBalance.toFixed(0)}. Switch to Cash on Delivery or top up your wallet.`);
+      notify("Insufficient wallet balance", `You need ₹${total.toFixed(0)} but your wallet has ₹${walletBalance.toFixed(0)}. Switch to Cash on Delivery or top up your wallet.`);
       return;
     }
     if (paymentMethod === "wallet_cod" && walletPart <= 0) {
-      Alert.alert("Nothing from wallet", "Drag the slider up to use wallet money, or pick Cash on Delivery.");
+      notify("Nothing from wallet", "Drag the slider up to use wallet money, or pick Cash on Delivery.");
+      return;
+    }
+    if (paymentMethod === "wallet_online" && walletPart <= 0) {
+      notify("Nothing from wallet", "Drag the slider up to use wallet money, or pay the full amount online.");
       return;
     }
     if (items.length === 0) {
-      Alert.alert("Cart is empty"); return;
+      notify("Cart is empty"); return;
     }
     setPlacing(true);
     try {
@@ -252,26 +433,30 @@ export default function CheckoutScreen() {
       };
       // Persist address (with GPS) for next time
       try { await AsyncStorage.setItem(ADDRESS_KEY, JSON.stringify(shipping_address)); } catch { /* ignore */ }
+
+      // Online methods collect the money FIRST, then place the order with
+      // the verified payment id.  A dismissed Razorpay sheet aborts quietly.
+      let paymentId: string | null = null;
+      const needsGateway = paymentMethod === "online" || (paymentMethod === "wallet_online" && onlinePart > 0);
+      if (needsGateway) {
+        paymentId = await collectOnlinePayment();
+        if (!paymentId) {
+          setPayStage("idle");
+          setPlacing(false);
+          return;
+        }
+      }
+
+      setPayStage("placing");
+      const effectiveMethod = paymentMethod === "wallet_online" && !needsGateway ? "wallet" : paymentMethod;
       const r = await api.post<any>("/orders/checkout", {
-        payment_method: paymentMethod,
-        wallet_amount: paymentMethod === "wallet_cod" ? walletPart : undefined,
+        payment_method: effectiveMethod,
+        wallet_amount: comboMode && effectiveMethod !== "wallet" ? walletPart : undefined,
+        payment_id: paymentId || undefined,
         shipping_address,
       });
       // Jun 2026 — checkout now returns one order per vendor.
-      const splitCount = Number(r.data?.split_count || 1);
-      const codDue = Number(r.data?.cod_due || 0);
-      const walletUsed = Number(r.data?.wallet_paid || 0);
-      const lines: string[] = [];
-      if (splitCount > 1) {
-        lines.push(`Split into ${splitCount} orders — one per seller, each tracked separately.`);
-      }
-      if (walletUsed > 0) lines.push(`₹${walletUsed.toFixed(0)} debited from your wallet.`);
-      if (codDue > 0) lines.push(`₹${codDue.toFixed(0)} to pay in cash on delivery.`);
-      Alert.alert(
-        splitCount > 1 ? `${splitCount} orders placed! 🎉` : "Order placed! 🎉",
-        lines.join("\n") || `₹${total.toFixed(0)} confirmed.`,
-        [{ text: "View orders", onPress: () => router.replace("/orders" as any) }],
-      );
+      announcePlaced(r.data);
     } catch (e: any) {
       // Nov 2026 — Out-of-delivery-zone handling.  Server returns detail={
       //   code: "out_of_delivery_zone", message: "...", conflicts: [...] }
@@ -284,10 +469,10 @@ export default function CheckoutScreen() {
         setOozConflicts(list);
         setOozOpen(true);
       } else {
-        Alert.alert("Checkout failed", formatApiError(e));
+        notify("Checkout failed", formatApiError(e));
       }
     }
-    finally { setPlacing(false); }
+    finally { setPlacing(false); setPayStage("idle"); }
   };
 
   if (loading) {
@@ -326,7 +511,29 @@ export default function CheckoutScreen() {
       </View>
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={20}>
-        <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: paymentMethod === "wallet_cod" ? 240 : 130 }} keyboardShouldPersistTaps="handled">
+        <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: comboMode ? 300 : 130 }} keyboardShouldPersistTaps="handled">
+          {pendingPay ? (
+            <View style={styles.pendingPayBox} testID="pending-payment-banner">
+              <Feather name="alert-circle" size={18} color="#B45309" />
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.pendingPayTitle}>
+                  {formatINR(pendingPay.online_amount)} already paid
+                </Text>
+                <Text style={styles.pendingPaySub}>
+                  Your last payment went through but the order wasn&apos;t placed. Finish it now —
+                  you won&apos;t be charged again.
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={resumePendingPayment}
+                disabled={placing}
+                style={styles.pendingPayBtn}
+                testID="pending-payment-resume"
+              >
+                <Text style={styles.pendingPayBtnText}>Finish</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
           {/* Order summary — Sept 2026 refresh: bigger thumbnails,
               clearer qty × unit-price arithmetic, sticky spacing. */}
           <Text style={styles.sectionLabel}>ORDER SUMMARY ({items.length} {items.length === 1 ? "item" : "items"})</Text>
@@ -509,7 +716,44 @@ export default function CheckoutScreen() {
             </View>
           </TouchableOpacity>
 
-          {paymentMethod === "wallet_cod" ? (
+          {/* Jun 2026 — Razorpay online payment (UPI / Card / Netbanking). */}
+          <TouchableOpacity
+            onPress={() => setPaymentMethod("online")}
+            style={[
+              styles.paymentOption,
+              (paymentMethod === "online" || paymentMethod === "wallet_online") && styles.paymentOptionActive,
+            ]}
+            testID="pay-online"
+          >
+            <View style={styles.radio}>
+              {(paymentMethod === "online" || paymentMethod === "wallet_online") ? <View style={styles.radioDot} /> : null}
+            </View>
+            <Feather name="smartphone" size={20} color={colors.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.paymentTitle}>Pay Online</Text>
+              <Text style={styles.paymentSub}>UPI, cards & netbanking · secured by Razorpay</Text>
+            </View>
+          </TouchableOpacity>
+
+          {(paymentMethod === "online" || paymentMethod === "wallet_online") && maxWalletUsable > 0 ? (
+            <View style={styles.walletToggleRow} testID="online-use-wallet-row">
+              <Feather name="credit-card" size={16} color={colors.primary} />
+              <Text style={styles.walletToggleText}>
+                Use my wallet balance too ({formatINR(walletBalance)})
+              </Text>
+              <Switch
+                value={paymentMethod === "wallet_online"}
+                onValueChange={(on) => {
+                  setSplitTouched(false);
+                  setPaymentMethod(on ? "wallet_online" : "online");
+                }}
+                trackColor={{ true: colors.primary, false: colors.border }}
+                testID="online-use-wallet"
+              />
+            </View>
+          ) : null}
+
+          {comboMode ? (
             <View style={styles.splitBox} testID="wallet-split-box">
               <View style={styles.splitRow}>
                 <View style={styles.splitCell}>
@@ -518,7 +762,9 @@ export default function CheckoutScreen() {
                 </View>
                 <View style={styles.splitDivider} />
                 <View style={[styles.splitCell, { alignItems: "flex-end" }]}>
-                  <Text style={styles.splitLabel}>CASH ON DELIVERY</Text>
+                  <Text style={styles.splitLabel}>
+                    {paymentMethod === "wallet_online" ? "PAY ONLINE" : "CASH ON DELIVERY"}
+                  </Text>
                   <Text style={styles.splitValueCash} testID="split-cash-amount">{formatINR(cashPart)}</Text>
                 </View>
               </View>
@@ -526,7 +772,7 @@ export default function CheckoutScreen() {
               <Slider
                 style={{ width: "100%", height: 40 }}
                 minimumValue={0}
-                maximumValue={Math.max(1, Math.floor(maxWalletUsable))}
+                maximumValue={Math.max(1, comboMax)}
                 step={1}
                 value={walletPart}
                 onValueChange={(v: number) => { setSplitTouched(true); setWalletSplit(v); }}
@@ -538,7 +784,9 @@ export default function CheckoutScreen() {
 
               <View style={styles.splitQuickRow}>
                 {[0, 0.25, 0.5, 0.75, 1].map((f) => {
-                  const amt = Math.floor(maxWalletUsable * f);
+                  // Percentages are of the BILL (so 50% is exactly half the
+                  // order), clamped to what the wallet can legally cover.
+                  const amt = Math.min(comboMax, Math.floor(total * f));
                   const active = walletPart === amt;
                   return (
                     <TouchableOpacity
@@ -556,6 +804,7 @@ export default function CheckoutScreen() {
               </View>
               <Text style={styles.splitHint}>
                 Wallet balance {formatINR(walletBalance)} · drag to change the split
+                {paymentMethod === "wallet_online" ? " · at least ₹1 is paid online" : ""}
               </Text>
             </View>
           ) : null}
@@ -566,12 +815,14 @@ export default function CheckoutScreen() {
           <View style={{ flex: 1 }}>
             <Text style={styles.stickyLabel}>
               {paymentMethod === "cod" ? "PAY ON DELIVERY"
-                : paymentMethod === "wallet_cod" ? `WALLET ${formatINR(walletPart)} + CASH` : "TOTAL"}
+                : paymentMethod === "wallet_cod" ? `WALLET ${formatINR(walletPart)} + CASH`
+                : paymentMethod === "wallet_online" ? `WALLET ${formatINR(walletPart)} + ONLINE`
+                : paymentMethod === "online" ? "PAY ONLINE" : "TOTAL"}
             </Text>
             <Text style={styles.stickyAmount}>
-              {paymentMethod === "wallet_cod" ? formatINR(cashPart) : formatINR(total)}
+              {comboMode ? formatINR(cashPart) : formatINR(total)}
             </Text>
-            {paymentMethod === "wallet_cod" ? (
+            {comboMode ? (
               <Text style={styles.stickySub}>of {formatINR(total)} total</Text>
             ) : null}
           </View>
@@ -582,16 +833,54 @@ export default function CheckoutScreen() {
             testID="place-order"
           >
             {placing ? (
-              <ActivityIndicator color={colors.primaryFg} />
+              <>
+                <ActivityIndicator color={colors.primaryFg} />
+                {payStage !== "idle" ? (
+                  <Text style={styles.placeBtnText}>
+                    {payStage === "creating" ? "Starting…"
+                      : payStage === "paying" ? "Paying…"
+                      : payStage === "verifying" ? "Verifying…" : "Placing…"}
+                  </Text>
+                ) : null}
+              </>
             ) : (
               <>
-                <Feather name="check-circle" size={18} color={colors.primaryFg} />
-                <Text style={styles.placeBtnText}>Place Order</Text>
+                <Feather name={onlinePart > 0 ? "lock" : "check-circle"} size={18} color={colors.primaryFg} />
+                <Text style={styles.placeBtnText}>
+                  {onlinePart > 0 ? `Pay ${formatINR(onlinePart)}` : "Place Order"}
+                </Text>
               </>
             )}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Razorpay hosted checkout (native only — web opens their JS modal) */}
+      <Modal visible={rzpVisible} animationType="slide" onRequestClose={() => handleRzpMessage('{"type":"cancel"}')}>
+        <SafeAreaView style={styles.safe} edges={["top"]}>
+          <View style={styles.headerRow}>
+            <TouchableOpacity
+              onPress={() => handleRzpMessage('{"type":"cancel"}')}
+              style={styles.iconBtn}
+              testID="rzp-close"
+            >
+              <Feather name="x" size={20} color={colors.textMain} />
+            </TouchableOpacity>
+            <Text style={styles.title}>Secure payment</Text>
+            <View style={{ width: 40 }} />
+          </View>
+          {rzpHtml ? (
+            <WebView
+              originWhitelist={["*"]}
+              source={{ html: rzpHtml }}
+              onMessage={(e) => handleRzpMessage(e.nativeEvent.data)}
+              javaScriptEnabled
+              domStorageEnabled
+              style={{ flex: 1 }}
+            />
+          ) : null}
+        </SafeAreaView>
+      </Modal>
       {/* Nov 2026 — Out-of-delivery-zone bottom sheet */}
       <OutOfZoneModal
         visible={oozOpen}
@@ -625,6 +914,22 @@ const styles = StyleSheet.create({
     padding: 12, marginBottom: 12,
   },
   splitNoticeText: { flex: 1, fontSize: 11.5, color: colors.textMain, fontWeight: "600", lineHeight: 16 },
+  walletToggleRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8,
+    borderRadius: 12, backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  walletToggleText: { flex: 1, fontSize: 12, fontWeight: "700", color: colors.textMain },
+  pendingPayBox: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    backgroundColor: "#FEF3C7", borderColor: "#FCD34D", borderWidth: 1,
+    borderRadius: 14, padding: 12, marginBottom: 4,
+  },
+  pendingPayTitle: { fontSize: 13, fontWeight: "900", color: "#92400E" },
+  pendingPaySub: { fontSize: 11, color: "#92400E", marginTop: 2, lineHeight: 15 },
+  pendingPayBtn: { backgroundColor: "#92400E", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8 },
+  pendingPayBtnText: { color: "#fff", fontSize: 12, fontWeight: "900" },
   sellerHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8, paddingHorizontal: 2 },
   sellerBadge: { backgroundColor: colors.primary, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
   sellerBadgeText: { fontSize: 9.5, fontWeight: "900", color: colors.primaryFg, letterSpacing: 0.6 },

@@ -18,7 +18,7 @@ type AdminOrder = {
   // Buyer / vendor identity — attached server-side (_attach_order_parties).
   buyer_name?: string; buyer_email?: string; buyer_phone?: string;
   vendor_id?: string; vendor_name?: string; vendor_email?: string; vendor_phone?: string;
-  wallet_paid?: number; cod_due?: number; paid_via?: string; payment_status?: string;
+  wallet_paid?: number; online_paid?: number; cod_due?: number; paid_via?: string; payment_status?: string;
   split_index?: number | string; split_count?: number | string;
   shipping_address?: Record<string, any>;
 };
@@ -211,6 +211,7 @@ function OrderDetailSheet({ order, onClose }: { order: AdminOrder | null; onClos
   const addr = o.shipping_address || {};
   const hero = o.items?.[0];
   const walletPaid = Number(o.wallet_paid || 0);
+  const onlinePaid = Number(o.online_paid || 0);
   const codDue = Number(o.cod_due || 0);
 
   return (
@@ -266,6 +267,7 @@ function OrderDetailSheet({ order, onClose }: { order: AdminOrder | null; onClos
           <View style={styles.box}>
             <DetailRow label="Method" value={(o.paid_via || "—").toUpperCase().replace("_", " + ")} />
             <DetailRow label="Paid from wallet" value={formatINR(walletPaid)} />
+            <DetailRow label="Paid online" value={formatINR(onlinePaid)} />
             <DetailRow label="Cash on delivery" value={formatINR(codDue)} />
             <DetailRow label="Order total" value={formatINR(o.total)} />
           </View>

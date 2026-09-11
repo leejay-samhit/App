@@ -124,8 +124,108 @@ async def cart_adjust(payload: CartAdjust, user: Dict[str, Any] = Depends(get_cu
         product = await db.products.find_one({"id": payload.product_id}, {"_id": 0})
         if product:
             await _resolve_variant(product, payload.variant_id, new_qty)
+            # Plain products (no variants) carry stock on the product doc.
+            if not (product.get("variants") or []):
+                avail = int(product.get("stock") or 0)
+                if new_qty > avail:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Only {avail} left in stock for '{product.get('name')}'.",
+                    )
     await db.cart_items.update_one(key, {"$set": {"qty": new_qty}})
     return {"ok": True, "qty": new_qty}
+
+
+@router.post("/orders/{order_id}/reorder")
+async def reorder(order_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    """Jun 2026 — one-tap Reorder from My Orders.
+
+    Re-adds every line of a past order to the cart. Items that can't come
+    back (delisted, out of stock, or the seller no longer delivers to the
+    customer's saved delivery pincode) are SKIPPED and reported, so the
+    buyer gets whatever is still available instead of a hard failure.
+    """
+    order = await db.orders.find_one({"id": order_id, "user_id": user["id"]}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    lines = order.get("items") or []
+    if not lines:
+        raise HTTPException(status_code=400, detail="This order has no items to reorder.")
+
+    pids = list({ln.get("product_id") for ln in lines if ln.get("product_id")})
+    products = {
+        p["id"]: p
+        async for p in db.products.find(
+            {"id": {"$in": pids}},
+            {"_id": 0, "images": 0, "description": 0, "specifications": 0, "reviews": 0, "questions": 0},
+        )
+    }
+
+    # Same delivery-eligibility rule the shop uses, based on the pincode the
+    # order was shipped to (best available signal for "where I buy").
+    from routes.products_public import _eligible_vendor_ids
+    ship_pin = str((order.get("shipping_address") or {}).get("pincode") or "").strip()
+    addr = order.get("shipping_address") or {}
+    eligible = await _eligible_vendor_ids(
+        pincode=ship_pin or None,
+        lat=addr.get("latitude") if isinstance(addr.get("latitude"), (int, float)) else None,
+        lng=addr.get("longitude") if isinstance(addr.get("longitude"), (int, float)) else None,
+    )
+
+    added: list = []
+    skipped: list = []
+    for ln in lines:
+        name = ln.get("name") or "Item"
+        qty = max(1, int(ln.get("qty") or 1))
+        product = products.get(ln.get("product_id"))
+        if not product or product.get("is_published") is False:
+            skipped.append({"name": name, "reason": "no longer available"})
+            continue
+        vid = product.get("vendor_id")
+        if vid and vid not in eligible:
+            skipped.append({"name": name, "reason": "seller doesn't deliver to your area anymore"})
+            continue
+
+        variant = find_variant(product, ln.get("variant_id"))
+        active_variants = [v for v in (product.get("variants") or []) if v.get("active", True)]
+        if active_variants and not variant:
+            skipped.append({"name": name, "reason": "this size / option was discontinued"})
+            continue
+        avail = int((variant or product).get("stock") or 0)
+        if avail <= 0:
+            skipped.append({"name": name, "reason": "out of stock"})
+            continue
+        take = min(qty, avail)
+
+        key = _row_key(user["id"], product["id"], (variant or {}).get("id"))
+        existing = await db.cart_items.find_one(key)
+        if existing:
+            # Don't stack past the shelf — cap the row at available stock.
+            new_qty = min(int(existing.get("qty") or 0) + take, avail)
+            await db.cart_items.update_one(key, {"$set": {"qty": new_qty}})
+        else:
+            await db.cart_items.insert_one({
+                "id": str(uuid.uuid4()),
+                **key,
+                "variant_label": (variant or {}).get("label", ""),
+                "qty": take,
+                "created_at": now_utc().isoformat(),
+            })
+        added.append({"name": name, "qty": take, "variant_label": (variant or {}).get("label", "")})
+        if take < qty:
+            skipped.append({"name": name, "reason": f"only {avail} left — added {take}"})
+
+    if not added:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "reorder_unavailable",
+                "message": "None of these items can be reordered right now.",
+                "skipped": skipped,
+            },
+        )
+    count = await db.cart_items.count_documents({"user_id": user["id"]})
+    return {"ok": True, "added": added, "skipped": skipped, "cart_count": count}
 
 
 @router.get("/cart")
@@ -268,8 +368,15 @@ async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
         if o.get("wallet_paid") is None:
             paid_via = (o.get("paid_via") or "wallet").lower()
             o["wallet_paid"] = 0.0 if paid_via == "cod" else float(o.get("total") or 0)
+        if o.get("online_paid") is None:
+            o["online_paid"] = 0.0
         if o.get("cod_due") is None:
-            o["cod_due"] = round(float(o.get("total") or 0) - float(o.get("wallet_paid") or 0), 2)
+            o["cod_due"] = round(
+                float(o.get("total") or 0)
+                - float(o.get("wallet_paid") or 0)
+                - float(o.get("online_paid") or 0),
+                2,
+            )
         o["vendor_count"] = len(vids) or 1
     return items
 
@@ -330,8 +437,10 @@ async def cancel_my_order(order_id: str, user: Dict[str, Any] = Depends(get_curr
     paid_via = (o.get("paid_via") or "").lower()
     if paid_via == "wallet":
         refund_amt = float(o.get("total") or 0)
-    elif paid_via == "wallet_cod":
-        refund_amt = float(o.get("wallet_paid") or 0)
+    elif paid_via in ("wallet_cod", "online", "wallet_online"):
+        # Wallet slice + any Razorpay-captured amount (online refunds land in
+        # the wallet). Pure-cash portions were never collected.
+        refund_amt = float(o.get("wallet_paid") or 0) + float(o.get("online_paid") or 0)
     else:
         refund_amt = 0.0
     if refund_amt > 0:

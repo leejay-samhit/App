@@ -6,7 +6,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, FlatList, Image, TouchableOpacity, ActivityIndicator,
-  RefreshControl, Modal, Platform, Share, Alert,
+  RefreshControl, Modal, Platform, Share,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -14,6 +14,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useSwipePager } from "../src/use-swipe-pager";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { notify } from "../src/notify";
 import { FadeSlideIn, ListRowSkeleton } from "../src/anim";
 
 type OrderItem = { name: string; price: number; image_url: string; qty: number };
@@ -27,6 +28,7 @@ type Order = {
   split_count?: number;
   total: number;
   wallet_paid?: number;
+  online_paid?: number;
   cod_due?: number;
   status: string;
   created_at: string;
@@ -48,6 +50,8 @@ const PAY_LABEL: Record<string, string> = {
   wallet: "Wallet",
   cod: "Cash on delivery",
   wallet_cod: "Wallet + Cash",
+  online: "Paid online",
+  wallet_online: "Wallet + Online",
 };
 // Progress steps shown on every live (non-cancelled) order card.
 const STEPS = ["placed", "shipped", "delivered"] as const;
@@ -81,6 +85,43 @@ export default function OrdersScreen() {
   });
   const [preview, setPreview] = useState<Order | null>(null);
   const [chatBusy, setChatBusy] = useState<string | null>(null);
+  const [reorderBusy, setReorderBusy] = useState<string | null>(null);
+
+  // Jun 2026 — One-tap Reorder. The backend re-adds whatever is still
+  // buyable and tells us what it had to skip (delisted / out of stock /
+  // seller no longer delivers here), then we drop the shopper in the bag.
+  const reorder = useCallback(async (o: Order) => {
+    setReorderBusy(o.id);
+    try {
+      const { data } = await api.post<{
+        added: { name: string; qty: number }[];
+        skipped: { name: string; reason: string }[];
+      }>(`/orders/${o.id}/reorder`);
+      const added = data?.added || [];
+      const skipped = data?.skipped || [];
+      const lines = [
+        `${added.length} item${added.length === 1 ? "" : "s"} added to your bag.`,
+        ...(skipped.length
+          ? ["", "Couldn't add:", ...skipped.map((s) => `• ${s.name} — ${s.reason}`)]
+          : []),
+      ];
+      notify("Added to bag", lines.join("\n"), [
+        { text: "Keep shopping", style: "cancel" },
+        { text: "Open bag", onPress: () => router.push("/cart" as any) },
+      ]);
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      if (detail && typeof detail === "object" && detail.code === "reorder_unavailable") {
+        const skipped = Array.isArray(detail.skipped) ? detail.skipped : [];
+        notify(
+          "Can't reorder this",
+          [detail.message, "", ...skipped.map((s: any) => `• ${s.name} — ${s.reason}`)].join("\n"),
+        );
+      } else {
+        notify("Couldn't reorder", formatApiError(e));
+      }
+    } finally { setReorderBusy(null); }
+  }, [router]);
 
   // Jun 2026 — One-tap "Ask this seller". A purchase is proof of
   // relationship, so the backend opens (or reuses) a direct thread with
@@ -90,9 +131,9 @@ export default function OrdersScreen() {
     try {
       const { data } = await api.post<{ thread_id?: string }>(`/orders/${o.id}/chat-vendor`);
       if (data?.thread_id) router.push(`/chat/${data.thread_id}` as any);
-      else Alert.alert("Couldn't open chat", "Try again in a moment.");
+      else notify("Couldn't open chat", "Try again in a moment.");
     } catch (e) {
-      Alert.alert("Couldn't open chat", formatApiError(e));
+      notify("Couldn't open chat", formatApiError(e));
     } finally { setChatBusy(null); }
   }, [router]);
 
@@ -213,6 +254,7 @@ export default function OrdersScreen() {
             const orderRef = item.order_number || `#${item.id.slice(0, 8).toUpperCase()}`;
             const codDue = Number(item.cod_due || 0);
             const walletPaid = Number(item.wallet_paid || 0);
+            const onlinePaid = Number(item.online_paid || 0);
             const stepIdx = STEPS.indexOf((item.status || "placed") as any);
             const cancelled = (item.status || "") === "cancelled";
             // Jun 2026 — GROUP HEADER. Sibling orders from one checkout are
@@ -334,7 +376,10 @@ export default function OrdersScreen() {
                     {PAY_LABEL[item.paid_via || "wallet"] || (item.paid_via || "").toUpperCase()}
                     {walletPaid > 0 && codDue > 0
                       ? `  ·  ${formatINR(walletPaid)} paid, ${formatINR(codDue)} on delivery`
-                      : codDue > 0 ? `  ·  ${formatINR(codDue)} due on delivery` : "  ·  Paid"}
+                      : codDue > 0 ? `  ·  ${formatINR(codDue)} due on delivery`
+                      : walletPaid > 0 && onlinePaid > 0
+                        ? `  ·  ${formatINR(walletPaid)} wallet + ${formatINR(onlinePaid)} online`
+                        : "  ·  Paid"}
                   </Text>
                 </View>
 
@@ -370,9 +415,20 @@ export default function OrdersScreen() {
                   </View>
                 ) : null}
 
-                {/* Jun 2026 — Action row: Ask this seller + Invoice.
+                {/* Jun 2026 — Action row: Reorder + Ask this seller + Invoice.
                     Cancel stays gated to "placed" with no vendor action. */}
                 <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    onPress={() => reorder(item)}
+                    disabled={reorderBusy === item.id}
+                    style={styles.reorderBtn}
+                    testID={`reorder-${item.id}`}
+                  >
+                    {reorderBusy === item.id
+                      ? <ActivityIndicator size="small" color={colors.primary} />
+                      : <Feather name="rotate-ccw" size={13} color={colors.primary} />}
+                    <Text style={styles.reorderBtnText}>Reorder</Text>
+                  </TouchableOpacity>
                   {item.vendor_id ? (
                     <TouchableOpacity
                       onPress={() => askSeller(item)}
@@ -399,10 +455,10 @@ export default function OrdersScreen() {
                 {item.status === "placed" && !item.delivery_info_updated_at ? (
                   <TouchableOpacity
                     onPress={() => {
-                      Alert.alert(
+                      notify(
                         "Cancel this order?",
-                        walletPaid > 0
-                          ? `Your ${formatINR(walletPaid)} wallet payment will be refunded.`
+                        walletPaid + onlinePaid > 0
+                          ? `${formatINR(walletPaid + onlinePaid)} will be refunded to your wallet.`
                           : "This cash-on-delivery order will be cancelled.",
                         [
                           { text: "Keep order", style: "cancel" },
@@ -413,7 +469,7 @@ export default function OrdersScreen() {
                                 await api.post(`/orders/${item.id}/cancel`);
                                 await load();
                               } catch (err) {
-                                Alert.alert("Couldn't cancel", formatApiError(err));
+                                notify("Couldn't cancel", formatApiError(err));
                               }
                             },
                           },
@@ -526,18 +582,35 @@ export default function OrdersScreen() {
               ListFooterComponent={
                 <View style={styles.footerBox}>
                   <View style={styles.divider} />
-                  {Number(preview.wallet_paid || 0) > 0 && Number(preview.cod_due || 0) > 0 ? (
-                    <View style={{ gap: 6, marginBottom: 10 }}>
-                      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                        <Text style={styles.lineDetail}>Paid from wallet</Text>
-                        <Text style={styles.lineAmt}>{formatINR(Number(preview.wallet_paid))}</Text>
+                  {(() => {
+                    const w = Number(preview.wallet_paid || 0);
+                    const on = Number(preview.online_paid || 0);
+                    const cod = Number(preview.cod_due || 0);
+                    // Only worth breaking down when more than one source paid.
+                    if ([w, on, cod].filter((x) => x > 0).length < 2) return null;
+                    return (
+                      <View style={{ gap: 6, marginBottom: 10 }}>
+                        {w > 0 ? (
+                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                            <Text style={styles.lineDetail}>Paid from wallet</Text>
+                            <Text style={styles.lineAmt}>{formatINR(w)}</Text>
+                          </View>
+                        ) : null}
+                        {on > 0 ? (
+                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                            <Text style={styles.lineDetail}>Paid online (Razorpay)</Text>
+                            <Text style={styles.lineAmt}>{formatINR(on)}</Text>
+                          </View>
+                        ) : null}
+                        {cod > 0 ? (
+                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                            <Text style={styles.lineDetail}>Cash on delivery</Text>
+                            <Text style={[styles.lineAmt, { color: "#B45309" }]}>{formatINR(cod)}</Text>
+                          </View>
+                        ) : null}
                       </View>
-                      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                        <Text style={styles.lineDetail}>Cash on delivery</Text>
-                        <Text style={[styles.lineAmt, { color: "#B45309" }]}>{formatINR(Number(preview.cod_due))}</Text>
-                      </View>
-                    </View>
-                  ) : null}
+                    );
+                  })()}
                   <View style={styles.grandRow}>
                     <Text style={styles.grandLabel}>Grand Total</Text>
                     <Text style={styles.grandValue}>{formatINR(preview.total)}</Text>
@@ -605,6 +678,9 @@ const styles = StyleSheet.create({
   actionRow: { flexDirection: "row", gap: 8, marginTop: 10 },
   askBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.surface, minHeight: 44 },
   askBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
+  reorderBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: colors.primary + "55", backgroundColor: colors.primary + "12", minHeight: 44 },
+  reorderBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
+
   invoiceBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 11, borderRadius: 10, backgroundColor: colors.primary, minHeight: 44 },
   invoiceBtnText: { fontSize: 12, fontWeight: "800", color: colors.primaryFg },
   cardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 6 },

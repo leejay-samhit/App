@@ -168,6 +168,7 @@ from routes import backup as backup_router  # noqa: E402
 from routes import delivery as delivery_router  # noqa: E402
 from routes import admin_passwords as admin_passwords_router  # noqa: E402
 from routes import login_history as login_history_router  # noqa: E402
+from routes import order_payments as order_payments_router  # noqa: E402
 from core.login_history import record_login  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1484,16 +1485,13 @@ MAX_PAYMENT_ATTEMPTS = 3
 
 
 async def get_razorpay_creds() -> Dict[str, Any]:
-    """Return active Razorpay credentials. Order of precedence: DB > env."""
-    s = await get_settings()
-    rzp = (s.get("razorpay") or {}) if isinstance(s.get("razorpay"), dict) else {}
-    db_id = (rzp.get("key_id") or "").strip()
-    db_secret = (rzp.get("key_secret") or "").strip()
-    if db_id and db_secret:
-        return {"key_id": db_id, "key_secret": db_secret, "source": "db", "is_mock": False}
-    if RAZORPAY_ENV_KEY_ID and RAZORPAY_ENV_KEY_SECRET:
-        return {"key_id": RAZORPAY_ENV_KEY_ID, "key_secret": RAZORPAY_ENV_KEY_SECRET, "source": "env", "is_mock": False}
-    return {"key_id": "", "key_secret": "", "source": "none", "is_mock": True}
+    """Return active Razorpay credentials. Order of precedence: DB > env.
+
+    Thin wrapper — the real logic lives in core/razorpay.py so the order
+    checkout flow (routes/order_payments.py) reads the exact same keys.
+    """
+    from core.razorpay import get_creds as _core_get_creds
+    return await _core_get_creds()
 
 
 async def _fetch_razorpay_payment(payment_id: str, creds: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -4092,27 +4090,28 @@ async def admin_update_settings(payload: SettingsUpdate, admin: Dict[str, Any] =
 async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, Any] = Depends(get_current_user)):
     """Place an order. Body:
       {
-        "payment_method": "wallet" | "cod" | "wallet_cod",
-        "wallet_amount": 250.0,        # only for "wallet_cod"
-        "shipping_address": {
-            "name": "...",
-            "phone": "...",
-            "line1": "...",
-            "line2": "...",
-            "city": "...",
-            "state": "...",
-            "pincode": "..."
-        }
+        "payment_method": "wallet" | "cod" | "wallet_cod" | "online" | "wallet_online",
+        "wallet_amount": 250.0,        # only for "wallet_cod" / "wallet_online"
+        "payment_id": "...",           # required for "online" / "wallet_online"
+                                       # (a VERIFIED /orders/payment/verify attempt)
+        "shipping_address": { ... }
       }
     Wallet flow debits the user's wallet immediately. COD skips wallet debit;
     the order is marked `paid_via: "cod"` and the platform/vendor commissions
     are credited only when the delivery is marked complete (out of scope here
     — captured on order status update). For COD we still atomically decrement
-    stock so we don't oversell.
+    stock so we don't oversell.  Online (Razorpay) money is captured BEFORE
+    this call, so those orders are fully prepaid like wallet orders.
     """
     payment_method = str((payload or {}).get("payment_method") or "wallet").strip().lower()
-    if payment_method not in ("wallet", "cod", "wallet_cod"):
-        raise HTTPException(status_code=400, detail="Unsupported payment_method. Use 'wallet', 'cod' or 'wallet_cod'.")
+    if payment_method not in ("wallet", "cod", "wallet_cod", "online", "wallet_online"):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported payment_method. Use 'wallet', 'cod', 'wallet_cod', 'online' or 'wallet_online'.",
+        )
+    online_payment_id = str((payload or {}).get("payment_id") or "").strip()
+    if payment_method in ("online", "wallet_online") and not online_payment_id:
+        raise HTTPException(status_code=400, detail="Missing payment_id for the online payment.")
     raw_addr = (payload or {}).get("shipping_address") or {}
     # Defensive: some legacy clients may send shipping_address as a string
     # instead of an object. Treat anything non-dict as missing.
@@ -4148,7 +4147,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     if len(shipping_address["pincode"]) < 5:
         raise HTTPException(status_code=400, detail="Pincode must be at least 5 digits.")
 
-    if user.get("wallet_frozen") and payment_method in ("wallet", "wallet_cod"):
+    if user.get("wallet_frozen") and payment_method in ("wallet", "wallet_cod", "wallet_online"):
         raise HTTPException(status_code=403, detail="Wallet is frozen. Pick COD or contact support.")
     items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
     if not items:
@@ -4420,10 +4419,24 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         groups.setdefault(it.get("vendor_id") or LEGACY_VENDOR_KEY, []).append(it)
 
     # Resolve how much of the basket the wallet should cover.
+    online_target = 0.0
     if payment_method == "wallet":
         wallet_target = total
     elif payment_method == "cod":
         wallet_target = 0.0
+    elif payment_method == "online":
+        # Razorpay already collected the whole bill.
+        wallet_target = 0.0
+        online_target = total
+    elif payment_method == "wallet_online":
+        try:
+            wallet_target = float((payload or {}).get("wallet_amount") or 0)
+        except Exception:
+            wallet_target = 0.0
+        wallet_target = max(0.0, min(round(wallet_target, 2), total))
+        online_target = round(total - wallet_target, 2)
+        if online_target <= 0.009:
+            payment_method, online_target, wallet_target = "wallet", 0.0, total
     else:  # wallet_cod
         try:
             wallet_target = float((payload or {}).get("wallet_amount") or 0)
@@ -4435,6 +4448,28 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         elif wallet_target >= total - 0.009:
             payment_method = "wallet"
             wallet_target = total
+
+    # ── Online (Razorpay) money was captured BEFORE this call.  Claim the
+    #    verified attempt now — single-use, and it must match the amounts we
+    #    just priced from the cart.  Any mismatch aborts before stock/wallet
+    #    are touched (the stock rollback below runs on the raised error).
+    online_attempt = None
+    if online_target > 0:
+        from routes.order_payments import consume_paid_attempt
+        try:
+            online_attempt = await consume_paid_attempt(
+                user["id"], online_payment_id, online_target, wallet_target,
+            )
+        except HTTPException:
+            for d in decremented:
+                if d.get("variant_id"):
+                    await db.products.update_one(
+                        {"id": d["product_id"], "variants.id": d["variant_id"]},
+                        {"$inc": {"variants.$.stock": d["qty"], "stock": d["qty"]}},
+                    )
+                else:
+                    await db.products.update_one({"id": d["product_id"]}, {"$inc": {"stock": d["qty"]}})
+            raise
 
     if wallet_target > 0:
         # ATOMIC debit — guards against rapid double-clicks creating
@@ -4470,15 +4505,23 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
 
     created_orders: List[Dict[str, Any]] = []
     wallet_left = round(wallet_target, 2)
+    online_left = round(online_target, 2)
     for idx, (vkey, vitems) in enumerate(groups.items(), start=1):
         sub_total = round(sum(float(i["line_total"]) for i in vitems), 2)
         wallet_paid = round(min(wallet_left, sub_total), 2)
-        cod_due = round(sub_total - wallet_paid, 2)
+        online_paid = round(min(online_left, sub_total - wallet_paid), 2)
+        cod_due = round(sub_total - wallet_paid - online_paid, 2)
         wallet_left = round(wallet_left - wallet_paid, 2)
+        online_left = round(online_left - online_paid, 2)
 
         if cod_due <= 0.009:
             cod_due = 0.0
-            sub_paid_via, sub_pay_status = "wallet", "paid"
+            if online_paid > 0.009 and wallet_paid > 0.009:
+                sub_paid_via, sub_pay_status = "wallet_online", "paid"
+            elif online_paid > 0.009:
+                sub_paid_via, sub_pay_status = "online", "paid"
+            else:
+                sub_paid_via, sub_pay_status = "wallet", "paid"
         elif wallet_paid <= 0.009:
             wallet_paid = 0.0
             sub_paid_via, sub_pay_status = "cod", "pending_cod"
@@ -4500,10 +4543,12 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             "items": vitems,
             "total": sub_total,
             "wallet_paid": wallet_paid,
+            "online_paid": online_paid,
             "cod_due": cod_due,
             "status": "placed",
             "paid_via": sub_paid_via,
             "payment_status": sub_pay_status,
+            "razorpay_payment_id": (online_attempt or {}).get("razorpay_payment_id") if online_paid > 0 else None,
             "shipping_address": shipping_address,
             "created_at": ts_now,
         }
@@ -4579,10 +4624,11 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             logging.warning(f"order notification failed (non-blocking): {e}")
 
         # Platform margin + vendor payout are credited immediately ONLY
-        # when the sub-order is fully prepaid from the wallet.  Anything
-        # carrying a cash-on-delivery balance defers until delivery is
-        # confirmed (settled in PATCH /admin/orders/{id}/status).
-        if sub_paid_via != "wallet":
+        # when the sub-order is FULLY prepaid (wallet, Razorpay online, or
+        # a wallet+online combo).  Anything carrying a cash-on-delivery
+        # balance defers until delivery is confirmed (settled in
+        # PATCH /admin/orders/{id}/status).
+        if cod_due > 0.009:
             continue
 
         platform_total = round(sum(float(i.get("platform_share") or 0) for i in vitems), 2)
@@ -4630,7 +4676,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
 
     # Vendors with a cash balance still need a heads-up about the order.
     for o in created_orders:
-        if o.get("vendor_id") and o["paid_via"] != "wallet":
+        if o.get("vendor_id") and float(o.get("cod_due") or 0) > 0.009:
             try:
                 await _create_notification(
                     o["vendor_id"], "vendor", "New order received",
@@ -4641,7 +4687,14 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
 
     await db.cart_items.delete_many({"user_id": user["id"]})
 
+    # Bind the Razorpay payment to this order group so it can never be
+    # reused for a second checkout.
+    if online_attempt:
+        from routes.order_payments import mark_attempt_consumed
+        await mark_attempt_consumed(online_attempt["id"], group_id)
+
     wallet_total_used = round(sum(float(o["wallet_paid"]) for o in created_orders), 2)
+    online_total_used = round(sum(float(o.get("online_paid") or 0) for o in created_orders), 2)
     cod_total_due = round(sum(float(o["cod_due"]) for o in created_orders), 2)
     await _create_notification(
         user["id"], "order",
@@ -4658,6 +4711,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         "split_count": split_count,
         "grand_total": total,
         "wallet_paid": wallet_total_used,
+        "online_paid": online_total_used,
         "cod_due": cod_total_due,
         # Legacy top-level fields (older clients read these directly).
         "id": first["id"],
@@ -6266,11 +6320,14 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                 "order_id": order_id,
                 "created_at": now_utc().isoformat(),
             })
-        elif paid_via == "wallet_cod":
-            # Jun 2026 — Wallet+COD combo: only the wallet-funded slice
-            # was actually collected, so refund exactly that. The cash
-            # portion was never taken, so nothing to give back.
-            refund_amt = round(float(order.get("wallet_paid") or 0), 2)
+        elif paid_via in ("wallet_cod", "online", "wallet_online"):
+            # Jun 2026 — refund exactly what was actually collected up-front:
+            # the wallet slice plus any Razorpay-captured amount.  Online money
+            # is returned as wallet credit (instant, no gateway round-trip).
+            # The cash portion was never taken, so nothing to give back.
+            refund_amt = round(
+                float(order.get("wallet_paid") or 0) + float(order.get("online_paid") or 0), 2,
+            )
             if refund_amt > 0:
                 await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": refund_amt}})
                 await db.transactions.insert_one({
@@ -6279,7 +6336,7 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                     "type": "refund",
                     "amount": refund_amt,
                     "status": "credited",
-                    "description": f"Order {order.get('order_number') or ('#' + order_id[:8])} cancelled — wallet portion refunded",
+                    "description": f"Order {order.get('order_number') or ('#' + order_id[:8])} cancelled — prepaid amount refunded to wallet",
                     "order_id": order_id,
                     "created_at": now_utc().isoformat(),
                 })
@@ -6292,7 +6349,7 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         # later cancelled, in which case order.commission_settled is True
         # and we reverse the same way.
         should_reverse_commission = (
-            paid_via == "wallet"
+            paid_via in ("wallet", "online", "wallet_online")
             or (paid_via in ("cod", "wallet_cod") and order.get("commission_settled"))
         )
         if should_reverse_commission:
@@ -10801,6 +10858,7 @@ app.include_router(backup_router.router, prefix="/api")
 app.include_router(delivery_router.router, prefix="/api")
 app.include_router(admin_passwords_router.router, prefix="/api")
 app.include_router(login_history_router.router, prefix="/api")
+app.include_router(order_payments_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

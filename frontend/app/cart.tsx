@@ -7,7 +7,6 @@ import {
   Image,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
   RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -16,6 +15,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { notify } from "../src/notify";
 
 type CartLine = {
   id: string;
@@ -38,6 +38,7 @@ export default function CartScreen() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [busyLine, setBusyLine] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -64,8 +65,26 @@ export default function CartScreen() {
       await api.post("/cart/remove", { product_id: productId, variant_id: variantId || null });
       await load();
     } catch (e) {
-      Alert.alert("Error", formatApiError(e));
+      notify("Error", formatApiError(e));
     }
+  };
+
+  // Jun 2026 — inline qty stepper. `delta` is ±1; the backend caps the row
+  // at available stock and deletes it when the qty hits zero.
+  const adjust = async (line: CartLine, delta: 1 | -1) => {
+    const key = `${line.product_id}-${line.variant_id || ""}`;
+    if (busyLine) return;
+    setBusyLine(key);
+    try {
+      await api.post("/cart/adjust", {
+        product_id: line.product_id,
+        variant_id: line.variant_id || null,
+        delta,
+      });
+      await load();
+    } catch (e) {
+      notify("Couldn't update quantity", formatApiError(e));
+    } finally { setBusyLine(null); }
   };
 
   const checkout = async () => {
@@ -151,8 +170,31 @@ export default function CartScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.lineName} numberOfLines={2}>{it.product.name}</Text>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <View style={styles.qtyPill}>
-                      <Text style={styles.qtyPillText}>Qty {it.qty}</Text>
+                    {/* Jun 2026 — inline qty stepper (no remove-and-re-add). */}
+                    <View style={styles.stepper}>
+                      <TouchableOpacity
+                        onPress={() => adjust(it, -1)}
+                        disabled={!!busyLine}
+                        style={styles.stepBtn}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        testID={`qty-minus-${it.product_id}`}
+                      >
+                        <Feather name={it.qty <= 1 ? "trash-2" : "minus"} size={13} color={colors.primary} />
+                      </TouchableOpacity>
+                      {busyLine === `${it.product_id}-${it.variant_id || ""}` ? (
+                        <ActivityIndicator size="small" color={colors.primary} style={{ width: 30 }} />
+                      ) : (
+                        <Text style={styles.stepQty} testID={`qty-value-${it.product_id}`}>{it.qty}</Text>
+                      )}
+                      <TouchableOpacity
+                        onPress={() => adjust(it, 1)}
+                        disabled={!!busyLine}
+                        style={styles.stepBtn}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        testID={`qty-plus-${it.product_id}`}
+                      >
+                        <Feather name="plus" size={13} color={colors.primary} />
+                      </TouchableOpacity>
                     </View>
                     {/* Jun 2026 — show the chosen size / RAM-ROM so the
                         shopper can confirm the fit before paying. */}
@@ -256,6 +298,14 @@ const styles = StyleSheet.create({
   image: { width: 72, height: 72, borderRadius: 12, backgroundColor: colors.surfaceMuted },
   lineName: { fontSize: 13, fontWeight: "700", color: colors.textMain, marginBottom: 6 },
   qtyPill: { alignSelf: "flex-start", backgroundColor: colors.surfaceMuted, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
+  // Jun 2026 — inline qty stepper
+  stepper: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: colors.primary + "10",
+    borderRadius: 999, borderWidth: 1, borderColor: colors.primary + "40",
+  },
+  stepBtn: { width: 30, height: 30, alignItems: "center", justifyContent: "center" },
+  stepQty: { minWidth: 30, textAlign: "center", fontSize: 13, fontWeight: "900", color: colors.textMain },
   variantPill: {
     backgroundColor: colors.primary, borderRadius: 999,
     paddingHorizontal: 8, paddingVertical: 3,

@@ -1158,3 +1158,61 @@ missing was buyer visibility BEFORE paying:
   SC-XXXXXX-1/-2 and the wallet vs cash breakdown.
 - Vendor isolation confirmed: each vendor sees only its own sub-order.
 - API-level regression test: `backend/tests/test_multivendor_split_ui.py`.
+
+### 12. Cart quantity, Razorpay online payment, Reorder (Jun 2026, iterations 73–74)
+**Cart quantity stepper**
+- `app/cart.tsx` bag lines have a − / qty / + stepper (`qty-minus-*`,
+  `qty-value-*`, `qty-plus-*`) hitting `POST /cart/adjust`. At qty 1 the
+  minus becomes a trash icon and deletes the row.
+- `routes/cart.py::cart_adjust` now also caps PLAIN (non-variant) products at
+  the product's stock → 400 "Only N left in stock".
+
+**Razorpay online payment for orders (MOCK mode until keys are added)**
+- `core/razorpay.py` (new): shared creds (admin settings > env > mock),
+  HMAC `verify_signature`, `create_order`, `fetch_payment`.
+  `server.py::get_razorpay_creds` is now a thin wrapper over it so the
+  registration-fee flow and the order flow can never diverge.
+- `routes/order_payments.py` (new), collection `order_payments`:
+  `POST /orders/payment/start` (prices the cart server-side, computes the
+  online remainder, creates the Razorpay order, one open attempt per user),
+  `POST /orders/payment/verify` (HMAC + live cross-check of status/amount),
+  `GET /orders/payment/pending` (a paid-but-unplaced attempt so the app can
+  resume instead of charging twice).
+- `POST /orders/checkout` accepts `payment_method: online | wallet_online`
+  plus `payment_id`. It consumes the verified attempt exactly ONCE
+  (`consumed_order_group`), so a reused/unverified payment is rejected 400.
+  Allocation per sub-order is wallet → online → COD; `online_paid` is stored
+  on every order. Fully-prepaid sub-orders (cod_due == 0) credit vendor +
+  platform immediately — the payout gate is now "no cash outstanding",
+  not "paid_via == wallet".
+- Cancellation refunds `wallet_paid + online_paid` to the wallet
+  (both in the admin status route and `POST /orders/{id}/cancel`).
+- `app/checkout.tsx`: "Pay Online" option + "Use my wallet balance too"
+  switch → wallet+online combo reusing the split box (right column becomes
+  PAY ONLINE). Gotchas fixed in iteration 74: the wallet slider is capped at
+  `total − ₹1` so the gateway always has something to collect, the combo
+  defaults to a 50/50 split when the wallet could cover everything, and
+  dragging the wallet to the full amount places a plain wallet order instead
+  of calling the gateway. A yellow resume banner finishes a captured-but-
+  unplaced payment.
+- `src/notify.ts` (new): `Alert.alert` is a NO-OP on react-native-web, so
+  every cart/checkout/orders message was invisible in the browser preview.
+  `notify()` keeps the native dialog and falls back to
+  window.alert / window.confirm on web. Use it (not Alert.alert) for any new
+  user-facing message in those screens.
+
+**Reorder**
+- `POST /orders/{order_id}/reorder` re-adds each line, SKIPPING delisted /
+  out-of-stock / "seller no longer delivers to you" items (checked with the
+  shop's own `_eligible_vendor_ids`) and returning
+  `{added, skipped:[{name,reason}], cart_count}`; 400 with
+  `detail.code = "reorder_unavailable"` when nothing can be added. Quantities
+  never exceed available stock, and a second reorder stacks up to that cap.
+- `app/orders.tsx`: "Reorder" button on every order card (`reorder-<id>`)
+  → dialog listing added + skipped with an "Open bag" action. New pay labels
+  "Paid online" / "Wallet + Online"; the invoice modal breaks payment into
+  wallet / online / cash rows. `app/admin/orders.tsx` shows a "Paid online" row.
+- Tests: `backend/tests/test_online_payment_reorder.py` (stepper + stock cap,
+  mock start/verify, unverified rejection, wallet+online split across two
+  vendors, reuse blocked, reorder) and
+  `backend/tests/test_multivendor_split_ui.py`.

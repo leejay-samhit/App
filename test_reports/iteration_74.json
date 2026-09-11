@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 74 (FRONTEND RE-TEST of iter73 fixes) — ALL requested flows now PASS end-to-end. The FIX 1 wallet+online combo is fully working: with a ₹350 two-seller bag and ₹5000 wallet, toggling `online-use-wallet` ON now auto-defaults the split to ₹175 wallet / ₹175 online (50/50) — NOT wallet=total. Chips split-chip-0 / 0.25 / 0.5 / 0.75 / 1 always sum to ₹350 and the 'Max' chip yields ₹349/₹1 (never ₹0 online, matching the total-₹1 cap). Tapping `place-order` fired a VISIBLE window.confirm dialog captured by page.on('dialog'): '2 orders placed! 🎉  Split into 2 orders — one per seller, each tracked separately.  ₹174 debited from your wallet.  ₹176 paid online.  [OK] View orders'. Wallet dropped exactly ₹174 (5000→4826). Two new orders were created: SC-80E363-1 paid_via=wallet (₹100 · Test Shop, wallet fully covered the first seller) and SC-80E363-2 paid_via=wallet_online (₹74 wallet + ₹176 online · Vendor Two Store), payment_status=paid for both. FIX 2 (notify.ts) verified — every previously-invisible Alert now surfaces as a captured dialog on RN-Web: stock cap 'Couldn't update quantity — Only 4 left in stock for Test Widget' (7 dialogs captured on repeated +taps), reorder 'Added to bag — 1 item added to your bag [OK] Open bag', wallet-only checkout 'Order placed! 🎉 ₹100 debited from your wallet [OK] View orders'. ADMIN view of SC-80E363-2 (previously untested) — Payment box correctly renders: Method 'WALLET + ONLINE', Paid from wallet ₹74, Paid online ₹176, Cash on delivery ₹0, Order total ₹250. Regressions: wallet-only checkout works end-to-end and wallet debits correctly (₹100). No red-box errors on /cart /checkout /orders /admin/orders. Only warnings observed are the pre-known web-only shadow*/expo-notifications ones.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "checkout.tsx (combo split chips)", "issues": ["Minor: the initial combo default uses Math.floor(total/2)=₹175/₹175, but tapping the 50% chip snaps to Math.floor(comboMax*0.5) where comboMax=total-1=349, so 50% chip shows ₹174/₹176 (still sums to ₹350). A user who taps 50% expecting an exact half sees a ₹1 asymmetry. Not a blocker; consider ceil for the wallet side or setting comboMax=total when only the chips fire."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iter74_screenshots/02_combo_open.png",
+    "/app/test_reports/iter74_screenshots/03_after_place_combo.png",
+    "/app/test_reports/iter74_screenshots/04_stock_cap.png",
+    "/app/test_reports/iter74_screenshots/05_admin_orders.png",
+    "/app/test_reports/iter74_screenshots/06_admin_order_detail.png"
+  ],
+  "action_items": [
+    "OPTIONAL/LOW — Align the 50% chip amount with the initial combo default so users don't see ₹174/₹176 vs ₹175/₹175 depending on how they got there. Reference: /app/frontend/app/checkout.tsx:786-802 (Math.floor(comboMax * f)) vs :236-238 (Math.floor(total/2))."
+  ],
+  "critical_code_review_comments": [
+    "checkout.tsx:236-238 — comboDefault correctly picks Math.floor(total/2) when wallet ≥ total in wallet_online mode. Good.",
+    "checkout.tsx:222-224 — comboMax capping at Math.max(0, total-1) for wallet_online guarantees at least ₹1 online is due when the split is at Max. Confirmed by the 'Max' chip showing ₹349/₹1.",
+    "checkout.tsx:440-451 — needsGateway=false when walletPart>=total in wallet_online mode → effectiveMethod becomes 'wallet' and no gateway call is made. Nice fallback for the edge where the user drags the slider all the way up.",
+    "notify.ts — window.confirm formatting places the primary button label inside the message body ('[OK] View orders'). Automation reads it fine; end users on desktop will see the label in-line rather than on the button. Consider a proper toast/bottom-sheet down the line so mobile-web users also get a nicer confirmation UI, but functionally correct."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% — all requested re-tests green: combo default 50/50, chips sum to total, place-order dialogs visible, wallet debits correctly, orders created (SC-80E363-1 wallet, SC-80E363-2 wallet_online), admin payment box shows method+wallet+online+COD, stock cap + reorder + wallet-only dialogs captured"},
+  "seed_data_creation": "None. Started at wallet ₹5000 → ended at ₹4726 after this run's 3 new orders (₹174 combo + ₹100 wallet-only = ₹274 debited; final wallet reflects that). New orders created: SC-80E363-1 (Test Shop · wallet · ₹100), SC-80E363-2 (Vendor Two Store · wallet_online · ₹74+₹176), SC-3D106F (Test Shop · wallet · ₹100). SC-495863-1/2 from iter73 still exist. Test Widget stock still 4.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "1) Combo wallet+online works end-to-end; the previous 'silent-fail' RCA (wallet auto-maxed to total leaving ₹0 online → 400) is closed. 2) All Alert.alert calls routed through src/notify.ts are now caught by Playwright's page.on('dialog') on RN-Web — assert via dialog.message. 3) testbuyer@test.com wallet is now ~₹4726. 4) Admin payment-box UI is correct — Method / Paid from wallet / Paid online / Cash on delivery rows. 5) Only remaining nit is the 50%-chip vs initial-default ₹1 asymmetry (see design_issues) — main agent can leave it as-is or align.",
+  "rca_of_issue": "Root cause of the iter73 combo silent failure was two independent bugs stacked: (a) with a full-balance wallet the auto-max default set walletSplit=total, so /orders/payment/start went out with wallet_amount=cartTotal and the backend correctly rejected it with 400 'Your wallet already covers this order'; (b) that 400 was surfaced via Alert.alert which is a NO-OP on react-native-web, so nothing appeared on screen. Both fixes verified this iteration: notify.ts uses window.alert/window.confirm on web, and comboMax now caps at total-1 for wallet_online plus a Math.floor(total/2) default so the slider defaults to a real 50/50 split. Reproducibility: 1/1 combo place-order created two orders and correctly debited exactly the walletPart amount."
+}
