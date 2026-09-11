@@ -15,7 +15,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
-  ActivityIndicator, Alert,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -23,14 +23,14 @@ import { useRouter } from "expo-router";
 
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
-import { downloadText } from "../../src/download";
+import { downloadServerFile } from "../../src/download";
+import { BackupRestoreCard } from "../../src/backup-restore-card";
+import { notify } from "../../src/notify";
 
 type Mode = "account" | "vendor" | "app";
 type Person = { id: string; name?: string; email?: string; is_vendor?: boolean; shop_name?: string; role?: string };
 type Manifest = { collections: { name: string; count: number }[]; total_documents: number; account?: any };
 
-const HEAVY = new Set(["products", "chat_messages", "offline_sales"]);
-const pageFor = (n: string) => (HEAVY.has(n) ? 25 : 200);
 
 export default function AdminResetCenter() {
   const router = useRouter();
@@ -60,7 +60,7 @@ export default function AdminResetCenter() {
       const rows: Person[] = Array.isArray(data) ? data : (data?.users || data?.items || []);
       setPeople(mode === "vendor" ? rows.filter((r) => r.is_vendor) : rows);
     } catch (e) {
-      Alert.alert("Search failed", formatApiError(e));
+      notify("Search failed", formatApiError(e));
     } finally { setSearching(false); }
   }, [query, mode]);
 
@@ -75,7 +75,7 @@ export default function AdminResetCenter() {
       const { data } = await api.get<Manifest>(url);
       setManifest(data);
     } catch (e) {
-      Alert.alert("Couldn't read the data", formatApiError(e));
+      notify("Couldn't read the data", formatApiError(e));
     } finally { setLoadingManifest(false); }
   }, [mode, picked]);
 
@@ -84,54 +84,31 @@ export default function AdminResetCenter() {
   }, [mode, picked, loadManifest]);
 
   // ── Mandatory backup download ───────────────────────────────────────────
+  // The server streams the whole .json to the device (see downloadServerFile);
+  // stitching it in JS used to crash Android with an OutOfMemoryError once the
+  // backup passed ~100 MB of base64 product photos.
   const onDownload = useCallback(async () => {
     if (!manifest) return;
-    setBusy("download"); setProgress("Starting…"); setResult("");
+    setBusy("download"); setProgress("Packing on the server…"); setResult("");
     try {
-      const out: Record<string, any[]> = {};
-      for (const c of manifest.collections) {
-        if (!c.count) continue;
-        const limit = pageFor(c.name);
-        let offset = 0;
-        const rows: any[] = [];
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const url = mode === "app" ? "/admin/backup/dump" : `/admin/backup/account/${picked?.id}/dump`;
-          const r = await api.get<any>(url, { params: { collection: c.name, offset, limit } });
-          rows.push(...(r.data?.docs || []));
-          setProgress(`${c.name}: ${rows.length} / ${c.count}`);
-          if (!r.data?.has_more) break;
-          offset += limit;
-        }
-        out[c.name] = rows;
-      }
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
       const label = mode === "app"
         ? "app"
         : (picked?.email || picked?.id || "account").replace(/[^a-zA-Z0-9]/g, "-");
-      const file = {
-        // The restore panel accepts this format, so a per-account file can be
-        // merged back into the app exactly as it was.
-        format: "slangcart.app-backup",
-        version: 1,
-        scope: mode === "app" ? "app" : "account",
-        account: mode === "app" ? null : { id: picked?.id, email: picked?.email, name: picked?.name },
-        exported_at: new Date().toISOString(),
-        counts: Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.length])),
-        collections: out,
-      };
-      const res = await downloadText({
+      const res = await downloadServerFile({
+        path: mode === "app" ? "/admin/backup/file" : `/admin/backup/account/${picked?.id}/file`,
         filename: `slangcart-${mode === "app" ? "full" : "account"}-backup-${label}-${stamp}.json`,
-        content: JSON.stringify(file),
-        mimeType: "application/json",
       });
       if (res.ok) {
         setDownloaded(true);
-        const total = Object.values(out).reduce((a, b) => a + b.length, 0);
-        setResult(`✅ Backup saved — ${total.toLocaleString("en-IN")} records. Restore it any time from Data backups → File backup.`);
+        const mb = res.bytes ? ` (${(res.bytes / 1024 / 1024).toFixed(1)} MB)` : "";
+        setResult(
+          `✅ Backup saved — ${manifest.total_documents.toLocaleString("en-IN")} records${mb}. ` +
+          `Restore it any time from the Restore card below.`,
+        );
       }
     } catch (e) {
-      Alert.alert("Backup failed", formatApiError(e));
+      notify("Backup failed", formatApiError(e));
     } finally { setBusy(""); setProgress(""); }
   }, [manifest, mode, picked]);
 
@@ -159,19 +136,19 @@ export default function AdminResetCenter() {
       setPin(""); setPhrase(""); setDownloaded(false);
       loadManifest();
     } catch (e) {
-      Alert.alert("Reset failed", formatApiError(e));
+      notify("Reset failed", formatApiError(e));
     } finally { setBusy(""); }
   }, [mode, pin, phrase, picked, loadManifest]);
 
   const confirmReset = useCallback((accountMode?: "clear" | "delete") => {
-    if (!/^[0-9]{6}$/.test(pin)) { Alert.alert("Danger PIN required", "Enter your 6-digit Danger PIN."); return; }
-    if (!downloaded) { Alert.alert("Download the backup first", "The reset stays locked until the backup file is on your device."); return; }
+    if (!/^[0-9]{6}$/.test(pin)) { notify("Danger PIN required", "Enter your 6-digit Danger PIN."); return; }
+    if (!downloaded) { notify("Download the backup first", "The reset stays locked until the backup file is on your device."); return; }
     if (mode === "app" && phrase.trim().toUpperCase() !== "RESET") {
-      Alert.alert("Type RESET", 'Please type RESET (capitals) to confirm a full wipe.');
+      notify("Type RESET", 'Please type RESET (capitals) to confirm a full wipe.');
       return;
     }
     const who = mode === "app" ? "the entire app" : (picked?.name || picked?.email || "this account");
-    Alert.alert(
+    notify(
       mode === "app" ? "Reset app to zero?" : accountMode === "delete" ? "Delete this account?" : mode === "vendor" ? "Clear this shop?" : "Clear this account's data?",
       mode === "app"
         ? "Every record in every table is deleted. Only your settings, branding and this super-admin login survive. This cannot be undone."
@@ -275,7 +252,7 @@ export default function AdminResetCenter() {
               <>
                 <Text style={s.body}>
                   {manifest.total_documents.toLocaleString("en-IN")} records will be saved to a
-                  .json file on this device. Restore it later from Data backups → File backup.
+                  .json file on this device. Restore it from the Restore card at the bottom of this screen.
                 </Text>
                 <View style={s.chipsWrap}>
                   {chips.map((c) => (
@@ -357,6 +334,11 @@ export default function AdminResetCenter() {
             <Text style={s.body}>{progress || "Working…"}</Text>
           </View>
         ) : null}
+
+        {/* Restore — same card as Data backups → File backup, so a
+            one-account / one-shop backup can be merged back right here. */}
+        <Text style={[s.step, { marginTop: 8 }]}>RESTORE A BACKUP</Text>
+        <BackupRestoreCard onDone={loadManifest} />
 
         {result ? (
           <View style={s.resultBox} testID="reset-result">

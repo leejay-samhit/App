@@ -1216,3 +1216,37 @@ missing was buyer visibility BEFORE paying:
   mock start/verify, unverified rejection, wallet+online split across two
   vendors, reuse blocked, reorder) and
   `backend/tests/test_multivendor_split_ui.py`.
+
+### 13. Backup: streamed download + one-account restore (Jun 2026, iteration 75)
+Owner report: the whole-app backup died on Android with
+`java.lang.OutOfMemoryError: Failed to allocate a 126097912 byte allocation`
+from `FileSystem.writeAsStringAsync`, and the Reset centre could take a
+one-account / one-shop backup but offered no way to restore-and-merge it.
+
+- Root cause: the app paged through every collection, stitched a ~120 MB JSON
+  string in JS, then asked the native module to write that string — two full
+  copies of the backup in the phone's heap.
+- `routes/backup.py` now streams the finished file:
+  `GET /admin/backup/file` (whole app) and
+  `GET /admin/backup/account/{user_id}/file` (one account/shop) return a
+  `StreamingResponse` that emits the JSON envelope and then documents 50 at a
+  time, with `Content-Disposition: attachment`. Same `slangcart.app-backup`
+  format, so the existing chunked `POST /admin/backup/restore` still replays
+  them. Nothing is buffered end-to-end on either side.
+- `src/download.ts::downloadServerFile()` (new): native streams to disk with
+  `FileSystem.downloadAsync` then opens the share sheet; web fetches with the
+  auth header and triggers a browser download. `downloadText` stays for small
+  CSV/TXT exports.
+- `src/backup-restore-card.tsx` (new, shared by Admin → Data backups → File
+  backup AND Admin → Reset centre): picker + merge/wipe + Danger PIN +
+  chunked replay. An ACCOUNT-scoped file is ALWAYS merged and never sends the
+  empty-collection wipe calls — restoring one shop can't delete other
+  sellers. On native it refuses files > 40 MB with "restore this from a
+  browser on a computer" instead of crashing (JSON.parse of a 120 MB string
+  is the same OOM).
+- Reset centre now also uses `notify()` (window.alert/confirm on web) so its
+  errors and confirmations are visible in the browser admin.
+- Verified: `backend/tests/test_backup_stream_restore.py` (streamed full file
+  == manifest count and valid JSON, account file scope/count, wrong PIN 401,
+  181-doc account merge replay) plus iteration 75 UI run (real browser
+  downloads: 25 / 182 / 1337 records, 9.3 MB full file).

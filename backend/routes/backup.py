@@ -26,12 +26,14 @@ Design notes
   price / stock before anything hits the public shop. Publishing stays
   admin-only, exactly like a manually created product.
 """
+import json
 import uuid
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pymongo import ReplaceOne
 
 from core.danger import get_danger_pin_hash, verify_danger_pin
@@ -369,6 +371,98 @@ async def account_backup_dump(
         "has_more": (offset + len(docs)) < total,
         "docs": [_json_safe(d) for d in docs],
     }
+
+
+# ══════════════════ 4D — ONE-SHOT STREAMED BACKUP FILE ═══════════════════
+#
+# Why this exists: the app used to fetch every page of every collection and
+# stitch the file together in JS, then hand a ~120 MB string to
+# FileSystem.writeAsStringAsync — which crashed Android with
+# "java.lang.OutOfMemoryError: Failed to allocate a 126097912 byte
+# allocation".  The server now streams the finished .json straight to disk,
+# so neither side ever holds the whole backup in memory.
+def _doc_json(doc: Dict[str, Any]) -> str:
+    return json.dumps(_json_safe(doc), default=str, ensure_ascii=False)
+
+
+async def _stream_backup(
+    names: List[str],
+    query_for,
+    envelope: Dict[str, Any],
+) -> AsyncIterator[bytes]:
+    """Yield one complete backup JSON document, a few documents at a time."""
+    head = {k: v for k, v in envelope.items()}
+    opening = json.dumps(head, ensure_ascii=False)[:-1]  # drop the closing brace
+    yield (opening + (", " if head else "") + '"collections": {').encode()
+    for i, name in enumerate(names):
+        yield (("," if i else "") + json.dumps(name) + ":[").encode()
+        first = True
+        buf: List[str] = []
+        async for doc in db[name].find(query_for(name)):
+            buf.append(("" if first else ",") + _doc_json(doc))
+            first = False
+            if len(buf) >= 50:
+                yield "".join(buf).encode()
+                buf = []
+        if buf:
+            yield "".join(buf).encode()
+        yield b"]"
+    yield b"}}"
+
+
+def _attachment(name: str) -> Dict[str, str]:
+    return {
+        "Content-Disposition": f'attachment; filename="{name}"',
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+    }
+
+
+@router.get("/admin/backup/file")
+async def admin_backup_file(
+    include_reference: bool = Query(False),
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """The whole app as ONE streamed .json download."""
+    names = await _exportable_collections(include_reference)
+    stamp = now_utc().strftime("%Y%m%d-%H%M")
+    envelope = {
+        "format": APP_EXPORT_FORMAT,
+        "version": 1,
+        "scope": "app",
+        "exported_at": now_utc().isoformat(),
+    }
+    return StreamingResponse(
+        _stream_backup(names, lambda _n: {}, envelope),
+        media_type="application/json",
+        headers=_attachment(f"slangcart-full-backup-{stamp}.json"),
+    )
+
+
+@router.get("/admin/backup/account/{user_id}/file")
+async def account_backup_file(
+    user_id: str,
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Everything about ONE account (customer or shop) as one streamed .json."""
+    u = await _scope_target(user_id)
+    email = (u.get("email") or "").lower() or None
+    names = await _exportable_collections(False)
+    stamp = now_utc().strftime("%Y%m%d-%H%M")
+    label = (u.get("email") or user_id).replace("@", "-at-")
+    label = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in label)
+    envelope = {
+        "format": APP_EXPORT_FORMAT,
+        "version": 1,
+        "scope": "account",
+        "account": {"id": u["id"], "email": u.get("email"), "name": u.get("name")},
+        "exported_at": now_utc().isoformat(),
+    }
+    return StreamingResponse(
+        _stream_backup(names, lambda n: scope_query(user_id, email, n), envelope),
+        media_type="application/json",
+        headers=_attachment(f"slangcart-account-backup-{label}-{stamp}.json"),
+    )
 
 
 @router.post("/admin/backup/restore")
