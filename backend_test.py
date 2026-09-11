@@ -8,7 +8,7 @@ import sys
 import requests
 from datetime import datetime, timezone
 
-BACKEND_URL = "https://vendor-network-app-1.preview.emergentagent.com"
+BACKEND_URL = "https://slangcart-tracking.preview.emergentagent.com"
 API = f"{BACKEND_URL}/api"
 
 ADMIN_EMAIL = "support@networkrupay.com"

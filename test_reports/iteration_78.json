@@ -1,0 +1,46 @@
+{
+  "summary": "Iter-78 push-diagnostic + cashback cutover regression: 18/18 pytest passing on /app/backend/tests/test_iter78_push_and_cutover.py. Verified: (1) POST /api/push/test super-admin returns {ok:false, relay:'key_missing', key_configured:false, device_registration, hint} in preview and 403 for buyer/vendor; (2) POST /api/register-push returns {status:'deferred', reason:'key_missing'} (NOT 500), stamps push_registration={status,platform,at} on user doc, rejects mismatched user_id with 403; (3) chat message POST still returns 200 with a valid message doc even though the internal push relay returns 401 (send_push return-value change didn't break chat send); (4) /api/cashback-config returns max_cashback_pct=10 + delivery flat/free_threshold/cart_max; (5) MLM dead — /api/wallet/transfer 404/405, buyer /api/withdrawals 403, /api/admin/users/tree 404/405; (6) sequential IDs — POST /api/admin/short-id/backfill is idempotent (2nd call minted=0 for every kind) and GET /api/admin/short-id/TXNA1 resolves; (7) admin group-wise Excel — GET /api/admin/wallet/export/groupwise returns a real xlsx (PK zip magic + openpyxl-parseable) with 'All Transactions' sheet and a GROUP SUMMARY block, correct spreadsheetml content-type, 403 for buyer; (8) /api/admin/wallet/groupwise-summary exposes ≥15 available_groups. Frontend smoke (mobile viewport 390×844): admin can log in, navigate to /admin/broadcast which correctly renders 'Test push notification' section with 'Send test to my phone' button (testID='broadcast-test-push' present); buyer /(tabs)/wallet renders 'Your Slangcart wallet', Add money, cashback ₹ + pending ₹ chips, and NO Send/Transfer/Withdraw controls — cashback flow evidence visible in transaction list (cashback_credit + cashback_reversal rows). NOTE: task spec listed GET /api/admin/finance/export/transactions as xlsx but that endpoint still returns CSV in code — the real group-wise xlsx export lives at /api/admin/wallet/export/groupwise (which does have the 19 group sections). Reported as info, not failure.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/admin/finance/export/transactions", "issue": "Task spec expects .xlsx with 19 groups but this endpoint still returns CSV (routes/finance.py:1034-1048). The real group-wise xlsx export is /api/admin/wallet/export/groupwise. Either update task spec to point to the wallet route or upgrade the finance route to xlsx as well."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "admin/broadcast Test-push Alert on web", "issue": "Alert.alert on RN-Web did not surface as a captured browser dialog during automation. Button is present and clickable; server-side diagnostic returns correctly. Human tester should verify Alert lines actually show on-device (hint / Relay / Push key on server / device status).", "testID": "broadcast-test-push", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin console DOM warnings", "issues": ["Multiple 'Unexpected text node' warnings from bare whitespace inside <View> (RN-Web strict). Cosmetic only.", "'shadow*' style props deprecated' warnings; 'props.pointerEvents is deprecated'.", "Layout warning: 'No route named \"network\" exists in nested children' — buyer bottom nav renders fine without a Network tab, but the (tabs)/_layout still references it somewhere; safe to remove."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter78_push_and_cutover.py",
+    "/app/test_reports/pytest/iter78_push_cutover.xml",
+    "/app/test_reports/iter78_admin_broadcast.png",
+    "/app/test_reports/iter78_broadcast_after_click.png",
+    "/app/test_reports/iter78_buyer_wallet.png"
+  ],
+  "action_items": [
+    "Decide the canonical route for the 19-group xlsx export: either update the task spec / frontend admin console to link to /api/admin/wallet/export/groupwise (already xlsx, works), OR upgrade /api/admin/finance/export/transactions from CSV → xlsx to match spec.",
+    "Remove the dangling 'network' tab reference from (tabs)/_layout — Layout warning fires on every buyer render.",
+    "Fix RN-Web 'Unexpected text node' warnings on admin screens (whitespace inside <View>). Cosmetic but noisy in devtools.",
+    "For real tray-push validation, a published EAS build with a real EMERGENT_PUSH_KEY is required — cannot be validated in preview / Expo Go / web (documented in code and confirmed by the diagnostic)."
+  ],
+  "critical_code_review_comments": [
+    "routes/push.py send_push() now returns a status string; all callers (routes/chat.py:743, server.py:3775/3788/5747, routes/broadcast.py:211, routes/push.py:249) discard the return value inside try/except or in an assignment — none broken by the type change.",
+    "routes/push.py:130-174 _stamp() writes push_registration for every branch (upstream_unreachable / key_missing / 5xx / 4xx / registered) — device token is NEVER stored, only status/platform/at. Matches user's privacy expectation.",
+    "routes/chat.py:722-758 chat POST always writes the in-app notification (push=False) AND fires send_push(category='chats', channel_id='chat') inside a try/except — a relay 401 can never break the send.",
+    "routes/wallet_export.py GROUPS defines 16 transaction groups (task copy says 19 — counting the 3 wallet-owner sheets brings the total to 19). Group-of() is first-match; every txn type maps to exactly one group so no double-count."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter78_push_and_cutover.py (new)"
+  ],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "smoke 100% — broadcast button + buyer wallet + admin nav rendered; Alert.alert dialog capture on RN-Web failed automation-side but backend path proven"},
+  "seed_data_creation": "No new seed. Created & left one chat_messages row 'TEST_iter78 push-nonblock check' in the buyer↔admin support thread (harmless).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Push diagnostic + cutover regression is green. The deep cashback money-flow scenarios (settle-on-delivered, duplicate-delivered no-op, vendor-short → pending → admin fund, platform-funded outstanding → recover, clawback on cancel with refund netting, multi-vendor cart cap allocation, wallet+COD split parity) are covered by /app/backend/tests/verify_cashback_flow.py (36/36 in iter-77 session) and were not re-driven via HTTP this session — the endpoint surface, permission gates and short-id + xlsx export were the new-code targets and are all verified. If a next session wants to re-prove the money maths end-to-end via HTTP, extend test_iter78 with the checkout → PATCH orders/{id}/status delivered → wallet-delta assertion loop."
+}

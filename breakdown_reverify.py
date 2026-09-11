@@ -3,7 +3,7 @@ import json
 import requests
 import sys
 
-BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASS = "Admin@123"
 

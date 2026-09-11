@@ -23,7 +23,7 @@ try:
 except Exception:
     pass
 if not BASE_URL:
-    BASE_URL = "https://vendor-network-app-1.preview.emergentagent.com/api"
+    BASE_URL = "https://slangcart-tracking.preview.emergentagent.com/api"
 
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PW = "Admin@123"

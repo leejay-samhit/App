@@ -19,33 +19,35 @@ JWT_ALGORITHM = "HS256"
 ADMIN_EMAIL = os.environ['ADMIN_EMAIL']
 ADMIN_PASSWORD = os.environ['ADMIN_PASSWORD']
 
-# ---- MLM / payout config ----
+# ---- Subscription fee ----
 REGISTRATION_FEE = float(os.environ.get('REGISTRATION_FEE', 118))
-PAYOUT_PER_LEVEL = float(os.environ.get('PAYOUT_PER_LEVEL', 400))
-LEVEL_2_PAYOUT = float(os.environ.get('LEVEL_2_PAYOUT', 100))
-LEVEL_3_PAYOUT = float(os.environ.get('LEVEL_3_PAYOUT', 50))
-DIRECTS_REQUIRED = 4
 
-# Default payout amounts per level (10 levels). L1 is paid every Nth direct;
-# L2..L10 are credited per qualifying down-line activation.
-DEFAULT_LEVEL_PAYOUTS: Dict[str, float] = {
-    "payout_l1": PAYOUT_PER_LEVEL,
-    "payout_l2": LEVEL_2_PAYOUT,
-    "payout_l3": LEVEL_3_PAYOUT,
-    "payout_l4": 25.0,
-    "payout_l5": 15.0,
-    "payout_l6": 10.0,
-    "payout_l7": 8.0,
-    "payout_l8": 5.0,
-    "payout_l9": 3.0,
-    "payout_l10": 2.0,
-}
+# ---- Purchase cashback (MLM cutover, Jun-2026) ----
+# HARD platform ceiling. No vendor, admin, product or campaign value may
+# ever exceed this. Enforced server-side in core/cashback.py.
+MAX_CASHBACK_PCT = 10.0
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "registration_fee": REGISTRATION_FEE,
-    **DEFAULT_LEVEL_PAYOUTS,
-    "directs_required": DIRECTS_REQUIRED,
     "vendor_commission_pct": 70,
+    # ── Purchase cashback ────────────────────────────────────────────────
+    # Credited to the customer wallet ONLY after a successful delivery.
+    # `default_cashback_pct` applies to products that don't set their own.
+    "max_cashback_pct": MAX_CASHBACK_PCT,
+    "default_cashback_pct": 0.0,
+    "cashback_enabled": True,
+    # Platform may front the cashback when a vendor wallet is short; the
+    # amount becomes a vendor outstanding recoverable by Slangcart.
+    "cashback_platform_funding_enabled": True,
+    # ── Delivery charges ────────────────────────────────────────────────
+    "delivery_charge_enabled": True,
+    "delivery_charge_flat": 30.0,          # charged per vendor below the threshold
+    "delivery_free_threshold": 500.0,      # per-vendor subtotal for free delivery
+    "delivery_cart_max": 40.0,             # cap on the WHOLE cart's delivery
+    # ── Returns ─────────────────────────────────────────────────────────
+    # Cashback already credited is always clawed back on a return; if the
+    # wallet is short the shortfall is netted off the refund payout.
+    "cashback_clawback_on_return": True,
     "auto_approve_on_payment": True,
     # ── Service Provider — "Get phone number" reveal fee (June 2026 model) ──
     # Customer pays this small fee to reveal a service-provider's phone number
@@ -65,29 +67,14 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 # ---- GST ----
 REFERRAL_GST_PCT = 18.0  # GST-exclusive: gst = 18% OF gross → admin; net = gross - gst → user.
 
-# ---- Achievement tiers ----
-TIERS = [
-    {"name": "Diamond", "min": 200, "color": "#E0F2FF", "icon": "award"},
-    {"name": "Platinum", "min": 60, "color": "#E8E8E8", "icon": "star"},
-    {"name": "Gold", "min": 16, "color": "#FFE9B3", "icon": "star"},
-    {"name": "Silver", "min": 4, "color": "#E5E5E5", "icon": "shield"},
-    {"name": "Bronze", "min": 0, "color": "#F4D9C0", "icon": "shield"},
-]
-
-def get_tier(team_size: int) -> Dict[str, Any]:
-    for t in TIERS:
-        if team_size >= t["min"]:
-            return t
-    return TIERS[-1]
-
 # ---- Admin role buckets ----
 ADMIN_ROLES_NON_FINANCE = ("super_admin", "manager", "support")
 
 # ---- Branding ----
 DEFAULT_BRANDING: Dict[str, Any] = {
     "app_name": "Slangcart",
-    "tagline": "Track your referrals, earnings and grow your team.",
-    "login_subtitle": "Sign in to your network",
+    "tagline": "Shop local vendors. Get cashback on every delivered order.",
+    "login_subtitle": "Sign in to your Slangcart account",
     "payment_hero": "Complete your registration",
     "pending_hero": "Awaiting finance approval",
     "colors": {
@@ -134,7 +121,6 @@ DEFAULT_BRANDING: Dict[str, Any] = {
     },
     "tabs": [
         {"key": "dashboard", "label": "Dashboard", "icon": "home", "visible": True},
-        {"key": "network", "label": "Network", "icon": "git-branch", "visible": True},
         {"key": "wallet", "label": "Wallet", "icon": "credit-card", "visible": True},
         {"key": "shop", "label": "Shop", "icon": "shopping-bag", "visible": True},
         {"key": "profile", "label": "Profile", "icon": "user", "visible": True},
@@ -142,4 +128,4 @@ DEFAULT_BRANDING: Dict[str, Any] = {
 }
 
 ALLOWED_FONTS = {"system", "inter", "poppins", "jakarta", "manrope", "dmsans"}
-ALLOWED_TAB_KEYS = {"dashboard", "network", "wallet", "shop", "profile"}
+ALLOWED_TAB_KEYS = {"dashboard", "wallet", "shop", "profile"}

@@ -11,7 +11,7 @@ import os
 import sys
 import requests
 
-BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://vendor-network-app-1.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://slangcart-tracking.preview.emergentagent.com").rstrip("/")
 
 def login(email, pw):
     r = requests.post(f"{BASE}/api/auth/login", json={"email": email, "password": pw}, timeout=15)

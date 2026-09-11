@@ -127,6 +127,22 @@ async def register_push(
     if body.user_id != user.get("id"):
         raise HTTPException(status_code=403, detail="user_id mismatch with JWT")
 
+    async def _stamp(status: str) -> None:
+        """Record WHETHER the device registered (never the token itself) so
+        the owner can tell 'phone never registered' apart from 'relay key
+        missing' when tray notifications don't arrive."""
+        from core.db import db
+        from core.utils import now_utc
+
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"push_registration": {
+                "status": status,
+                "platform": body.platform,
+                "at": now_utc().isoformat(),
+            }}},
+        )
+
     try:
         resp = await _client.post(
             "/api/v1/push/users/register",
@@ -135,6 +151,7 @@ async def register_push(
     except httpx.HTTPError as e:
         logger.warning(f"register-push relay failed: {e}")
         # Don't 5xx the caller — push registration is best-effort.
+        await _stamp("deferred_upstream_unreachable")
         return {"status": "deferred", "reason": "upstream_unreachable"}
 
     if resp.status_code == 401:
@@ -142,14 +159,18 @@ async def register_push(
         # the client; just report the deferred status so the FE still
         # remembers to retry later.
         logger.info("register-push: EMERGENT_PUSH_KEY missing/invalid (expected in dev)")
+        await _stamp("deferred_key_missing")
         return {"status": "deferred", "reason": "key_missing"}
     if resp.status_code >= 500:
         logger.warning(f"register-push: upstream {resp.status_code} {resp.text[:200]}")
+        await _stamp("deferred_upstream_5xx")
         return {"status": "deferred", "reason": "upstream_5xx"}
     if 400 <= resp.status_code < 500:
         # Surface 4xx as a soft warning — don't break the client.
         logger.warning(f"register-push: upstream {resp.status_code} {resp.text[:200]}")
+        await _stamp(f"deferred_upstream_{resp.status_code}")
         return {"status": "deferred", "reason": f"upstream_{resp.status_code}"}
+    await _stamp("registered")
     return {"status": "registered"}
 
 
@@ -158,7 +179,7 @@ async def send_push(
     data: Dict[str, Any],
     idempotency_key: Optional[str] = None,
     category: Optional[str] = None,
-) -> None:
+) -> str:
     """Fire a push notification to one or many user_ids.
 
     `data` must include `title` and `message`. Optional keys: `subtext`,
@@ -175,19 +196,19 @@ async def send_push(
     broadcast, etc.) never break on a push relay hiccup.
     """
     if not recipients:
-        return
+        return "no_recipients"
     if "title" not in data or "message" not in data:
         logger.warning("send_push: missing title/message in payload")
-        return
+        return "bad_payload"
     if category:
         recipients = await filter_by_prefs(recipients, category)
         if not recipients:
-            return
+            return "opted_out"
     # Chunk over 100 — playbook hard limit.
     if len(recipients) > 100:
         for i in range(0, len(recipients), 100):
             await send_push(recipients[i:i + 100], data, idempotency_key=idempotency_key)
-        return
+        return "chunked"
 
     payload: Dict[str, Any] = {"recipients": recipients, "data": data}
     if idempotency_key:
@@ -197,15 +218,16 @@ async def send_push(
         resp = await _client.post("/api/v1/push/trigger", json=payload)
     except httpx.HTTPError as e:
         logger.warning(f"send_push: relay error {e}")
-        return
+        return "relay_unreachable"
 
     if resp.status_code == 401:
         # Expected in dev — placeholder key.
         logger.info("send_push: EMERGENT_PUSH_KEY missing/invalid (dev placeholder)")
-        return
+        return "key_missing"
     if resp.status_code >= 400:
         logger.warning(f"send_push: upstream {resp.status_code} {resp.text[:300]}")
-        return
+        return f"upstream_{resp.status_code}"
+    return "sent"
 
 
 # ── Test helper for super admins ───────────────────────────────────────
@@ -220,11 +242,42 @@ async def push_test(
     body: TestPushBody,
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
-    """Super admin smoke test — sends a push to themselves so they can
-    verify the relay end-to-end after deploying."""
-    await send_push(
+    """Super admin smoke test — sends a push to themselves AND reports why
+    it would not arrive (relay key not injected yet / this phone never
+    registered a device token), so "no tray notifications" can be
+    diagnosed without guesswork."""
+    relay = await send_push(
         recipients=[admin["id"]],
-        data={"title": body.title, "message": body.message},
+        data={
+            "title": body.title,
+            "message": body.message,
+            "channel_id": "default",
+        },
         idempotency_key=f"push-test-{admin['id']}",
     )
-    return {"ok": True, "sent_to": admin["id"]}
+    reg = admin.get("push_registration") or {}
+    key_configured = bool(PUSH_KEY) and PUSH_KEY != "placeholder"
+    if not key_configured:
+        hint = (
+            "This environment has no push relay key yet. Tray notifications "
+            "start working once you Publish/Deploy the app and generate the "
+            "Android/iOS build."
+        )
+    elif reg.get("status") != "registered":
+        hint = (
+            "The relay key is live but this account has no registered device. "
+            "Open the installed app (not Expo Go / web), allow notifications, "
+            "then run this test again."
+        )
+    elif relay != "sent":
+        hint = f"Relay rejected the send ({relay}). Try again in a minute."
+    else:
+        hint = "Sent. It should appear in your phone's notification tray within a few seconds."
+    return {
+        "ok": relay == "sent",
+        "sent_to": admin["id"],
+        "relay": relay,
+        "key_configured": key_configured,
+        "device_registration": reg or None,
+        "hint": hint,
+    }

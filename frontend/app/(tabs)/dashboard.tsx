@@ -23,30 +23,24 @@ import { colors, formatINR, radii, spacing } from "../../src/theme";
 import { SubscribeBanner } from "../../src/subscription";
 import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
-import { Sparkline, DonutProgress, BarChart } from "../../src/charts";
+import { Sparkline } from "../../src/charts";
 import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { startBackgroundProviderLocation, stopBackgroundProviderLocation, pushLocationNow } from "../../src/bg-location";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
-type Tier = { name: string; min: number; color: string; icon: string };
 
 type Dashboard = {
   wallet_balance: number;
-  total_earned: number;
-  direct_referrals: number;
-  team_size: number;
-  payouts_received: number;
-  next_payout_in: number;
-  directs_required: number;
-  registration_paid: boolean;
+  cashback_earned: number;
+  pending_cashback: number;
+  total_spent: number;
+  orders_count: number;
+  delivered_count: number;
   pending_withdrawals: number;
-  referral_code: string;
+  invite_code: string;
   unread_notifications: number;
-  tier: Tier;
-  level_payouts: { l1: number; l2: number; l3: number };
-  earnings_per_day?: number[];
+  cashback_per_day?: number[];
   day_labels?: string[];
-  level_breakdown?: Record<string, number>;
 };
 
 type Notif = {
@@ -181,17 +175,17 @@ export default function DashboardScreen() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const onShareCode = async () => {
-    if (!data?.referral_code) return;
+    if (!data?.invite_code) return;
     try {
       await Share.share({
-        message: `Hi! Join Slangcart using my referral code *${data.referral_code}* and earn ₹400 for every 4 friends you bring. Sign up: slangcart.com/r/${data.referral_code}`,
+        message: `Shop local vendors on Slangcart and get cashback on every delivered order. Use my invite code *${data.invite_code}* when you sign up: slangcart.com/r/${data.invite_code}`,
       });
     } catch {}
   };
 
   const onCopyCode = async () => {
-    if (!data?.referral_code) return;
-    await Clipboard.setStringAsync(data.referral_code);
+    if (!data?.invite_code) return;
+    await Clipboard.setStringAsync(data.invite_code);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -218,8 +212,9 @@ export default function DashboardScreen() {
 
   // Free tier = signed up but no ₹118 subscription yet.
   const isFreeTier = !!user && (user as any).role !== "admin" && !user.registration_paid;
-
-  const progressPct = ((data.directs_required - data.next_payout_in) / data.directs_required) * 100;
+  // Bank withdrawals are a SELLER settlement feature only — a customer's
+  // Slangcart wallet is spent inside the app.
+  const isSeller = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -282,7 +277,7 @@ export default function DashboardScreen() {
               <Text style={styles.approvalBannerSub} numberOfLines={2}>
                 {(user as any).approval_status === "rejected"
                   ? `${(user as any).approval_reject_reason || "Please upload additional documents to re-verify."} Tap to upload.`
-                  : "Your account is awaiting admin approval. Withdrawals are disabled until approved."}
+                  : "Your account is awaiting admin approval. Some seller features stay locked until then."}
               </Text>
             </View>
             <Feather name="chevron-right" size={18} color={colors.textMuted} />
@@ -319,13 +314,10 @@ export default function DashboardScreen() {
           <Feather name="chevron-right" size={20} color="#FFFFFF" />
         </TouchableOpacity>
 
-        {/* === Compact Total Earnings card ===
-            Hidden for free (unsubscribed) users — cashback, wallet and
-            withdrawals are member-only, and the subscribe banner above is
-            their call-to-action. */}
-        {isFreeTier ? null : (
-        /* The card body is tappable: it toggles the expanded sections.
-           The Withdraw button is OUTSIDE the toggle area so taps go to wallet. */
+        {/* === Slangcart wallet + cashback card ===
+            Shown to every shopper: the wallet holds cashback from delivered
+            orders, refunds and money added via Razorpay, and it is spent on
+            Slangcart purchases. */}
         <Animated.View entering={FadeInDown.duration(450).delay(120)}>
           <GradientCard variant="emerald" style={styles.heroCardCompact}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
@@ -335,14 +327,14 @@ export default function DashboardScreen() {
                 onPress={() => setExpanded((e) => !e)}
                 testID="dashboard-earnings-toggle"
               >
-                <Text style={styles.heroLabelCompact}>TOTAL EARNINGS</Text>
-                <Text style={styles.heroAmountCompact} testID="dashboard-total-earned">
-                  {formatINR(data.total_earned)}
+                <Text style={styles.heroLabelCompact}>SLANGCART WALLET</Text>
+                <Text style={styles.heroAmountCompact} testID="dashboard-wallet-balance">
+                  {formatINR(data.wallet_balance)}
                 </Text>
                 <View style={styles.heroSubRow}>
-                  <Feather name="credit-card" size={11} color="rgba(255,255,255,0.85)" />
-                  <Text style={styles.heroSubText} testID="dashboard-wallet-balance">
-                    Wallet {formatINR(data.wallet_balance)}
+                  <Feather name="gift" size={11} color="rgba(255,255,255,0.85)" />
+                  <Text style={styles.heroSubText} testID="dashboard-cashback-earned">
+                    {formatINR(data.cashback_earned)} cashback earned
                   </Text>
                   <View style={styles.expandPill}>
                     <Feather name={expanded ? "chevron-up" : "chevron-down"} size={11} color="#fff" />
@@ -355,13 +347,20 @@ export default function DashboardScreen() {
                 style={styles.withdrawBtnCompact}
                 testID="dashboard-withdraw-btn"
               >
-                <Feather name="arrow-up-right" size={14} color={colors.accentFg} />
-                <Text style={styles.withdrawBtnText}>Withdraw</Text>
+                <Feather name={isSeller ? "arrow-up-right" : "plus"} size={14} color={colors.accentFg} />
+                <Text style={styles.withdrawBtnText}>{isSeller ? "Withdraw" : "Add money"}</Text>
               </TouchableOpacity>
             </View>
+            {data.pending_cashback > 0 ? (
+              <View style={styles.pendingCbRow}>
+                <Feather name="clock" size={11} color="rgba(255,255,255,0.9)" />
+                <Text style={styles.pendingCbText}>
+                  {formatINR(data.pending_cashback)} cashback arriving soon
+                </Text>
+              </View>
+            ) : null}
           </GradientCard>
         </Animated.View>
-        )}
 
         {/* === Vendor Panel preview — only visible for approved vendors === */}
         {vendorStats ? (
@@ -475,58 +474,21 @@ export default function DashboardScreen() {
         ) : null}
 
         {/* === Expanded sections — only when user taps Total Earnings === */}
-        {expanded && (<>
-        <Animated.View entering={FadeInDown.duration(350).delay(40)}>
-          <TouchableOpacity
-            activeOpacity={0.85}
-            onPress={() => router.push("/(tabs)/network" as any)}
-            style={styles.progressCard}
-            testID="dashboard-next-payout-card"
-          >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
-              <DonutProgress
-                value={data.directs_required - data.next_payout_in}
-                max={data.directs_required}
-                size={104}
-                strokeWidth={12}
-                color={colors.primary}
-                label={`${data.direct_referrals % data.directs_required}/${data.directs_required}`}
-                sublabel="DIRECTS"
-              />
-              <View style={{ flex: 1 }}>
-                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                  <Text style={styles.cardTitle}>Next L1 payout</Text>
-                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
-                </View>
-                <Text style={styles.bigPrice}>{formatINR(data.level_payouts.l1)}</Text>
-                <Text style={styles.progressInfo}>
-                  Refer <Text style={styles.bold}>{data.next_payout_in}</Text> more direct{data.next_payout_in === 1 ? "" : "s"} to unlock.
-                </Text>
-              </View>
-            </View>
-            <View style={styles.levelsRow}>
-              <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L1</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l1)}</Text></View>
-              <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L2</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l2)}</Text></View>
-              <View style={styles.levelChip}><Text style={styles.levelChipLabel}>L3</Text><Text style={styles.levelChipValue}>{formatINR(data.level_payouts.l3)}</Text></View>
-            </View>
-          </TouchableOpacity>
-        </Animated.View>
-
-        {/* Sparkline - earnings last 7 days */}
-        {Array.isArray(data.earnings_per_day) && data.earnings_per_day.length > 0 && (
+        {/* === Expanded section — cashback trend (tap the wallet card) === */}
+        {expanded && Array.isArray(data.cashback_per_day) && data.cashback_per_day.length > 0 && (
           <Animated.View entering={FadeInDown.duration(450).delay(220)} style={styles.chartCard}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
               <View>
                 <Text style={styles.chartLabel}>LAST 7 DAYS</Text>
-                <Text style={styles.chartTitle}>Earnings trend</Text>
+                <Text style={styles.chartTitle}>Cashback received</Text>
               </View>
               <View style={{ alignItems: "flex-end" }}>
-                <Text style={styles.chartTotal}>{formatINR(data.earnings_per_day.reduce((a, b) => a + b, 0))}</Text>
-                <Text style={styles.chartTotalLabel}>total this week</Text>
+                <Text style={styles.chartTotal}>{formatINR(data.cashback_per_day.reduce((a, b) => a + b, 0))}</Text>
+                <Text style={styles.chartTotalLabel}>this week</Text>
               </View>
             </View>
             <View style={{ marginTop: 14 }}>
-              <Sparkline data={data.earnings_per_day} width={300} height={88} strokeColor={colors.primary} fillFrom="rgba(20,61,46,0.28)" fillTo="rgba(20,61,46,0.0)" />
+              <Sparkline data={data.cashback_per_day} width={300} height={88} strokeColor={colors.primary} fillFrom="rgba(20,61,46,0.28)" fillTo="rgba(20,61,46,0.0)" />
               <View style={styles.dayLabelsRow}>
                 {(data.day_labels || []).map((d, i) => (
                   <Text key={i} style={styles.dayLabel}>{d}</Text>
@@ -536,37 +498,13 @@ export default function DashboardScreen() {
           </Animated.View>
         )}
 
-        {/* Bar chart - level breakdown */}
-        {data.level_breakdown && Object.values(data.level_breakdown).some((v) => (v as number) > 0) && (
-          <Animated.View entering={FadeInDown.duration(450).delay(260)} style={styles.chartCard}>
-            <Text style={styles.chartLabel}>EARNINGS BY LEVEL</Text>
-            <Text style={styles.chartTitle}>Where it's coming from</Text>
-            <View style={{ marginTop: 14, alignItems: "center" }}>
-              <BarChart
-                data={Object.values(data.level_breakdown) as number[]}
-                labels={["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10"]}
-                width={320}
-                height={170}
-                color={colors.primary}
-              />
-            </View>
-          </Animated.View>
-        )}
-
-        {/* Sept 2026 BUGFIX — the `expanded` block used to run all the way
-            down past QUICK ACTIONS, so a free (unsubscribed) user — who
-            never sees the Total Earnings card and therefore can't expand
-            anything — got an EMPTY dashboard with no way to reach "My
-            orders". Only the earnings charts are collapsible now. */}
-        </>)}
-
         <Animated.View entering={FadeInDown.duration(450).delay(240)}>
-          <Text style={styles.sectionLabel}>YOUR NETWORK</Text>
+          <Text style={styles.sectionLabel}>MY SHOPPING</Text>
           <View style={styles.bento}>
-            <StatCard icon="user-plus" label="Direct referrals" value={String(data.direct_referrals)} testID="stat-direct" onPress={() => router.push("/(tabs)/network")} />
-            <StatCard icon="users" label="Team size" value={String(data.team_size)} testID="stat-team" onPress={() => router.push("/(tabs)/network")} />
-            <StatCard icon="award" label="Payouts" value={String(data.payouts_received)} testID="stat-payouts" onPress={() => router.push("/(tabs)/wallet")} />
-            <StatCard icon="clock" label="Pending W/D" value={String(data.pending_withdrawals)} testID="stat-pending" onPress={() => router.push("/(tabs)/wallet")} />
+            <StatCard icon="package" label="Total orders" value={String(data.orders_count)} testID="stat-orders" onPress={() => router.push("/orders")} />
+            <StatCard icon="check-circle" label="Delivered" value={String(data.delivered_count)} testID="stat-delivered" onPress={() => router.push("/orders")} />
+            <StatCard icon="gift" label="Cashback earned" value={formatINR(data.cashback_earned)} testID="stat-cashback" onPress={() => router.push("/(tabs)/wallet")} />
+            <StatCard icon="clock" label="Cashback pending" value={formatINR(data.pending_cashback)} testID="stat-cashback-pending" onPress={() => router.push("/(tabs)/wallet")} />
           </View>
         </Animated.View>
 
@@ -574,8 +512,8 @@ export default function DashboardScreen() {
           <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
           <View style={styles.codeCard}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.codeLabel}>YOUR REFERRAL CODE</Text>
-              <Text style={styles.codeValue}>{data.referral_code}</Text>
+              <Text style={styles.codeLabel}>YOUR INVITE CODE</Text>
+              <Text style={styles.codeValue}>{data.invite_code}</Text>
             </View>
             <TouchableOpacity onPress={onCopyCode} style={styles.codeIconBtn} testID="dashboard-copy-code">
               <Feather name={copied ? "check" : "copy"} size={16} color={colors.primaryFg} />
@@ -776,6 +714,12 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   heroDecor: { position: "absolute", right: -40, top: -40, width: 160, height: 160, borderRadius: 80, backgroundColor: "rgba(229,122,68,0.18)" },
+  pendingCbRow: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    marginTop: 10, paddingTop: 9,
+    borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)",
+  },
+  pendingCbText: { color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: "700" },
   heroLabel: { color: "rgba(255,255,255,0.7)", fontSize: 11, letterSpacing: 2, fontWeight: "700" },
   heroAmount: { color: colors.primaryFg, fontSize: 44, fontWeight: "800", marginTop: 6, letterSpacing: -1.5 },
   heroBottom: { marginTop: 16, flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end" },

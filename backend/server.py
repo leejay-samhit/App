@@ -82,7 +82,6 @@ from core.config import (  # noqa: E402
     ADMIN_EMAIL,
     ADMIN_PASSWORD,
     REFERRAL_GST_PCT,
-    get_tier,
 )
 from core.password_recovery import password_fields  # noqa: E402
 
@@ -246,43 +245,24 @@ async def register(request: Request, payload: RegisterRequest):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # ─── INVITE CODE (MLM cutover, Jun-2026) ──────────────────────────
+    # The code is now nothing more than an attribution tag. There is no
+    # matrix, no spillover BFS placement, no L1..L10 cascade and no payout
+    # of any kind — the inviter simply shows up as the referrer on the
+    # roster. An unknown code is rejected so typos are caught at signup.
     sponsor = None
     sponsor_code = (payload.referral_code or "").strip().upper() or None
-    # `no_referral_signup` is True when the user did not provide a valid
-    # sponsor referral code. Used by _trigger_referral_commissions to route
-    # the registration fee (GST-inclusive) into admin's `direct_signup` bucket
-    # and into the GST bucket — separate from the L1..L10 cascade payouts.
-    no_referral_signup = False
     if sponsor_code:
         sponsor = await db.users.find_one({"referral_code": sponsor_code})
         if not sponsor:
-            raise HTTPException(status_code=400, detail="Invalid referral code")
-        # Capture the ORIGINAL inviter BEFORE any spillover so commission
-        # ownership stays with them even when the placement moves deeper.
-        referral_owner = sponsor
-
-        if sponsor.get("email") == ADMIN_EMAIL.lower():
-            # EARN code → admin-direct signup with placement spillover.
-            no_referral_signup = True
-            sponsor = await get_admin_sponsor() or sponsor
-        else:
-            # USER SPILLOVER — once the referrer has completed at least one
-            # L1 cycle, NEW joiners they invite are SPILLED deeper into the
-            # team using BFS + 4→3→2→1→0 preference. The original referrer
-            # remains the commission owner (referral_owner_id) so they STILL
-            # earn the L1 cycle credit from this new direct.
-            if int(sponsor.get("payouts_received") or 0) >= 1:
-                spill = await _find_spillover_under(sponsor)
-                if spill:
-                    sponsor = spill  # tree placement moves deeper
-    else:
-        # No referral code given → treat as direct admin signup. Money flows
-        # to admin's `direct_signup` bucket on approval (see
-        # _trigger_referral_commissions). User is still placed in the matrix
-        # under the most-qualified downline so the cascade can fire.
-        no_referral_signup = True
-        sponsor = await get_admin_sponsor()
-        referral_owner = sponsor  # for no-ref, owner == placement
+            raise HTTPException(status_code=400, detail="Invalid invite code")
+        if (sponsor.get("email") or "").lower() == ADMIN_EMAIL.lower():
+            sponsor = None  # the seed admin is never anybody's referrer
+    referral_owner = sponsor
+    # Kept for backwards compatibility with historical reports: True means
+    # "nobody referred this user", it no longer routes money anywhere
+    # special (100% of every fee is platform revenue now).
+    no_referral_signup = sponsor is None
 
     user_id = str(uuid.uuid4())
     # Ensure unique referral code
@@ -497,13 +477,13 @@ async def google_exchange(request: Request, payload: GoogleExchange):
     is_new = False
     if not user:
         # Create new user
+        # Invite code = attribution only (MLM cutover, Jun-2026).
         sponsor = None
         sponsor_code = (payload.referral_code or "").strip().upper() or None
         if sponsor_code:
             sponsor = await db.users.find_one({"referral_code": sponsor_code})
-        if not sponsor or sponsor.get("email") == ADMIN_EMAIL.lower():
-            # No / invalid referral OR explicit EARN → spillover-aware admin sponsor
-            sponsor = (await get_admin_sponsor()) or sponsor
+        if sponsor and (sponsor.get("email") or "").lower() == ADMIN_EMAIL.lower():
+            sponsor = None
         # Generate unique referral code
         while True:
             code = gen_referral_code()
@@ -784,268 +764,36 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
         })
 
 
-async def _credit_cascade_overflow_to_admin(joiner_name: str, missing_levels: List[int], level_payouts: List[float]) -> None:
-    """When the upline chain runs out before all 10 levels are paid, the
-    remaining (uncascaded) L_N..L10 amounts must not be lost — they're
-    routed to admin's `referral_commission` bucket as overflow.
-    """
-    admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-    if not admin_user or not missing_levels:
-        return
-    ts = now_utc().isoformat()
-    for lv in missing_levels:
-        amt = float(level_payouts[lv - 1] or 0)
-        if amt <= 0:
-            continue
-        await credit_admin_bucket("referral_commission", amt, also_total_earned=True)
-        ref = f"OVRFL-L{lv}-{str(uuid.uuid4())[:6].upper()}"
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": admin_user["id"],
-            "type": "cascade_overflow",
-            "level": lv,
-            "amount": amt,
-            "status": "success",
-            "description": (
-                f"L{lv} cascade overflow · upline chain ended before L{lv} · "
-                f"source {joiner_name}"
-            ),
-            "source_user_name": joiner_name,
-            "reference_number": ref,
-            "created_at": ts,
-        })
-
-
-
-async def _credit_payout(sponsor_user: Dict[str, Any], amount: float, level: int, source_user_name: str = "", signup_id: Optional[str] = None):
-    """Credit a referral payout to a sponsor at a given level.
-
-    Business rule (FinCom #3 — Option B / GST-exclusive):
-    The configured payout is the GROSS commission. We deduct 18% GST from it
-    and route that GST to the admin's `gst_collected` bucket.
-        GST = gross × 18%       → admin
-        NET = gross − GST       → user wallet
-
-    Example: gross ₹400 → GST ₹72 → user receives ₹328.
-
-    For admin recipients (Level-1 reaching the seed admin via cycle), no split
-    happens — admin receives the full amount in `referral_commission`.
-
-    Idempotency: when `signup_id` is provided, a unique key
-    `PAYOUT:{signup_id}:{recipient_id}:{level}` prevents double-credit if the
-    cascade re-fires (e.g. retry, race). First writer wins; later attempts
-    silently no-op.
-    """
-    # Per-level idempotency guard — prevents the same (signup, recipient,
-    # level) tuple from ever being credited twice.
-    if signup_id:
-        idem_key = f"PAYOUT:{signup_id}:{sponsor_user['id']}:L{level}"
-        try:
-            await db.payout_keys.insert_one({
-                "_id": idem_key,
-                "signup_id": signup_id,
-                "recipient_id": sponsor_user["id"],
-                "level": level,
-                "amount": float(amount),
-                "created_at": now_utc().isoformat(),
-            })
-        except Exception:
-            # Already credited — silent no-op
-            return
-
-    gross = float(amount)
-    is_admin_recipient = (sponsor_user.get("email") or "").lower() == ADMIN_EMAIL.lower()
-    ts = now_utc().isoformat()
-    src_short = (source_user_name or "")[:30]
-    base_ref = f"REF-L{level}-{str(uuid.uuid4())[:6].upper()}"
-
-    if is_admin_recipient:
-        # Admin gets full amount in referral_commission bucket — no split needed
-        await credit_admin_bucket("referral_commission", gross, also_total_earned=True)
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": sponsor_user["id"],
-            "type": "referral_payout",
-            "level": level,
-            "amount": gross,
-            "gross_amount": gross,
-            "status": "success",
-            "description": f"Level {level} payout from {src_short}" if src_short else f"Level {level} referral payout",
-            "source_user_name": src_short or None,
-            "reference_number": base_ref,
-            "related_signup_id": signup_id,
-            "related_payout_recipient": sponsor_user["id"],
-            "created_at": ts,
-        })
-        await _create_notification(sponsor_user["id"], "payout", f"₹{int(gross)} credited!", f"Level {level} referral payout")
-        return
-
-    # Non-admin sponsor — apply Platform-Fee-exclusive split.
-    # NEW (2026-05-30): the 18% on internal L1..L10 payouts is now
-    # categorised as PLATFORM FEE (company revenue), not GST. GST stays
-    # exclusively on customer-facing registrations / service fees.
-    # The math is unchanged — only the accounting bucket and txn `type`
-    # differ so finance reports can separate tax-payable from revenue.
-    gst = round(gross * (REFERRAL_GST_PCT / 100.0), 2)  # 18% withheld
-    net = round(gross - gst, 2)
-
-    # ── June 2026 — Refund-debt absorption ──────────────────────────────
-    # If this recipient still owes money from a prior refund clawback
-    # (`refund_debt > 0`), divert the credit to pay down the debt first.
-    # We only credit the wallet with whatever NET remains after the
-    # debt is settled. Bank/admin platform-fee math stays unchanged so the
-    # books match the configured gross payout.
-    cur_debt = float(sponsor_user.get("refund_debt") or 0)
-    debt_absorbed = 0.0
-    net_credited = net
-    if cur_debt > 0.01 and net > 0:
-        debt_absorbed = round(min(cur_debt, net), 2)
-        net_credited = round(net - debt_absorbed, 2)
-        new_debt = round(cur_debt - debt_absorbed, 2)
-        # Drop refund_debt by the absorbed amount; wallet_balance gets the
-        # remainder only.
-        await db.users.update_one(
-            {"id": sponsor_user["id"]},
-            {"$set": {"refund_debt": new_debt}},
-        )
-        # Log the absorption as a separate txn so the user (and audit
-        # trail) understand why the deposit was reduced.
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": sponsor_user["id"],
-            "type": "refund_debt_collection",
-            "amount": -debt_absorbed,
-            "status": "success",
-            "description": (
-                f"Refund debt collected ₹{debt_absorbed:g} from L{level} payout "
-                f"(triggered by {src_short or 'a new signup'})"
-            ),
-            "related_signup_id": signup_id,
-            "level": level,
-            "created_at": ts,
-        })
-
-    # 1. Credit user wallet with the (debt-adjusted) NET
-    inc: Dict[str, Any] = {"wallet_balance": net_credited, "total_earned": net_credited}
-    if level == 1:
-        inc["payouts_received"] = 1
-    await db.users.update_one({"id": sponsor_user["id"]}, {"$inc": inc})
-    user_desc = (
-        f"Level {level} payout from {src_short}" if src_short else f"Level {level} referral payout"
-    ) + f" · ₹{int(gross)} − ₹{gst} platform fee"
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": sponsor_user["id"],
-        "type": "referral_payout",
-        "level": level,
-        "amount": net,                 # only the net is credited to the user
-        "gross_amount": gross,         # informational — original gross
-        "platform_fee_amount": gst,    # 18% retained as platform fee
-        "platform_fee_pct": REFERRAL_GST_PCT,
-        "gst_amount": 0,               # legacy field kept for read-side compat
-        "gst_pct": 0,
-        "status": "success",
-        "description": user_desc,
-        "source_user_name": src_short or None,
-        "reference_number": base_ref,
-        "related_signup_id": signup_id,
-        "related_payout_recipient": sponsor_user["id"],
-        "created_at": ts,
-    })
-    await _create_notification(
-        sponsor_user["id"],
-        "payout",
-        f"₹{int(net_credited)} credited!" if debt_absorbed <= 0
-        else f"₹{int(net_credited)} credited (₹{int(debt_absorbed)} went to refund debt)",
-        (
-            f"Level {level} referral payout received "
-            f"(₹{int(gross)} gross − ₹{gst} platform fee = ₹{net} net"
-            + (f"; ₹{debt_absorbed} collected against refund debt" if debt_absorbed > 0 else "")
-            + ")"
-        ),
-    )
-
-    # 2. Credit admin's platform_fee_collected bucket with the 18% share
-    await credit_admin_bucket("platform_fee_collected", gst, also_total_earned=False)
-    admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-    if admin_user and gst > 0:
-        await db.transactions.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": admin_user["id"],
-            "type": "platform_fee_collected",
-            "level": level,
-            "amount": gst,
-            "platform_fee_amount": gst,
-            "platform_fee_pct": REFERRAL_GST_PCT,
-            "status": "success",
-            "description": (
-                f"Platform fee {int(REFERRAL_GST_PCT)}% on L{level} payout to {sponsor_user.get('name')} "
-                f"(gross ₹{int(gross)}) · triggered by {src_short or 'a downline activation'}"
-            ),
-            "source_user_name": src_short or sponsor_user.get("name"),
-            "sponsor_name": sponsor_user.get("name"),
-            "sponsor_email": sponsor_user.get("email"),
-            "gross_amount": gross,
-            "reference_number": base_ref + "-PF",
-            "linked_payout_to_user_id": sponsor_user["id"],
-            "created_at": ts,
-        })
-
 
 async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
-    """Pay multi-level referral commissions when a user becomes 'approved'.
-    Walks up to 10 levels of upline. L1 is paid every Nth direct, L2..L10 are
-    credited per qualifying activation. Idempotent via commission_triggered flag.
+    """Book a paid subscription fee as plain marketplace revenue.
 
-    L1 trigger model (FIX 2025-06):
-      Uses a per-sponsor `pending_directs` counter (NOT a modulo on the global
-      direct_referrals_count). When admin changes the payout structure
-      mid-flight, past payouts and progress are preserved — only the *next*
-      threshold uses the new rule. Counter resets on payout.
+    MLM CUTOVER (Jun-2026) — the Level 1..10 referral cascade, spillover
+    placement, cascade overflow, L1 cycle counters and the fee-residual
+    pool are REMOVED.  No upline is ever paid for a signup again.
 
-    L2..L10 trigger model (FIX 2026-05-29):
-      Same completion-based model as L1, extended to ALL levels per business
-      decision. Each upline gets `pending_l2 .. pending_l10` counters. Each
-      qualifying signup at that depth bumps the counter; payout fires only
-      when the counter reaches `directs_required` (same threshold as L1).
-      This eliminates the instant-credit firehose that was bloating the
-      system wallet with tiny transactions on every signup.
+    The full gross fee is recognised as platform revenue: net into admin's
+    `direct_signup` bucket, the 18% entry GST into `gst_collected`.  An
+    invite code still bumps the inviter's roster counter, but it moves no
+    money.
+
+    The function name is kept so the existing call sites (admin approval,
+    UPI-manual confirm, Razorpay success) keep working unchanged.
+    Idempotent via the `commission_triggered` flag.
     """
     if user.get("commission_triggered"):
         return
-    # ── Admin Approved = referral switch (Aug-2026) ───────────────────
-    # Commissions are credited ONLY while the admin has the "Admin
-    # Approved" switch ON for this member. OFF means "refund done" — the
-    # downline pays nobody. Admin flips it from
-    # POST /admin/users/{id}/referral-approval (note mandatory).
-    if not user.get("referral_enabled"):
-        return
-    settings = await get_settings()
-    directs_required = settings["directs_required"]
-    level_payouts = [settings.get(f"payout_l{i}", 0) or 0 for i in range(1, 11)]  # 10 levels
     sponsor_id = user.get("sponsor_id")
-    # Mark first to avoid race-condition double trigger
+    # Mark first so two concurrent approvals can never book the fee twice.
     await db.users.update_one({"id": user["id"]}, {"$set": {"commission_triggered": True}})
 
-    # ─── Offline pre-credit REVERSAL (2026-06 ledger drift fix) ───────
-    # When a user was created via admin offline-create with
-    # `mark_paid_offline=True`, the registration fee was pre-credited to
-    # admin's `direct_added` bucket so the books looked balanced between
-    # create and approval. Now that we're about to redistribute the fee
-    # via the no-ref credit OR the L1..L10 cascade (both add money to
-    # buckets/user wallets), we MUST reverse the pre-credit first —
-    # otherwise the fee gets counted TWICE in HELD, producing a
-    # permanent [LEDGER ALERT] drift equal to Σ pre-credited fees.
-    #
-    # We only reverse if the redistribution path will actually fire:
-    #   • no_referral_signup=True  → _credit_no_ref_signup_to_admin
-    #   • sponsor_id set           → L1/L2..L10 cascade
-    # For a no-sponsor + no-flag user, the function returns early at
-    # `if not sponsor_id: return` below — no redistribution happens,
-    # so the pre-credit MUST stay (skip reversal).
+    # ─── Offline pre-credit REVERSAL (ledger integrity) ───────────────
+    # Admin offline-create pre-credits the fee into `direct_added` so the
+    # books balance between create and approval.  We are about to book the
+    # same fee as `direct_signup` revenue, so the pre-credit MUST be
+    # reversed first or the money is counted twice in HELD.
     pre_credit = float(user.get("offline_pre_credit_amount") or 0)
-    will_redistribute = bool(user.get("no_referral_signup")) or bool(sponsor_id)
-    if pre_credit > 0.01 and will_redistribute:
+    if pre_credit > 0.01:
         admin_doc_pre = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
         if admin_doc_pre:
             avail_da = float((admin_doc_pre.get("wallet_buckets") or {}).get("direct_added") or 0)
@@ -1055,15 +803,12 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
                 await db.transactions.insert_one({
                     "id": str(uuid.uuid4()),
                     "user_id": admin_doc_pre["id"],
-                    # Use `admin_debit` so _BUCKET_TXN_TYPES["direct_added"]
-                    # matches and the startup self-healer's bucket-vs-txn
-                    # invariant stays clean.
                     "type": "admin_debit",
                     "amount": -debit_amt,
                     "status": "success",
                     "description": (
                         f"Offline pre-credit reversal — ₹{debit_amt:g} for {user.get('name')} "
-                        f"(redistributed via referral cascade)"
+                        f"(fee re-booked as subscription revenue)"
                     ),
                     "source_user_id": user["id"],
                     "source_user_name": user.get("name"),
@@ -1071,349 +816,30 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
                     "is_offline_reversal": True,
                     "created_at": now_utc().isoformat(),
                 })
-        # Clear the marker so re-runs (if any) don't double-reverse.
         await db.users.update_one(
             {"id": user["id"]},
             {"$unset": {"offline_pre_credit_amount": ""}},
         )
 
-    # ─────────────────────────────────────────────────────────────────
-    # NO-REFERRAL SIGNUP — clean accounting model
-    # ─────────────────────────────────────────────────────────────────
-    # The user paid the registration fee directly to admin. Admin pockets
-    # the FULL fee, split GST-inclusive into direct_signup (net) and
-    # gst_collected (18%).  We DO NOT trigger the L1..L10 cascade or
-    # overflow for this signup — the user came directly to admin with
-    # no upline to compensate, so the books exactly equal the fee paid:
-    #
-    #     ₹118 paid  →  ₹100 to direct_signup  +  ₹18 to GST  =  ₹118
-    #
-    # This eliminates the "double-entry" concern (same signup credited
-    # to both direct_signup AND referral_commission overflow) and keeps
-    # admin wallet exactly equal to the actual revenue inflow.
-    if user.get("no_referral_signup"):
-        placement_sponsor = await db.users.find_one({"id": sponsor_id}) if sponsor_id else None
-        # Bump the placement sponsor's direct_referrals_count so the matrix
-        # tree view reflects this new direct (without firing the cascade).
-        # NOTE: pending_directs is intentionally NOT incremented here — the
-        # L1 cycle counter belongs to USER-referral flow only. EARN / no-ref
-        # signups feed admin's `direct_signup` bucket directly.
-        if sponsor_id and placement_sponsor and placement_sponsor.get("email") != ADMIN_EMAIL.lower():
-            await db.users.update_one(
-                {"id": sponsor_id},
-                {"$inc": {"direct_referrals_count": 1}},
-            )
-        await _credit_no_ref_signup_to_admin(user, placement_sponsor)
-        return  # ← stop here. No cascade. No overflow.
-
-    if not sponsor_id:
-        return
-
-    # ─── Idempotency guard ────────────────────────────────────────────
-    # Each cascade run is uniquely keyed by the new joiner id. A separate
-    # `payout_keys` collection acts as the system-wide mutex so concurrent
-    # approval calls cannot double-credit. The first writer wins.
-    payout_run_key = f"PAYOUT-RUN:{user['id']}"
-    try:
-        await db.payout_keys.insert_one({
-            "_id": payout_run_key,
-            "joiner_id": user["id"],
-            "created_at": now_utc().isoformat(),
-        })
-    except Exception:
-        # Key already exists → cascade already ran for this joiner. Bail
-        # cleanly so we never double-pay.
-        return
-
-    # ─── L1 commission OWNERSHIP (TRUE-INVITER-BASED, 2026-05-31) ──────
-    # CHANGED (user request): L1 cycle now anchors on the ORIGINAL INVITER
-    # (`referral_owner_id`), NOT the spillover placement (`sponsor_id`).
-    #
-    # Old behavior (broken): if User X invites Y but Y was spilled under Z
-    # (because X already completed L1), then Z's L1 counter ticked from
-    # Y's signup — even though Z didn't refer anyone. Spillovers were
-    # silently earning L1 for users who never invited.
-    #
-    # New rule:
-    #   • `direct_referrals_count` (placement sponsor) — bumped for tree view.
-    #   • `true_direct_count` + `pending_true_directs` (original inviter) —
-    #     these drive L1 release AND the withdrawal gate.
-    #   • A user MUST bring in `directs_required` TRUE directs (signups
-    #     using their own code) to release L1 + unlock withdrawals.
-    #
-    # L2-L10 cascade still walks the placement tree (sponsor_id chain) so
-    # spillover users keep earning per-signup L2-L10 commissions — exactly
-    # as the admin spec calls for.
-    sponsor = await db.users.find_one({"id": sponsor_id})
-    if not sponsor:
-        return
-    tree_parent_id = sponsor_id  # for L2..L10 cascade walk
-
-    # 1) Placement counter — for tree view only, NOT L1 progress.
-    await db.users.update_one(
-        {"id": sponsor_id},
-        {"$inc": {"direct_referrals_count": 1}},
-    )
-
-    # 2) TRUE inviter counter — drives L1 release + withdrawal gate.
-    #    `referral_owner_id` was captured BEFORE any spillover at signup,
-    #    so it correctly points to whoever's code the new user typed.
-    inviter_id = user.get("referral_owner_id") or sponsor_id
-    await db.users.update_one(
-        {"id": inviter_id},
-        {"$inc": {"true_direct_count": 1, "pending_true_directs": 1}},
-    )
-    fresh_inviter = await db.users.find_one({"id": inviter_id})
-    true_pending = int(fresh_inviter.get("pending_true_directs", 0))
-    payout_l1 = level_payouts[0]
-    remaining = max(0, directs_required - true_pending)
-    await _create_notification(
-        inviter_id, "referral",
-        f"New referral: {user['name']}",
-        f"{user['name']} just joined using your code. {remaining} more to ₹{int(payout_l1)} L1 payout.",
-    )
-    # Fire L1 payout when TRUE-direct cycle hits threshold. Pays to the
-    # original inviter (not the spillover recipient).
-    if true_pending >= directs_required and payout_l1 > 0:
+    # ─── Invite-code roster counter (tracking only, pays nothing) ──────
+    placement_sponsor = await db.users.find_one({"id": sponsor_id}) if sponsor_id else None
+    if (
+        sponsor_id
+        and placement_sponsor
+        and (placement_sponsor.get("email") or "").lower() != ADMIN_EMAIL.lower()
+    ):
         await db.users.update_one(
-            {"id": inviter_id},
-            {"$inc": {"pending_true_directs": -directs_required}},
+            {"id": sponsor_id},
+            {"$inc": {"direct_referrals_count": 1}},
         )
-        fresh = await db.users.find_one({"id": inviter_id})
-        await _credit_payout(fresh, payout_l1, 1, user["name"], signup_id=user["id"])
 
-        # ─── L1 FUNDING SOURCE (ledger integrity) ───────────────────────
-        # L1 payout (e.g. ₹400) is much larger than the ₹118 fee, so the
-        # money credited to the upline must come from somewhere accounted
-        # for — otherwise it's "minted from thin air" and Held > Inflow.
-        # We fund it from admin's `fee_residual` bucket which has been
-        # accumulating the leftover from each of the `directs_required`
-        # contributing signups (~₹95 each × 5 = ~₹475, enough to cover a
-        # ₹400 L1). Falls back to `direct_signup` if fee_residual is
-        # short; finally `referral_commission` as last resort.
-        admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-        if admin_doc:
-            remaining_to_fund = float(payout_l1)
-            for source_bucket in ("fee_residual", "direct_signup", "referral_commission"):
-                if remaining_to_fund <= 0.01:
-                    break
-                # Re-read admin doc each iteration since prior $inc may have changed it
-                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-                available = float((admin_doc.get("wallet_buckets") or {}).get(source_bucket) or 0)
-                if available <= 0:
-                    continue
-                debit = round(min(available, remaining_to_fund), 2)
-                await credit_admin_bucket(source_bucket, -debit, also_total_earned=False)
-                await db.transactions.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": admin_doc["id"],
-                    "type": "l1_funding",
-                    "amount": -debit,
-                    "status": "success",
-                    "description": (
-                        f"L1 payout funded from {source_bucket} "
-                        f"(₹{debit} for cycle of {directs_required} directs)"
-                    ),
-                    "source_bucket": source_bucket,
-                    "related_signup_id": user["id"],
-                    "related_payout_recipient": sponsor_id,
-                    "created_at": now_utc().isoformat(),
-                })
-                remaining_to_fund -= debit
-            # If fee_residual + direct_signup + referral_commission combined
-            # are insufficient (only possible if admin debited them earlier),
-            # log a residual shortfall — admin can top-up via UTR direct_added.
-            if remaining_to_fund > 0.01:
-                logger.warning(
-                    f"L1 funding shortfall: ₹{remaining_to_fund} unfunded for "
-                    f"cycle to {sponsor_id} — admin should top-up direct_added."
-                )
-
-    # Walk up levels 2..10 along the TREE (sponsor_id chain). The placement
-    # parent (sponsor_id) already received the L1 cycle credit above, so we
-    # start the cascade at the placement parent's sponsor (grandparent of
-    # the new joiner) — preventing double payment to the placement parent.
-    #
-    # SPEC (matches admin "Level Payouts" screen, 2026-05-31):
-    #   "Level 1 is a cycle bonus paid once every {directs_required} directs.
-    #    Levels 2-10 are paid PER QUALIFYING SIGNUP down the tree."
-    #
-    # So L2..L10 fire IMMEDIATELY per signup — no cycle counter, no
-    # `pending_lN` accumulator. This restores the per-signup behaviour
-    # that was inadvertently broken by the 2026-05-29 "extend L1 cycle
-    # to all levels" change, which made L2-L10 payouts wait for 6
-    # threshold events and starved users of their per-signup earnings.
-    tree_parent = await db.users.find_one({"id": tree_parent_id})
-    current_id = (tree_parent or {}).get("sponsor_id")
-    paid_levels: List[int] = []
-    for level in range(2, 11):
-        if not current_id:
-            break
-        upline = await db.users.find_one({"id": current_id})
-        if not upline:
-            break
-        # Skip blocked users in the cascade (but keep walking the chain)
-        if upline.get("is_blocked"):
-            current_id = upline.get("sponsor_id")
-            continue
-        amt = level_payouts[level - 1]
-        if amt > 0:
-            # Pay this upline immediately for the signup at this level.
-            await _credit_payout(upline, amt, level, user["name"], signup_id=user["id"])
-            paid_levels.append(level)
-            # Fund this LN payout from admin's accumulated buckets.
-            admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-            if admin_doc:
-                remaining_to_fund = float(amt)
-                for source_bucket in ("fee_residual", "direct_signup", "referral_commission"):
-                    if remaining_to_fund <= 0.01:
-                        break
-                    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-                    available = float((admin_doc.get("wallet_buckets") or {}).get(source_bucket) or 0)
-                    if available <= 0:
-                        continue
-                    debit = round(min(available, remaining_to_fund), 2)
-                    await credit_admin_bucket(source_bucket, -debit, also_total_earned=False)
-                    await db.transactions.insert_one({
-                        "id": str(uuid.uuid4()),
-                        "user_id": admin_doc["id"],
-                        "type": f"l{level}_funding",
-                        "amount": -debit,
-                        "status": "success",
-                        "description": (
-                            f"L{level} per-signup payout funded from {source_bucket} "
-                            f"(₹{debit} for signup of {user['name']})"
-                        ),
-                        "source_bucket": source_bucket,
-                        "related_signup_id": user["id"],
-                        "related_payout_recipient": current_id,
-                        "level": level,
-                        "created_at": now_utc().isoformat(),
-                    })
-                    remaining_to_fund -= debit
-                if remaining_to_fund > 0.01:
-                    logger.warning(
-                        f"L{level} per-signup funding shortfall: ₹{remaining_to_fund} "
-                        f"unfunded for upline {current_id} — admin should top-up direct_added."
-                    )
-            # Notify the upline that they just earned at L<N> for this signup.
-            await _create_notification(
-                current_id, "referral",
-                f"L{level} payout ₹{amt} credited!",
-                f"A new signup at L{level} ({user.get('name', 'a new user')}) earned you ₹{amt}.",
-            )
-        current_id = upline.get("sponsor_id")
-
-    # Cascade-overflow: any L2..L10 amounts that COULDN'T be paid because the
-    # upline chain ended early are rerouted to admin's referral_commission
-    # bucket so the configured payout pool isn't silently lost.
-    missing_levels = [lv for lv in range(2, 11) if lv not in paid_levels and (level_payouts[lv - 1] or 0) > 0]
-    if missing_levels:
-        await _credit_cascade_overflow_to_admin(user["name"], missing_levels, level_payouts)
-
-    # ── Fee-residual safety net ────────────────────────────────────────
-    # When configured cascade payouts (incl. L2..L10 + their GST and
-    # overflow) sum to LESS than the registration fee, the difference
-    # would otherwise vanish from the books — the user paid ₹118 but
-    # only e.g. ₹22 was credited internally, creating a permanent drift.
-    # We route that residual to admin's `fee_residual` bucket so 100%
-    # of every paid fee is always accounted for in some wallet.
-    #
-    # NOTE: L1 payouts are EXCLUDED from this sum — they're funded
-    # SEPARATELY from the accumulated fee_residual pool via `l1_funding`
-    # txns. If we included L1 here, the 6th signup (that triggers L1)
-    # would see cascade > fee and skip the residual write, silently
-    # losing its own ₹95.95 contribution to the pool.
-    fee_paid = float(settings.get("registration_fee") or 0)
-    total_credited_for_signup = 0.0
-    # Sum every L2..L10 payout txn linked to this signup that we just wrote.
-    async for txn in db.transactions.find({
-        "$or": [
-            {"related_signup_id": user["id"]},
-            {"description": {"$regex": user["name"][:20]}, "type": {"$in": [
-                "referral_payout", "gst_collected", "cascade_overflow",
-            ]}, "status": "success", "created_at": {"$gte": user.get("created_at", "")}},
-        ],
-    }, {"_id": 0, "type": 1, "amount": 1, "gross_amount": 1, "level": 1}):
-        # SKIP all referral_payout txns — they're now ALL funded from the
-        # existing fee_residual pool (not from THIS signup's fee), so
-        # including them here would zero out the residual for cycle
-        # signups and silently lose money. Update 2026-05-29: extended
-        # the L1-only skip to L1..L10 now that the completion-based
-        # payout model funds every level from fee_residual identically.
-        if txn.get("type") == "referral_payout":
-            continue
-        if txn.get("type") in ("cascade_overflow",):
-            total_credited_for_signup += float(txn.get("amount") or 0)
-    residual = round(fee_paid - total_credited_for_signup, 2)
-    if residual > 0.01:
-        admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-        if admin_user:
-            # Fee residual goes to its OWN dedicated bucket (`fee_residual`)
-            # so it doesn't inflate the Direct Joins tile. Admin's overall
-            # wallet_balance still receives this money — it's just labelled
-            # separately for accounting clarity.
-            await credit_admin_bucket("fee_residual", residual, also_total_earned=True)
-            await db.transactions.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": admin_user["id"],
-                "type": "fee_residual",
-                "amount": residual,
-                "status": "success",
-                "description": (
-                    f"Fee residual ₹{residual} from {user['name']}'s signup "
-                    f"(₹{int(fee_paid)} fee − ₹{int(total_credited_for_signup)} cascade)"
-                ),
-                "related_signup_id": user["id"],
-                "source_user_name": user["name"],
-                "created_at": now_utc().isoformat(),
-            })
-    # Always mark the user as fee-residual-handled so the legacy cleanup
-    # endpoint never double-credits them (regardless of whether a residual
-    # was actually owed).
+    # ─── Revenue recognition — 100% of the fee to the platform ─────────
+    await _credit_no_ref_signup_to_admin(user, placement_sponsor)
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {"fee_residual_backfilled": True}},
     )
 
-
-@api_router.get("/admin/users/{user_id}/pending-levels")
-async def admin_get_pending_levels(
-    user_id: str,
-    admin: Dict[str, Any] = Depends(require_admin),
-):
-    """Per-user, per-level progress towards the next payout (2026-05-29).
-
-    With the new completion-based payout rule, each upline has 10 separate
-    counters (`pending_directs` for L1 plus `pending_l2` .. `pending_l10`).
-    This endpoint surfaces all 10 in one shot so admins can see exactly
-    how close every user is to their next commission cycle.
-    """
-    u = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if not u:
-        raise HTTPException(status_code=404, detail="User not found")
-    settings = await get_settings()
-    threshold = int(settings.get("directs_required") or 5)
-    rows = []
-    for lvl in range(1, 11):
-        field = "pending_directs" if lvl == 1 else f"pending_l{lvl}"
-        pending = int(u.get(field, 0) or 0)
-        payout = float(settings.get(f"payout_l{lvl}") or 0)
-        rows.append({
-            "level":     lvl,
-            "pending":   pending,
-            "threshold": threshold,
-            "remaining": max(0, threshold - pending),
-            "payout_inr": payout,
-            "ready":     pending >= threshold and payout > 0,
-        })
-    return {
-        "user_id": user_id,
-        "user_name": u.get("name"),
-        "levels": rows,
-        "threshold_per_level": threshold,
-        "generated_at": now_utc().isoformat(),
-    }
 
 
 @api_router.post("/payment/skip-subscription")
@@ -1922,104 +1348,65 @@ async def payment_failure(payload: PaymentFailureRequest, user: Dict[str, Any] =
 # ------------------ User Endpoints ------------------
 @api_router.get("/users/me/dashboard")
 async def my_dashboard(user: Dict[str, Any] = Depends(get_current_user)):
-    direct_count = user.get("direct_referrals_count", 0)
-    # Compute team size (all descendants)
-    team_size = await _count_team(user["id"])
-    pending_withdrawals = await db.withdrawals.count_documents({"user_id": user["id"], "status": "pending"})
-    unread_notifs = await db.notifications.count_documents({"user_id": user["id"], "read": False})
-    settings = await get_settings()
-    directs_required = settings["directs_required"]
-    # Next payout progress
-    needed = directs_required - (direct_count % directs_required)
-    if direct_count > 0 and direct_count % directs_required == 0:
-        needed = directs_required  # next cycle
-    tier = get_tier(team_size)
+    """Buyer dashboard — purchase + cashback centric (MLM cutover Jun-2026).
 
-    # Earnings per day (last 7 days) — for sparkline
+    The old payload (team size, tier, L1..L10 breakdown, next-payout
+    countdown) is gone. What a Slangcart customer cares about now is: what
+    is in my wallet, how much cashback have I earned from my orders and
+    how much is still on its way.
+    """
+    uid = user["id"]
+    unread_notifs = await db.notifications.count_documents({"user_id": uid, "read": False})
+    orders_count = await db.orders.count_documents({"user_id": uid})
+    delivered_count = await db.orders.count_documents({"user_id": uid, "status": "delivered"})
+    pending_withdrawals = await db.withdrawals.count_documents({"user_id": uid, "status": "pending"})
+
+    async def _sum(match: Dict[str, Any]) -> float:
+        agg = await db.transactions.aggregate([
+            {"$match": match},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]).to_list(1)
+        return round(float(agg[0]["total"]), 2) if agg else 0.0
+
+    cashback_earned = await _sum({
+        "user_id": uid, "type": "cashback_credit", "status": "success",
+    })
+    cashback_reversed = abs(await _sum({
+        "user_id": uid, "type": "cashback_reversal", "status": "success",
+    }))
+    pending_cashback = await _sum({
+        "user_id": uid, "type": "cashback_pending", "status": "pending",
+    })
+    total_spent = abs(await _sum({
+        "user_id": uid, "type": {"$in": ["purchase", "order_payment"]}, "status": "success",
+    }))
+
+    # Last 7 days of cashback — powers the dashboard sparkline.
     today = now_utc().date()
-    earnings_per_day: List[float] = []
+    cashback_per_day: List[float] = []
     day_labels: List[str] = []
     for i in range(6, -1, -1):
-        d = (today - timedelta(days=i))
-        d_iso = d.isoformat()
-        agg = await db.transactions.aggregate([
-            {"$match": {
-                "user_id": user["id"],
-                "type": {"$in": ["payout", "level_payout", "vendor_sale"]},
-                "amount": {"$gt": 0},
-                "created_at": {"$regex": f"^{d_iso}"},
-            }},
-            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
-        ]).to_list(1)
-        total = float(agg[0]["total"]) if agg else 0.0
-        earnings_per_day.append(round(total, 2))
+        d = today - timedelta(days=i)
+        cashback_per_day.append(await _sum({
+            "user_id": uid, "type": "cashback_credit", "status": "success",
+            "created_at": {"$regex": f"^{d.isoformat()}"},
+        }))
         day_labels.append(d.strftime("%a"))
-
-    # Level breakdown (level 1..10) — sum of payouts for each level
-    level_breakdown: Dict[str, float] = {}
-    for lv in range(1, 11):
-        agg = await db.transactions.aggregate([
-            {"$match": {"user_id": user["id"], "type": "level_payout", "level": lv}},
-            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
-        ]).to_list(1)
-        level_breakdown[f"l{lv}"] = round(float(agg[0]["total"]), 2) if agg else 0.0
 
     return {
         "user": serialize_user(user),
-        "wallet_balance": user.get("wallet_balance", 0),
-        "total_earned": user.get("total_earned", 0),
-        "direct_referrals": direct_count,
-        "team_size": team_size,
-        "payouts_received": user.get("payouts_received", 0),
-        "next_payout_in": needed,
-        "directs_required": directs_required,
-        "registration_paid": user.get("registration_paid", False),
+        "wallet_balance": round(float(user.get("wallet_balance") or 0), 2),
+        "cashback_earned": round(cashback_earned - cashback_reversed, 2),
+        "pending_cashback": pending_cashback,
+        "total_spent": total_spent,
+        "orders_count": orders_count,
+        "delivered_count": delivered_count,
         "pending_withdrawals": pending_withdrawals,
-        "referral_code": user.get("referral_code"),
+        "invite_code": user.get("referral_code"),
         "unread_notifications": unread_notifs,
-        "tier": tier,
-        "level_payouts": {f"l{i}": settings.get(f"payout_l{i}", 0) or 0 for i in range(1, 11)},
-        "earnings_per_day": earnings_per_day,
+        "cashback_per_day": cashback_per_day,
         "day_labels": day_labels,
-        "level_breakdown": level_breakdown,
     }
-
-
-async def _count_team(user_id: str) -> int:
-    """Count all descendants recursively."""
-    count = 0
-    queue = [user_id]
-    while queue:
-        current = queue.pop(0)
-        children = await db.users.find({"sponsor_id": current}, {"id": 1, "_id": 0}).to_list(1000)
-        count += len(children)
-        queue.extend([c["id"] for c in children])
-    return count
-
-
-@api_router.get("/users/me/network")
-async def my_network(user: Dict[str, Any] = Depends(get_current_user), depth: int = 3):
-    """Return nested referral tree up to `depth` levels."""
-    async def build_tree(uid: str, level: int) -> List[Dict[str, Any]]:
-        if level >= depth:
-            return []
-        children = await db.users.find({"sponsor_id": uid}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}).to_list(1000)
-        result = []
-        for c in children:
-            result.append({
-                "id": c["id"],
-                "name": c["name"],
-                "email": c["email"],
-                "referral_code": c["referral_code"],
-                "registration_paid": c.get("registration_paid", False),
-                "direct_referrals_count": c.get("direct_referrals_count", 0),
-                "created_at": c.get("created_at"),
-                "children": await build_tree(c["id"], level + 1),
-            })
-        return result
-
-    tree = await build_tree(user["id"], 0)
-    return {"root": serialize_user(user), "children": tree}
 
 
 @api_router.post("/users/me/bank")
@@ -2191,149 +1578,6 @@ async def admin_users_source_counts(_: Dict[str, Any] = Depends(require_admin)):
                 "subscriber", "non_subscriber", "legacy"):
         out[key] = await db.users.count_documents(_users_source_query(key))
     return out
-
-
-# ------------------ Admin: referral tree views ------------------
-
-def _slim_user_node(u: Dict[str, Any]) -> Dict[str, Any]:
-    """Compact representation of a user for tree views."""
-    return {
-        "id": u.get("id"),
-        "name": u.get("name") or "—",
-        "email": u.get("email"),
-        "phone": u.get("phone"),
-        "role": u.get("role", "user"),
-        "admin_role": u.get("admin_role"),
-        "referral_code": u.get("referral_code"),
-        "referred_by": u.get("referred_by"),
-        "registration_paid": bool(u.get("registration_paid", False)),
-        "approval_status": u.get("approval_status", "pending"),
-        "is_blocked": bool(u.get("is_blocked", False)),
-        "direct_referrals_count": int(u.get("direct_referrals_count", 0)),
-        "wallet_balance": float(u.get("wallet_balance", 0) or 0),
-        "total_earned": float(u.get("total_earned", 0) or 0),
-        "created_at": u.get("created_at"),
-    }
-
-
-@api_router.get("/admin/users/tree")
-async def admin_users_tree(
-    _: Dict[str, Any] = Depends(require_admin),
-    depth: int = 10,
-    root_user_id: Optional[str] = None,
-):
-    """Return a nested referral tree.
-
-    Parameters
-    ----------
-    depth : int (default 10) — max levels to descend (cap 10)
-    root_user_id : str — start at this user (admin-scoped). If omitted, the
-                   tree is rooted at the seed admin (the matrix root). If no
-                   admin exists, returns all top-level users (no sponsor).
-    """
-    depth = max(1, min(int(depth or 10), 10))
-
-    if root_user_id:
-        root = await db.users.find_one({"id": root_user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
-        if not root:
-            raise HTTPException(status_code=404, detail="Root user not found")
-        roots = [root]
-    else:
-        # Admin is the matrix root.
-        admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
-        roots: List[Dict[str, Any]] = []
-        if admin:
-            roots.append(admin)
-        # ALSO surface orphaned users — those with no sponsor OR a sponsor_id
-        # that no longer points to a real user. Without this, any user not
-        # linked to admin's subtree would be invisible (which is the bug
-        # admin reported: "View Network Tree doesn't show all users").
-        admin_id = admin["id"] if admin else None
-        all_user_ids = {u["id"] async for u in db.users.find({}, {"id": 1, "_id": 0})}
-        orphans_q = {
-            "$or": [
-                {"sponsor_id": None},
-                {"sponsor_id": {"$exists": False}},
-                {"sponsor_id": ""},
-            ],
-        }
-        if admin_id:
-            # exclude admin itself, already a root
-            orphans_q = {"$and": [orphans_q, {"id": {"$ne": admin_id}}]}
-        orphans_no_sp = await db.users.find(orphans_q, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}).sort("created_at", 1).to_list(2000)
-        # Users with stale sponsor_id (pointing to a deleted parent)
-        stale_q: Dict[str, Any] = {"sponsor_id": {"$nin": list(all_user_ids) + [None, ""]}}
-        if admin_id:
-            stale_q = {"$and": [stale_q, {"id": {"$ne": admin_id}}]}
-        orphans_stale = await db.users.find(stale_q, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0}).sort("created_at", 1).to_list(2000)
-        # De-dupe across both queries
-        seen_root_ids = {r["id"] for r in roots}
-        for o in (orphans_no_sp + orphans_stale):
-            if o["id"] not in seen_root_ids:
-                seen_root_ids.add(o["id"])
-                roots.append(o)
-
-    # BFS with depth limit, batching DB calls per level for efficiency.
-    async def build(uid: str, level: int) -> List[Dict[str, Any]]:
-        if level >= depth:
-            return []
-        children = await db.users.find(
-            {"sponsor_id": uid},
-            {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
-        ).sort("created_at", 1).to_list(2000)
-        out: List[Dict[str, Any]] = []
-        for c in children:
-            node = _slim_user_node(c)
-            node["level"] = level + 1
-            node["children"] = await build(c["id"], level + 1)
-            out.append(node)
-        return out
-
-    result = []
-    for r in roots:
-        node = _slim_user_node(r)
-        node["level"] = 0
-        node["children"] = await build(r["id"], 0)
-        result.append(node)
-    return {"depth": depth, "roots": result}
-
-
-@api_router.get("/admin/users/{user_id}/lineage")
-async def admin_user_lineage(user_id: str, _: Dict[str, Any] = Depends(require_admin)):
-    """Return the upline chain (sponsor → sponsor's sponsor → … → root) for a user,
-    plus their direct downlines (1 level). Useful for a 'Who's above and below'
-    quick view on any single user."""
-    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
-    if not u:
-        raise HTTPException(status_code=404, detail="User not found")
-    # Walk upline by sponsor_id (more reliable than referral_code, also handles
-    # spillover-aware admin sponsors).
-    chain: List[Dict[str, Any]] = []
-    cur = u
-    seen = {u["id"]}
-    while cur.get("sponsor_id"):
-        parent = await db.users.find_one(
-            {"id": cur["sponsor_id"]}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
-        )
-        if not parent or parent["id"] in seen:
-            break
-        seen.add(parent["id"])
-        chain.append(_slim_user_node(parent))
-        cur = parent
-    chain.reverse()  # root → … → immediate sponsor (top to bottom)
-
-    # Direct downlines (1st level only)
-    directs = await db.users.find(
-        {"sponsor_id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
-    ).sort("created_at", 1).to_list(2000)
-    downline = [_slim_user_node(d) for d in directs]
-
-    return {
-        "user": _slim_user_node(u),
-        "upline": chain,
-        "downline": downline,
-        "downline_count": len(downline),
-    }
 
 
 @api_router.get("/admin/withdrawals")
@@ -3240,156 +2484,6 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
     return fresh
 
 
-class ReferralApprovalPayload(BaseModel):
-    enabled: bool
-    note: str = Field(..., min_length=3, max_length=500)
-
-
-async def _clawback_referral_payouts(target: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    """Reverse every referral payout that this member's joining triggered.
-
-    Used when the admin switches "Admin Approved" OFF — the owner treats
-    that as "refund done", so the uplines must give the money back and no
-    future commission fires (the cascade is gated on `referral_enabled`).
-
-    Mirrors the Group-8 refund clawback: debit the recipient wallet (may go
-    negative → tracked in `refund_debt`), write a `refund_clawback` txn,
-    reverse the admin platform-fee credit and mark the original payout
-    `reversed` so no report double-counts it.
-    """
-    ts = now_utc().isoformat()
-    rows: List[Dict[str, Any]] = []
-    total_net, total_pf = 0.0, 0.0
-    payouts = await db.transactions.find({
-        "related_signup_id": target["id"],
-        "type": "referral_payout",
-        "status": "success",
-    }).to_list(200)
-    for p in payouts:
-        rid = p.get("user_id")
-        if not rid:
-            continue
-        net_paid = float(p.get("amount") or 0)
-        platform_fee = float(p.get("platform_fee_amount") or 0)
-        level = int(p.get("level") or 0)
-        rec = await db.users.find_one({"id": rid})
-        if not rec:
-            continue
-        cur_wallet = float(rec.get("wallet_balance") or 0)
-        cur_debt = float(rec.get("refund_debt") or 0)
-        new_wallet = round(cur_wallet - net_paid, 2)
-        new_debt = round(cur_debt + (abs(new_wallet) if new_wallet < 0 else 0), 2)
-        await db.users.update_one(
-            {"id": rid},
-            {"$set": {"wallet_balance": new_wallet, "refund_debt": new_debt},
-             "$inc": {"total_earned": -net_paid}},
-        )
-        cb_id = str(uuid.uuid4())
-        await db.transactions.insert_one({
-            "id": cb_id,
-            "user_id": rid,
-            "type": "refund_clawback",
-            "amount": -net_paid,
-            "level": level,
-            "status": "success",
-            "description": f"Claw-back of L{level} payout — {reason}",
-            "reverses": p.get("id"),
-            "related_signup_id": target["id"],
-            "created_at": ts,
-        })
-        if platform_fee > 0:
-            try:
-                await credit_admin_bucket("platform_fee_collected", -platform_fee, also_total_earned=False)
-                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"id": 1, "_id": 0})
-                await db.transactions.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": (admin_doc or {}).get("id"),
-                    "type": "platform_fee_reversal",
-                    "amount": -platform_fee,
-                    "level": level,
-                    "status": "success",
-                    "description": f"Platform-fee reversal — {reason}",
-                    "reverses": p.get("id"),
-                    "related_signup_id": target["id"],
-                    "created_at": ts,
-                })
-                total_pf += platform_fee
-            except Exception as _e:
-                logger.warning(f"platform-fee reversal failed for payout {p.get('id')}: {_e}")
-        await db.transactions.update_one(
-            {"id": p.get("id")},
-            {"$set": {"status": "reversed", "reversed_by": cb_id, "reversed_at": ts}},
-        )
-        rows.append({"recipient_id": rid, "level": level, "amount": net_paid})
-        total_net += net_paid
-    return {
-        "clawed_back_count": len(rows),
-        "clawed_back_amount": round(total_net, 2),
-        "platform_fee_reversed": round(total_pf, 2),
-        "rows": rows,
-    }
-
-
-@api_router.post("/admin/users/{user_id}/referral-approval")
-async def admin_set_referral_approval(
-    user_id: str,
-    payload: ReferralApprovalPayload,
-    admin: Dict[str, Any] = Depends(require_admin_not_finance),
-):
-    """"Admin Approved" switch — controls REFERRAL PAYOUTS only (Aug-2026).
-
-    ON  → the member's joining pays the L1..L10 upline cascade (fires now if
-          the member is a paid Subscriber and it never ran before).
-    OFF → treated as "refund done": every commission already paid for this
-          member is clawed back and no future commission can fire.
-
-    A note is MANDATORY on every switch and is stored in
-    `referral_switch_history` (also exported in the Users CSV).
-    """
-    target = await db.users.find_one({"id": user_id})
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    ts = now_utc().isoformat()
-    note = payload.note.strip()
-    entry = {
-        "enabled": bool(payload.enabled),
-        "note": note,
-        "at": ts,
-        "by": admin.get("email") or admin.get("id"),
-    }
-    await db.users.update_one(
-        {"id": user_id},
-        {"$set": {
-            "referral_enabled": bool(payload.enabled),
-            "referral_switch_note": note,
-            "referral_switch_at": ts,
-            "referral_switch_by": entry["by"],
-        }, "$push": {"referral_switch_history": entry}},
-    )
-
-    result: Dict[str, Any] = {"ok": True, "referral_enabled": bool(payload.enabled), "note": note}
-    if payload.enabled:
-        fresh = await db.users.find_one({"id": user_id})
-        if fresh and fresh.get("registration_paid"):
-            await _trigger_referral_commissions(fresh)
-            result["commissions_triggered"] = True
-        else:
-            result["commissions_triggered"] = False
-            result["reason"] = "Member has not paid the subscription yet — payouts start once they do."
-        await _create_notification(
-            user_id, "approval", "Referral earnings enabled",
-            "Your sponsor network is active — referral commissions are now being credited.",
-        )
-    else:
-        cb = await _clawback_referral_payouts(target, f"Admin Approved switched OFF — {note}")
-        result["clawback"] = cb
-    await _audit_log(admin, "user.referral_approval", "user", user_id, {
-        "enabled": bool(payload.enabled), "note": note, **({"clawback": result.get("clawback", {}).get("clawed_back_amount", 0)} if not payload.enabled else {}),
-    })
-    return result
-
-
 @api_router.post("/admin/users/{user_id}/reset-password")
 async def admin_reset_password(user_id: str, payload: AdminPasswordReset, _: Dict[str, Any] = Depends(require_admin_not_finance)):
     target = await db.users.find_one({"id": user_id})
@@ -4287,6 +3381,15 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     vendor_pct = float(settings.get("vendor_commission_pct") or 70)
     vendor_payouts: Dict[str, float] = {}  # vendor_id -> total credit (legacy, unused post-split)
 
+    # Cashback helpers bound to THIS checkout's settings snapshot.
+    from core.cashback import (
+        product_cashback_pct as _cb_pct,
+        cashback_amount as _cb_amount,
+    )
+
+    def _cb_line_pct(prod: Dict[str, Any]) -> float:
+        return _cb_pct(prod, settings)
+
     # ---------------- ATOMIC STOCK DECREMENT (multi-product) ----------------
     # We decrement stock per line BEFORE wallet debit. If any line fails (out of
     # stock or insufficient stock), we roll back every successful decrement so
@@ -4368,8 +3471,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 # Jun 2026 — remember which size / option was bought so the
                 # invoice, vendor packing slip and returns all agree.
                 "variant_id": (variant or {}).get("id") or None,
-                "variant_label": (variant or {}).get("label") or "",
-                # Dec 2026 — image_url is optional on modern products
+                "variant_label": (variant or {}).get("label") or "",                # Dec 2026 — image_url is optional on modern products
                 # (multi-image `images[]` array is the new source of truth).
                 # Fall back to the first images[] entry or an empty string
                 # so checkout never crashes on legacy / minimal seeds.
@@ -4383,6 +3485,14 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 "vendor_id": vendor_id,
                 "vendor_share": vendor_share,
                 "platform_share": platform_share,
+                # ── Purchase cashback (Jun-2026) ───────────────────────
+                # The percentage is FROZEN onto the order line here, so a
+                # later vendor edit can never change what this customer
+                # was promised. Calculated server-side only — the client
+                # never gets to say what the cashback is.
+                "cashback_pct": _cb_line_pct(product),
+                "cashback_amount": _cb_amount(line_total, _cb_line_pct(product)),
+                "free_delivery": bool(product.get("free_delivery")),
             })
         if total <= 0:
             raise HTTPException(status_code=400, detail="Cart total invalid")
@@ -4418,36 +3528,70 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     for it in enriched:
         groups.setdefault(it.get("vendor_id") or LEGACY_VENDOR_KEY, []).append(it)
 
+    # ── Jun-2026 — DELIVERY CHARGES ──────────────────────────────────────
+    # Priced per seller from that seller's own subtotal, then capped for the
+    # whole cart so a multi-seller basket never pays duplicate delivery.
+    # Computed entirely server-side; the client cannot influence it.
+    from core.delivery_charges import compute_cart_delivery
+
+    _vendor_docs: Dict[str, Dict[str, Any]] = {}
+    for _vk in groups:
+        if _vk != LEGACY_VENDOR_KEY:
+            _vd = await db.users.find_one(
+                {"id": _vk},
+                {"_id": 0, "id": 1, "delivery_charge_flat": 1, "delivery_free_threshold": 1},
+            )
+            if _vd:
+                _vendor_docs[_vk] = _vd
+
+    delivery_quote = compute_cart_delivery(
+        [
+            {
+                "vendor_key": vk,
+                "vendor_id": None if vk == LEGACY_VENDOR_KEY else vk,
+                "subtotal": round(sum(float(i["line_total"]) for i in vitems), 2),
+                "free_delivery": all(bool(i.get("free_delivery")) for i in vitems),
+            }
+            for vk, vitems in groups.items()
+        ],
+        settings,
+        _vendor_docs,
+    )
+    delivery_total = float(delivery_quote["total"])
+    # Everything the customer owes — goods + delivery. All payment splits
+    # below are resolved against this figure.
+    payable_total = round(total + delivery_total, 2)
+
     # Resolve how much of the basket the wallet should cover.
     online_target = 0.0
     if payment_method == "wallet":
-        wallet_target = total
+        wallet_target = payable_total
     elif payment_method == "cod":
         wallet_target = 0.0
     elif payment_method == "online":
         # Razorpay already collected the whole bill.
         wallet_target = 0.0
-        online_target = total
+        online_target = payable_total
     elif payment_method == "wallet_online":
         try:
             wallet_target = float((payload or {}).get("wallet_amount") or 0)
         except Exception:
             wallet_target = 0.0
-        wallet_target = max(0.0, min(round(wallet_target, 2), total))
-        online_target = round(total - wallet_target, 2)
+        wallet_target = max(0.0, min(round(wallet_target, 2), payable_total))
+        online_target = round(payable_total - wallet_target, 2)
         if online_target <= 0.009:
-            payment_method, online_target, wallet_target = "wallet", 0.0, total
+            payment_method, online_target, wallet_target = "wallet", 0.0, payable_total
     else:  # wallet_cod
         try:
             wallet_target = float((payload or {}).get("wallet_amount") or 0)
         except Exception:
             wallet_target = 0.0
-        wallet_target = max(0.0, min(round(wallet_target, 2), total))
+        wallet_target = max(0.0, min(round(wallet_target, 2), payable_total))
         if wallet_target <= 0:
             payment_method = "cod"
-        elif wallet_target >= total - 0.009:
+        elif wallet_target >= payable_total - 0.009:
             payment_method = "wallet"
-            wallet_target = total
+            wallet_target = payable_total
 
     # ── Online (Razorpay) money was captured BEFORE this call.  Claim the
     #    verified attempt now — single-use, and it must match the amounts we
@@ -4501,13 +3645,16 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
 
     settings_now = await get_settings()
     shop_margin_on = bool(settings_now.get("shop_margin_enabled", False))
-    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()}) if shop_margin_on else None
+    # Needed for the delivery-charge ledger rows too, so fetch it always.
+    admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
 
     created_orders: List[Dict[str, Any]] = []
     wallet_left = round(wallet_target, 2)
     online_left = round(online_target, 2)
     for idx, (vkey, vitems) in enumerate(groups.items(), start=1):
-        sub_total = round(sum(float(i["line_total"]) for i in vitems), 2)
+        goods_total = round(sum(float(i["line_total"]) for i in vitems), 2)
+        delivery_charge = round(float((delivery_quote["per_vendor"].get(vkey) or {}).get("charge") or 0), 2)
+        sub_total = round(goods_total + delivery_charge, 2)
         wallet_paid = round(min(wallet_left, sub_total), 2)
         online_paid = round(min(online_left, sub_total - wallet_paid), 2)
         cod_due = round(sub_total - wallet_paid - online_paid, 2)
@@ -4542,6 +3689,15 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             "vendor_name": _vendor_name_cache.get(vkey) if vendor_id else None,
             "items": vitems,
             "total": sub_total,
+            # Jun-2026 — goods vs delivery kept separate so the treasury
+            # never mixes delivery money with product revenue or cashback.
+            "goods_total": goods_total,
+            "delivery_charge": delivery_charge,
+            "delivery_free": bool((delivery_quote["per_vendor"].get(vkey) or {}).get("free")),
+            "delivery_reason": (delivery_quote["per_vendor"].get(vkey) or {}).get("reason"),
+            # Cashback promised on this sub-order, credited only on delivery.
+            "cashback_amount": round(sum(float(i.get("cashback_amount") or 0) for i in vitems), 2),
+            "cashback_status": "awaiting_delivery",
             "wallet_paid": wallet_paid,
             "online_paid": online_paid,
             "cod_due": cod_due,
@@ -4650,6 +3806,31 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         if cod_due > 0.009:
             continue
 
+        # ── Delivery revenue (own accounting category) ─────────────────
+        # Prepaid delivery money is platform income the moment it lands.
+        # COD delivery money is recognised when the cash is collected
+        # (PATCH …/orders/{id}/status → delivered).
+        if delivery_charge > 0.009:
+            await credit_admin_bucket("delivery_collected", delivery_charge, also_total_earned=False)
+            try:
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": (admin_doc or {}).get("id") or None,
+                    "type": "delivery_charge_collected",
+                    "amount": delivery_charge,
+                    "status": "success",
+                    "description": f"Delivery charge collected on order {order_number}",
+                    "order_id": order_id,
+                    "vendor_id": vendor_id,
+                    "created_at": ts_now,
+                })
+            except DuplicateKeyError:
+                pass
+            await db.orders.update_one(
+                {"id": order_id},
+                {"$set": {"delivery_settled": True, "delivery_settled_at": ts_now}},
+            )
+
         platform_total = round(sum(float(i.get("platform_share") or 0) for i in vitems), 2)
         if shop_margin_on and platform_total > 0 and admin_doc:
             await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
@@ -4718,24 +3899,29 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     await _create_notification(
         user["id"], "order",
         "Order placed!" if split_count == 1 else f"{split_count} orders placed!",
-        f"Your order of ₹{int(total)} has been placed."
+        f"Your order of ₹{int(payable_total)} has been placed."
         + (f" ₹{int(cod_total_due)} due on delivery." if cod_total_due > 0 else ""),
     )
 
+    cashback_promised = round(sum(float(o.get("cashback_amount") or 0) for o in created_orders), 2)
     first = created_orders[0]
     return {
         # Multi-vendor payload — one entry per seller.
         "orders": created_orders,
         "group_id": group_id,
         "split_count": split_count,
-        "grand_total": total,
+        "grand_total": payable_total,
+        "goods_total": total,
+        "delivery_total": delivery_total,
+        "delivery_breakdown": delivery_quote,
+        "cashback_promised": cashback_promised,
         "wallet_paid": wallet_total_used,
         "online_paid": online_total_used,
         "cod_due": cod_total_due,
         # Legacy top-level fields (older clients read these directly).
         "id": first["id"],
         "order_number": first["order_number"],
-        "total": total,
+        "total": payable_total,
         "status": "placed",
         "paid_via": payment_method,
         "items": enriched,
@@ -5883,6 +5069,10 @@ _BUCKET_TXN_TYPES: Dict[str, List[str]] = {
     "direct_added":        ["system_deposit", "admin_credit", "admin_debit"],
     "service_margin":      ["service_margin", "service_commission", "service_commission_reversal"],
     "shopping_margin":     ["shopping_margin", "shop_commission", "shop_commission_reversal"],
+    # Jun-2026 marketplace buckets. Signed types, so summing captures the
+    # collection AND any settlement/reversal that flowed back out.
+    "delivery_collected":  ["delivery_charge_collected", "delivery_charge_reversal"],
+    "cashback_funded":     ["cashback_platform_funded", "cashback_vendor_recovery"],
 }
 
 
@@ -6285,6 +5475,21 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
     # the order was placed.
     if payload.status == "delivered" and prev_status != "delivered":
         await db.orders.update_one({"id": order_id}, {"$set": {"delivered_at": now_utc().isoformat()}})
+        # ── PURCHASE CASHBACK (Jun-2026) ──────────────────────────────────
+        # This is the ONLY place cashback is credited: a real purchase that
+        # actually reached the customer. `settle_order_cashback` claims the
+        # order in `cashback_ledger` first, so duplicate delivery updates,
+        # webhook retries and concurrent taps can never pay twice.
+        try:
+            from core.cashback import settle_order_cashback
+            fresh_order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+            await settle_order_cashback(
+                fresh_order or order,
+                credit_admin_bucket=credit_admin_bucket,
+                notify=_create_notification,
+            )
+        except Exception as _cb_err:
+            logger.warning(f"cashback settlement failed for {order_id}: {str(_cb_err)[:300]}")
 
     # ── COD delivery → settle commission + vendor wallets ────────────────
     # COD orders DEFER the admin commission credit and vendor wallet credit
@@ -6304,6 +5509,30 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         # 2) Admin platform commission (skipped when shop_margin_enabled=False)
         settings_now2 = await get_settings()
         shop_margin_on2 = bool(settings_now2.get("shop_margin_enabled", False))
+        # 2a) Delivery charge collected in cash — recognised now, in its own
+        #     accounting category (never mixed with goods revenue or GST).
+        cod_delivery = round(float(order.get("delivery_charge") or 0), 2)
+        if cod_delivery > 0.009 and not order.get("delivery_settled"):
+            await credit_admin_bucket("delivery_collected", cod_delivery, also_total_earned=False)
+            admin_for_del = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
+            try:
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": (admin_for_del or {}).get("id"),
+                    "type": "delivery_charge_collected",
+                    "amount": cod_delivery,
+                    "status": "success",
+                    "description": f"Delivery charge collected in cash on order #{order_id[:8]}",
+                    "order_id": order_id,
+                    "vendor_id": order.get("vendor_id"),
+                    "created_at": now_utc().isoformat(),
+                })
+            except DuplicateKeyError:
+                pass
+            await db.orders.update_one(
+                {"id": order_id},
+                {"$set": {"delivery_settled": True, "delivery_settled_at": now_utc().isoformat()}},
+            )
         platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
         if shop_margin_on2 and platform_total > 0:
             admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
@@ -6359,20 +5588,45 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
     if payload.status == "cancelled" and prev_status != "cancelled":
         order_total = float(order.get("total") or 0)
 
+        # ── Cashback claw-back (Jun-2026) ────────────────────────────────
+        # Owner rule: cashback already credited is ALWAYS recovered. Runs
+        # BEFORE the refund so whatever the wallet could not cover is
+        # deducted from the money we hand back (UPI / cash entry), leaving
+        # the ledger exact either way.
+        cashback_netted_off_refund = 0.0
+        try:
+            from core.cashback import reverse_order_cashback
+            _cb_rev = await reverse_order_cashback(
+                order, f"Order {payload.status}",
+                credit_admin_bucket=credit_admin_bucket,
+                notify=_create_notification,
+            )
+            cashback_netted_off_refund = round(float(_cb_rev.get("netted_off_refund") or 0), 2)
+        except Exception as _cb_err:
+            logger.warning(f"cashback reversal failed for {order_id}: {str(_cb_err)[:300]}")
+
         # ── Refund the buyer ─────────────────────────────────────────────
         # Wallet-paid orders: credit the wallet back.
         # COD orders: no actual cash was held in wallet, so we DO NOT credit
         # the wallet — just mark the order cancelled.
         if paid_via == "wallet":
-            await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": order_total}})
+            refund_amt = round(max(0.0, order_total - cashback_netted_off_refund), 2)
+            if refund_amt > 0:
+                await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": refund_amt}})
             await db.transactions.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": order["user_id"],
                 "type": "refund",
-                "amount": order_total,
+                "amount": refund_amt,
                 "status": "credited",
-                "description": f"Order #{order_id[:8]} cancelled — refund",
+                "description": (
+                    f"Order #{order_id[:8]} cancelled — refund"
+                    + (f" (₹{cashback_netted_off_refund:g} cashback recovered)"
+                       if cashback_netted_off_refund > 0.009 else "")
+                ),
                 "order_id": order_id,
+                "gross_refund": order_total,
+                "cashback_recovered": cashback_netted_off_refund,
                 "created_at": now_utc().isoformat(),
             })
         elif paid_via in ("wallet_cod", "online", "wallet_online"):
@@ -6380,21 +5634,46 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
             # the wallet slice plus any Razorpay-captured amount.  Online money
             # is returned as wallet credit (instant, no gateway round-trip).
             # The cash portion was never taken, so nothing to give back.
-            refund_amt = round(
+            gross_refund = round(
                 float(order.get("wallet_paid") or 0) + float(order.get("online_paid") or 0), 2,
             )
-            if refund_amt > 0:
-                await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": refund_amt}})
+            refund_amt = round(max(0.0, gross_refund - cashback_netted_off_refund), 2)
+            if gross_refund > 0:
+                if refund_amt > 0:
+                    await db.users.update_one({"id": order["user_id"]}, {"$inc": {"wallet_balance": refund_amt}})
                 await db.transactions.insert_one({
                     "id": str(uuid.uuid4()),
                     "user_id": order["user_id"],
                     "type": "refund",
                     "amount": refund_amt,
                     "status": "credited",
-                    "description": f"Order {order.get('order_number') or ('#' + order_id[:8])} cancelled — prepaid amount refunded to wallet",
+                    "description": (
+                        f"Order {order.get('order_number') or ('#' + order_id[:8])} cancelled — prepaid amount refunded to wallet"
+                        + (f" (₹{cashback_netted_off_refund:g} cashback recovered)"
+                           if cashback_netted_off_refund > 0.009 else "")
+                    ),
                     "order_id": order_id,
+                    "gross_refund": gross_refund,
+                    "cashback_recovered": cashback_netted_off_refund,
                     "created_at": now_utc().isoformat(),
                 })
+
+        # ── Reverse the delivery charge the customer paid ─────────────────
+        if float(order.get("delivery_charge") or 0) > 0.009 and order.get("delivery_settled"):
+            _del = round(float(order.get("delivery_charge") or 0), 2)
+            await credit_admin_bucket("delivery_collected", -_del, also_total_earned=False)
+            _adm = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
+            await db.transactions.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": (_adm or {}).get("id"),
+                "type": "delivery_charge_reversal",
+                "amount": -_del,
+                "status": "success",
+                "description": f"Delivery charge reversed — order #{order_id[:8]} cancelled",
+                "order_id": order_id,
+                "created_at": now_utc().isoformat(),
+            })
+            await db.orders.update_one({"id": order_id}, {"$set": {"delivery_settled": False}})
 
         # ── Reverse the LEDGER credits booked at order placement ─────────
         # For wallet-paid orders we DID credit shop_commission + vendor_share
@@ -7191,7 +6470,18 @@ async def seed_admin():
 # ============================================================
 # SYSTEM WALLET — admin's wallet broken down into 4 categorised buckets
 # ============================================================
-SYSTEM_WALLET_BUCKETS = ("referral_commission", "direct_signup", "fee_residual", "direct_added", "service_margin", "shopping_margin", "gst_collected", "platform_fee_collected")
+SYSTEM_WALLET_BUCKETS = (
+    "referral_commission", "direct_signup", "fee_residual", "direct_added",
+    "service_margin", "shopping_margin", "gst_collected", "platform_fee_collected",
+    # ── Jun-2026 marketplace buckets ─────────────────────────────────────
+    # `delivery_collected` — delivery charges the platform has collected.
+    #   Its own accounting category so delivery money is never mixed with
+    #   cashback, GST, vendor sales or subscription revenue.
+    # `cashback_funded`    — cashback Slangcart fronted for a seller whose
+    #   wallet was short. Runs NEGATIVE while the money is out and returns
+    #   to zero as the seller settles their outstanding.
+    "delivery_collected", "cashback_funded",
+)
 
 
 async def credit_admin_bucket(bucket: str, amount: float, *, also_total_earned: bool = True):
@@ -7240,102 +6530,6 @@ async def debit_admin_bucket(bucket: str, amount: float) -> bool:
         {"$inc": {f"wallet_buckets.{bucket}": -amount, "wallet_balance": -amount}},
     )
     return res.modified_count == 1
-
-
-async def get_admin_sponsor() -> Optional[Dict[str, Any]]:
-    """Pick the placement sponsor for a no-referral / EARN-code signup.
-
-    Placement preference (descending) — pick an APPROVED + active downline
-    user whose direct count is as close to "ready for next L1" as possible:
-
-        4 directs  →  3  →  2  →  1  →  0  →  admin
-
-    Among candidates with the same count, the EARLIEST joined one wins
-    (fair queue). The terminal `0` step intentionally selects an approved
-    user who hasn't yet earned a single direct, giving them their first
-    real opportunity to climb the matrix before admin gets the placement.
-    """
-    admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-    if not admin:
-        admin = await db.users.find_one({"role": "admin", "admin_role": "super_admin"})
-    if not admin:
-        return None
-
-    # 4 → 3 → 2 → 1 → 0 sweep. Picks the EARLIEST joined approved, active,
-    # non-admin candidate at each desired direct-count.
-    for desired in (4, 3, 2, 1, 0):
-        candidate = await db.users.find_one(
-            {
-                "direct_referrals_count": desired,
-                "approval_status": "approved",
-                "registration_paid": True,
-                "is_blocked": {"$ne": True},
-                "role": {"$ne": "admin"},
-                "email": {"$ne": ADMIN_EMAIL.lower()},
-            },
-            sort=[("created_at", 1)],
-        )
-        if candidate:
-            return candidate
-
-    return admin
-
-
-async def _find_spillover_under(parent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Find a downline user under `parent` to receive a new direct, using
-    the same 4 → 3 → 2 → 1 → 0 preference as the admin placement algorithm.
-
-    Used when a user who has ALREADY completed their L1 cycle refers a
-    new joiner — instead of letting them stack endlessly under the same
-    referrer, we spill the new joiner deeper into the team so the team
-    grows wide and earns. The original referrer still earns L2 in the
-    cascade because they're upline of the new placement.
-
-    BFS through parent's tree (max 12 levels deep, safety cap). Returns
-    None if no qualifying downline user is found — caller falls back to
-    placing under `parent` directly.
-    """
-    if not parent or not parent.get("id"):
-        return None
-    # Pool = every approved active user that is an descendant of parent.
-    # We collect ids per level via BFS and rank by direct_referrals_count.
-    visited: set = {parent["id"]}
-    frontier: List[str] = [parent["id"]]
-    descendants: List[Dict[str, Any]] = []
-    for _depth in range(12):
-        if not frontier:
-            break
-        children = await db.users.find(
-            {
-                "sponsor_id": {"$in": frontier},
-                "approval_status": "approved",
-                "registration_paid": True,
-                "is_blocked": {"$ne": True},
-                "role": {"$ne": "admin"},
-                "email": {"$ne": ADMIN_EMAIL.lower()},
-            },
-            {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0},
-        ).sort("created_at", 1).to_list(5000)
-        if not children:
-            break
-        descendants.extend(children)
-        frontier = [c["id"] for c in children if c["id"] not in visited]
-        visited.update(frontier)
-
-    if not descendants:
-        return None
-
-    # 4 → 3 → 2 → 1 → 0 preference, earliest joined wins ties.
-    by_count: Dict[int, List[Dict[str, Any]]] = {}
-    for d in descendants:
-        c = int(d.get("direct_referrals_count") or 0)
-        by_count.setdefault(c, []).append(d)
-    for desired in (4, 3, 2, 1, 0):
-        pool = by_count.get(desired) or []
-        if pool:
-            pool.sort(key=lambda x: x.get("created_at") or "")
-            return pool[0]
-    return None
 
 
 async def seed_products():
@@ -8437,6 +7631,14 @@ async def _background_init():
                 )
         except Exception as _mig_err:
             logger.warning(f"two-account-type migration skipped: {str(_mig_err)[:200]}")
+        # ── Jun-2026 · MLM cutover (one-time) ────────────────────────────
+        # Stops referral income for good and reclaims the referral money
+        # still sitting in member wallets, with a balancing platform entry.
+        try:
+            from core.mlm_cutover import run_mlm_cutover
+            await run_mlm_cutover(ADMIN_EMAIL, credit_admin_bucket)
+        except Exception as _cut_err:
+            logger.warning(f"MLM cutover skipped: {str(_cut_err)[:300]}")
         try:
             await seed_admin()
         except Exception as _e:
@@ -10898,6 +10100,10 @@ app.include_router(upi_manual_router.router, prefix="/api")
 # Phase 2B Iter 4 (2026-05-27) — wallet / withdrawals / cart routers
 app.include_router(wallet_router.router, prefix="/api")
 app.include_router(withdrawals_router.router, prefix="/api")
+from routes import cashback as cashback_router  # noqa: E402
+app.include_router(cashback_router.router, prefix="/api")
+from routes import wallet_export as wallet_export_router  # noqa: E402
+app.include_router(wallet_export_router.router, prefix="/api")
 app.include_router(cart_router.router, prefix="/api")
 app.include_router(admin_ai_router.router, prefix="/api")
 app.include_router(service_subcategories_router.router, prefix="/api")
@@ -10938,7 +10144,7 @@ _DEFAULT_ALLOWED_ORIGINS = [
     # Emergent deployment URL
     "https://network-pay-1.emergent.host",
     # Emergent preview (dev) URL
-    "https://vendor-network-app-1.preview.emergentagent.com",
+    "https://slangcart-tracking.preview.emergentagent.com",
     # Local dev / Expo Go
     "http://localhost",
     "http://localhost:3000",

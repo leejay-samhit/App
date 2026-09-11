@@ -18,7 +18,7 @@ import base64
 import pytest
 import requests
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://vendor-network-app-1.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://slangcart-tracking.preview.emergentagent.com").rstrip("/")
 
 ADMIN_EMAIL = "support@slangcart.com"
 ADMIN_PASSWORD = "3)Ywxtic"

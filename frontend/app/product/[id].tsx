@@ -21,6 +21,7 @@ import { useAuth } from "../../src/auth";
 import { useContentWidth } from "../../src/content-width";
 import { getProductPreview } from "../../src/product-preview";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../../src/cashback";
 
 /* ─── Types ─── */
 type StyledText = { text?: string; bold?: boolean; font_size?: number | null; align?: "left" | "center" | "right" };
@@ -139,6 +140,7 @@ export default function ProductDetailScreen() {
   // True while the full document is still in flight but we're already
   // showing the preview (name / price / cover image).
   const hydrating = loading;
+  const moneyCfg = useShopMoneyConfig();
 
   // ── Jun 2026 — Variants (size / RAM-ROM) ───────────────────────────────
   // Products with options are unbuyable until the customer picks one, and
@@ -147,6 +149,9 @@ export default function ProductDetailScreen() {
   const hasVariants = variants.length > 0;
   const selected = hasVariants ? (variants.find((v) => v.id === variantId) || null) : null;
   const unitPrice = selected ? selected.price : product.price;
+  // Purchase cashback shown before buying (paid after delivery).
+  const cashbackPct = effectiveCashbackPct(product, moneyCfg);
+  const cashbackValue = cashbackAmount(unitPrice, cashbackPct, moneyCfg.max_cashback_pct);
   const maxQty = selected ? selected.stock : (product.stock || 99);
   const inStock = hasVariants
     ? variants.some((v) => v.in_stock)
@@ -398,6 +403,26 @@ export default function ProductDetailScreen() {
                 </View>
               ) : null}
             </View>
+
+            {/* ── Purchase cashback (Jun-2026) ────────────────────────────
+                Shown directly under the price so the customer knows the
+                benefit BEFORE buying. The exact amount is recalculated and
+                paid by the server after a successful delivery. */}
+            {cashbackPct > 0 ? (
+              <View style={styles.cashbackRow} testID="product-cashback">
+                <View style={styles.cashbackIcon}>
+                  <Feather name="gift" size={12} color="#15803D" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.cashbackTitle}>
+                    Cashback {cashbackPct}% · {formatINR(cashbackValue)}
+                  </Text>
+                  <Text style={styles.cashbackSub}>
+                    Credited to your Slangcart wallet after successful delivery
+                  </Text>
+                </View>
+              </View>
+            ) : null}
           </View>
 
           {/* Styled summary blocks — only show those the admin/vendor filled in */}
@@ -978,6 +1003,18 @@ const styles = StyleSheet.create({
   bulletDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: colors.primary, marginTop: 7 },
   bulletText: { fontSize: 13, color: colors.textMain, flex: 1, lineHeight: 19 },
   priceRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 12, gap: 8 },
+  cashbackRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    marginTop: 12, padding: 10,
+    backgroundColor: "#F0FDF4", borderWidth: 1, borderColor: "#BBF7D0",
+    borderRadius: 12,
+  },
+  cashbackIcon: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: "#DCFCE7", alignItems: "center", justifyContent: "center",
+  },
+  cashbackTitle: { fontSize: 13, fontWeight: "800", color: "#15803D" },
+  cashbackSub: { fontSize: 11, color: "#166534", marginTop: 2 },
   priceFrom: { fontSize: 9.5, fontWeight: "900", letterSpacing: 1.1, color: colors.textMuted, marginBottom: 2 },
   price: { fontSize: 26, fontWeight: "900", color: colors.primary, letterSpacing: -0.6 },
   ratingChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: "#FEF3C7" },

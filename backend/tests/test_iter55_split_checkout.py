@@ -12,7 +12,7 @@ import os
 
 import requests
 
-BASE = os.environ.get("SC_BASE", "https://vendor-network-app-1.preview.emergentagent.com/api")
+BASE = os.environ.get("SC_BASE", "https://slangcart-tracking.preview.emergentagent.com/api")
 BUYER = ("testbuyer@test.com", "Test@1234")
 PIN = "517644"
 P1 = "9c6bb05d-eecc-4637-8489-466f1e4f0288"  # Vendor One Widget  ₹100

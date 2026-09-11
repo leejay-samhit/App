@@ -32,7 +32,7 @@ import requests
 
 BASE = os.environ.get("SC_BASE") or (
     (os.environ.get("EXPO_PUBLIC_BACKEND_URL") or "").rstrip("/") + "/api"
-) or "https://vendor-network-app-1.preview.emergentagent.com/api"
+) or "https://slangcart-tracking.preview.emergentagent.com/api"
 
 BUYER_EMAIL = "testbuyer@test.com"
 BUYER_PWD = "Test@1234"

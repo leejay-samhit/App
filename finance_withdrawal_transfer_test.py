@@ -10,7 +10,7 @@ import uuid
 import json
 import requests
 
-BASE = os.environ.get("BACKEND_URL") or "https://network-pay-1.preview.emergentagent.com"
+BASE = os.environ.get("BACKEND_URL") or "https://slangcart-tracking.preview.emergentagent.com"
 API = BASE.rstrip("/") + "/api"
 
 ADMIN_EMAIL = "admin@app.com"

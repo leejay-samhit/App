@@ -79,6 +79,7 @@ export default function AdminLayout() {
       <Tabs.Screen name="admins" options={{ href: null }} />
       <Tabs.Screen name="approvals" options={{ href: null }} />
       <Tabs.Screen name="backups" options={{ href: null }} />
+      <Tabs.Screen name="cashback" options={{ href: null }} />
       <Tabs.Screen name="backup-file" options={{ href: null }} />
       <Tabs.Screen name="reset-center" options={{ href: null }} />
       <Tabs.Screen name="products" options={{ href: null }} />
@@ -95,7 +96,6 @@ export default function AdminLayout() {
       <Tabs.Screen name="service-applications" options={{ href: null }} />
       <Tabs.Screen name="system-wallet" options={{ href: null }} />
       <Tabs.Screen name="vendors" options={{ href: null }} />
-      <Tabs.Screen name="users-tree" options={{ href: null }} />
       <Tabs.Screen name="service-management" options={{ href: null }} />
       <Tabs.Screen name="area-mapping" options={{ href: null }} />
       <Tabs.Screen name="shop-categories" options={{ href: null }} />

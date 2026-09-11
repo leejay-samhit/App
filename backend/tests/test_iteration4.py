@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://network-pay-1.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://slangcart-tracking.preview.emergentagent.com").rstrip("/")
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
 

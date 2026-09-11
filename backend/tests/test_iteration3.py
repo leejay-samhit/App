@@ -5,7 +5,7 @@ import pytest
 import requests
 from conftest import auth_headers
 
-BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://network-pay-1.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://slangcart-tracking.preview.emergentagent.com").rstrip("/")
 
 
 def _register(email_prefix="u", referral=None):

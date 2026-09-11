@@ -273,7 +273,7 @@ export default function ProfileScreen() {
             </View>
             <View style={{ flexDirection: "row", marginTop: 16, gap: 8 }}>
               <View style={{ backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }}>
-                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700", letterSpacing: 1 }}>REF CODE</Text>
+                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700", letterSpacing: 1 }}>INVITE CODE</Text>
                 <Text style={{ fontSize: 14, fontWeight: "800", color: "#fff", letterSpacing: 1 }}>{user?.referral_code}</Text>
               </View>
               {(user as any)?.is_vendor && (
@@ -342,8 +342,8 @@ export default function ProfileScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* ───── EARN MORE GROUP ───── */}
-          <Text style={styles.groupLabel}>EARN MORE</Text>
+          {/* ───── SELL ON SLANGCART GROUP ───── */}
+          <Text style={styles.groupLabel}>SELL ON SLANGCART</Text>
           <View style={styles.groupCard}>
             <TouchableOpacity
               onPress={() => {
@@ -409,7 +409,7 @@ export default function ProfileScreen() {
                   {(user as any)?.is_service_provider ? "TAP TO UPDATE OR VIEW BOOKINGS"
                     : (user as any)?.service_status === "pending" ? "APPLICATION UNDER REVIEW"
                     : (user as any)?.service_status === "rejected" ? "APPLY AGAIN"
-                    : "EARN — LIST YOUR SERVICE"}
+                    : "LIST YOUR SERVICE"}
                 </Text>
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
@@ -634,7 +634,7 @@ const styles = StyleSheet.create({
   code: { color: colors.primaryFg, fontSize: 26, fontWeight: "800", letterSpacing: 3, marginTop: 4 },
   kycCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 16, borderRadius: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginBottom: 28 },
   // ─── Phase 2B UX polish: grouped settings list ───
-  // Section labels above logical groups (ACCOUNT, EARN MORE).
+  // Section labels above logical groups (ACCOUNT, SELL ON SLANGCART).
   groupLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginTop: spacing.sectionGap, marginBottom: 10, paddingHorizontal: 4 },
   // Group container: white card holding several rows separated by hairlines.
   // Replaces the previous pattern where each row was its own card with
@@ -650,7 +650,7 @@ const styles = StyleSheet.create({
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginTop: spacing.sectionGap, marginBottom: 6 },
   // White card wrapping the entire payout-details form so it visually
   // belongs to the same group as the section label above (matches the
-  // groupCard pattern used by ACCOUNT / EARN MORE).
+  // groupCard pattern used by ACCOUNT / SELL ON SLANGCART).
   payoutCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16, padding: spacing.cardPad },
   helperText: { fontSize: 13, color: colors.textMuted, marginBottom: 16 },
   formGroup: { marginBottom: 14 },

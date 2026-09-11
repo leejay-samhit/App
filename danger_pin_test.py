@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-BASE = "https://network-pay-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
 

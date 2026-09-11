@@ -608,7 +608,7 @@ wipe_all_fix_2026_06_01:
         agent: "testing"
         comment: |
           ALL 27/27 CHECKS PASS on /app/backend_test.py against
-          https://vendor-network-app-1.preview.emergentagent.com/api.
+          https://slangcart-tracking.preview.emergentagent.com/api.
           Bug-fix verified end-to-end.
 
           STEP 1 — Admin login (support@networkrupay.com / Nlee@1115) → 200,
@@ -693,7 +693,7 @@ regression_2026_05_28_routes_refactor:
         agent: "testing"
         comment: |
           ALL 8/8 PASS on /app/backend_test.py against
-          https://vendor-network-app-1.preview.emergentagent.com/api.
+          https://slangcart-tracking.preview.emergentagent.com/api.
           Both extracted router modules behave identically to the
           pre-refactor server.py. No 404s, no 500s, no wiring bugs.
 
@@ -738,7 +738,7 @@ regression_2026_05_28_phase2_refactor:
         agent: "testing"
         comment: |
           ALL 10/10 PASS on /app/backend_test.py against
-          https://vendor-network-app-1.preview.emergentagent.com/api.
+          https://slangcart-tracking.preview.emergentagent.com/api.
           Both newly-extracted router modules behave identically to the
           pre-refactor server.py. No 404s, no 500s, no wiring bugs.
 
@@ -1046,7 +1046,7 @@ phase_1_session_c_pagination_2026_05_27:
         agent: "testing"
         comment: |
           Phase 1 Session C regression: 43/43 PASS. Runner /app/backend_test.py
-          against https://vendor-network-app-1.preview.emergentagent.com/api.
+          against https://slangcart-tracking.preview.emergentagent.com/api.
           Single admin login + single user login reused throughout to respect
           the 10/min rate limit (no 429 encountered).
 
@@ -1154,7 +1154,7 @@ placement_realignment_2026_05:
         agent: "testing"
         comment: |
           ALL 10/10 CHECKS PASS. Runner: /app/backend_test.py.
-          API: https://vendor-network-app-1.preview.emergentagent.com/api
+          API: https://slangcart-tracking.preview.emergentagent.com/api
 
           1. POST /auth/login admin → 200 (token captured).
           2. GET /admin/users → 200, 131 users returned.
@@ -1216,7 +1216,7 @@ l1_payout_funding_2026_02:
       - working: false
         agent: "testing"
         comment: |
-          Live test against https://vendor-network-app-1.preview.emergentagent.com/api.
+          Live test against https://slangcart-tracking.preview.emergentagent.com/api.
           GET /api/admin/system-wallet/breakdown:
             inflow.total = ₹15,331.00
             outflow.total = ₹2,832.00
@@ -1469,7 +1469,7 @@ agent_communication:
   - agent: "testing"
     message: |
       L1 PAYOUT FUNDING — SECOND PASS (re-verify after fixes).
-      Runner: /app/backend_test.py.  API: https://vendor-network-app-1.preview.emergentagent.com/api
+      Runner: /app/backend_test.py.  API: https://slangcart-tracking.preview.emergentagent.com/api
 
       FINAL VERDICT: **L1 minting bug FIXED & IDEMPOTENT: YES (with caveats)**
 
@@ -1538,7 +1538,7 @@ agent_communication:
   - agent: "testing"
     message: |
       L1 PAYOUT FUNDING TEST RUN — live end-to-end on
-      https://vendor-network-app-1.preview.emergentagent.com/api.
+      https://slangcart-tracking.preview.emergentagent.com/api.
       Script: /app/backend_test.py. Logs captured in /tmp/test_run.log.
 
       VERDICT: **L1 minting bug FIXED: NO** — 2 critical issues found:
@@ -1616,7 +1616,7 @@ phase_2b_refactor_2026_02:
         agent: "testing"
         comment: |
           Phase 2B refactor regression: 20/20 PASS. Runner /app/backend_test.py
-          against https://vendor-network-app-1.preview.emergentagent.com/api.
+          against https://slangcart-tracking.preview.emergentagent.com/api.
 
           A — TICKETS SMOKE (11/11 PASS):
             • POST /auth/login testuser@app.com -> 200, token grabbed (json key 'token').
@@ -1675,7 +1675,7 @@ agent_communication:
     message: |
       PHASE 2B REFACTOR (TICKETS + PINCODES) — RE-VERIFY RUN.
       Runner: /app/backend_test.py.
-      API: https://vendor-network-app-1.preview.emergentagent.com/api
+      API: https://slangcart-tracking.preview.emergentagent.com/api
 
       FINAL VERDICT: **Phase 2B refactor (tickets+pincodes) GREEN: YES**
       All 20/20 assertions PASS across 4 sections:
@@ -2555,7 +2555,7 @@ ai_image_generation_2026_05_13:
           agent: "testing"
           comment: |
             AI image generation regression: 12/12 PASS. Runner: /app/tests/ai_image_test.py.
-            Public EXPO_PUBLIC_BACKEND_URL = https://network-pay-1.preview.emergentagent.com/api.
+            Public EXPO_PUBLIC_BACKEND_URL = https://slangcart-tracking.preview.emergentagent.com/api.
 
             A. POST /api/products/ai-image (auth + validation + AI call)
               • A1 No auth → 401 "Not authenticated"                            ✅
@@ -2942,7 +2942,7 @@ agent_communication:
     - agent: "testing"
       message: |
         CRITICAL DEPLOYMENT FIX VERIFICATION — 8/8 PASS. Runner: /tmp/deploy_fix_test.py.
-        Public REACT_APP_BACKEND_URL (https://network-pay-1.preview.emergentagent.com/api).
+        Public REACT_APP_BACKEND_URL (https://slangcart-tracking.preview.emergentagent.com/api).
 
           1 ✅ GET /api/branding                              -> 200, app_name=NetworkPay
                 (confirms uvicorn bound to port 8001 quickly; nginx no longer 502s)
@@ -4211,7 +4211,7 @@ system_wallet_breakdown_regression_2026_05_22:
         comment: |
           RE-VERIFY after double-counting fix: 10/10 PASS.
           Runner: /app/breakdown_reverify.py against
-          https://vendor-network-app-1.preview.emergentagent.com/api.
+          https://slangcart-tracking.preview.emergentagent.com/api.
 
           ─ PAYLOAD SHAPE (PASS) ─
           All 30 required keys still present:
@@ -4249,7 +4249,7 @@ system_wallet_breakdown_regression_2026_05_22:
         comment: |
           Regression test of /api/admin/system-wallet/breakdown after the
           frontend system-wallet.tsx rebuild. Runner: /app/backend_test.py
-          against https://vendor-network-app-1.preview.emergentagent.com/api.
+          against https://slangcart-tracking.preview.emergentagent.com/api.
           Result: 18/19 PASS, 1 FAIL.
 
           ─ PAYLOAD SHAPE ─ ALL PASS
@@ -4461,7 +4461,7 @@ session_2026_05_23_misc_endpoints:
               yield 422; this masks the actual failure mode.
 
           Tests run via /app/backend_test.py against
-          https://vendor-network-app-1.preview.emergentagent.com/api .
+          https://slangcart-tracking.preview.emergentagent.com/api .
 
   - task: "Service Provider Profile + Reviews (B section)"
     implemented: true
@@ -4811,7 +4811,7 @@ upi_manual_payment_2026_02:
         agent: "testing"
         comment: |
           Manual UPI payment end-to-end: 20/21 PASS. Runner: /app/backend_test.py
-          against https://vendor-network-app-1.preview.emergentagent.com/api.
+          against https://slangcart-tracking.preview.emergentagent.com/api.
 
           A) BRANDING CONFIG (4/4 PASS)
             • A1 admin login → 200, token.
@@ -4909,7 +4909,7 @@ agent_communication:
     message: |
       MANUAL UPI PAYMENT — E2E TEST PASS (20/21).
       Runner: /app/backend_test.py.
-      API: https://vendor-network-app-1.preview.emergentagent.com/api
+      API: https://slangcart-tracking.preview.emergentagent.com/api
 
       Sections A (branding), B (user flow), C (approve), D (reject), F
       (cleanup) → ALL PASS. Section E (duplicate UTR guard) needs a
@@ -6479,7 +6479,7 @@ shop_visual_polish_and_app_size_2026_05_27:
         comment: |
           Phase 2B Iter 4 modular refactor regression — 50/50 PASS via
           /app/backend_test.py against
-          https://vendor-network-app-1.preview.emergentagent.com/api.
+          https://slangcart-tracking.preview.emergentagent.com/api.
 
           Validated endpoints (all moved out of server.py, behaviour unchanged):
 
@@ -6554,7 +6554,7 @@ agent_communication:
     message: |
       PHASE 2B ITER 4 MODULAR REFACTOR — backend validation COMPLETE.
       50/50 assertions PASS via /app/backend_test.py against
-      https://vendor-network-app-1.preview.emergentagent.com/api.
+      https://slangcart-tracking.preview.emergentagent.com/api.
 
       Five read endpoints were relocated from server.py into:
         • routes/wallet.py        — /transactions/me, /transactions/{id},
@@ -6652,7 +6652,7 @@ phase2b_modular_refactor_iter4_2026_05_27:
       Phase 2B Iter 4 regression test (2026-05-27 second pass) — 23/24 PASS.
 
       Test artefact: /app/backend_test.py
-      Base URL: https://vendor-network-app-1.preview.emergentagent.com/api
+      Base URL: https://slangcart-tracking.preview.emergentagent.com/api
       Credentials: admin@app.com / Admin@123 + testuser@app.com / Test@123 — both OK.
 
       RESULTS BY NUMBERED TARGET:
@@ -6819,7 +6819,7 @@ ledger_drift_offline_pre_credit_fix_2026_06:
           VERIFIED — Ledger-drift fix is working end-to-end. Test suite
           extended at /app/backend_test.py (sections 10.0a → 10.4, +18 new
           assertions). Full run: 43/44 PASS against
-          https://vendor-network-app-1.preview.emergentagent.com/api.
+          https://slangcart-tracking.preview.emergentagent.com/api.
           (The single fail `4b.invoice non-invoiceable -> 400` is a pre-
           existing data-dependent edge case unrelated to this fix: no
           non-invoiceable transaction exists in the live test dataset, so
@@ -7137,7 +7137,7 @@ ledger_drift_offline_pre_credit_fix_2026_06:
         ── 2026-05-27 Backend test run for Guest Tickets + Splash Clear + Auth Ticket Regression ──
 
         Harness: /app/backend_test.py (httpx + motor DB asserts)
-        Base:    https://vendor-network-app-1.preview.emergentagent.com/api
+        Base:    https://slangcart-tracking.preview.emergentagent.com/api
         Admin login: admin@app.com / Admin@123  → OK
         Test user:   testuser@app.com / Test@123 → 401 INVALID CREDENTIALS.
                      test_credentials.md is STALE — `testuser@app.com` does
@@ -7424,7 +7424,7 @@ agent_communication:
 
 
         ── BACKEND TEST RUN — Phase A+B+C: services + payment + AI feature pack ──
-        Vs https://vendor-network-app-1.preview.emergentagent.com/api
+        Vs https://slangcart-tracking.preview.emergentagent.com/api
         Total checks: 41 → 39 PASSED, 2 FAILED.
 
         FAILURES (2):
@@ -7524,7 +7524,7 @@ agent_communication:
     - agent: "testing"
       message: |
         ── BACKEND TEST RUN — June 2026 Phase D pending items ──────────────────
-        Vs https://vendor-network-app-1.preview.emergentagent.com/api
+        Vs https://slangcart-tracking.preview.emergentagent.com/api
         Script: /app/backend_test.py
         Result: 47 / 47 checks PASSED, 0 FAILED.
 
@@ -7571,7 +7571,7 @@ agent_communication:
     - agent: "testing"
       message: |
         ── BACKEND TEST RUN — Small additions follow-up (May 2026) ─────────────
-        Vs https://vendor-network-app-1.preview.emergentagent.com/api
+        Vs https://slangcart-tracking.preview.emergentagent.com/api
         Script: /app/tests/category_image_smoke.py
         Result: 34 / 34 checks PASSED, 0 FAILED.
 
@@ -7618,7 +7618,7 @@ backend:
           agent: "testing"
           comment: |
             ── BACKEND TEST RUN — Phase 2 small changes (2026-05-29) ──────────
-            Vs https://vendor-network-app-1.preview.emergentagent.com/api
+            Vs https://slangcart-tracking.preview.emergentagent.com/api
             Script: /app/backend_test.py
             Result: 15 / 15 checks PASSED, 0 FAILED.
 
@@ -7717,7 +7717,7 @@ backend:
         comment: |
           ── BACKEND TEST RUN — Commission engine 2026-05-29 (verified) ──
           /app/backend_test.py executed against
-          https://vendor-network-app-1.preview.emergentagent.com/api
+          https://slangcart-tracking.preview.emergentagent.com/api
           with admin support@networkrupay.com / Nlee@1115.
 
           Results: 13 PASS / 0 critical FAIL (1 minor non-existent regression
@@ -7764,7 +7764,7 @@ backend:
                    • B received referral_payout txn (L2) for ≈₹9.84 net.
                    • Admin ledger gained 'l2_funding' txn: amount=-12.00,
                      source_bucket='fee_residual',
-                     related_signup_id=2e63412f-bef7-4073-a3ad-7a2e102e8006
+                     related_signup_id=slangcart-tracking
                    • system-wallet Δfee_residual = -₹304.05, Δtotal = -₹337.84
                      (payout to user + GST + dust deductions — money leaves
                       admin custody and lands in user wallet/govt buckets).

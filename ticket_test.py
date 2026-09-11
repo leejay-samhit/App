@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Support / Ticket System — backend tests.
-Tests against https://network-pay-1.preview.emergentagent.com/api
+Tests against https://slangcart-tracking.preview.emergentagent.com/api
 """
 import os, sys, json, time, uuid, random, string, re
 import requests
 
-BASE = "https://network-pay-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASS = "Admin@123"

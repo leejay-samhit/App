@@ -3,7 +3,7 @@ import os
 import sys
 import requests
 
-BASE = "https://network-pay-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN = {"email": "admin@app.com", "password": "Admin@123"}
 USER = {"email": "testuser@app.com", "password": "Test@123"}
 

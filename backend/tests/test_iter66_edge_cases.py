@@ -27,7 +27,7 @@ from core.security import hash_password  # noqa: E402
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
-BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://vendor-network-app-1.preview.emergentagent.com").rstrip("/") + "/api"
+BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://slangcart-tracking.preview.emergentagent.com").rstrip("/") + "/api"
 UA = {"User-Agent": "curl/8.5.0"}
 PIN = "135790"
 

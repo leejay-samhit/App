@@ -31,10 +31,9 @@ export default function TabsLayout() {
   // keeping the rest in their configured order around it. This works even if
   // the admin re-ordered tabs via branding.
   // Hard-hide certain tabs from the bottom bar regardless of branding (per UX requirement).
-  // The screen route still exists so other in-app navigation (e.g. Withdraw button on
-  // Dashboard pushes to /(tabs)/wallet, Next L1 Payout card pushes to /(tabs)/network)
-  // keeps working.
-  const HARD_HIDDEN: Set<string> = new Set(["wallet", "network", "shop-category/[name]"]);
+  // The screen route still exists so other in-app navigation (e.g. the
+  // Wallet card on Dashboard pushes to /(tabs)/wallet) keeps working.
+  const HARD_HIDDEN: Set<string> = new Set(["wallet", "shop-category/[name]"]);
 
 
   // ── Jun 2026 — WhatsApp-style swipe between the bottom tabs ───────────
@@ -69,7 +68,16 @@ export default function TabsLayout() {
   // NOTE: `shop-category/[name]` is a child route registered as a hidden tab
   // so that the bottom tab bar STAYS VISIBLE when a user drills into a
   // shop category from the Shop tab (per user request — keep the side layout).
-  const allKeys = Array.from(new Set([...HARDCODED_ORDER, ...tabs.map((t) => t.key), "wallet", "network", "shop-category/[name]"]));
+  // Only routes that actually exist as files may be registered — a stale
+  // branding key (e.g. the retired MLM "network" tab still stored in the DB)
+  // would otherwise register a phantom screen and warn on every render.
+  const EXISTING_ROUTES = new Set([...HARDCODED_ORDER, "wallet", "shop-category/[name]"]);
+  const allKeys = Array.from(new Set([
+    ...HARDCODED_ORDER,
+    ...tabs.map((t) => t.key).filter((k) => EXISTING_ROUTES.has(k)),
+    "wallet",
+    "shop-category/[name]",
+  ]));
   const order = allKeys;
   const byKey = Object.fromEntries(tabs.map((t) => [t.key, t]));
 
@@ -108,8 +116,8 @@ export default function TabsLayout() {
       >
       {order.map((key) => {
         const t = byKey[key];
-        const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "network" ? "git-branch" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : key === "services" ? "briefcase" : key === "chat" ? "message-circle" : "user");
-        const label = t?.label || (key === "services" ? "Services" : key === "shop" ? "Shop" : key === "dashboard" ? "Dashboard" : key === "profile" ? "Profile" : key === "chat" ? "Chat" : key === "network" ? "Network" : key === "wallet" ? "Wallet" : key);
+        const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : key === "services" ? "briefcase" : key === "chat" ? "message-circle" : "user");
+        const label = t?.label || (key === "services" ? "Services" : key === "shop" ? "Shop" : key === "dashboard" ? "Dashboard" : key === "profile" ? "Profile" : key === "chat" ? "Chat" : key === "wallet" ? "Wallet" : key);
         const isHidden = HARD_HIDDEN.has(key) || t?.visible === false;
         return (
           <Tabs.Screen

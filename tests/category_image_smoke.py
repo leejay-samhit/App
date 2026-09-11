@@ -8,7 +8,7 @@ Smoke test for the small additions to backend:
 import requests
 import sys
 
-BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN = ("admin@app.com", "Admin@123")
 USER = ("testuser@app.com", "Test@123")
 

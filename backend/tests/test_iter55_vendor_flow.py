@@ -11,7 +11,7 @@ import sys
 
 import requests
 
-BASE = os.environ.get("SC_BASE", "https://vendor-network-app-1.preview.emergentagent.com/api")
+BASE = os.environ.get("SC_BASE", "https://slangcart-tracking.preview.emergentagent.com/api")
 BUYER = ("testbuyer@test.com", "Test@1234")
 VENDOR = ("testvendor@test.com", "Test@1234")
 PIN = "517644"

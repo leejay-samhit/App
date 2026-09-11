@@ -29,7 +29,7 @@ try:
 except FileNotFoundError:
     pass
 if not BASE:
-    BASE = "https://vendor-network-app-1.preview.emergentagent.com"
+    BASE = "https://slangcart-tracking.preview.emergentagent.com"
 API = f"{BASE.rstrip('/')}/api"
 
 ADMIN_EMAIL = "admin@app.com"

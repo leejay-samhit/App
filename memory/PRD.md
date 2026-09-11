@@ -1340,3 +1340,67 @@ User picked ALL the offered options, so all of it shipped.
   (`chat-v2` — Android freezes a channel's sound after creation) and add
   `sound: "<file>.wav"` to the chat `send_push` data for iOS.
 - Test: `backend/tests/test_notif_prefs_tracking.py`.
+
+---
+
+## Jun 2026 — Cashback lifecycle verification + push tray diagnostics (iteration 78)
+
+### Cashback / delivery lifecycle — VERIFIED
+`backend/tests/verify_cashback_flow.py` → **36/36 pass** against the live API:
+delivery flat charge under the free threshold, free delivery at/above it,
+`cashback_status=awaiting_delivery` with NO credit before delivery, +₹ on the
+`delivered` transition, duplicate `delivered` cannot double-credit (one
+`cashback_credit` row), vendor-wallet-short → PENDING → `POST
+/admin/cashback/{order}/fund`, platform funding → `vendor_outstanding` →
+`…/outstanding/{vendor}/recover` (customer never credited twice), clawback on
+return with refund netting + `delivery_charge_reversal`, wallet+COD parity
+(`wallet_paid + cod_due == grand_total`), multi-vendor delivery cap with
+allocations summing to the cap, and zero new referral/cascade transactions.
+
+### "Chat & order notifications don't reach the phone status bar"
+Root cause is environmental, not a code defect: the whole push path matches the
+Emergent managed-push playbook (native `getDevicePushTokenAsync`, backend-only
+relay, module-scope handler + `default`/`chat` channels, tap + cold-start
+handlers, `google-services.json` present for `com.slangcart.app`). Tray
+delivery needs `EMERGENT_PUSH_KEY`, which is `placeholder` in preview and is
+injected only by the deploy pipeline — and Expo Go / web can never receive a
+native push. In-app bell rows keep working because they're pure DB rows.
+
+Made that diagnosable instead of invisible:
+- `POST /api/register-push` now stamps `users.push_registration
+  {status, platform, at}` (**never** the device token) for every outcome, so
+  "this phone never registered" is distinguishable from "relay key missing".
+- `send_push()` returns a status string (`sent` / `key_missing` /
+  `opted_out` / `relay_unreachable` / `upstream_4xx`) instead of `None`.
+  All 6 call sites ignore the return value, so nothing changed for them.
+- `POST /api/push/test` (super admin) now answers
+  `{ok, relay, key_configured, device_registration, hint}` with a plain-English
+  hint naming the actual blocker. Admin → Broadcast's "Send test to my phone"
+  prints those lines.
+- `src/push.ts` caches the registration only when the relay answers
+  `registered`; a `deferred` answer is retried on the next app open (it used to
+  be cached, leaving the install unreachable for the whole session).
+
+### Also fixed
+`(tabs)/_layout.tsx` registered a phantom `network` tab from the retired MLM
+branding entry (`No route named "network" exists in nested children` on every
+render). Registration is now filtered to routes that exist, and the `network`
+tab is gone from `DEFAULT_BRANDING.tabs`.
+
+### Verified
+`backend/tests/test_iter78_push_and_cutover.py` 18/18 (report
+`test_reports/pytest/iter78_push_cutover.xml`): push diagnostics + RBAC,
+register-push stamping, chat POST still 200 with the relay 401, MLM endpoints
+dead (`/wallet/transfer` 404, buyer `/withdrawals` 403, `/admin/users/tree`
+404), short-id backfill idempotent, and `GET /api/admin/wallet/export/groupwise`
+returning a real openpyxl workbook (buyer 403). Browser: buyer wallet shows the
+cashback chips with no transfer/withdraw, tab bar renders 5 tabs with the route
+warning gone.
+
+### Still open / needs the owner
+- `chat_ping.wav` for the custom chat notification sound (owner will send later).
+- Live Razorpay keys — payments stay in Mock mode until then.
+- Real tray-push confirmation needs a published build (Publish → Deploy →
+  generate Android/iOS build).
+- Note: `GET /api/admin/finance/export/transactions` is CSV; the group-wise
+  **xlsx** export is `GET /api/admin/wallet/export/groupwise`.

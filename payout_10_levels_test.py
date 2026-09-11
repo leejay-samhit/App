@@ -10,7 +10,7 @@ import uuid
 import requests
 from typing import Dict, Any, List, Optional
 
-BASE = "https://network-pay-1.preview.emergentagent.com"
+BASE = "https://slangcart-tracking.preview.emergentagent.com"
 API = BASE + "/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"

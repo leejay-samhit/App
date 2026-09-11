@@ -15,7 +15,7 @@ import requests
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
     # Fall back to the frontend .env value expected by the environment
-    BASE_URL = "https://vendor-network-app-1.preview.emergentagent.com"
+    BASE_URL = "https://slangcart-tracking.preview.emergentagent.com"
 
 BUYER_EMAIL = "testbuyer@test.com"
 BUYER_PASSWORD = "Test@1234"

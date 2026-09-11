@@ -1,7 +1,7 @@
 """E2E: chat audit — deleted message recovery + txt export (super admin only)."""
 import requests
 
-B = "https://vendor-network-app-1.preview.emergentagent.com/api"
+B = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN = ("support@slangcart.com", "3)Ywxtic")
 A = ("testbuyer@test.com", "Test@1234")
 BOB = ("testbuyer2@test.com", "Test@1234")

@@ -16,6 +16,7 @@ import { WebView } from "react-native-webview";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../src/cashback";
 import { notify } from "../src/notify";
 import OutOfZoneModal from "../src/OutOfZoneModal";
 import { useDeliveryLocation } from "../src/use-delivery-location";
@@ -26,6 +27,7 @@ type CartItem = { id: string; product_id: string; qty: number; product: { name: 
 const ADDRESS_KEY = "@checkout-address-v1";
 
 export default function CheckoutScreen() {
+  const moneyCfg = useShopMoneyConfig();
   const router = useRouter();
   const { user } = useAuth();
   // Dec 2026 — shared delivery-location hook so coords captured on the
@@ -194,7 +196,7 @@ export default function CheckoutScreen() {
     }
   }, [deliveryLoc.coords, gpsLat, gpsLng]);
 
-  const total = items.reduce((s, i) => s + ((i.line_total) || (i.product?.price || 0) * (i.qty || 1)), 0);
+  const goodsTotal = items.reduce((s, i) => s + ((i.line_total) || (i.product?.price || 0) * (i.qty || 1)), 0);
   // Jun 2026 — one order per SELLER. Show the split before paying so the
   // buyer knows exactly how many orders/deliveries to expect.
   const sellerGroups: { key: string; name: string; lines: CartItem[]; subTotal: number }[] = [];
@@ -209,6 +211,30 @@ export default function CheckoutScreen() {
     g.subTotal += it.line_total || (it.product?.price || 0) * (it.qty || 1);
   });
   const multiSeller = sellerGroups.length > 1;
+
+  // ── Delivery charges (Jun-2026) ──────────────────────────────────────
+  // Mirrors core/delivery_charges.py: priced per seller from that seller's
+  // own subtotal, then capped for the whole cart. The server recomputes
+  // and is authoritative — this is so the buyer sees the same figure.
+  const deliveryRows = sellerGroups.map((g) => {
+    const allFree = g.lines.every((l) => !!l.product?.free_delivery);
+    if (!moneyCfg.delivery_charge_enabled || allFree) return { key: g.key, charge: 0, free: true };
+    if (moneyCfg.delivery_free_threshold > 0 && g.subTotal >= moneyCfg.delivery_free_threshold - 0.009) {
+      return { key: g.key, charge: 0, free: true };
+    }
+    return { key: g.key, charge: moneyCfg.delivery_charge_flat, free: moneyCfg.delivery_charge_flat <= 0 };
+  });
+  const deliveryRaw = Math.round(deliveryRows.reduce((a, r) => a + r.charge, 0) * 100) / 100;
+  const deliveryCapped = moneyCfg.delivery_cart_max > 0 && deliveryRaw > moneyCfg.delivery_cart_max;
+  const deliveryTotal = deliveryCapped ? moneyCfg.delivery_cart_max : deliveryRaw;
+  // Cashback promised on this basket — paid after successful delivery.
+  const cashbackTotal = Math.round(items.reduce((a, i) => a + cashbackAmount(
+    i.line_total || (i.product?.price || 0) * (i.qty || 1),
+    effectiveCashbackPct(i.product || {}, moneyCfg),
+    moneyCfg.max_cashback_pct,
+  ), 0) * 100) / 100;
+  // Everything the buyer owes: goods + delivery.
+  const total = Math.round((goodsTotal + deliveryTotal) * 100) / 100;
 
   const canAffordWallet = walletBalance >= total;
   // Jun 2026 — Wallet+COD combo maths. `maxWalletUsable` is the most the
@@ -589,10 +615,30 @@ export default function CheckoutScreen() {
               })}
             </View>
           ))}
+          <View style={styles.breakdownRow}>
+            <Text style={styles.breakdownLabel}>Items subtotal</Text>
+            <Text style={styles.breakdownValue}>{formatINR(goodsTotal)}</Text>
+          </View>
+          <View style={styles.breakdownRow} testID="checkout-delivery-row">
+            <Text style={styles.breakdownLabel}>
+              Delivery{deliveryCapped ? ` (capped at ${formatINR(moneyCfg.delivery_cart_max)})` : ""}
+            </Text>
+            <Text style={[styles.breakdownValue, deliveryTotal <= 0 && { color: colors.success }]}>
+              {deliveryTotal <= 0 ? "FREE" : formatINR(deliveryTotal)}
+            </Text>
+          </View>
           <View style={styles.totalRow}>
             <Text style={styles.totalLabel}>Total</Text>
             <Text style={styles.totalAmount}>{formatINR(total)}</Text>
           </View>
+          {cashbackTotal > 0 ? (
+            <View style={styles.cashbackBanner} testID="checkout-cashback">
+              <Feather name="gift" size={14} color="#15803D" />
+              <Text style={styles.cashbackBannerText}>
+                {formatINR(cashbackTotal)} cashback to your wallet after successful delivery
+              </Text>
+            </View>
+          ) : null}
 
           {/* Shipping address */}
           <Text style={styles.sectionLabel}>SHIPPING ADDRESS</Text>
@@ -967,6 +1013,11 @@ const styles = StyleSheet.create({
   gpsBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.3 },
   gpsCoordChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: (colors.success || "#16A34A") + "1A", paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6, alignSelf: "flex-start", marginTop: 4, marginBottom: 4 },
   gpsCoordText: { fontSize: 10, color: colors.success || "#16A34A", fontWeight: "800", letterSpacing: 0.3 },
+  breakdownRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, paddingVertical: 7 },
+  breakdownLabel: { fontSize: 13, color: colors.textMuted, fontWeight: "600" },
+  breakdownValue: { fontSize: 13, color: colors.textMain, fontWeight: "800" },
+  cashbackBanner: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, padding: 10, backgroundColor: "#F0FDF4", borderWidth: 1, borderColor: "#BBF7D0", borderRadius: 12 },
+  cashbackBannerText: { flex: 1, fontSize: 12, fontWeight: "700", color: "#15803D" },
   totalRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, backgroundColor: colors.brand100, borderRadius: 12, marginTop: 4 },
   totalLabel: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
   totalAmount: { fontSize: 19, fontWeight: "900", color: colors.primary, letterSpacing: -0.4 },

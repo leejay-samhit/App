@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.db import db
 from core.security import get_current_user, require_clean_device
-from core.utils import now_utc, get_settings
+from core.utils import now_utc
 from core.notifications import create_notification as _create_notification
 from core.config import ADMIN_EMAIL
 from core.rate_limit import limiter as _rate_limiter
@@ -44,36 +44,23 @@ async def request_withdrawal(
                 f"Please enter an amount of ₹{int(MIN_WITHDRAWAL_AMOUNT)} or more."
             ),
         )
-    if not user.get("registration_paid"):
-        raise HTTPException(status_code=400, detail="Complete registration payment first")
-    if user.get("approval_status", "approved") != "approved":
+    # ── SELLER SETTLEMENT ONLY (MLM cutover, Jun-2026) ──────────────────
+    # A Slangcart wallet is a marketplace wallet: customers SPEND it inside
+    # the app, they do not cash it out. Only approved vendors (and admins)
+    # may withdraw, because that is their genuine sales settlement.
+    is_seller = bool(user.get("is_vendor") and user.get("is_vendor_approved"))
+    is_admin = user.get("role") == "admin" or (user.get("email") or "").lower() == ADMIN_EMAIL.lower()
+    if not (is_seller or is_admin):
         raise HTTPException(
             status_code=403,
-            detail="Account is awaiting admin approval. Withdrawals are disabled until approved.",
+            detail=(
+                "Your Slangcart wallet balance is used for purchases, cashback "
+                "and refunds inside the app. Bank withdrawals are available to "
+                "approved seller accounts for their sales settlement."
+            ),
         )
     if user.get("wallet_frozen"):
         raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
-
-    # ── L1 completion gate (2026-05-31) ─────────────────────────────────
-    # Users who only have spillover / auto-aligned downline (i.e. NO real
-    # direct referrals using their own code) CANNOT withdraw. They must
-    # bring in `directs_required` true directs first to unlock L1, which
-    # also unlocks withdrawals.
-    settings = await get_settings()
-    dr_required = int(settings.get("directs_required") or 5)
-    if user.get("email", "").lower() != ADMIN_EMAIL.lower() and user.get("role") != "admin":
-        true_directs = int(user.get("true_direct_count") or 0)
-        if true_directs < dr_required:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Unable to withdraw due to direct {dr_required} referral "
-                    f"not joined. Please complete Level 1 then raise withdrawal "
-                    f"request. (You have {true_directs}/{dr_required} direct "
-                    f"referrals — bring in {dr_required - true_directs} more "
-                    f"using your own referral code.)"
-                ),
-            )
 
     if user.get("wallet_balance", 0) < payload.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")

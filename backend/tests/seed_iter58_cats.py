@@ -8,7 +8,7 @@ import os
 import sys
 import requests
 
-BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://vendor-network-app-1.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://slangcart-tracking.preview.emergentagent.com").rstrip("/")
 ADMIN_EMAIL = "support@slangcart.com"
 ADMIN_PW = "3)Ywxtic"
 

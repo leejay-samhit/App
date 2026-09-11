@@ -20,6 +20,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError, resolveImageUrl } from "./api";
 import { colors, radii } from "./theme";
+import { clampCashbackPct, cashbackAmount, MAX_CASHBACK_PCT } from "./cashback";
 import {
   VariantEditor, VariantState, emptyVariantState, variantPayload, variantStateFrom,
 } from "./variant-editor";
@@ -203,6 +204,9 @@ export function RichProductEditor({
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [stock, setStock] = useState("100");
+  // Purchase cashback the vendor gives on this product (0–10% hard cap).
+  const [cashbackPct, setCashbackPct] = useState("");
+  const [freeDelivery, setFreeDelivery] = useState(false);
   // Jun 2026 — size / RAM-ROM options (see src/variant-editor.tsx)
   const [variantState, setVariantState] = useState<VariantState>(emptyVariantState);
   const [description, setDescription] = useState("");
@@ -538,6 +542,8 @@ export function RichProductEditor({
     setName(existing?.name || "");
     setPrice(existing?.price ? String(existing.price) : "");
     setStock(existing?.stock != null ? String(existing.stock) : "100");
+    setCashbackPct(existing?.cashback_pct != null ? String(existing.cashback_pct) : "");
+    setFreeDelivery(!!existing?.free_delivery);
     setVariantState(variantStateFrom(existing));
     setDescription(existing?.description || "");
     setCategory(existing?.category || "");
@@ -1306,6 +1312,9 @@ export function RichProductEditor({
         image_url: imageUrl,
         description: description.trim(),
         stock: isNaN(stockN) ? 0 : stockN,
+        // 0–10% only. The server clamps again and rejects anything higher.
+        cashback_pct: clampCashbackPct(cashbackPct),
+        free_delivery: freeDelivery,
         // Sizes / RAM-ROM. The server recomputes `stock` as the sum of the
         // options and `price` as the cheapest buyable one.
         ...variantPayload(variantState),
@@ -1549,6 +1558,49 @@ export function RichProductEditor({
                 </Text>
               ) : null}
 
+              {/* ── Purchase cashback (Jun-2026) ─────────────────────────
+                  Shown to the customer under the price. Credited to their
+                  wallet from YOUR wallet after a successful delivery. */}
+              <Text style={modalStyles.fieldLabel}>Cashback (%)</Text>
+              <TextInput
+                value={cashbackPct}
+                onChangeText={(t) => setCashbackPct(t)}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor={colors.textMuted}
+                style={modalStyles.input}
+                testID="product-cashback-pct"
+              />
+              <Text style={sectionStyles.helpText}>
+                {clampCashbackPct(cashbackPct) > 0
+                  ? `Customer sees "Cashback ${clampCashbackPct(cashbackPct)}% \u00b7 \u20b9${cashbackAmount(Number(price) || 0, cashbackPct).toFixed(2)}" and gets it in their wallet after successful delivery.`
+                  : `0\u201310% only. Leave blank to use the platform default. Funded from your wallet after successful delivery.`}
+              </Text>
+              {Number(cashbackPct) > MAX_CASHBACK_PCT ? (
+                <Text style={[sectionStyles.helpText, { color: "#B45309", fontWeight: "700" }]}>
+                  Maximum cashback is {MAX_CASHBACK_PCT}% \u2014 it will be saved as {MAX_CASHBACK_PCT}%.
+                </Text>
+              ) : null}
+
+              <TouchableOpacity
+                onPress={() => setFreeDelivery((v) => !v)}
+                style={sectionStyles.chipRow}
+                testID="product-free-delivery"
+              >
+                <View style={[modalStyles.input, {
+                  flexDirection: "row", alignItems: "center", gap: 8, flex: 1,
+                }]}>
+                  <Feather
+                    name={freeDelivery ? "check-square" : "square"}
+                    size={16}
+                    color={freeDelivery ? colors.primary : colors.textMuted}
+                  />
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }}>
+                    Free delivery on this product
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
               {/* Sizes / RAM-ROM options — sits between Price/Stock and
                   Category exactly as the owner asked. */}
               <VariantEditor
@@ -1708,7 +1760,7 @@ export function RichProductEditor({
                       <Image source={{ uri: aiReference }} style={sectionStyles.aiRefThumb} resizeMode="cover" />
                       <View style={{ flex: 1 }}>
                         <Text style={sectionStyles.aiRefLabel}>AI Reference</Text>
-                        <Text style={sectionStyles.aiRefSub}>Used only as a guide — won't appear in the product gallery.</Text>
+                        <Text style={sectionStyles.aiRefSub}>Used only as a guide — will not appear in the product gallery.</Text>
                       </View>
                       <TouchableOpacity onPress={onChangeReference} style={sectionStyles.aiRefBtn} testID="product-ai-ref-change">
                         <Feather name="refresh-cw" size={14} color={colors.primary} />

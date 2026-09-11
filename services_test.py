@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-BASE_URL = "https://network-pay-1.preview.emergentagent.com/api"
+BASE_URL = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
 RAZORPAY_KEY_SECRET = "QrEEeWzxU5xJdRh1HrXeDUIy"

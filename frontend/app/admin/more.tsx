@@ -27,6 +27,7 @@ const ITEMS = [
   { icon: "users", label: "All vendors", route: "/admin/vendors" },
   { icon: "edit-3", label: "Branding & theme", route: "/admin/branding" },
   { icon: "hard-drive", label: "Data backups", route: "/admin/backups" },
+  { icon: "gift", label: "Cashback & Excel reports", route: "/admin/cashback" },
   { icon: "map", label: "Product roadmap", route: "/admin/roadmap" },
   { icon: "user-check", label: "KYC review queue", route: "/admin/kyc" },
   { icon: "package", label: "Orders management", route: "/admin/orders" },

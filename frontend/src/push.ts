@@ -44,12 +44,17 @@ export async function registerForPush(userId: string): Promise<void> {
     const device_token = (tokenResp && (tokenResp.data as string)) || "";
     if (!device_token) return;
 
-    await api.post("/register-push", {
+    const { data } = await api.post<{ status?: string; reason?: string }>("/register-push", {
       user_id: userId,
       platform: Platform.OS,
       device_token,
     });
-    lastRegisteredUserId = userId;
+    // Only remember it when the relay actually took the token. A "deferred"
+    // answer (relay key not injected yet, upstream hiccup) must be retried
+    // on the next app open, otherwise the phone stays unreachable for the
+    // whole install.
+    if (data?.status === "registered") lastRegisteredUserId = userId;
+    else if (__DEV__) console.warn("[push] registration deferred:", data?.reason);
   } catch (e) {
     // Best-effort. Don't surface to the user — push is non-critical for
     // sign-in. Backend already returns 201/deferred semantics.

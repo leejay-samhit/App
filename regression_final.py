@@ -3,7 +3,7 @@
 import os, sys, json
 import requests
 
-BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://network-pay-1.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://slangcart-tracking.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 
 PASS, FAIL = [], []

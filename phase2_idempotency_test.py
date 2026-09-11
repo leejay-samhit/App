@@ -24,7 +24,7 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import httpx
 
-BASE = "https://network-pay-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
 RAZORPAY_KEY_SECRET = "QrEEeWzxU5xJdRh1HrXeDUIy"

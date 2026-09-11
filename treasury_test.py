@@ -10,7 +10,7 @@ import uuid
 import json
 import requests
 
-BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
 AARAV_EMAIL = "aarav@demo.app"

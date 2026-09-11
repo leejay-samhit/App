@@ -7,7 +7,7 @@ import sys
 import json
 import requests
 
-BASE_URL = "https://network-pay-1.preview.emergentagent.com/api"
+BASE_URL = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
 

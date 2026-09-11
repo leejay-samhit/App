@@ -74,7 +74,7 @@ export default function Register() {
             style={styles.gradHero}
           >
             <View style={styles.gradGlow} pointerEvents="none" />
-            <Text style={styles.gradOverline}>JOIN THE NETWORK</Text>
+            <Text style={styles.gradOverline}>CREATE YOUR ACCOUNT</Text>
             <Text style={styles.gradH1}>Create your{"\n"}account</Text>
             <Text style={styles.gradSub}>
               Refer 4 friends to unlock recurring rewards.
@@ -98,7 +98,7 @@ export default function Register() {
             <TextInput testID="register-password-input" value={password} onChangeText={setPassword} secureTextEntry placeholder="Min 6 characters" placeholderTextColor={colors.textMuted} style={styles.input} />
           </View>
           <View style={styles.formGroup}>
-            <Text style={styles.label}>Referral code (optional)</Text>
+            <Text style={styles.label}>Invite code (optional)</Text>
             <TextInput testID="register-referral-input" value={referral} onChangeText={(t) => setReferral(t.toUpperCase())} autoCapitalize="characters" placeholder="e.g. ABC123" placeholderTextColor={colors.textMuted} style={styles.input} />
           </View>
 

@@ -13,7 +13,7 @@ import uuid
 import json
 import requests
 
-BACKEND_URL = "https://network-pay-1.preview.emergentagent.com"
+BACKEND_URL = "https://slangcart-tracking.preview.emergentagent.com"
 API = f"{BACKEND_URL}/api"
 
 ADMIN_EMAIL = "admin@app.com"

@@ -118,7 +118,7 @@ user_problem_statement: |
           agent: "testing"
           comment: |
             GST split + admin transactions enrichment — ALL 4 scenarios PASSED via
-            /app/backend_test.py against https://network-pay-1.preview.emergentagent.com.
+            /app/backend_test.py against https://slangcart-tracking.preview.emergentagent.com.
 
             SCENARIO A — GST split math + dual transactions (PASS) ✅
               • Direct call to backend.server._credit_payout() (clean, no Razorpay needed).
@@ -248,7 +248,7 @@ user_problem_statement: |
           comment: |
             Razorpay verify UTR-required fix — testing COMPLETE.
             ALL scenarios PASSED via /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Gateway state at test time: source=env, key_id=rzp_test_SjgtHA4CxiFyTK,
             is_mock=False, is_test_mode=True (env-fallback creds active; no DB
@@ -380,7 +380,7 @@ backend:
           comment: |
             Phase 1 refactor smoke test — testing COMPLETE.
             ALL 10/10 checks PASSED via /app/refactor_smoke_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Setup verified:
               • /app/backend/models.py exists, 313 lines, 47 Pydantic classes.
@@ -435,7 +435,7 @@ backend:
           comment: |
             Registration-fee duplicate-entry fix — testing COMPLETE.
             ALL 14/14 checks PASSED via /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             SCENARIO C — Code review (PASS) ✅
               • backend/server.py L1008-1060 /payment/verify: NEW update-first
@@ -537,7 +537,7 @@ backend:
           comment: |
             Phase 3 — GST Invoice endpoints — testing COMPLETE.
             ALL 52/52 checks PASSED via /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             STAGE A — Auth & Permissions (9/9) ✅
               • Anonymous → 401 (HTML & PDF).
@@ -639,7 +639,7 @@ backend:
             Phase 2 — Transaction Detail + Idempotency safety net testing
             COMPLETE. ALL 50/50 checks PASSED via
             /app/phase2_idempotency_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             SETUP:
               • admin@app.com / Admin@123 → super_admin.
@@ -795,7 +795,7 @@ backend:
           comment: |
             Phase 1 System Wallet rework — end-to-end testing COMPLETE.
             ALL 78/78 checks PASSED via /app/system_wallet_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             SETUP:
               • admin@app.com / Admin@123 → super_admin token.
@@ -1110,7 +1110,7 @@ backend:
           comment: |
             Services Marketplace — end-to-end testing COMPLETE.
             ALL 66/66 checks PASSED via /app/services_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             SETUP ✅
               • admin@app.com / Admin@123 login → super_admin token.
@@ -1344,7 +1344,7 @@ backend:
           comment: |
             EARN spillover (forced-matrix BFS) — end-to-end testing COMPLETE.
             ALL 35/35 checks PASSED via /app/earn_spillover_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             PRECONDITION snapshot:
               • directs_required=5, payout_l1=300, payout_l2=12,
@@ -1587,7 +1587,7 @@ backend:
           comment: |
             Default-sponsor + EARN code feature — end-to-end testing COMPLETE.
             ALL 46/46 checks PASSED via /app/admin_default_sponsor_test.py
-            against https://network-pay-1.preview.emergentagent.com.
+            against https://slangcart-tracking.preview.emergentagent.com.
 
             Boot logs confirm migration: "Admin referral_code migrated from
             I1YDTL → EARN" (logged once on backend start). Live settings:
@@ -1788,7 +1788,7 @@ backend:
           comment: |
             RE-TEST after SettingsUpdate fix — ALL 48/48 checks PASSED via
             /app/auto_approve_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Fix verified at backend/server.py line 2218:
               auto_approve_on_payment: Optional[bool] = None
@@ -1826,7 +1826,7 @@ backend:
           comment: |
             Auto-approval pipeline end-to-end testing via
             /app/auto_approve_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
             40/48 checks PASS, 8 FAIL — ALL 8 failures trace back to ONE root-
             cause bug in the SettingsUpdate Pydantic model that blocks the
             "toggle auto-approval off" requirement (Scenario E).
@@ -2120,7 +2120,7 @@ backend:
           comment: |
             RE-TEST after route-ordering fix — ALL 85/85 checks PASSED via
             /app/withdrawal_settlement_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Route ordering verified in backend/server.py:
               • line 1426  POST /admin/withdrawals/batch/complete   ← static, FIRST ✅
@@ -2172,7 +2172,7 @@ backend:
           comment: |
             Withdrawal Settlement Enhancements — end-to-end testing via
             /app/withdrawal_settlement_test.py against
-            https://network-pay-1.preview.emergentagent.com. 72/79 PASSED, 7 FAILED.
+            https://slangcart-tracking.preview.emergentagent.com. 72/79 PASSED, 7 FAILED.
             4 of the 5 new/modified endpoints work correctly; the batch endpoint
             is completely unreachable due to a ROUTE ORDERING BUG in server.py.
 
@@ -2480,7 +2480,7 @@ backend:
           comment: |
             Vendor Panel backend — end-to-end testing COMPLETE. ALL 72/72 checks
             PASSED via /app/vendor_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Detailed results (matches review-request scenarios 1–8):
 
@@ -2722,7 +2722,7 @@ backend:
           comment: |
             Support/Ticket backend — end-to-end testing COMPLETE. ALL 74/74 checks
             PASSED via /app/ticket_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Detailed scenario results (matches review-request 1–15):
 
@@ -2982,7 +2982,7 @@ backend:
           agent: "testing"
           comment: |
             ALL 42/42 checks PASSED via /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com. Live Razorpay
+            https://slangcart-tracking.preview.emergentagent.com. Live Razorpay
             test-mode integration is fully functional end-to-end.
 
             Detailed scenario results (matches review-request A–F):
@@ -3130,7 +3130,7 @@ backend:
           comment: |
             Backend testing COMPLETE. 43/44 functional checks PASSED via
             /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com. The single "failure"
+            https://slangcart-tracking.preview.emergentagent.com. The single "failure"
             is a TEST-script limitation (PATCH /admin/users does not expose
             approval_status field) — NOT a backend bug. Scenario I's
             defensive-dedup property is fully covered by scenario J (verified
@@ -3332,7 +3332,7 @@ backend:
           agent: "testing"
           comment: |
             ALL 87/87 checks PASSED via /app/branding_products_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Detailed scenario results (matches review-request A–N):
 
@@ -3514,7 +3514,7 @@ backend:
           comment: |
             PHASE B — backend testing COMPLETE. ALL 81/81 checks PASSED via
             /app/phase_b_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Detailed scenario results (matches review request A–G):
 
@@ -3733,7 +3733,7 @@ backend:
           comment: |
             Razorpay-compatible MOCK payment flow — backend testing COMPLETE.
             63/65 functional checks PASSED via /app/payment_razorpay_test.py against
-            https://network-pay-1.preview.emergentagent.com. The 2 "failures" are NOT
+            https://slangcart-tracking.preview.emergentagent.com. The 2 "failures" are NOT
             implementation bugs — they are env-config mismatches (see note at bottom).
 
             Detailed scenario results (matches review-request A–G):
@@ -3906,7 +3906,7 @@ backend:
           agent: "testing"
           comment: |
             ALL 31/31 PASSED via /app/danger_pin_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Detailed scenario results:
             1) Super admin login admin@app.com / Admin@123 -> 200, token captured.
@@ -4001,7 +4001,7 @@ backend:
           agent: "testing"
           comment: |
             All 31/31 scenarios PASSED via /app/admin_mgmt_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Endpoints exercised:
             • GET  /api/admin/admins            (any admin)
@@ -4101,7 +4101,7 @@ backend:
           agent: "testing"
           comment: |
             All KYC image upload scenarios verified — 18/18 PASSED via /app/kyc_image_test.py
-            against https://network-pay-1.preview.emergentagent.com.
+            against https://slangcart-tracking.preview.emergentagent.com.
 
             Detailed results (matches the 9 scenarios + extras):
             1) POST /users/me/kyc with valid full_name/aadhaar/pan + 1x1 PNG data URL in
@@ -4194,7 +4194,7 @@ backend:
           agent: "testing"
           comment: |
             ALL 43/43 scenarios PASSED via /app/approval_gate_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Endpoints exercised:
             • GET  /api/admin/approvals?status=pending|approved|rejected|all  — list users (excludes images + extra_docs); adds sponsor_email/sponsor_name. ✅
@@ -4275,7 +4275,7 @@ backend:
           agent: "testing"
           comment: |
             ALL 135/135 scenarios PASSED via /app/payout_10_levels_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Detailed scenario results (A–H from review request):
             A. GET /admin/settings — payout_l1..payout_l10 all present as floats >= 0
@@ -4624,7 +4624,7 @@ frontend:
           agent: "testing"
           comment: |
             ALL 62/62 scenarios PASSED via /app/finance_withdrawal_transfer_test.py
-            against https://network-pay-1.preview.emergentagent.com.
+            against https://slangcart-tracking.preview.emergentagent.com.
 
             Scenarios A–AA covered (matches review request exactly):
             A. Super admin login admin@app.com / Admin@123 → 200 (T_super captured). ✅
@@ -4721,7 +4721,7 @@ frontend:
           agent: "testing"
           comment: |
             ALL 48/49 scenarios PASSED via /app/backup_restore_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Endpoints exercised:
             • GET    /api/admin/backups                  — list snapshots, lightweight (no `data` payload). ✅
@@ -4834,7 +4834,7 @@ agent_communication:
       message: |
         PHASE 3 — GST INVOICE ENDPOINTS — testing COMPLETE.
         ALL 52/52 checks PASSED via /app/backend_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Endpoints verified:
           • GET /api/transactions/{txn_id}/invoice (HTML)
@@ -4940,7 +4940,7 @@ agent_communication:
       message: |
         PHASE 1 SYSTEM WALLET — testing COMPLETE, 78/78 PASSED via
         /app/system_wallet_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         All scenarios A-K green:
           A. System wallet has 4 buckets, total = sum, total = wallet_balance.
@@ -4976,7 +4976,7 @@ agent_communication:
       message: |
         SERVICES MARKETPLACE — testing COMPLETE, 66/66 PASSED via
         /app/services_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         All 9 new endpoints working correctly:
           • POST /service/apply, GET /service/me
@@ -5024,7 +5024,7 @@ agent_communication:
       message: |
         EARN SPILLOVER (forced-matrix BFS) — testing COMPLETE, 35/35 PASSED
         via /app/earn_spillover_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Verified scenarios:
           A. PHASE 1 pre-fill: admin started at D=7 (>= N=5) from prior runs,
@@ -5070,7 +5070,7 @@ agent_communication:
       message: |
         DEFAULT-SPONSOR + EARN CODE — testing COMPLETE, ALL 46/46 PASSED
         via /app/admin_default_sponsor_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Boot logs confirm one-time migration: "Admin referral_code
         migrated from I1YDTL → EARN".
@@ -5117,7 +5117,7 @@ agent_communication:
       message: |
         AUTO-APPROVAL PIPELINE — RE-TEST COMPLETE, ALL 48/48 PASSED via
         /app/auto_approve_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Fix verified: SettingsUpdate at backend/server.py line 2218 now
         declares `auto_approve_on_payment: Optional[bool] = None`. PUT
@@ -5143,7 +5143,7 @@ agent_communication:
       message: |
         [PREVIOUS RUN] AUTO-APPROVAL PIPELINE — testing COMPLETE via
         /app/auto_approve_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
         40/48 PASSED, 8 FAILED — all 8 cascade from ONE bug.
 
         ROOT CAUSE (critical, 1-line fix):
@@ -5217,7 +5217,7 @@ agent_communication:
       message: |
         VENDOR PANEL — backend testing COMPLETE. ALL 72/72 PASSED via
         /app/vendor_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Scenarios 1–8 all green:
         1. APPLY GUARDS — unpaid → 403 "Complete registration"; paid+pending →
@@ -5272,7 +5272,7 @@ agent_communication:
       message: |
         SUPPORT / TICKET SYSTEM — backend testing COMPLETE. ALL 74/74 PASSED via
         /app/ticket_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Scenarios 1–15 all green:
         1. USER CREATE ticket → 200 with status=open, priority=normal,
@@ -5322,7 +5322,7 @@ agent_communication:
       message: |
         Approved Registrations bucket + finance-can-approve — backend testing
         COMPLETE. 43/44 functional checks PASSED via /app/backend_test.py
-        against https://network-pay-1.preview.emergentagent.com.
+        against https://slangcart-tracking.preview.emergentagent.com.
 
         ALL backend behavior verified across scenarios A–M:
         • A. super_admin approve U1 → archive row created with
@@ -5365,7 +5365,7 @@ agent_communication:
       message: |
         PHASE B — backend testing COMPLETE. ALL 81/81 PASSED via
         /app/phase_b_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Scenarios A–G all green:
         A. /admin/users/create — super 200 (paid+offline+pending verified),
@@ -5400,7 +5400,7 @@ agent_communication:
       message: |
         RAZORPAY-MOCK PAYMENT FLOW (Phase A) — backend testing COMPLETE.
         63/65 functional checks PASSED via /app/payment_razorpay_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Scenarios A–G all verified end-to-end:
         • A. SUCCESS: register → /payment/config (is_mock=true, max_attempts=3,
@@ -5441,7 +5441,7 @@ agent_communication:
       message: |
         10-LEVEL PAYOUT STRUCTURE — backend testing COMPLETE. ALL 135/135 PASSED via
         /app/payout_10_levels_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Highlights (matches scenarios A–H from the review request):
         • A. GET /admin/settings exposes payout_l1..payout_l10 (all floats >= 0).
@@ -5480,7 +5480,7 @@ agent_communication:
       message: |
         APPROVAL GATE + EXTRA DOCS — backend testing COMPLETE. ALL 43/43 PASSED via
         /app/approval_gate_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Highlights (matches scenarios A–T from the review request):
         • Registration → approval_status="pending", commission_triggered=false. ✅
@@ -5534,7 +5534,7 @@ agent_communication:
     - agent: "testing"
       message: |
         ADMIN MANAGEMENT — backend testing COMPLETE. ALL 31/31 PASSED via
-        /app/admin_mgmt_test.py against https://network-pay-1.preview.emergentagent.com.
+        /app/admin_mgmt_test.py against https://slangcart-tracking.preview.emergentagent.com.
 
         New endpoints (all green):
         - GET  /admin/admins               → any admin, returns list w/o password_hash
@@ -5576,7 +5576,7 @@ agent_communication:
     - agent: "testing"
       message: |
         Backend regression complete — 69/69 PASSED via /app/backend_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Google Auth (5/5):
         - GET /api/auth/google/callback → 200 text/html
@@ -5602,7 +5602,7 @@ agent_communication:
       message: |
         FINANCE ROLE + WITHDRAWAL PROCESSING + WALLET TRANSFER — backend testing
         COMPLETE. ALL 62/62 PASSED via /app/finance_withdrawal_transfer_test.py
-        against https://network-pay-1.preview.emergentagent.com.
+        against https://slangcart-tracking.preview.emergentagent.com.
 
         Highlights (matches scenarios A–AA from the review request):
         • Finance admin created via POST /admin/admins {admin_role:"finance"} → 200;
@@ -5645,7 +5645,7 @@ agent_communication:
     - agent: "testing"
       message: |
         KYC IMAGE UPLOAD — backend testing COMPLETE. ALL 18/18 tests PASSED via
-        /app/kyc_image_test.py against https://network-pay-1.preview.emergentagent.com.
+        /app/kyc_image_test.py against https://slangcart-tracking.preview.emergentagent.com.
 
         Summary of the 9 review scenarios (all green):
         1) Submit KYC with 3 base64 PNG images -> 200 pending. ✅
@@ -5677,7 +5677,7 @@ agent_communication:
       message: |
         DANGER PIN (unified Wipe + Restore gate) — backend testing COMPLETE.
         ALL 31/31 PASSED via /app/danger_pin_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Coverage (matches the review request 1-7):
         1) GET /api/admin/danger-pin -> 200 with {is_set, format}; format string
@@ -5722,7 +5722,7 @@ agent_communication:
       message: |
         WITHDRAWAL SETTLEMENT ENHANCEMENTS — backend testing COMPLETE.
         72/79 PASSED via /app/withdrawal_settlement_test.py against
-        https://network-pay-1.preview.emergentagent.com. Detailed pass/fail
+        https://slangcart-tracking.preview.emergentagent.com. Detailed pass/fail
         log appended to the first backend task's status_history.
 
         RESULT: 4 of 5 endpoints green; 1 CRITICAL bug blocking the batch
@@ -5773,7 +5773,7 @@ agent_communication:
       message: |
         PHASE 2 — TRANSACTION DETAIL + IDEMPOTENCY testing COMPLETE.
         ALL 50/50 PASSED via /app/phase2_idempotency_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         Coverage:
           A) GET /api/transactions/{txn_id} (15/15)
@@ -6229,7 +6229,7 @@ agent_communication:
     -message: |
         Referral Payout GST Split + Admin Transactions Enrichment — testing COMPLETE.
         ALL 4 scenarios PASSED via /app/backend_test.py against
-        https://network-pay-1.preview.emergentagent.com.
+        https://slangcart-tracking.preview.emergentagent.com.
 
         SCENARIO A (GST math + dual txns) ✅ — direct call to _credit_payout(sponsor,
           gross=118, level=1) for a non-admin sponsor produced exactly:
@@ -6441,7 +6441,7 @@ backend:
           comment: |
             Service Categories + Service Application — testing COMPLETE.
             ALL 43/43 checks PASSED via /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             Backend log on startup: "Seeded 13 default service categories"
             confirming idempotent seed_service_categories() ran.
@@ -6610,7 +6610,7 @@ backend:
           comment: |
             Phase 2 GPS / nearby-worker backend testing COMPLETE.
             37/37 functional checks PASSED via /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
             (1 cosmetic test-script "FAIL" was unrelated to the backend — see
             note at end.)
 
@@ -6742,7 +6742,7 @@ backend:
                 "categories". This caused a single cosmetic FAIL line
                 ("Plumber category found: got 0 categories"). The Plumber
                 category DOES exist in the live DB
-                (id=d7dc1103-30ac-4c5b-aa31-f152e1dd146d, slug=plumber)
+                (id=slangcart-tracking, slug=plumber)
                 — verified via direct curl. Service apply succeeded
                 anyway because category_id is optional and the textual
                 service_category ("Plumber") is enough on its own.
@@ -6771,7 +6771,7 @@ agent_communication:
         ALL 43/43 checks PASSED via /app/backend_test.py.
 
         Endpoints verified end-to-end on
-        https://network-pay-1.preview.emergentagent.com:
+        https://slangcart-tracking.preview.emergentagent.com:
           GET    /api/admin/service-categories
           POST   /api/admin/service-categories
           PATCH  /api/admin/service-categories/{id}
@@ -7008,7 +7008,7 @@ backend:
           comment: |
             Distributor Network / Area Mapping — testing COMPLETE.
             46/51 PASS · 5 FAIL via /app/backend_test.py against
-            https://network-pay-1.preview.emergentagent.com.
+            https://slangcart-tracking.preview.emergentagent.com.
 
             ALL CODE-LOGIC SCENARIOS PASSED. The 5 failures are
             seed-data quality issues (upstream CSV has artifacts),

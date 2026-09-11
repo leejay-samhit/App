@@ -66,16 +66,21 @@ export default function AdminBroadcastScreen() {
   const onTestPush = async () => {
     setTesting(true);
     try {
-      await api.post("/push/test", {
+      const { data } = await api.post<{
+        ok: boolean; relay: string; key_configured: boolean; hint: string;
+        device_registration?: { status?: string; platform?: string; at?: string } | null;
+      }>("/push/test", {
         title: "Slangcart test",
         message: "Push notifications are working on this device. 🎉",
       });
-      Alert.alert(
-        "Test sent",
-        "If you don't see it within a few seconds: push only works in a published " +
-        "iOS / Android build (not Expo Go or the web preview), and notifications " +
-        "must be allowed for Slangcart in your phone settings.",
-      );
+      const lines = [
+        data.hint,
+        "",
+        `Relay: ${data.relay}`,
+        `Push key on server: ${data.key_configured ? "live" : "not set yet"}`,
+        `This account's device: ${data.device_registration?.status || "never registered"}`,
+      ];
+      Alert.alert(data.ok ? "Test sent" : "Test could not be delivered", lines.join("\n"));
     } catch (e) {
       Alert.alert("Couldn't send the test", formatApiError(e));
     } finally { setTesting(false); }

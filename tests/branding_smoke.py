@@ -2,7 +2,7 @@
 import json
 import requests
 
-BASE = "https://vendor-network-app-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 
 results = []
 

@@ -245,15 +245,6 @@ export default function AdminUsers() {
                 <Text style={styles.newUserBtnText}>  Add new user</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity
-              onPress={() => router.push("/admin/users-tree")}
-              style={styles.treeBtn}
-              testID="admin-users-tree"
-            >
-              <Feather name="git-branch" size={16} color={colors.primary} />
-              <Text style={styles.treeBtnText}>  View network tree (upline · downline)</Text>
-              <Feather name="chevron-right" size={16} color={colors.primary} style={{ marginLeft: "auto" }} />
-            </TouchableOpacity>
             <SourceTabs
               tabs={sourceTabsData}
               value={sourceTab}

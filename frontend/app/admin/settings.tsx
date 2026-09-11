@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, ActivityIndicator,
-  KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView, Platform, Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -11,29 +11,90 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 
 type Settings = {
   registration_fee: number;
-  directs_required: number;
-  payout_l1: number;
-  payout_l2: number;
-  payout_l3: number;
-  payout_l4: number;
-  payout_l5: number;
-  payout_l6: number;
-  payout_l7: number;
-  payout_l8: number;
-  payout_l9: number;
-  payout_l10: number;
+  max_cashback_pct: number;
+  default_cashback_pct: number;
+  cashback_enabled: boolean;
+  cashback_platform_funding_enabled: boolean;
+  cashback_clawback_on_return: boolean;
+  delivery_charge_enabled: boolean;
+  delivery_charge_flat: number;
+  delivery_free_threshold: number;
+  delivery_cart_max: number;
 };
 
-const LEVEL_KEYS = ["payout_l1","payout_l2","payout_l3","payout_l4","payout_l5","payout_l6","payout_l7","payout_l8","payout_l9","payout_l10"] as const;
+type NumField = {
+  key: keyof Settings;
+  label: string;
+  help: string;
+  suffix?: string;
+  integer?: boolean;
+};
 
-const TOP_FIELDS = [
-  { key: "registration_fee" as const, label: "Registration fee", help: "One-time fee paid by every new user.", suffix: "₹", integer: false },
-  { key: "directs_required" as const, label: "Directs per cycle", help: "How many direct paid referrals trigger a Level 1 payout.", integer: true },
+const CASHBACK_FIELDS: NumField[] = [
+  {
+    key: "default_cashback_pct",
+    label: "Default cashback %",
+    help: "Applied to products where the vendor has not set their own cashback. 0–10% only.",
+    suffix: "%",
+  },
+];
+
+const DELIVERY_FIELDS: NumField[] = [
+  {
+    key: "delivery_charge_flat",
+    label: "Delivery charge per seller",
+    help: "Charged once per seller in the cart when that seller's items are below the free-delivery threshold.",
+    suffix: "₹",
+  },
+  {
+    key: "delivery_free_threshold",
+    label: "Free delivery above",
+    help: "Per-seller item total that makes that seller's delivery free.",
+    suffix: "₹",
+  },
+  {
+    key: "delivery_cart_max",
+    label: "Maximum cart delivery",
+    help: "Hard cap on the delivery charged for the WHOLE cart, however many sellers it contains.",
+    suffix: "₹",
+  },
+];
+
+const TOGGLES: { key: keyof Settings; label: string; help: string }[] = [
+  {
+    key: "cashback_enabled",
+    label: "Purchase cashback",
+    help: "When off, no new cashback is created. Cashback already credited is untouched.",
+  },
+  {
+    key: "cashback_platform_funding_enabled",
+    label: "Slangcart may front cashback",
+    help: "If a seller's wallet is short, Slangcart pays the customer now and recovers it from the seller later.",
+  },
+  {
+    key: "cashback_clawback_on_return",
+    label: "Claw back cashback on returns",
+    help: "Cashback already paid is recovered when the order is returned. Shortfall is netted off the refund.",
+  },
+  {
+    key: "delivery_charge_enabled",
+    label: "Delivery charges",
+    help: "When off, every order ships free and no delivery revenue is recorded.",
+  },
+];
+
+const NUM_KEYS: (keyof Settings)[] = [
+  "registration_fee",
+  "default_cashback_pct",
+  "delivery_charge_flat",
+  "delivery_free_threshold",
+  "delivery_cart_max",
 ];
 
 export default function AdminSettings() {
   const [data, setData] = useState<Settings | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
+  const [flags, setFlags] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
@@ -42,12 +103,12 @@ export default function AdminSettings() {
     try {
       const { data } = await api.get<Settings>("/admin/settings");
       setData(data);
-      const initial: Record<string, string> = {
-        registration_fee: String(data.registration_fee ?? 0),
-        directs_required: String(data.directs_required ?? 4),
-      };
-      LEVEL_KEYS.forEach((k) => { initial[k] = String((data as any)[k] ?? 0); });
+      const initial: Record<string, string> = {};
+      NUM_KEYS.forEach((k) => { initial[k as string] = String((data as any)[k] ?? 0); });
       setForm(initial);
+      const f: Record<string, boolean> = {};
+      TOGGLES.forEach((t) => { f[t.key as string] = !!(data as any)[t.key]; });
+      setFlags(f);
     } catch {}
     finally { setLoading(false); }
   }, []);
@@ -58,17 +119,13 @@ export default function AdminSettings() {
     setMsg("");
     setSaving(true);
     try {
-      const payload: any = {};
-      const all = [
-        ...TOP_FIELDS.map((f) => ({ key: f.key as string, integer: !!f.integer })),
-        ...LEVEL_KEYS.map((k) => ({ key: k as string, integer: false })),
-      ];
-      for (const f of all) {
-        const raw = form[f.key];
+      const payload: any = { ...flags };
+      for (const k of NUM_KEYS) {
+        const raw = form[k as string];
         if (raw === undefined || raw === "") continue;
-        const v = f.integer ? parseInt(raw, 10) : parseFloat(raw);
+        const v = parseFloat(raw);
         if (Number.isNaN(v)) continue;
-        payload[f.key] = v;
+        payload[k] = v;
       }
       const { data } = await api.put<Settings>("/admin/settings", payload);
       setData(data);
@@ -85,160 +142,109 @@ export default function AdminSettings() {
     return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
   }
 
-  // Per-cycle (1 sponsor + N directs paying ₹fee each):
-  // Revenue: directs_required × fee
-  // Costs: L1 cycle bonus (1×) + L2..L10 = sum of payouts per signup × N (only L2..L10 paid per signup)
-  const N = data.directs_required;
-  const levelVals = LEVEL_KEYS.map((k) => Number((data as any)[k]) || 0);
-  const cycleCost = levelVals[0] + N * levelVals.slice(1).reduce((a, b) => a + b, 0);
-  const cycleRevenue = N * data.registration_fee;
-  const margin = cycleRevenue - cycleCost;
+  const maxPct = Number(data.max_cashback_pct ?? 10);
+  const defPct = parseFloat(form.default_cashback_pct || "0") || 0;
+  const overMax = defPct > maxPct;
+  const flat = parseFloat(form.delivery_charge_flat || "0") || 0;
+  const threshold = parseFloat(form.delivery_free_threshold || "0") || 0;
+  const cartMax = parseFloat(form.delivery_cart_max || "0") || 0;
 
-  // 10-level tree projection from one sponsor's perspective: each level has N^level nodes
-  const counts = Array.from({ length: 10 }, (_, i) => Math.pow(N, i + 1));
-  // Sponsor's earnings per level (sponsor's perspective):
-  // L1 = single cycle bonus when N directs all pay
-  // L2..L10 = perSignup × count at that level
-  const earnPerLevel = levelVals.map((v, idx) => idx === 0 ? v : v * counts[idx]);
-  const earnTotal = earnPerLevel.reduce((a, b) => a + b, 0);
-  const treeTotalNodes = counts.reduce((a, b) => a + b, 0);
-  const treeRevenue = treeTotalNodes * data.registration_fee;
+  const renderNumber = (f: NumField) => (
+    <View key={f.key as string} style={styles.field}>
+      <Text style={styles.fieldLabel}>{f.label}</Text>
+      <View style={styles.inputWrap}>
+        {f.suffix ? <Text style={styles.suffix}>{f.suffix}</Text> : null}
+        <TextInput
+          testID={`settings-${f.key}`}
+          value={form[f.key as string] || ""}
+          onChangeText={(t) => setForm((x) => ({ ...x, [f.key as string]: t }))}
+          keyboardType="numeric"
+          style={[styles.input, !!f.suffix && { paddingLeft: 32 }]}
+          placeholder="0"
+          placeholderTextColor={colors.textMuted}
+        />
+      </View>
+      <Text style={styles.fieldHelp}>{f.help}</Text>
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
           <Text style={styles.overline}>ADMIN</Text>
-          <Text style={styles.h1}>Payout settings</Text>
-          <Text style={styles.subtitle}>Tune the registration fee and 10-level commission structure. Set any level to 0 to disable it.</Text>
+          <Text style={styles.h1}>Cashback &amp; delivery</Text>
+          <Text style={styles.subtitle}>
+            Purchase cashback is credited to the customer wallet only after a successful
+            delivery. Delivery charges are calculated per seller and capped for the cart.
+          </Text>
 
-          <View style={styles.summaryCard}>
-            <Text style={styles.summaryLabel}>PER CYCLE PROJECTION ({N} signups)</Text>
+          <View style={styles.summaryCard} testID="settings-summary">
+            <Text style={styles.summaryLabel}>PLATFORM CEILING</Text>
             <View style={styles.summaryRow}>
               <View>
-                <Text style={styles.summaryStatLabel}>Revenue</Text>
-                <Text style={styles.summaryStatValue}>{formatINR(cycleRevenue)}</Text>
+                <Text style={styles.summaryStatLabel}>Max cashback</Text>
+                <Text style={styles.summaryStatValue}>{maxPct}%</Text>
               </View>
               <View>
-                <Text style={styles.summaryStatLabel}>Payouts</Text>
-                <Text style={[styles.summaryStatValue, { color: colors.accent }]}>{formatINR(cycleCost)}</Text>
-              </View>
-              <View>
-                <Text style={styles.summaryStatLabel}>Margin</Text>
-                <Text style={[styles.summaryStatValue, { color: margin >= 0 ? colors.success : "#B3261E" }]}>
-                  {margin >= 0 ? "+" : ""}{formatINR(margin)}
+                <Text style={styles.summaryStatLabel}>On ₹1,000</Text>
+                <Text style={[styles.summaryStatValue, { color: colors.accent }]}>
+                  {formatINR((1000 * Math.min(defPct, maxPct)) / 100)}
                 </Text>
+              </View>
+              <View>
+                <Text style={styles.summaryStatLabel}>Cart delivery cap</Text>
+                <Text style={styles.summaryStatValue}>{formatINR(cartMax)}</Text>
               </View>
             </View>
           </View>
 
-          <Text style={styles.sectionLabel}>BASE</Text>
-          {TOP_FIELDS.map((f) => (
-            <View key={f.key} style={styles.field}>
-              <Text style={styles.fieldLabel}>{f.label}</Text>
-              <View style={styles.inputWrap}>
-                {(f as any).suffix && <Text style={styles.suffix}>{(f as any).suffix}</Text>}
-                <TextInput
-                  testID={`settings-${f.key}`}
-                  value={form[f.key] || ""}
-                  onChangeText={(t) => setForm((x) => ({ ...x, [f.key]: t }))}
-                  keyboardType="numeric"
-                  style={[styles.input, !!(f as any).suffix && { paddingLeft: 32 }]}
-                  placeholder="0"
-                  placeholderTextColor={colors.textMuted}
-                />
+          <Text style={styles.sectionLabel}>CASHBACK</Text>
+          <Text style={styles.sectionHelp}>
+            The backend rejects any cashback above {maxPct}% — vendor, product and campaign
+            values are all clamped to the same ceiling.
+          </Text>
+          {CASHBACK_FIELDS.map(renderNumber)}
+          {overMax ? (
+            <View style={styles.warnBox} testID="settings-cashback-warn">
+              <Feather name="alert-triangle" size={14} color="#B45309" />
+              <Text style={styles.warnText}>
+                {defPct}% is above the {maxPct}% platform ceiling — the server will reject this.
+              </Text>
+            </View>
+          ) : null}
+
+          <Text style={[styles.sectionLabel, { marginTop: 12 }]}>DELIVERY CHARGES</Text>
+          <Text style={styles.sectionHelp}>
+            Example with these values: a seller&apos;s items below {formatINR(threshold)} add
+            {" "}{formatINR(flat)} delivery; {formatINR(threshold)} and above ships free. A
+            multi-seller cart never pays more than {formatINR(cartMax)} in total.
+          </Text>
+          {DELIVERY_FIELDS.map(renderNumber)}
+
+          <Text style={[styles.sectionLabel, { marginTop: 12 }]}>SWITCHES</Text>
+          {TOGGLES.map((t) => (
+            <View key={t.key as string} style={styles.toggleRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>{t.label}</Text>
+                <Text style={styles.fieldHelp}>{t.help}</Text>
               </View>
-              <Text style={styles.fieldHelp}>{f.help}</Text>
+              <Switch
+                testID={`settings-toggle-${t.key}`}
+                value={!!flags[t.key as string]}
+                onValueChange={(v) => setFlags((x) => ({ ...x, [t.key as string]: v }))}
+                trackColor={{ true: colors.primary, false: colors.border }}
+              />
             </View>
           ))}
 
-          <Text style={[styles.sectionLabel, { marginTop: 12 }]}>LEVEL PAYOUTS (10 LEVELS)</Text>
-          <Text style={styles.sectionHelp}>Level 1 is a cycle bonus paid once every {N} directs. Levels 2–10 are paid per qualifying signup down the tree.</Text>
-
-          {LEVEL_KEYS.map((k, idx) => {
-            const lvl = idx + 1;
-            const help = lvl === 1
-              ? `Cycle bonus paid every ${N} directs.`
-              : `Per signup at level ${lvl} (${lvl === 2 ? "grand" : lvl === 3 ? "great-grand" : `${lvl - 1} levels deep`}).`;
-            return (
-              <View key={k} style={styles.levelRow}>
-                <View style={[styles.levelBadge, lvl === 1 && { backgroundColor: colors.success }, lvl === 2 && { backgroundColor: colors.brand500 }, lvl === 3 && { backgroundColor: colors.accent }, lvl >= 4 && { backgroundColor: colors.primary, opacity: Math.max(0.4, 1 - (lvl - 4) * 0.07) }]}>
-                  <Text style={styles.levelBadgeText}>L{lvl}</Text>
-                </View>
-                <View style={styles.levelInputWrap}>
-                  <Text style={styles.levelSuffix}>₹</Text>
-                  <TextInput
-                    testID={`settings-${k}`}
-                    value={form[k] || ""}
-                    onChangeText={(t) => setForm((x) => ({ ...x, [k]: t }))}
-                    keyboardType="numeric"
-                    style={styles.levelInput}
-                    placeholder="0"
-                    placeholderTextColor={colors.textMuted}
-                  />
-                </View>
-                <Text style={styles.levelHelp} numberOfLines={2}>{help}</Text>
-              </View>
-            );
+          <Text style={[styles.sectionLabel, { marginTop: 12 }]}>SUBSCRIPTION</Text>
+          {renderNumber({
+            key: "registration_fee",
+            label: "Subscription fee",
+            help: "One-time optional membership fee. Recognised in full as platform revenue (18% entry GST split out).",
+            suffix: "₹",
           })}
-
-          <Text style={[styles.sectionLabel, { marginTop: 16 }]}>1+{N} TREE PROJECTION (10 LEVELS)</Text>
-          <Text style={styles.sectionHelp}>One sponsor's potential earnings if their network fills 10 levels deep with {N} directs each.</Text>
-
-          <View style={styles.treeWrap} testID="tree-projection">
-            <View style={styles.treeRoot}>
-              <View style={styles.treeAvatar}><Feather name="user" size={18} color={colors.primaryFg} /></View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.treeRootName}>YOU</Text>
-                <Text style={styles.treeRootSub}>Sponsor — earns from up to 10 levels below</Text>
-              </View>
-              <Text style={styles.treeRootEarn}>{formatINR(earnTotal)}</Text>
-            </View>
-
-            {Array.from({ length: 10 }).map((_, idx) => {
-              const lvl = idx + 1;
-              const c = counts[idx];
-              const v = levelVals[idx];
-              const earn = earnPerLevel[idx];
-              const sub = lvl === 1
-                ? `One ₹${v} cycle bonus when all ${N} directs pay`
-                : v > 0
-                  ? `₹${v} × ${c.toLocaleString("en-IN")} signups`
-                  : `(disabled — ₹0)`;
-              return (
-                <View key={lvl} style={styles.treeLevelWrap} testID={`tree-l${lvl}`}>
-                  <View style={styles.treeConnector} />
-                  <View style={styles.treeLevelCard}>
-                    <View style={styles.treeLevelHeader}>
-                      <View style={[styles.treeBadge, lvl === 1 && styles.l1, lvl === 2 && styles.l2, lvl === 3 && styles.l3, lvl >= 4 && styles.lDeep]}>
-                        <Text style={styles.treeBadgeText}>L{lvl}</Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.treeLevelTitle}>{c.toLocaleString("en-IN")} users</Text>
-                        <Text style={styles.treeLevelSub} numberOfLines={1}>{sub}</Text>
-                      </View>
-                      <Text style={[styles.treeLevelEarn, v === 0 && { color: colors.textMuted }]}>{formatINR(earn)}</Text>
-                    </View>
-                  </View>
-                </View>
-              );
-            })}
-
-            <View style={styles.treeTotal}>
-              <View>
-                <Text style={styles.treeTotalLabel}>NETWORK SIZE</Text>
-                <Text style={styles.treeTotalValue}>{treeTotalNodes.toLocaleString("en-IN")} users</Text>
-              </View>
-              <View>
-                <Text style={styles.treeTotalLabel}>SYSTEM REVENUE</Text>
-                <Text style={styles.treeTotalValue}>{formatINR(treeRevenue)}</Text>
-              </View>
-              <View>
-                <Text style={styles.treeTotalLabel}>SPONSOR EARNS</Text>
-                <Text style={[styles.treeTotalValue, { color: colors.success }]}>{formatINR(earnTotal)}</Text>
-              </View>
-            </View>
-          </View>
 
           {msg ? (
             <Text style={[styles.msg, { color: msg === "Saved successfully" ? colors.success : "#B3261E" }]} testID="settings-msg">
@@ -266,7 +272,7 @@ const styles = StyleSheet.create({
   container: { padding: spacing.screen, paddingBottom: 40 },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 6 },
   h1: { fontSize: 30, fontWeight: "800", color: colors.textMain, letterSpacing: -1 },
-  subtitle: { fontSize: 13, color: colors.textMuted, marginTop: 6, marginBottom: 20 },
+  subtitle: { fontSize: 13, color: colors.textMuted, marginTop: 6, marginBottom: 20, lineHeight: 19 },
   sectionLabel: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 8 },
   sectionHelp: { fontSize: 12, color: colors.textMuted, marginBottom: 14, lineHeight: 18 },
   summaryCard: { backgroundColor: colors.primary, borderRadius: radii.card, padding: 18, marginBottom: 24 },
@@ -279,36 +285,18 @@ const styles = StyleSheet.create({
   inputWrap: { position: "relative" },
   suffix: { position: "absolute", left: 14, top: 14, fontSize: 16, color: colors.textMuted, fontWeight: "600", zIndex: 1 },
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 14, paddingVertical: 14, fontSize: 16, color: colors.textMain, fontWeight: "600" },
-  fieldHelp: { fontSize: 11, color: colors.textMuted, marginTop: 6 },
-  levelRow: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 },
-  levelBadge: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: colors.primary },
-  levelBadgeText: { color: "#fff", fontWeight: "800", fontSize: 12 },
-  levelInputWrap: { width: 120, position: "relative" },
-  levelSuffix: { position: "absolute", left: 12, top: 12, fontSize: 14, color: colors.textMuted, fontWeight: "700", zIndex: 1 },
-  levelInput: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 12, paddingLeft: 26, paddingVertical: 11, fontSize: 14, color: colors.textMain, fontWeight: "700" },
-  levelHelp: { flex: 1, fontSize: 11, color: colors.textMuted, lineHeight: 16 },
-  treeWrap: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14, marginBottom: 24 },
-  treeRoot: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.primary, padding: 14, borderRadius: 14 },
-  treeAvatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" },
-  treeRootName: { color: colors.primaryFg, fontSize: 14, fontWeight: "800", letterSpacing: 1.5 },
-  treeRootSub: { color: "rgba(255,255,255,0.7)", fontSize: 11, marginTop: 2 },
-  treeRootEarn: { color: colors.accent, fontSize: 16, fontWeight: "800", letterSpacing: -0.3 },
-  treeLevelWrap: { alignItems: "center" },
-  treeConnector: { width: 2, height: 14, backgroundColor: colors.border },
-  treeLevelCard: { width: "100%", backgroundColor: colors.surfaceMuted, borderRadius: 12, padding: 10 },
-  treeLevelHeader: { flexDirection: "row", alignItems: "center", gap: 10 },
-  treeBadge: { width: 32, height: 32, borderRadius: 10, alignItems: "center", justifyContent: "center" },
-  l1: { backgroundColor: colors.success },
-  l2: { backgroundColor: colors.brand500 },
-  l3: { backgroundColor: colors.accent },
-  lDeep: { backgroundColor: colors.primary, opacity: 0.7 },
-  treeBadgeText: { color: "#fff", fontWeight: "800", fontSize: 11 },
-  treeLevelTitle: { fontSize: 13, fontWeight: "800", color: colors.textMain },
-  treeLevelSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-  treeLevelEarn: { fontSize: 14, fontWeight: "800", color: colors.primary },
-  treeTotal: { flexDirection: "row", justifyContent: "space-between", marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.border },
-  treeTotalLabel: { fontSize: 10, letterSpacing: 1.5, color: colors.textMuted, fontWeight: "700" },
-  treeTotalValue: { fontSize: 13, fontWeight: "800", color: colors.textMain, marginTop: 4 },
+  fieldHelp: { fontSize: 11, color: colors.textMuted, marginTop: 6, lineHeight: 16 },
+  toggleRow: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    borderRadius: radii.card, padding: 14, marginBottom: 10,
+  },
+  warnBox: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: "#FEF3C7", borderWidth: 1, borderColor: "#FCD34D",
+    borderRadius: radii.card, padding: 12, marginBottom: 14,
+  },
+  warnText: { flex: 1, fontSize: 12, color: "#78350F", fontWeight: "600", lineHeight: 17 },
   msg: { fontSize: 13, marginTop: 8, textAlign: "center" },
   saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 16, borderRadius: radii.button, marginTop: 12 },
   saveBtnText: { color: colors.primaryFg, fontWeight: "700", fontSize: 15 },

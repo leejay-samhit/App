@@ -21,7 +21,6 @@ import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
-import { SubscriptionLocked } from "../../src/subscription";
 import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
@@ -56,8 +55,6 @@ export default function WalletScreen() {
   const [amount, setAmount] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  // Wallet-to-wallet transfer state
-  const [showTransfer, setShowTransfer] = useState(false);
   const [txFilter, setTxFilter] = useState<"all" | "credits" | "debits">("all");
   // Transaction detail modal
   const [txDetail, setTxDetail] = useState<any | null>(null);
@@ -108,20 +105,24 @@ export default function WalletScreen() {
     if (txFilter === "credits") return !isDebit(t);
     return isDebit(t);
   });
-  const [recipient, setRecipient] = useState("");
-  const [transferAmt, setTransferAmt] = useState("");
-  const [transferNote, setTransferNote] = useState("");
-  const [transferring, setTransferring] = useState(false);
-  const [transferError, setTransferError] = useState("");
+  const [summary, setSummary] = useState<{ cashback_earned: number; pending_cashback: number }>({
+    cashback_earned: 0,
+    pending_cashback: 0,
+  });
 
   const load = useCallback(async () => {
     try {
-      const [w, t] = await Promise.all([
+      const [w, t, d] = await Promise.all([
         api.get<Withdrawal[]>("/withdrawals/me"),
         api.get<Txn[]>("/transactions/me"),
+        api.get("/users/me/dashboard"),
       ]);
       setWithdrawals(w.data);
       setTxns(t.data);
+      setSummary({
+        cashback_earned: Number(d.data?.cashback_earned || 0),
+        pending_cashback: Number(d.data?.pending_cashback || 0),
+      });
       await refresh();
     } catch {}
     finally { setLoading(false); setRefreshing(false); }
@@ -148,53 +149,19 @@ export default function WalletScreen() {
     }
   };
 
-  const onTransfer = async () => {
-    setTransferError("");
-    const amt = parseFloat(transferAmt);
-    if (!recipient.trim()) { setTransferError("Enter recipient email or referral code"); return; }
-    if (!amt || amt <= 0) { setTransferError("Enter valid amount"); return; }
-    if (amt > (user?.wallet_balance || 0)) { setTransferError("Insufficient balance"); return; }
-    setTransferring(true);
-    try {
-      await api.post("/wallet/transfer", {
-        recipient: recipient.trim(),
-        amount: amt,
-        note: transferNote.trim() || undefined,
-      });
-      setShowTransfer(false);
-      setRecipient("");
-      setTransferAmt("");
-      setTransferNote("");
-      await load();
-      Alert.alert("Sent", `₹${amt} transferred successfully.`);
-    } catch (e) {
-      setTransferError(formatApiError(e));
-    } finally {
-      setTransferring(false);
-    }
-  };
+
+  // Bank withdrawals are a SELLER settlement feature. A shopper's Slangcart
+  // wallet is spent inside the app on purchases (requirement: the wallet is
+  // not a general-purpose money service).
+  const isSeller = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
+  const isAdminUser = user?.role === "admin";
+  const canWithdraw = isSeller || isAdminUser;
 
   if (loading) {
     return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
   }
 
   const hasPayoutMethod = !!(user?.upi_id || user?.bank_account);
-
-  // ── Free tier (Aug-2026) ──────────────────────────────────────────────
-  // The ₹118 is a subscription. Users who skipped it can browse and shop,
-  // but cashback / wallet / withdrawals are member-only.
-  if (user && user.role !== "admin" && !user.registration_paid) {
-    return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <ScrollView contentContainerStyle={styles.container}>
-          <Text style={styles.overline}>WALLET</Text>
-          <Text style={styles.h1Compact}>Your earnings</Text>
-          <View style={{ height: 12 }} />
-          <SubscriptionLocked feature="Wallet & cashback" />
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -203,7 +170,7 @@ export default function WalletScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
         <Text style={styles.overline}>WALLET</Text>
-        <Text style={styles.h1Compact}>Your earnings</Text>
+        <Text style={styles.h1Compact}>Your Slangcart wallet</Text>
 
         <GradientCard variant="emerald" style={styles.balanceCardCompact}>
           {/* Top row — balance + chips on right */}
@@ -217,87 +184,101 @@ export default function WalletScreen() {
                 adjustsFontSizeToFit
               >
                 {(() => {
-                  // For admin: only the referral_commission bucket counts as
-                  // "your earnings" (per payout structure). The other buckets
-                  // (direct_signup, direct_added, GST, service/shopping
-                  // margin) are platform treasury, not personal earnings.
-                  // For regular users: total wallet_balance (single bucket).
-                  const isAdmin = (user?.role === "admin");
+                  // Admin sees only their own personal bucket here; the
+                  // platform treasury lives in Admin → System Wallet.
                   const buckets = (user as any)?.wallet_buckets || {};
-                  const value = isAdmin
+                  const value = isAdminUser
                     ? Number(buckets.referral_commission || 0)
                     : Number(user?.wallet_balance || 0);
                   return formatINR(value);
                 })()}
               </Text>
-              {user?.role === "admin" ? (
+              {isAdminUser ? (
                 <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700", marginTop: 2, letterSpacing: 0.3 }}>
-                  Referral earnings only · See System Wallet for treasury
+                  Personal bucket only · See System Wallet for treasury
                 </Text>
-              ) : null}
+              ) : (
+                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700", marginTop: 2, letterSpacing: 0.3 }}>
+                  Spend on Slangcart orders · cashback · refunds
+                </Text>
+              )}
             </View>
             <View style={styles.miniStatsCol}>
               <View style={styles.miniStat}>
-                <Text style={styles.miniStatLabel}>EARNED</Text>
-                <Text style={styles.miniStatValue}>{formatINR(user?.total_earned || 0)}</Text>
+                <Text style={styles.miniStatLabel}>CASHBACK</Text>
+                <Text style={styles.miniStatValue} testID="wallet-cashback-earned">
+                  {formatINR(summary.cashback_earned)}
+                </Text>
               </View>
               <View style={styles.miniStatDivider} />
               <View style={styles.miniStat}>
-                <Text style={styles.miniStatLabel}>PAYOUTS</Text>
-                <Text style={styles.miniStatValue}>{user?.payouts_received || 0}</Text>
+                <Text style={styles.miniStatLabel}>PENDING</Text>
+                <Text style={styles.miniStatValue} testID="wallet-cashback-pending">
+                  {formatINR(summary.pending_cashback)}
+                </Text>
               </View>
             </View>
           </View>
 
-          {/* Bottom row — Withdraw + Send compact buttons */}
+          {summary.pending_cashback > 0 ? (
+            <View style={styles.pendingStrip}>
+              <Feather name="clock" size={11} color="rgba(255,255,255,0.9)" />
+              <Text style={styles.pendingStripText} testID="wallet-pending-strip">
+                {formatINR(summary.pending_cashback)} cashback arriving soon from your sellers
+              </Text>
+            </View>
+          ) : null}
+
+          {/* Bottom row — Add money (everyone) + Withdraw (sellers only) */}
           <View style={styles.actionsRowCompact}>
             <TouchableOpacity
               style={styles.withdrawBtnCompact}
-              onPress={() => {
-                if (!hasPayoutMethod) {
-                  Alert.alert(
-                    "Add UPI / Bank details",
-                    "To withdraw, please add a UPI ID or bank account first.",
-                    [
-                      { text: "Cancel", style: "cancel" },
-                      { text: "Add now", onPress: () => router.push("/payout-details" as any) },
-                    ],
-                  );
-                  return;
-                }
-                setShowModal(true);
-              }}
-              testID="wallet-request-withdraw"
+              onPress={() => router.push("/payment" as any)}
+              testID="wallet-add-money"
             >
-              <Feather name="arrow-up-right" size={14} color={colors.accentFg} />
-              <Text
-                style={styles.withdrawBtnTextCompact}
-                numberOfLines={1}
+              <Feather name="plus" size={14} color={colors.accentFg} />
+              <Text style={styles.withdrawBtnTextCompact} numberOfLines={1}>Add money</Text>
+            </TouchableOpacity>
+            {canWithdraw ? (
+              <TouchableOpacity
+                style={styles.transferBtnCompact}
+                onPress={() => {
+                  if (!hasPayoutMethod) {
+                    Alert.alert(
+                      "Add UPI / Bank details",
+                      "To settle your sales to a bank account, please add a UPI ID or bank account first.",
+                      [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Add now", onPress: () => router.push("/payout-details" as any) },
+                      ],
+                    );
+                    return;
+                  }
+                  setShowModal(true);
+                }}
+                testID="wallet-request-withdraw"
               >
-                {hasPayoutMethod ? "Withdraw" : "Add details"}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.transferBtnCompact}
-              onPress={() => setShowTransfer(true)}
-              testID="wallet-transfer"
-            >
-              <Feather name="send" size={14} color={colors.primary} />
-              <Text style={styles.transferBtnTextCompact} numberOfLines={1}>Send</Text>
-            </TouchableOpacity>
+                <Feather name="arrow-up-right" size={14} color={colors.primary} />
+                <Text style={styles.transferBtnTextCompact} numberOfLines={1}>
+                  {hasPayoutMethod ? "Withdraw" : "Add details"}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </GradientCard>
 
-        <Text style={styles.sectionLabel}>WITHDRAWAL HISTORY</Text>
-        {withdrawals.length === 0 ? (
-          <Text style={styles.empty}>No withdrawals yet.</Text>
-        ) : (
-          withdrawals.map((w) => {
-            const color = w.status === "success" || w.status === "approved" ? colors.success
-              : w.status === "rejected" ? "#B3261E"
-              : w.status === "processing" ? colors.brand500
-              : colors.warning;
-            return (
+        {canWithdraw ? (
+          <>
+            <Text style={styles.sectionLabel}>SETTLEMENT HISTORY</Text>
+            {withdrawals.length === 0 ? (
+              <Text style={styles.empty}>No settlements yet.</Text>
+            ) : (
+              withdrawals.map((w) => {
+                const color = w.status === "success" || w.status === "approved" ? colors.success
+                  : w.status === "rejected" ? "#B3261E"
+                  : w.status === "processing" ? colors.brand500
+                  : colors.warning;
+                return (
               <View key={w.id} style={styles.row} testID={`withdrawal-${w.id}`}>
                 <View style={styles.rowLeft}>
                   <View style={[styles.rowDot, { backgroundColor: color }]} />
@@ -317,8 +298,10 @@ export default function WalletScreen() {
                 <Text style={[styles.statusPill, { color }]}>{w.status.toUpperCase()}</Text>
               </View>
             );
-          })
-        )}
+              })
+            )}
+          </>
+        ) : null}
 
         <View style={styles.txHeader}>
           <Text style={styles.sectionLabel}>TRANSACTIONS</Text>
@@ -350,7 +333,9 @@ export default function WalletScreen() {
               "vendor_payout_debit", "purchase",
             ]);
             const isDebit = (Number(t.amount) < 0) || DEBIT_TYPES.has(t.type);
-            const icon = t.type === "referral_payout" || t.type === "level_payout" ? "trending-up"
+            const icon = t.type === "cashback_credit" ? "gift"
+              : t.type === "cashback_pending" ? "clock"
+              : t.type === "cashback_reversal" ? "rotate-ccw"
               : t.type === "withdrawal" ? "arrow-up-right"
               : t.type === "transfer_out" ? "send"
               : t.type === "transfer_in" ? "download"
@@ -416,51 +401,6 @@ export default function WalletScreen() {
               </TouchableOpacity>
               <TouchableOpacity onPress={onSubmit} disabled={submitting} style={[styles.modalBtn, { backgroundColor: colors.primary }]} testID="withdraw-submit">
                 {submitting ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={{ color: colors.primaryFg, fontWeight: "700" }}>Submit</Text>}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      <Modal visible={showTransfer} transparent animationType="slide" onRequestClose={() => setShowTransfer(false)}>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>Send to another user</Text>
-            <Text style={styles.modalSub}>Wallet-to-wallet transfer · Available: {formatINR(user?.wallet_balance || 0)}</Text>
-            <TextInput
-              testID="transfer-recipient"
-              value={recipient}
-              onChangeText={setRecipient}
-              autoCapitalize="none"
-              placeholder="Recipient email or referral code"
-              placeholderTextColor={colors.textMuted}
-              style={styles.modalInput}
-            />
-            <TextInput
-              testID="transfer-amount"
-              value={transferAmt}
-              onChangeText={setTransferAmt}
-              placeholder="Amount in ₹"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="numeric"
-              style={[styles.modalInput, { marginTop: 10 }]}
-            />
-            <TextInput
-              testID="transfer-note"
-              value={transferNote}
-              onChangeText={setTransferNote}
-              placeholder="Note (optional)"
-              placeholderTextColor={colors.textMuted}
-              style={[styles.modalInput, { marginTop: 10 }]}
-            />
-            {transferError ? <Text style={styles.errorText}>{transferError}</Text> : null}
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-              <TouchableOpacity onPress={() => { setShowTransfer(false); setTransferError(""); }} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
-                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={onTransfer} disabled={transferring} style={[styles.modalBtn, { backgroundColor: colors.primary }]} testID="transfer-submit">
-                {transferring ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={{ color: colors.primaryFg, fontWeight: "700" }}>Send</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -635,8 +575,13 @@ const styles = StyleSheet.create({
     minHeight: 36,
   },
   withdrawBtnTextCompact: { color: colors.accentFg, fontWeight: "800", fontSize: 12, letterSpacing: 0.2 },
-  transferBtnCompact: {
-    flex: 1,
+  pendingStrip: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    marginTop: 10, paddingTop: 9,
+    borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)",
+  },
+  pendingStripText: { color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: "700", flex: 1 },
+  transferBtnCompact: {    flex: 1,
     flexDirection: "row", alignItems: "center", justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.95)",
     paddingVertical: 9, paddingHorizontal: 10,

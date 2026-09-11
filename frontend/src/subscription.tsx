@@ -21,8 +21,8 @@ export const SUBSCRIPTION_BENEFITS: { icon: keyof typeof Feather.glyphMap; title
   { icon: "slash",       title: "Zero ads",                    sub: "A clean, distraction-free app" },
   { icon: "shopping-bag",title: "Better shopping experience",  sub: "Member-only deals and smoother checkout" },
   { icon: "star",        title: "Our priority customer",       sub: "Faster delivery handling and order help" },
-  { icon: "repeat",      title: "Unlimited cashback",          sub: "No cap on what you can earn back" },
-  { icon: "credit-card", title: "Withdraw to your bank",       sub: "Move your cashback to your bank account" },
+  { icon: "percent",     title: "Higher cashback offers",      sub: "Member-only cashback deals on vendor products" },
+  { icon: "truck",       title: "Delivery perks",              sub: "Member-only free-delivery offers" },
   { icon: "award",       title: "One payment, lifetime free",  sub: "Pay once — no renewals (T&C apply)" },
 ];
 
@@ -135,9 +135,9 @@ export function SkipSubscriptionButton({ amount }: { amount: number }) {
             </View>
             <Text style={styles.confirmTitle}>Continue without subscription?</Text>
             <Text style={styles.confirmBody}>
-              You can browse and shop for free. Cashback, wallet, referral earnings and
-              withdrawals stay locked until you complete the {formatINR(amount)} subscription —
-              you can activate it anytime from your Profile.
+              You can browse and shop for free. Member-only cashback offers, delivery
+              perks and priority support stay locked until you complete the {formatINR(amount)}
+              subscription — you can activate it anytime from your Profile.
             </Text>
             <View style={styles.confirmRow}>
               <TouchableOpacity

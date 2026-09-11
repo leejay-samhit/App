@@ -9,7 +9,7 @@ import string
 import requests
 from typing import Optional
 
-BASE = "https://network-pay-1.preview.emergentagent.com/api"
+BASE = "https://slangcart-tracking.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@app.com"
 ADMIN_PASSWORD = "Admin@123"
 SUPER_PASSWORD = "1ABCxy!@zd"  # 1 digit, 3 upper, 4 lower, 2 syms

@@ -101,6 +101,11 @@ class ProductCreate(BaseModel):
     variant_chart: Optional[str] = ""
     variant_price_mode: Optional[str] = "extra"
     variants: Optional[List[Dict[str, Any]]] = None
+    # ── Purchase cashback + delivery (Jun-2026) ───────────────────────
+    # `le=10` is the HARD platform ceiling — a vendor cannot type more,
+    # and core/cashback.py clamps again when the money is calculated.
+    cashback_pct: Optional[float] = Field(default=None, ge=0, le=10)
+    free_delivery: Optional[bool] = False
 
 
 class ProductUpdate(BaseModel):
@@ -143,6 +148,9 @@ class ProductUpdate(BaseModel):
     variant_chart: Optional[str] = None
     variant_price_mode: Optional[str] = None
     variants: Optional[List[Dict[str, Any]]] = None
+    # Purchase cashback + delivery (Jun-2026). 0–10% hard ceiling.
+    cashback_pct: Optional[float] = Field(default=None, ge=0, le=10)
+    free_delivery: Optional[bool] = None
 
 
 class BrandingPayload(BaseModel):
@@ -276,18 +284,20 @@ class WipeAllRequest(BaseModel):
 
 class SettingsUpdate(BaseModel):
     registration_fee: Optional[float] = Field(default=None, ge=0)
-    payout_l1: Optional[float] = Field(default=None, ge=0)
-    payout_l2: Optional[float] = Field(default=None, ge=0)
-    payout_l3: Optional[float] = Field(default=None, ge=0)
-    payout_l4: Optional[float] = Field(default=None, ge=0)
-    payout_l5: Optional[float] = Field(default=None, ge=0)
-    payout_l6: Optional[float] = Field(default=None, ge=0)
-    payout_l7: Optional[float] = Field(default=None, ge=0)
-    payout_l8: Optional[float] = Field(default=None, ge=0)
-    payout_l9: Optional[float] = Field(default=None, ge=0)
-    payout_l10: Optional[float] = Field(default=None, ge=0)
-    directs_required: Optional[int] = Field(default=None, ge=1, le=20)
     auto_approve_on_payment: Optional[bool] = None
+    # ── Purchase cashback (MLM cutover, Jun-2026) ────────────────────────
+    # `le=10` is the HARD platform ceiling from core.config.MAX_CASHBACK_PCT.
+    # Pydantic rejects anything above it before the handler even runs, and
+    # core/cashback.py clamps again at calculation time.
+    default_cashback_pct: Optional[float] = Field(default=None, ge=0, le=10)
+    cashback_enabled: Optional[bool] = None
+    cashback_platform_funding_enabled: Optional[bool] = None
+    cashback_clawback_on_return: Optional[bool] = None
+    # ── Delivery charges ─────────────────────────────────────────────────
+    delivery_charge_enabled: Optional[bool] = None
+    delivery_charge_flat: Optional[float] = Field(default=None, ge=0, le=10000)
+    delivery_free_threshold: Optional[float] = Field(default=None, ge=0)
+    delivery_cart_max: Optional[float] = Field(default=None, ge=0, le=10000)
     # ── Service Provider — "Get phone number" reveal fee (June 2026) ──
     # Both optional — admins toggle these from the web admin panel without
     # affecting other settings. Defaults remain those in DEFAULT_SETTINGS

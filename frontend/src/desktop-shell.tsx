@@ -52,15 +52,15 @@ export function DesktopShell({ children }: { children: React.ReactNode }) {
 
   // Build the nav list from the same five primary tabs the mobile bar shows.
   // Order: Dashboard · Shop · Services · Chat · Wallet · Network · Profile.
-  // (Wallet + Network are hidden on the mobile tab bar but they're high-value
-  // shortcuts on a desktop screen so we surface them in the sidebar.)
+  // (Wallet is hidden on the mobile tab bar but it's a high-value shortcut
+  // on a desktop screen so we surface it in the sidebar.)
   const items: NavItem[] = [
     { key: "dashboard", label: "Dashboard", icon: "home", path: "/(tabs)/dashboard", match: /\/dashboard/ },
     { key: "shop",      label: "Shop",      icon: "shopping-bag", path: "/(tabs)/shop", match: /\/shop|\/shop-category/ },
     { key: "services",  label: "Services",  icon: "briefcase", path: "/(tabs)/services", match: /\/services/ },
     { key: "chat",      label: "Slang-Connect", icon: "message-circle", path: "/(tabs)/chat", match: /\/chat/ },
     { key: "wallet",    label: "Wallet",    icon: "credit-card", path: "/(tabs)/wallet", match: /\/wallet/ },
-    { key: "network",   label: "Network",   icon: "git-branch", path: "/(tabs)/network", match: /\/network/ },
+    { key: "orders",    label: "My orders", icon: "package", path: "/orders", match: /\/orders/ },
     { key: "profile",   label: "Profile",   icon: "user", path: "/(tabs)/profile", match: /\/profile/ },
   ];
 
