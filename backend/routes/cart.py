@@ -164,6 +164,22 @@ async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
             p["image_url"] = f"/api/products/{p.get('id')}/image?w=240&q=70"
         prod_map[p["id"]] = p
 
+    # Jun 2026 — the cart groups lines by SELLER (checkout splits into one
+    # order per vendor), so ship the vendor display name with every row.
+    vendor_ids = list({p.get("vendor_id") for p in prod_map.values() if p.get("vendor_id")})
+    vendor_names: Dict[str, str] = {}
+    if vendor_ids:
+        async for v in db.users.find(
+            {"id": {"$in": vendor_ids}},
+            {"_id": 0, "id": 1, "vendor_business_name": 1, "shop_name": 1, "name": 1},
+        ):
+            vendor_names[v["id"]] = (
+                v.get("vendor_business_name") or v.get("shop_name") or v.get("name") or "Seller"
+            )
+    for p in prod_map.values():
+        if p.get("vendor_id"):
+            p["vendor_name"] = vendor_names.get(p["vendor_id"]) or "Seller"
+
     enriched = []
     total = 0.0
     for it in items:

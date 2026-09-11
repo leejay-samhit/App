@@ -63,9 +63,9 @@ export default function Login() {
     if (autoPromptedRef.current) return;
     autoPromptedRef.current = true;
     // Fire and forget — onBiometric handles its own loading + errors.
-    // Adding a tiny delay so the splash overlay has time to unmount and
-    // the OS biometric sheet animates in cleanly without overlapping it.
-    const t = setTimeout(() => { onBiometric(); }, 350);
+    // The splash overlay is gone (Sep 2026) so the OS biometric sheet can
+    // come up on the next frame instead of after a 350ms wait.
+    const t = setTimeout(() => { onBiometric(); }, 0);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [biometricReady]);

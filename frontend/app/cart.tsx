@@ -21,7 +21,7 @@ type CartLine = {
   id: string;
   product_id: string;
   qty: number;
-  product: { name: string; price: number; image_url: string };
+  product: { name: string; price: number; image_url: string; vendor_id?: string | null; vendor_name?: string | null };
   line_total: number;
   // Jun 2026 — which size / RAM-ROM option this row is for
   variant_id?: string;
@@ -58,8 +58,6 @@ export default function CartScreen() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
   const onRefresh = useCallback(() => { setRefreshing(true); load(); }, [load]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
-
   const remove = async (productId: string, variantId?: string) => {
     try {
       // Pass the variant so removing "Size L" doesn't wipe "Size M" too.
@@ -79,6 +77,21 @@ export default function CartScreen() {
 
   const balance = user?.wallet_balance || 0;
   const canPay = balance >= total && total > 0;
+
+  // Jun 2026 — checkout splits into ONE order per seller, so the bag shows
+  // the same grouping up-front: no surprise "why did I get 2 orders?".
+  const sellerGroups: { key: string; name: string; lines: CartLine[]; subTotal: number }[] = [];
+  items.forEach((it) => {
+    const key = it.product?.vendor_id || "__slangcart__";
+    let g = sellerGroups.find((x) => x.key === key);
+    if (!g) {
+      g = { key, name: it.product?.vendor_name || "Slangcart Store", lines: [], subTotal: 0 };
+      sellerGroups.push(g);
+    }
+    g.lines.push(it);
+    g.subTotal += it.line_total || 0;
+  });
+  const multiSeller = sellerGroups.length > 1;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -113,7 +126,26 @@ export default function CartScreen() {
             contentContainerStyle={{ padding: spacing.screen, paddingTop: 8, paddingBottom: 20 }}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
           >
-            {items.map((it) => (
+            {multiSeller ? (
+              <View style={styles.splitNotice} testID="cart-split-notice">
+                <Feather name="git-branch" size={15} color={colors.primary} />
+                <Text style={styles.splitNoticeText}>
+                  Items from {sellerGroups.length} sellers — this will be placed as{" "}
+                  {sellerGroups.length} separate orders, each tracked and delivered on its own.
+                </Text>
+              </View>
+            ) : null}
+
+            {sellerGroups.map((g) => (
+              <View key={g.key} testID={`cart-seller-${g.key}`}>
+                {multiSeller ? (
+                  <View style={styles.sellerHeader}>
+                    <Feather name="shopping-bag" size={13} color={colors.primary} />
+                    <Text style={styles.sellerName} numberOfLines={1}>{g.name}</Text>
+                    <Text style={styles.sellerSub}>{formatINR(g.subTotal)}</Text>
+                  </View>
+                ) : null}
+                {g.lines.map((it) => (
               <View key={it.id} style={styles.line} testID={`cart-line-${it.product_id}${it.variant_id ? `-${it.variant_id}` : ""}`}>
                 <Image source={{ uri: resolveImageUrl(it.product.image_url) }} style={styles.image} />
                 <View style={{ flex: 1 }}>
@@ -138,6 +170,8 @@ export default function CartScreen() {
                   </TouchableOpacity>
                   <Text style={styles.lineTotal}>{formatINR(it.line_total)}</Text>
                 </View>
+              </View>
+                ))}
               </View>
             ))}
 
@@ -207,6 +241,18 @@ const styles = StyleSheet.create({
   emptyBtnText: { color: colors.primaryFg, fontWeight: "800" },
 
   line: { flexDirection: "row", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16, padding: 12, marginBottom: 10, gap: 12 },
+
+  // Jun 2026 — multi-seller split grouping
+  splitNotice: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    backgroundColor: colors.primary + "10", borderRadius: 14,
+    borderWidth: 1, borderColor: colors.primary + "40",
+    padding: 12, marginBottom: 12,
+  },
+  splitNoticeText: { flex: 1, fontSize: 11.5, color: colors.textMain, fontWeight: "600", lineHeight: 16 },
+  sellerHeader: { flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 8, paddingHorizontal: 2 },
+  sellerName: { flex: 1, fontSize: 12, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
+  sellerSub: { fontSize: 12, fontWeight: "800", color: colors.primary },
   image: { width: 72, height: 72, borderRadius: 12, backgroundColor: colors.surfaceMuted },
   lineName: { fontSize: 13, fontWeight: "700", color: colors.textMain, marginBottom: 6 },
   qtyPill: { alignSelf: "flex-start", backgroundColor: colors.surfaceMuted, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },

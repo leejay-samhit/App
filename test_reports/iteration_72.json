@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 72 (FRONTEND ONLY) — Verified the multi-vendor bag/checkout split UI and the wallet+COD combo end-to-end. All 9 requested flows passed. Two-seller cart shows `cart-split-notice` ('Items from 2 sellers — this will be placed as 2 separate orders...'), correct per-seller headers `cart-seller-1115f76...` (Test Shop, ₹100) and `cart-seller-ddbce05...` (Vendor Two Store, ₹250), grand total ₹350. Single-seller cart correctly hides the notice and seller header row. Checkout shows `checkout-split-notice`, ORDER 1 (Test Shop, ₹100) and ORDER 2 (Vendor Two Store, ₹250) sections, `checkout-seller-*` groups, grand total ₹350. `pay-wallet-cod` reveals `wallet-split-box` with `split-wallet-amount=₹200` and `split-cash-amount=₹150` (auto-max ₹200 given wallet balance). Place Order succeeded — created 2 sibling orders SC-CBE39D-1 (Test Shop, ₹100 wallet, paid_via=wallet) and SC-CBE39D-2 (Vendor Two Store, ₹250 = ₹100 wallet + ₹150 COD, paid_via=wallet_cod), same group_id. /orders shows `order-group-<groupId>` header '1 checkout · 2 sellers  2/2', two cards with different order numbers, correct seller names, 'Order 1 of 2' / 'Order 2 of 2', per-order payment breakdown (Test Shop: 'Wallet · Paid'; Vendor Two Store: '₹100 paid, ₹150 on delivery'). Wallet balance decreased 200 → 0 as expected. Vendor 1 sees only SC-CBE39D-1 (Vendor One Widget, ₹100); Vendor 2 sees only SC-CBE39D-2 (Vendor Two Gadget, ₹250). No red-box, no blank screens; only benign warnings (shadow* deprecation, expo-notifications web push, expo package-version notice) that were pre-listed in the review notes as ignorable.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "checkout.tsx — wallet+COD split quick-chips", "issue": "The split-chip-* buttons (₹0/25%/50%/75%/Max) render inside the ScrollView but sit visually under the sticky Place Order footer at 390×844. When tapped via automation (force=True) the split amount did not change from the auto-max ₹200/₹150. The math itself is correct in the source (Math.floor(maxWalletUsable * f)), so this is likely a footer-overlap / z-index issue where the sticky CTA (position:absolute) is intercepting taps on the bottom chip row. Manual scroll or a small paddingBottom on the ScrollView + higher zIndex on splitBox chips would fix. Reference: /app/frontend/app/checkout.tsx:539-556 (splitQuickRow) and :680 (stickyCta).", "testID": "split-chip-0.5 / split-chip-0.75 / split-chip-1", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "checkout.tsx", "issues": ["Sticky Place Order footer visually overlays the last row of the wallet-split-box (chip row + hint text) when the split panel is expanded and the address form is fully filled. Consider adding paddingBottom: 180 to the ScrollView contentContainerStyle (currently 130) when paymentMethod === 'wallet_cod'."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iter72_cart_multi.png",
+    "/app/test_reports/iter72_checkout_summary.png",
+    "/app/test_reports/iter72_checkout_split.png",
+    "/app/test_reports/iter72_after_place.png",
+    "/app/test_reports/iter72_orders.png",
+    "/app/test_reports/iter72_cart_single.png"
+  ],
+  "action_items": [
+    "Optional: raise ScrollView paddingBottom (or increase splitBox marginBottom) on /checkout so the wallet-split quick chips and hint aren't visually covered by the sticky Place Order footer on 390×844 viewports. Purely a small polish — the maths and the slider still work; auto-max is correct.",
+    "No blocking issues. The multi-vendor split UI, checkout split preview, wallet+COD combo, order splitting, wallet debit, and vendor-side isolation are all working end-to-end.",
+    "(FYI) buyer wallet is now ₹0 after this run — top up via admin if the next iteration re-runs this exact scenario."
+  ],
+  "critical_code_review_comments": [
+    "cart.tsx grouping is defensive: falls back to key '__slangcart__' and name 'Slangcart Store' when vendor_id/vendor_name are missing — good.",
+    "checkout.tsx wallet+COD maths: walletPart = max(0, min(round(walletSplit), floor(maxWalletUsable))) — correctly clamps to wallet balance and total; auto-max useEffect fires exactly once (splitTouched flag).",
+    "orders.tsx group-header detection: `(item.split_count||1) > 1 && (index===0 || filtered[index-1].group_id !== item.group_id)` — assumes the newest-first list from /orders/me keeps siblings adjacent. Backend confirmed to return them adjacent (both created within the same checkout, sorted by created_at desc).",
+    "cart.tsx line 149: variant_id concatenation into testID may produce trailing '-' when variant_id is empty string (currently emits '-'); minor cosmetic — not user-facing.",
+    "checkout.tsx onPlaceOrder posts wallet_amount only when payment_method === 'wallet_cod' — correct."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (frontend-only run per request)", "frontend": "100% of the 9 requested flows"},
+  "seed_data_creation": "No new seed data. Used existing products (Vendor One Widget 9c6bb05d..., Vendor Two Gadget 4c1155f9...) and testbuyer@test.com. Buyer's wallet went 200 → 0 after the combo checkout.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "testbuyer wallet is now ₹0 after this run's ₹200 wallet debit. To re-run the exact combo scenario, top up via admin (e.g. `POST /api/admin/wallet/adjust` or via the admin UI). Two new orders SC-CBE39D-1 / SC-CBE39D-2 exist on Vendor 1 / Vendor 2 dashboards. Login testIDs unchanged: login-email-input, login-password-input, login-submit-button. Cart split testIDs verified: cart-split-notice, cart-seller-<vendorId>, checkout-split-notice, checkout-seller-<vendorId>, pay-wallet-cod, wallet-split-box, split-wallet-amount, split-cash-amount, wallet-split-slider, split-chip-<f>, order-group-<groupId>. Vendor sales endpoint is `GET /api/vendor/me/sales` (NOT /vendor/me/orders — that returns 404).",
+  "rca_of_issue": "N/A — no bug found in the reviewed changes. The single medium-priority note is a purely visual overlap of the sticky footer over the wallet-split quick-chip row on a 390px-wide viewport; the underlying logic is correct."
+}

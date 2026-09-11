@@ -1,31 +1,19 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { Platform, StyleSheet } from "react-native";
+// (Platform / StyleSheet no longer needed — system font only.)
 // Preload @expo/vector-icons fonts at boot — Expo SDK 54 + new-arch can race
 // the runtime font loader and surface "Font file for feather is empty"
 // when an icon renders before the font registers. Importing each icon set
 // here exposes its `.font` map (e.g. `{ feather: require(...) }`) which we
-// pass to `useFonts` alongside the Google fonts.
+// pass to `useFonts`.
 import Feather from "@expo/vector-icons/Feather";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import Ionicons from "@expo/vector-icons/Ionicons";
-// Trimmed to 3 weights per font (400/600/800) — drops ~40% of the bundled font assets
-// while still covering Body / Heading / ExtraBold use cases throughout the app.
-import {
-  useFonts as useInter,
-  Inter_400Regular,
-  Inter_600SemiBold,
-  Inter_800ExtraBold,
-} from "@expo-google-fonts/inter";
-import {
-  Poppins_400Regular,
-  Poppins_600SemiBold,
-  Poppins_800ExtraBold,
-} from "@expo-google-fonts/poppins";
-import {
-  PlusJakartaSans_400Regular,
-  PlusJakartaSans_600SemiBold,
-  PlusJakartaSans_800ExtraBold,
-} from "@expo-google-fonts/plus-jakarta-sans";
+// Sep 2026 — the three Google font families (Inter / Poppins / Plus Jakarta)
+// were dropped. The app has always shipped with `font: "system"`, yet all
+// nine .ttf weights were bundled AND loaded at boot: ~16 MB of package
+// weight, nine font assets in the build and a font-loading step in front of
+// the first frame. Only the icon fonts are preloaded now.
+import { useFonts } from "expo-font";
 import { api } from "./api";
 import { colors as defaultColors } from "./theme";
 
@@ -38,12 +26,9 @@ export type Branding = {
   payment_hero: string;
   pending_hero: string;
   colors: typeof defaultColors;
-  font: "system" | "inter" | "poppins" | "jakarta" | "manrope" | "dmsans";
+  /** Kept for API compatibility — the app renders in the system font. */
+  font: "system";
   tabs: BrandingTab[];
-  // ─── Splash overlay (Feb-2026) ───
-  splash_image?: string | null;
-  splash_duration_ms?: number;
-  splash_bg?: string;
   // ─── Payment methods config (Feb-2026) ───
   payment_methods?: {
     razorpay_enabled?: boolean;
@@ -97,14 +82,8 @@ const DEFAULT_BRANDING: Branding = {
   support_phone: "+91 91547 35888",
 };
 
-const FONT_FAMILY_MAP: Record<Branding["font"], string | undefined> = {
-  system: undefined,
-  inter: "Inter_600SemiBold",
-  poppins: "Poppins_600SemiBold",
-  jakarta: "PlusJakartaSans_600SemiBold",
-  manrope: undefined, // can be added later
-  dmsans: undefined, // can be added later
-};
+// System font everywhere — no custom family to resolve.
+const FONT_FAMILY_MAP: Record<string, string | undefined> = { system: undefined };
 
 type Ctx = {
   branding: Branding;
@@ -128,16 +107,7 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   // Load the trimmed weights so they're ready when the user picks a font.
-  const [fontsLoaded] = useInter({
-    Inter_400Regular,
-    Inter_600SemiBold,
-    Inter_800ExtraBold,
-    Poppins_400Regular,
-    Poppins_600SemiBold,
-    Poppins_800ExtraBold,
-    PlusJakartaSans_400Regular,
-    PlusJakartaSans_600SemiBold,
-    PlusJakartaSans_800ExtraBold,
+  useFonts({
     // Icon fonts — preload to avoid the Expo SDK 54 race condition where the
     // first <Feather/> render happens before the font asset registers.
     ...((Feather as any).font || {}),
@@ -192,15 +162,6 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
     })();
   }, [refresh, setBranding]);
 
-  // Apply the chosen font globally. We override default styles for Text via
-  // a one-time monkey-patch on StyleSheet (works for RN out of the box).
-  useEffect(() => {
-    const fam = FONT_FAMILY_MAP[branding.font];
-    // Use setNativeProps via Text default — see below in `useFontFamily()` hook.
-    // No-op here; consumers can use useFontFamily() to get the active family.
-    return () => undefined;
-  }, [branding.font, fontsLoaded]);
-
   const value = useMemo<Ctx>(() => ({ branding, setBranding, refresh, loading }), [branding, setBranding, refresh, loading]);
   return <BrandingContext.Provider value={value}>{children}</BrandingContext.Provider>;
 }
@@ -224,9 +185,3 @@ export function useFontFamily(): string | undefined {
 
 /** Helper to get a typed StyleSheet that automatically applies the active font.
  *  Usage: const styles = useThemedStyles(() => StyleSheet.create({ ... })) */
-export const FONT_OPTIONS: { key: Branding["font"]; label: string }[] = [
-  { key: "system", label: "System default" },
-  { key: "inter", label: "Inter" },
-  { key: "poppins", label: "Poppins" },
-  { key: "jakarta", label: "Plus Jakarta Sans" },
-];

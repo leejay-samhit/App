@@ -1132,3 +1132,29 @@ delivery needs a published build.
   delivered" badges + matched words + Open chat / Mark reviewed, an
   "⚠ N to review" chip on conversation cards and a SCAM/ABUSE badge on the
   offending bubble inside the transcript.
+
+### 11. Multi-vendor split — buyer-facing UI (Jun 2026, verified iteration 72)
+Backend already created ONE order per vendor per checkout (shared `group_id`,
+`split_index`/`split_count`, per-sub-order `wallet_paid`/`cod_due`). What was
+missing was buyer visibility BEFORE paying:
+- `GET /api/cart` now returns `vendor_name` on each line's `product`
+  (single batched users lookup).
+- `server.py::_vendor_name()` aligned to the same priority as
+  `routes/cart.py` (vendor_business_name > shop_name > name) so the seller
+  name in the bag matches the name printed on the placed order.
+- `app/cart.tsx`: bag grouped by seller. With 2+ sellers it shows
+  `cart-split-notice` ("Items from N sellers — this will be placed as N
+  separate orders…") and a per-seller header with that seller's subtotal.
+  Single-seller carts render exactly as before. Removed a duplicate
+  `useFocusEffect` that loaded the cart twice on focus.
+- `app/checkout.tsx`: ORDER SUMMARY grouped by seller with ORDER 1 / ORDER 2
+  badges + per-seller subtotals and `checkout-split-notice`. ScrollView
+  bottom padding grows to 240 in `wallet_cod` mode so the sticky footer
+  stops covering the split quick-chips.
+- Wallet+COD combo verified: wallet money is allocated across sub-orders in
+  cart order (first seller fully paid → `wallet`, next → `wallet_cod`
+  partial_cod / `cod` pending_cod). `/orders` shows the group header
+  "1 checkout · N sellers" with per-order seller name, order number
+  SC-XXXXXX-1/-2 and the wallet vs cash breakdown.
+- Vendor isolation confirmed: each vendor sees only its own sub-order.
+- API-level regression test: `backend/tests/test_multivendor_split_ui.py`.

@@ -14,7 +14,7 @@
  * "Add" pill, an inline −/+ stepper (when already in the cart) or a SOLD OUT
  * chip. Wrap a list of these in a <View style={productGridStyles.wrap}>.
  */
-import React from "react";
+import React, { memo } from "react";
 import { View, Text, Image, TouchableOpacity, StyleSheet } from "react-native";
 import { Feather } from "@expo/vector-icons";
 
@@ -62,7 +62,7 @@ export function gridColumnsFor(width: number): number {
 
 const GRID_GAP = 12;
 
-export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, index = 0 }: Props) {
+function ProductGridCardBase({ product: p, qty, onOpen, onAdd, onDecrement, index = 0 }: Props) {
   const width = useContentWidth();
   const cols = gridColumnsFor(width);
   // Jun 2026 — prime the preview cache so /product/[id] paints instantly.
@@ -145,6 +145,23 @@ export function ProductGridCard({ product: p, qty, onOpen, onAdd, onDecrement, i
     </FadeSlideIn>
   );
 }
+
+/**
+ * Sep 2026 perf — the shop grid re-rendered every card on any parent state
+ * change (search text, cart badge, a single qty bump). Memoising on the
+ * fields the card actually paints keeps a 60-item grid at one render per
+ * changed tile, which is what makes scrolling and tab swipes feel instant.
+ */
+export const ProductGridCard = memo(ProductGridCardBase, (a, b) =>
+  a.product.id === b.product.id &&
+  a.product.name === b.product.name &&
+  a.product.price === b.product.price &&
+  a.product.image_url === b.product.image_url &&
+  a.product.is_in_stock === b.product.is_in_stock &&
+  a.product.stock === b.product.stock &&
+  a.qty === b.qty &&
+  a.index === b.index,
+);
 
 /** Wrapper style for a responsive grid of ProductGridCards. */
 export const productGridStyles = StyleSheet.create({

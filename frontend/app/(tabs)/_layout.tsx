@@ -83,6 +83,10 @@ export default function TabsLayout() {
           // Horizontal slide so a swipe (or a tab tap) reads as moving
           // sideways through the app, matching the reference video.
           animation: "shift",
+          // Perf: never build a tab until it is first opened, and freeze it
+          // the moment it loses focus so background screens cost nothing.
+          lazy: true,
+          freezeOnBlur: true,
           // Jun 2026 — paint each tab scene on the app background. Without
           // this the scene is transparent during the shift animation and the
           // dark root view flashed green between tabs.

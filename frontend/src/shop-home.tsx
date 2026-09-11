@@ -380,10 +380,18 @@ export function ShopHome({
   }, []);
 
   useEffect(() => { load(); loadCategories(); }, [load, loadCategories]);
-  // Reload categories whenever the shop home regains focus so admin
-  // changes (icon swap, rename, new category) show up immediately
-  // when the admin pops back from /admin/shop-categories.
-  useFocusEffect(useCallback(() => { loadCategories(); }, [loadCategories]));
+  // Reload categories whenever the shop home REGAINS focus so admin changes
+  // (icon swap, rename, new category) show up immediately when the admin
+  // pops back from /admin/shop-categories.
+  //
+  // Sep 2026 perf — the first focus fires on mount, right after the effect
+  // above, so every single open of the Shop tab fetched the categories
+  // twice. `firstFocus` skips that duplicate round-trip.
+  const firstFocus = useRef(true);
+  useFocusEffect(useCallback(() => {
+    if (firstFocus.current) { firstFocus.current = false; return; }
+    loadCategories();
+  }, [loadCategories]));
 
   // ── Derived collections per section ───────────────────────────────────
   const filteredProducts = useMemo(() => {

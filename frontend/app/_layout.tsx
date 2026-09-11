@@ -4,6 +4,7 @@ import { StatusBar } from "expo-status-bar";
 import { Text, TextInput, Platform, View, useWindowDimensions } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { enableFreeze } from "react-native-screens";
 import * as SplashScreen from "expo-splash-screen";
 import * as Notifications from "expo-notifications";
 import * as Linking from "expo-linking";
@@ -11,7 +12,6 @@ import { AuthProvider, useAuth } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
 import { ChatSettingsProvider } from "../src/chat-settings";
 import { LocationGate } from "../src/location-gate";
-import { SplashOverlay } from "../src/splash-overlay";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
 import { registerForPush } from "../src/push";
 import { ContentWidthProvider, TABLET_MAX_WIDTH } from "../src/content-width";
@@ -43,12 +43,16 @@ if (Platform.OS === "android") {
   }).catch(() => {});
 }
 
-// Keep the native (Expo) splash screen visible until React Native has had a
-// chance to mount our own JS splash overlay. Without this, there's a brief
-// FAF9F6 (off-white) flash between the moment the native splash auto-hides
-// and the moment our `<SplashOverlay/>` renders the dark-green brand splash.
-// Calling preventAutoHideAsync() at module-load (outside any component)
-// guarantees we win the race against the auto-hide.
+// Sep 2026 — SPLASHES REMOVED. There is no JS splash overlay any more (it
+// used to hold the app hostage for the admin-configured duration, 5s by
+// default). The OS launch screen is kept up only until React's first commit
+// so the handoff has no white flash, then hidden immediately.
+//
+// Freeze inactive screens: a blurred tab / pushed-away screen stops
+// re-rendering entirely, which is the single biggest win for back-navigation
+// and swipe smoothness on mid-range Androids.
+enableFreeze(true);
+
 SplashScreen.preventAutoHideAsync().catch(() => {
   /* Safe to ignore — fails on web / when called twice. */
 });
@@ -158,9 +162,7 @@ function PushReRegister() {
 }
 
 export default function RootLayout() {
-  // Once React has mounted and our SplashOverlay is in the tree, hide the
-  // native Expo splash. The handoff to the JS-rendered splash is now
-  // seamless — no off-white flash between them.
+  // First commit is done → drop the OS launch screen straight away.
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
@@ -236,16 +238,17 @@ function RootLayoutInner() {
                         // launch frames, so the navigator now uses the app
                         // background and transitions are flash-free.
                         contentStyle: { backgroundColor: colors.background },
-                        animation: "fade",
+                        // Native slide is GPU-driven and reads as "instant"
+                        // next to the old cross-fade, and the iOS back-swipe
+                        // gesture comes for free with it.
+                        animation: "slide_from_right",
+                        animationDuration: 180,
+                        gestureEnabled: true,
+                        freezeOnBlur: true,
                       }}
                     />
                   </TamperGate>
                 </LocationGate>
-                {/* App-launch splash overlay (admin-uploaded image + duration).
-                    Renders over EVERYTHING for the first N seconds (default 5s)
-                    and then unmounts itself. Reads from branding context so it
-                    follows admin changes without a rebuild. */}
-                <SplashOverlay />
               </TabletContainer>
             </GlobalFont>
             </ChatSettingsProvider>

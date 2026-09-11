@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { View, Text, Image, StyleSheet, ScrollView, TextInput, TouchableOpacity, ActivityIndicator, Alert, Switch, KeyboardAvoidingView, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import * as ImagePicker from "expo-image-picker";
-import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
-import { useBranding, useBrandingActions, FONT_OPTIONS, type Branding } from "../../src/branding";
+import { useBranding, useBrandingActions, type Branding } from "../../src/branding";
 import { colors, radii, spacing } from "../../src/theme";
 
 const COLOR_FIELDS: { key: keyof Branding["colors"]; label: string }[] = [
@@ -22,10 +20,6 @@ const COLOR_FIELDS: { key: keyof Branding["colors"]; label: string }[] = [
   { key: "border", label: "Borders" },
 ];
 
-const TAB_ICON_OPTIONS = [
-  "home", "git-branch", "users", "credit-card", "shopping-bag", "user",
-  "grid", "pie-chart", "bar-chart-2", "settings",
-];
 
 export default function AdminBranding() {
   const router = useRouter();
@@ -46,7 +40,6 @@ export default function AdminBranding() {
     setDraft((d) => ({ ...d, [k]: v } as Branding));
   };
 
-  const setFont = (f: Branding["font"]) => setDraft((d) => ({ ...d, font: f }));
 
   const moveTab = (index: number, dir: -1 | 1) => {
     setDraft((d) => {
@@ -77,9 +70,6 @@ export default function AdminBranding() {
         colors: draft.colors,
         font: draft.font,
         tabs: draft.tabs,
-        splash_image: draft.splash_image ?? "",
-        splash_duration_ms: draft.splash_duration_ms,
-        splash_bg: draft.splash_bg,
         // ⬇️ THIS WAS MISSING — the whole reason payee_upi_id wasn't
         // saving. Without this key in the PUT body the backend never
         // received the UPI ID / payee name / toggles changes.
@@ -168,17 +158,6 @@ export default function AdminBranding() {
             </View>
           ))}
 
-          {/* Font */}
-          <SectionHeader icon="bold" label="Font" />
-          <View style={styles.fontList}>
-            {FONT_OPTIONS.map((f) => (
-              <TouchableOpacity key={f.key} onPress={() => setFont(f.key)} style={[styles.fontRow, draft.font === f.key && styles.fontRowActive]} testID={`branding-font-${f.key}`}>
-                <Feather name={draft.font === f.key ? "check-circle" : "circle"} size={18} color={draft.font === f.key ? colors.primary : colors.textMuted} />
-                <Text style={styles.fontLabel}>{f.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
           {/* Payment methods (Feb-2026) — Razorpay toggle + Manual UPI config */}
           <SectionHeader icon="credit-card" label="Payment methods" />
           <Text style={styles.helper}>
@@ -226,87 +205,6 @@ export default function AdminBranding() {
           <Field label="Payee Display Name" value={draft.payment_methods?.payee_name || ""}
                  onChangeText={(v) => setDraft((d) => ({ ...d, payment_methods: { ...(d.payment_methods || {}), payee_name: v } }))}
                  placeholder={draft.app_name || "Slangcart"} testID="branding-pm-payeename" />
-
-          {/* Splash overlay (admin-uploaded launch image + duration) */}
-          <SectionHeader icon="image" label="App launch splash" />
-          <Text style={styles.helper}>
-            Shown for {Math.round((draft.splash_duration_ms || 5000) / 1000)}s when users open the app.
-            Recommended size: 1080 × 1920 px (9:16 portrait, ≤500 KB).
-          </Text>
-          <View style={styles.splashPreviewWrap}>
-            <View style={[styles.splashPreview, { backgroundColor: draft.splash_bg || draft.colors.primary }]}>
-              {draft.splash_image ? (
-                <Image source={{ uri: draft.splash_image }} style={styles.splashPreviewImg} resizeMode="contain" />
-              ) : (
-                <Text style={styles.splashPreviewFallback}>{draft.app_name || "Launch image"}</Text>
-              )}
-            </View>
-            <View style={{ flex: 1, gap: 8 }}>
-              <TouchableOpacity
-                onPress={async () => {
-                  const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-                  if (!perm.granted) { Alert.alert("Permission needed", "Allow photo access to choose a splash image."); return; }
-                  const res = await ImagePicker.launchImageLibraryAsync({
-                    mediaTypes: ImagePicker.MediaTypeOptions.Images,
-                    quality: 0.85,
-                    aspect: [9, 16],
-                    allowsEditing: true,
-                  });
-                  if (res.canceled || !res.assets?.[0]?.uri) return;
-                  // Compress + base64 encode (≤500KB target).
-                  const manip = await ImageManipulator.manipulateAsync(
-                    res.assets[0].uri,
-                    [{ resize: { width: 1080 } }],
-                    { compress: 0.75, format: ImageManipulator.SaveFormat.JPEG, base64: true },
-                  );
-                  if (!manip.base64) return;
-                  const dataUri = `data:image/jpeg;base64,${manip.base64}`;
-                  setDraft((d) => ({ ...d, splash_image: dataUri }));
-                }}
-                style={styles.splashBtn}
-                testID="branding-splash-pick"
-              >
-                <Feather name="upload" size={14} color={colors.primary} />
-                <Text style={styles.splashBtnText}>{draft.splash_image ? "Replace image" : "Upload image"}</Text>
-              </TouchableOpacity>
-              {draft.splash_image ? (
-                <TouchableOpacity
-                  onPress={() => setDraft((d) => ({ ...d, splash_image: null }))}
-                  style={[styles.splashBtn, { backgroundColor: "#FFF7E6", borderColor: "#B85F0044" }]}
-                  testID="branding-splash-clear"
-                >
-                  <Feather name="trash-2" size={14} color="#B85F00" />
-                  <Text style={[styles.splashBtnText, { color: "#B85F00" }]}>Remove</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-          </View>
-          <View style={styles.splashRow}>
-            <Text style={styles.fieldLabel}>Duration (seconds)</Text>
-            <TextInput
-              value={String(Math.round((draft.splash_duration_ms || 5000) / 1000))}
-              onChangeText={(v) => {
-                const sec = Math.max(1, Math.min(10, parseInt(v.replace(/\D/g, "") || "0", 10) || 0));
-                setDraft((d) => ({ ...d, splash_duration_ms: sec * 1000 }));
-              }}
-              keyboardType="number-pad"
-              style={styles.splashInput}
-              testID="branding-splash-duration"
-              maxLength={2}
-            />
-          </View>
-          <View style={styles.splashRow}>
-            <Text style={styles.fieldLabel}>Background colour</Text>
-            <TextInput
-              value={draft.splash_bg || draft.colors.primary}
-              onChangeText={(v) => setDraft((d) => ({ ...d, splash_bg: v }))}
-              autoCapitalize="characters"
-              style={styles.splashInput}
-              placeholder="#143D2E"
-              placeholderTextColor={colors.textMuted}
-              testID="branding-splash-bg"
-            />
-          </View>
 
           {/* ─── Premium theme (June 2026) — gradient, button style, banner ─── */}
           <SectionHeader icon="layers" label="Premium theme" />
@@ -488,12 +386,6 @@ const styles = StyleSheet.create({
   saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 14 },
   saveBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
   // Splash uploader
-  splashPreviewWrap: { flexDirection: "row", gap: 12, marginBottom: 12 },
   splashPreview: { width: 90, height: 160, borderRadius: 12, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, overflow: "hidden" },
-  splashPreviewImg: { width: "100%", height: "100%" },
-  splashPreviewFallback: { fontSize: 11, color: "#fff", fontWeight: "800", textAlign: "center", paddingHorizontal: 6 },
-  splashBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: colors.primary + "55", backgroundColor: colors.brand100 },
-  splashBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
   splashRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  splashInput: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, fontSize: 13, fontWeight: "700", color: colors.textMain, backgroundColor: colors.surface, minWidth: 110, textAlign: "center" },
 });

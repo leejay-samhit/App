@@ -18,7 +18,7 @@ import { colors, radii, spacing, formatINR } from "../src/theme";
 import OutOfZoneModal from "../src/OutOfZoneModal";
 import { useDeliveryLocation } from "../src/use-delivery-location";
 
-type CartItem = { id: string; product_id: string; qty: number; product: { name: string; price: number; image_url: string }; line_total: number };
+type CartItem = { id: string; product_id: string; qty: number; product: { name: string; price: number; image_url: string; vendor_id?: string | null; vendor_name?: string | null }; line_total: number };
 
 const ADDRESS_KEY = "@checkout-address-v1";
 
@@ -179,6 +179,21 @@ export default function CheckoutScreen() {
   }, [deliveryLoc.coords, gpsLat, gpsLng]);
 
   const total = items.reduce((s, i) => s + ((i.line_total) || (i.product?.price || 0) * (i.qty || 1)), 0);
+  // Jun 2026 — one order per SELLER. Show the split before paying so the
+  // buyer knows exactly how many orders/deliveries to expect.
+  const sellerGroups: { key: string; name: string; lines: CartItem[]; subTotal: number }[] = [];
+  items.forEach((it) => {
+    const key = it.product?.vendor_id || "__slangcart__";
+    let g = sellerGroups.find((x) => x.key === key);
+    if (!g) {
+      g = { key, name: it.product?.vendor_name || "Slangcart Store", lines: [], subTotal: 0 };
+      sellerGroups.push(g);
+    }
+    g.lines.push(it);
+    g.subTotal += it.line_total || (it.product?.price || 0) * (it.qty || 1);
+  });
+  const multiSeller = sellerGroups.length > 1;
+
   const canAffordWallet = walletBalance >= total;
   // Jun 2026 — Wallet+COD combo maths. `maxWalletUsable` is the most the
   // wallet can contribute; the slider defaults to that (auto-max) and the
@@ -311,11 +326,31 @@ export default function CheckoutScreen() {
       </View>
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={20}>
-        <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 130 }} keyboardShouldPersistTaps="handled">
+        <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: paymentMethod === "wallet_cod" ? 240 : 130 }} keyboardShouldPersistTaps="handled">
           {/* Order summary — Sept 2026 refresh: bigger thumbnails,
               clearer qty × unit-price arithmetic, sticky spacing. */}
           <Text style={styles.sectionLabel}>ORDER SUMMARY ({items.length} {items.length === 1 ? "item" : "items"})</Text>
-          {items.map((it) => {
+          {multiSeller ? (
+            <View style={styles.splitNotice} testID="checkout-split-notice">
+              <Feather name="git-branch" size={15} color={colors.primary} />
+              <Text style={styles.splitNoticeText}>
+                {sellerGroups.length} sellers in this bag — we&apos;ll place {sellerGroups.length} separate
+                orders so each seller ships and updates you independently.
+              </Text>
+            </View>
+          ) : null}
+          {sellerGroups.map((g, gi) => (
+            <View key={g.key} testID={`checkout-seller-${g.key}`}>
+              {multiSeller ? (
+                <View style={styles.sellerHeader}>
+                  <View style={styles.sellerBadge}>
+                    <Text style={styles.sellerBadgeText}>ORDER {gi + 1}</Text>
+                  </View>
+                  <Text style={styles.sellerName} numberOfLines={1}>{g.name}</Text>
+                  <Text style={styles.sellerSub}>{formatINR(g.subTotal)}</Text>
+                </View>
+              ) : null}
+              {g.lines.map((it) => {
             const p = it.product || {} as any;
             const img = resolveImageUrl(p.image_url);
             const nm = p.name || "Product";
@@ -344,7 +379,9 @@ export default function CheckoutScreen() {
                 </View>
               </View>
             );
-          })}
+              })}
+            </View>
+          ))}
           <View style={styles.totalRow}>
             <Text style={styles.totalLabel}>Total</Text>
             <Text style={styles.totalAmount}>{formatINR(total)}</Text>
@@ -580,6 +617,20 @@ const styles = StyleSheet.create({
   title: { fontSize: 17, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
   sectionLabel: { fontSize: 11, fontWeight: "800", letterSpacing: 1.4, color: colors.textMuted, marginTop: 18, marginBottom: 8 },
   // Line items
+  // Jun 2026 — multi-seller split preview
+  splitNotice: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    backgroundColor: colors.primary + "10", borderRadius: 14,
+    borderWidth: 1, borderColor: colors.primary + "40",
+    padding: 12, marginBottom: 12,
+  },
+  splitNoticeText: { flex: 1, fontSize: 11.5, color: colors.textMain, fontWeight: "600", lineHeight: 16 },
+  sellerHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8, paddingHorizontal: 2 },
+  sellerBadge: { backgroundColor: colors.primary, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  sellerBadgeText: { fontSize: 9.5, fontWeight: "900", color: colors.primaryFg, letterSpacing: 0.6 },
+  sellerName: { flex: 1, fontSize: 12, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
+  sellerSub: { fontSize: 12, fontWeight: "800", color: colors.primary },
+
   lineItem: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
   thumb: { width: 68, height: 68, borderRadius: 12, backgroundColor: colors.surfaceMuted },
   thumbEmpty: { alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderStyle: "dashed" },

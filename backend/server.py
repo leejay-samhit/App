@@ -4243,8 +4243,10 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     async def _vendor_name(vid: str) -> str:
         if vid in _vendor_name_cache:
             return _vendor_name_cache[vid]
-        v = await db.users.find_one({"id": vid}, {"_id": 0, "vendor_business_name": 1, "name": 1, "pincode": 1, "store_pincode": 1, "delivery_radius_km": 1})
-        nm = (v or {}).get("vendor_business_name") or (v or {}).get("name") or "Vendor"
+        v = await db.users.find_one({"id": vid}, {"_id": 0, "vendor_business_name": 1, "shop_name": 1, "name": 1, "pincode": 1, "store_pincode": 1, "delivery_radius_km": 1})
+        # Keep this priority identical to routes/cart.py so the seller name
+        # the buyer saw in the bag matches the name on the placed order.
+        nm = (v or {}).get("vendor_business_name") or (v or {}).get("shop_name") or (v or {}).get("name") or "Vendor"
         _vendor_name_cache[vid] = nm
         return nm
 

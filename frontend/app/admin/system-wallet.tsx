@@ -1252,18 +1252,6 @@ export default function AdminSystemWallet() {
 
 /* ────────────────────────── Breakdown row ────────────────────────── */
 
-function BreakdownRow({ label, sub, value, hint }: { label: string; sub?: string; value: number; hint?: string }) {
-  return (
-    <View style={styles.bRow}>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={styles.bRowLabel}>{label}</Text>
-        {sub ? <Text style={styles.bRowSub}>{sub}</Text> : null}
-        {hint ? <Text style={styles.bRowHint}>{hint}</Text> : null}
-      </View>
-      <Text style={styles.bRowAmount}>{formatINR(value)}</Text>
-    </View>
-  );
-}
 
 /* ────────────────────────── Transaction row ────────────────────────── */
 
@@ -1747,12 +1735,6 @@ const styles = StyleSheet.create({
   sourceMiniHead: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 4 },
 
   // Group drilldown drawer
-  drawerBg:    { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
-  drawerSheet: { backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, maxHeight: "88%" },
-  drawerHeader:{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 12, paddingBottom: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  drawerTitle: { fontSize: 16, fontWeight: "800", color: colors.textMain },
-  drawerSub:   { fontSize: 11, fontWeight: "700", color: colors.textMuted, marginTop: 2 },
-  closeBtn:    { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted },
 
   // ID chips (txn display_id, level, reversed badge)
   idChip:      { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, backgroundColor: colors.primary + "18" },
@@ -1763,8 +1745,6 @@ const styles = StyleSheet.create({
   gTxnType:    { fontSize: 12, fontWeight: "800", color: colors.textMain, textTransform: "capitalize" },
   gTxnDesc:    { fontSize: 11.5, color: colors.textMuted, marginTop: 3, lineHeight: 16 },
   gTxnMeta:    { fontSize: 10, color: colors.textMuted, marginTop: 2 },
-  subtotalText:{ textAlign: "center", marginTop: 12, fontSize: 14, fontWeight: "800", color: colors.primary },
-  subtotalHint:{ textAlign: "center", marginTop: 2, fontSize: 10, color: colors.textMuted },
 
   // "Tap to view transactions" affordance inside each Group card
   viewAll:     { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, justifyContent: "center" },

@@ -1,0 +1,40 @@
+{
+  "summary": "Regression verification of the aggressive 'Health Checkup' cleanup (splash removal, Google-fonts removal, freezeOnBlur, ProductGridCard memo). Frontend-only run. All critical flows PASSED: no white/blank/red-box, no splash overlay anywhere, system-font rendering intact, buyer/vendor/admin logins work, tab switching survives freezeOnBlur (2 rounds x 5 tabs + scroll-leave-return, all tabs re-render with content), ProductGridCard memo reacts correctly to pincode change (517644 -> 516002 empty-state -> 517644 products reappear), admin Branding page loads WITHOUT splash settings, admin Legal Pages + admin Chat render correctly, legal/about + legal/contact render dynamic content both pre-login and post-login. No missing-module errors detected in bundler or console.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Buyer /shop product grid", "issues": ["Seeded products 'Test Widget' and 'Vendor One Widget' display a grey placeholder icon instead of an image because their image_url is empty in the seed data. Not a regression from this cleanup but worth flagging so demo product cards look complete."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iter71_login.png",
+    "/app/test_reports/iter71_buyer_home.png",
+    "/app/test_reports/iter71_shop_return.png",
+    "/app/test_reports/iter71_pincode_516002.png",
+    "/app/test_reports/iter71_pincode_517644_back.png",
+    "/app/test_reports/iter71_admin_dash.png",
+    "/app/test_reports/iter71_admin_branding.png",
+    "/app/test_reports/iter71_admin_chat.png",
+    "/app/test_reports/iter71_vendor_dashboard.png"
+  ],
+  "action_items": [
+    "Nothing required from the cleanup itself — regression suite is green.",
+    "Optional cosmetic: attach real image_url values to the two seed products ('Test Widget', 'Vendor One Widget') so the buyer shop demo isn't full of grey placeholders. Purely cosmetic."
+  ],
+  "critical_code_review_comments": [
+    "app/_layout.tsx still imports expo-splash-screen and calls preventAutoHideAsync/hideAsync — this is correct (keeps the OS launch screen up until first commit) and NOT dead code; do not delete.",
+    "src/branding.tsx still keeps Branding.font typed as literal 'system' and FONT_FAMILY_MAP={system:undefined} — clean; if the admin API ever returns a different font key the merge in refresh() falls back to DEFAULT_BRANDING so it won't crash.",
+    "enableFreeze(true) + freezeOnBlur:true confirmed working on web preview across 5 tabs, 2 round-trips, and after a scroll+leave+return. React Native Screens correctly hydrates the frozen subtree on re-focus.",
+    "ProductGridCard memo verified via pincode reload — memo does not stale-prop when the delivery pincode changes."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "skipped", "frontend": "100%"},
+  "seed_data_creation": "None. Only localStorage was seeded (delivery pincode/address/coords) to bypass headless Chrome geolocation, per test_credentials.md notes.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter71 verified the Sep 2026 splash/font/dead-code cleanup + enableFreeze + ProductGridCard memo. If future changes touch app/_layout.tsx, src/branding.tsx, react-native-screens config, or the tab navigator's freezeOnBlur, re-run this iteration's tab-switching and pincode-change tests. Headless Chrome blocks geolocation — always seed the three @app/delivery* localStorage keys BEFORE login (see test_credentials.md). Login response field is `token` not `access_token`. Use testIDs login-email-input / login-password-input / login-submit-button. Vendor screens live under /vendor/... not under a bottom tab. The two demo product cards render placeholder icons because their image_url is empty — this is a seed-data artefact, not a code bug.",
+  "rca_of_issue": "N/A — regression verification only, no bug reproduced. All previously-suspected regressions from the cleanup (white-screen from stale google-fonts import, blank tab after freezeOnBlur, stale memoized ProductGridCard, admin Branding crash from removed splash UI, missing modules) were tested and did NOT reproduce."
+}

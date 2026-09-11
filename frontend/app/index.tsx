@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { View, ActivityIndicator, StyleSheet } from "react-native";
+import { View, StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import { useAuth } from "../src/auth";
 import { adminLanding } from "../src/admin-roles";
@@ -30,13 +30,11 @@ export default function Index() {
     }
   }, [user]);
 
-  return (
-    <View style={styles.center} testID="splash-screen">
-      <ActivityIndicator size="large" color={colors.primary} />
-    </View>
-  );
+  // No spinner, no splash — this route exists purely to redirect, so it
+  // paints a single background-coloured frame and gets replaced.
+  return <View style={styles.center} testID="entry-redirect" />;
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.background },
+  center: { flex: 1, backgroundColor: colors.background },
 });
