@@ -8,6 +8,8 @@ import { enableFreeze } from "react-native-screens";
 import * as SplashScreen from "expo-splash-screen";
 import * as Notifications from "expo-notifications";
 import * as Linking from "expo-linking";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { notify } from "../src/notify";
 import { AuthProvider, useAuth } from "../src/auth";
 import { BrandingProvider, useFontFamily } from "../src/branding";
 import { ChatSettingsProvider } from "../src/chat-settings";
@@ -41,6 +43,37 @@ if (Platform.OS === "android") {
     importance: Notifications.AndroidImportance.MAX,
     sound: "default",
   }).catch(() => {});
+}
+
+// ── Denied-permission nudge ─────────────────────────────────────────────
+// Once a user says "no" twice (iOS) or picks "Don't ask again" (Android),
+// requestPermissionsAsync() can never prompt again — canAskAgain is false.
+// The only route back is the OS settings screen, so we ask (politely, at
+// most once a week) and deep-link them there.
+const PUSH_NUDGE_KEY = "pushNudgeAt";
+const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function maybeNudgeForPushPermission() {
+  if (Platform.OS === "web") return;
+  const { status, canAskAgain } = await Notifications.getPermissionsAsync();
+  if (status !== "denied" || canAskAgain) return;
+
+  const last = await AsyncStorage.getItem(PUSH_NUDGE_KEY);
+  if (last && Date.now() - Number(last) <= ONE_WEEK_MS) return;
+
+  const stamp = () => AsyncStorage.setItem(PUSH_NUDGE_KEY, String(Date.now())).catch(() => {});
+  notify(
+    "Turn on notifications?",
+    "You're missing order updates and replies from sellers. Notifications are " +
+    "switched off for Slangcart — you can turn them back on in settings.",
+    [
+      { text: "Later", style: "cancel", onPress: stamp },
+      {
+        text: "Open Settings",
+        onPress: () => { stamp(); Linking.openSettings().catch(() => {}); },
+      },
+    ],
+  );
 }
 
 // Sep 2026 — SPLASHES REMOVED. There is no JS splash overlay any more (it
@@ -141,23 +174,16 @@ function PushReRegister() {
   useEffect(() => {
     if (user?.id) {
       registerForPush(user.id).catch(() => {});
+      // Jun 2026 — if the user has permanently denied notifications we can't
+      // re-prompt (canAskAgain === false), so nudge them to system settings
+      // at most once a week. Tapping a notification is the only way they
+      // hear about orders and chat replies while the app is closed.
+      maybeNudgeForPushPermission().catch(() => {});
     }
   }, [user?.id]);
 
-  // Tapping a notification in the phone's tray should land the user on the
-  // right screen (chat thread, order, login activity). The payload carries
-  // `action_url` — see backend core/notifications.py.
-  useEffect(() => {
-    if (Platform.OS === "web") return;
-    const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
-      const data: any = resp?.notification?.request?.content?.data || {};
-      const url = data.action_url || data.url;
-      if (url && typeof url === "string" && url.startsWith("/")) {
-        try { expoRouter.push(url as any); } catch { /* ignore bad routes */ }
-      }
-    });
-    return () => { try { sub.remove(); } catch { /* ignore */ } };
-  }, []);
+  // NOTE: notification-tap routing lives in RootLayoutInner — exactly ONE
+  // response listener must exist, otherwise every tap navigates twice.
   return null;
 }
 
@@ -179,7 +205,7 @@ function RootLayoutInner() {
 
     const handleData = (data: any) => {
       try {
-        const url: string | undefined = data?.action_url || data?.deeplink;
+        const url: string | undefined = data?.action_url || data?.deeplink || data?.url;
         if (!url) return;
         if (url.startsWith("http")) {
           Linking.openURL(url).catch(() => {});

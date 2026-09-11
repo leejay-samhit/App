@@ -1250,3 +1250,44 @@ one-account / one-shop backup but offered no way to restore-and-merge it.
   == manifest count and valid JSON, account file scope/count, wrong PIN 401,
   181-doc account merge replay) plus iteration 75 UI run (real browser
   downloads: 25 / 182 / 1337 records, 9.3 MB full file).
+
+### 14. Emergent managed push notifications — verified against the playbook (Jun 2026)
+The relay was already in place from an earlier session; this pass audited it
+against the current Emergent push playbook and closed the gaps.
+- Backend `routes/push.py` matches the playbook exactly: `POST /register-push`
+  (JWT-checked so nobody can register a token under another user id) and
+  `send_push(recipients, data, idempotency_key)` → `/api/v1/push/trigger`
+  with `X-Push-Key: EMERGENT_PUSH_KEY`, chunked at 100 recipients, never
+  raising. `POST /push/test` sends a single push to the calling super admin.
+  With the dev `placeholder` key the endpoints return
+  `{"status":"deferred","reason":"key_missing"}` — expected; the deployer
+  swaps the real key in at publish time. NEVER edit EMERGENT_PUSH_KEY.
+- Event senders already wired: chat messages (`routes/chat.py`), order
+  placement + status changes (`server.py`), broadcasts
+  (`routes/broadcast.py`), new-device logins (`core/login_history.py`) and the
+  generic in-app notification helper (`core/notifications.py`).
+- FIXED: `app/_layout.tsx` registered TWO
+  `addNotificationResponseReceivedListener`s (one in `PushReRegister`, one in
+  `RootLayoutInner`), so every notification tap navigated twice. There is now
+  exactly one, in `RootLayoutInner`, handling warm taps,
+  `getLastNotificationResponseAsync()` cold starts, `action_url` / `deeplink`
+  / `url`, and http(s) links via `Linking.openURL`.
+- ADDED: the denied-permission weekly nudge — when `status === "denied"` and
+  `canAskAgain === false` we can never re-prompt, so once every 7 days
+  (throttled via AsyncStorage `pushNudgeAt`) the user gets a dialog with an
+  "Open Settings" CTA (`Linking.openSettings()`). Both the CTA and "Later"
+  stamp the key.
+- ADDED: Admin → Broadcast now has a "Send test to my phone" button
+  (testID `broadcast-test-push`) hitting `POST /push/test`, with copy stating
+  it only works in a published build.
+- Config confirmed: `expo-notifications` plugin present in `app.json`
+  (mandatory — Android pushes are data-only and render through its Firebase
+  messaging service), module-scope `setNotificationHandler` +
+  high-importance `default` channel, native token via
+  `getDevicePushTokenAsync()` (never the Expo token), re-registered on every
+  app open / auth change, and a real
+  `frontend/google-services.json` (project `slangcart`, package
+  `com.slangcart.app`) wired via `android.googleServicesFile`.
+- Cannot be tested in Expo Go or the web preview — needs Publish → Deploy →
+  Generate build (iOS also needs an APNs .p8 key; Android a Google service
+  account JSON, both prompted in the build UI).

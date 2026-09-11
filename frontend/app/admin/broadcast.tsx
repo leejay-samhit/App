@@ -58,8 +58,28 @@ export default function AdminBroadcastScreen() {
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [audience, setAudience] = useState<Audience>("all");
   const [sending, setSending] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [history, setHistory] = useState<Broadcast[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+
+  // Push self-test — one notification to the admin's own devices.
+  const onTestPush = async () => {
+    setTesting(true);
+    try {
+      await api.post("/push/test", {
+        title: "Slangcart test",
+        message: "Push notifications are working on this device. 🎉",
+      });
+      Alert.alert(
+        "Test sent",
+        "If you don't see it within a few seconds: push only works in a published " +
+        "iOS / Android build (not Expo Go or the web preview), and notifications " +
+        "must be allowed for Slangcart in your phone settings.",
+      );
+    } catch (e) {
+      Alert.alert("Couldn't send the test", formatApiError(e));
+    } finally { setTesting(false); }
+  };
 
   // Redirect non-super-admins back to the admin landing — defence in depth
   // (the API also enforces this).
@@ -148,10 +168,9 @@ export default function AdminBroadcastScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.headerBar}>
+    <SafeAreaView style={styles.safe} edges={["top"]}>      <View style={styles.headerBar}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} testID="broadcast-back">
-          <Feather name="arrow-left" size={22} color={colors.text} />
+          <Feather name="arrow-left" size={22} color={colors.textMain} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={styles.h1}>Broadcast</Text>
@@ -249,6 +268,30 @@ export default function AdminBroadcastScreen() {
 
           <View style={styles.divider} />
 
+          {/* Jun 2026 — Push self-test. Sends ONE notification to the admin's
+              own devices so they can confirm push works after publishing a
+              build (it can't work in Expo Go / the web preview). */}
+          <View style={styles.testBox}>
+            <Text style={styles.testTitle}>Test push notification</Text>
+            <Text style={styles.testHint}>
+              Sends a single notification to your own phone. Works only in a
+              published iOS / Android build — not in Expo Go or the web preview.
+            </Text>
+            <TouchableOpacity
+              onPress={onTestPush}
+              disabled={testing}
+              style={[styles.testBtn, testing && { opacity: 0.6 }]}
+              testID="broadcast-test-push"
+            >
+              {testing
+                ? <ActivityIndicator color={colors.primary} size="small" />
+                : <Feather name="bell" size={16} color={colors.primary} />}
+              <Text style={styles.testBtnLabel}>Send test to my phone</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.divider} />
+
           <Text style={styles.historyHeader}>Past announcements</Text>
           {historyLoading ? (
             <ActivityIndicator color={colors.primary} style={{ marginTop: 16 }} />
@@ -286,10 +329,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   backBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 20 },
-  h1: { fontSize: 22, fontWeight: "700", color: colors.text },
+  h1: { fontSize: 22, fontWeight: "700", color: colors.textMain },
   subtitle: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   scroll: { padding: spacing.screen, paddingBottom: 48 },
-  label: { fontSize: 13, fontWeight: "600", color: colors.text, marginTop: 16, marginBottom: 8 },
+  label: { fontSize: 13, fontWeight: "600", color: colors.textMain, marginTop: 16, marginBottom: 8 },
   audienceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   audiencePill: {
     paddingHorizontal: 14, paddingVertical: 8,
@@ -297,12 +340,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   audiencePillActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  audienceLabel: { fontSize: 13, color: colors.text, fontWeight: "500" },
+  audienceLabel: { fontSize: 13, color: colors.textMain, fontWeight: "500" },
   audienceLabelActive: { color: "#fff" },
   audienceHint: { fontSize: 12, color: colors.textMuted, marginTop: 6 },
   input: {
-    borderWidth: 1, borderColor: colors.border, borderRadius: radii.md,
-    paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: colors.text,
+    borderWidth: 1, borderColor: colors.border, borderRadius: radii.card,
+    paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: colors.textMain,
     backgroundColor: colors.surface,
   },
   textarea: { minHeight: 110, textAlignVertical: "top" },
@@ -310,11 +353,11 @@ const styles = StyleSheet.create({
   imagePicker: {
     flexDirection: "row", alignItems: "center", gap: 10,
     paddingVertical: 14, paddingHorizontal: 16,
-    borderRadius: radii.md, borderWidth: 1, borderColor: colors.border,
+    borderRadius: radii.card, borderWidth: 1, borderColor: colors.border,
     borderStyle: "dashed", backgroundColor: colors.surface,
   },
   imagePickerLabel: { fontSize: 14, color: colors.primary, fontWeight: "600" },
-  imageWrap: { position: "relative", borderRadius: radii.md, overflow: "hidden" },
+  imageWrap: { position: "relative", borderRadius: radii.card, overflow: "hidden" },
   imagePreview: { width: "100%", aspectRatio: 16 / 9, backgroundColor: colors.surfaceMuted },
   imageRemove: {
     position: "absolute", top: 8, right: 8,
@@ -323,20 +366,30 @@ const styles = StyleSheet.create({
   },
   sendBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
-    marginTop: 24, paddingVertical: 14, borderRadius: radii.md,
+    marginTop: 24, paddingVertical: 14, borderRadius: radii.card,
     backgroundColor: colors.primary,
   },
   sendBtnLabel: { color: "#fff", fontWeight: "700", fontSize: 15 },
   divider: { height: 1, backgroundColor: colors.border, marginVertical: 28 },
-  historyHeader: { fontSize: 15, fontWeight: "700", color: colors.text },
+  testBox: { backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, padding: 14 },
+  testTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain },
+  testHint: { fontSize: 12, color: colors.textMuted, lineHeight: 17, marginTop: 4, marginBottom: 12 },
+  testBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    minHeight: 46, borderRadius: 12, borderWidth: 1,
+    borderColor: colors.primary, backgroundColor: colors.primary + "12",
+  },
+  testBtnLabel: { fontSize: 13.5, fontWeight: "800", color: colors.primary },
+
+  historyHeader: { fontSize: 15, fontWeight: "700", color: colors.textMain },
   historyEmpty: { fontSize: 13, color: colors.textMuted, marginTop: 8 },
   historyCard: {
     marginTop: 12, padding: 14,
-    borderRadius: radii.md, borderWidth: 1, borderColor: colors.border,
+    borderRadius: radii.card, borderWidth: 1, borderColor: colors.border,
     backgroundColor: colors.surface,
   },
   historyTop: { flexDirection: "row", alignItems: "center", gap: 8 },
-  historyTitle: { flex: 1, fontWeight: "700", color: colors.text, fontSize: 14 },
+  historyTitle: { flex: 1, fontWeight: "700", color: colors.textMain, fontSize: 14 },
   historyCount: {
     fontSize: 12, color: colors.primary, fontWeight: "700",
     paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12,
