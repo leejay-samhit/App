@@ -55,6 +55,7 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
 
   useEffect(() => {
     let cancelled = false;
+    let paused = false;
     let timer: any = null;
     let heartbeat: any = null;
 
@@ -73,7 +74,7 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
     };
 
     const connect = async () => {
-      if (cancelled) return;
+      if (cancelled || paused) return;
       const token = await getAuthToken();
       if (!token) {
         timer = setTimeout(connect, 3000);
@@ -104,7 +105,7 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
           setConnected(false);
           wsRef.current = null;
           stopHeartbeat();
-          if (cancelled) return;
+          if (cancelled || paused) return;
           // Exponential backoff capped at 30s.
           const delay = Math.min(30_000, 1000 * Math.pow(2, reconnectRef.current));
           reconnectRef.current += 1;
@@ -115,11 +116,23 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
       }
     };
 
-    // Reconnect aggressively when the app returns to the foreground —
-    // mobile OSes routinely tear down idle sockets to save battery.
+    // Nov 2026 (battery) — the socket is a FOREGROUND thing. Holding it open
+    // in the background meant a keep-alive frame every 20 s plus reconnect
+    // storms every time the carrier dropped the idle socket, which kept the
+    // radio awake all day. Offline delivery is the push relay's job, so the
+    // socket is closed on background and re-opened instantly on foreground.
     const onAppState = (state: AppStateStatus) => {
       if (cancelled) return;
-      if (state !== "active") return;
+      if (state !== "active") {
+        paused = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        stopHeartbeat();
+        try { wsRef.current?.close(); } catch { /* ignore */ }
+        wsRef.current = null;
+        setConnected(false);
+        return;
+      }
+      paused = false;
       const ws = wsRef.current;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
         // Skip the backoff — user is looking at the app right now.
@@ -134,7 +147,7 @@ export function useChatSocket(onEvent: (ev: ChatSocketEvent) => void) {
     let visListener: (() => void) | null = null;
     if (Platform.OS === "web" && typeof document !== "undefined") {
       visListener = () => {
-        if (document.visibilityState === "visible") onAppState("active");
+        onAppState(document.visibilityState === "visible" ? "active" : "background");
       };
       document.addEventListener("visibilitychange", visListener);
     }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, RefreshControl, Alert, Modal, TextInput, ScrollView, Switch, Image, Platform } from "react-native";
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, RefreshControl, Alert, Modal, TextInput, ScrollView, Switch, Image, Platform, AppState } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -127,7 +127,10 @@ export default function AdminProducts() {
     // Dec 2026 — Silent auto-refresh every 15 s so new vendor products
     // & publish-toggle changes appear without a manual pull-to-refresh.
     // Interval is cleared on blur (useFocusEffect cleanup runs).
-    const iv = setInterval(() => { load(); }, 15000);
+    const iv = setInterval(() => {
+      if (AppState.currentState !== "active") return;   // don't poll from the pocket
+      load();
+    }, 15000);
     return () => clearInterval(iv);
   }, [load]));
 

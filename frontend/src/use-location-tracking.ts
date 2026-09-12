@@ -1,131 +1,128 @@
 /**
  * useLocationTracking
  *
- * Once a user (non-admin) has granted location permission, this hook
- * silently pings the backend with their current lat/lng every PING_INTERVAL.
+ * Keeps the backend's copy of the customer's position fresh enough for
+ * "which sellers deliver to me" without draining the battery.
  *
- * Behaviour:
- *   • First ping fires immediately (so the admin user list shows fresh data
- *     within seconds of login).
- *   • Subsequent pings every PING_INTERVAL_MS (5 seconds, per product spec).
- *   • Failures (offline, server down) are swallowed silently — we keep the
- *     LAST KNOWN coordinate cached in AsyncStorage so when the device comes
- *     back online the next successful ping carries up-to-date data, and
- *     admins can still see the last position from before disconnect.
- *   • Hook is auto-disabled when `enabled=false` (e.g. for admin users).
+ * Battery rules (Nov 2026 — owner reported heavy drain):
+ *   • FOREGROUND ONLY. The timer is torn down the moment the app is
+ *     backgrounded and rebuilt when it comes back. Previously a 30-second
+ *     timer kept firing while the phone was in the user's pocket, waking
+ *     the GPS + the radio ~120 times an hour, all day.
+ *   • The cadence is 5 minutes, not 30 seconds. A shopper's delivery
+ *     eligibility does not change twice a minute.
+ *   • Coordinates come from the OS's LAST KNOWN fix (free) and only pay
+ *     for a real sensor fix when that is older than 5 minutes.
+ *   • The network POST is skipped unless the user actually MOVED (≥ 150 m)
+ *     or the server copy is older than 20 minutes.
+ *   • Failures are swallowed; the last coordinate stays cached in
+ *     AsyncStorage and is flushed on the next successful tick.
  *
- * Privacy: backend stores coords as `service_location` GeoJSON Point on the
- * user document, the same field used for nearby-worker search. There is no
- * separate trajectory table — only the latest position is persisted.
+ * Privacy: only the latest position is persisted server-side
+ * (`service_location` GeoJSON point) — there is no trajectory history.
  */
 import { useEffect, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AppState, AppStateStatus } from "react-native";
 import { api } from "./api";
-import { getCurrentCoords } from "./location";
+import { getTrackingCoords, metresBetween, Coords } from "./location";
 
-const PING_INTERVAL_MS = 30_000;                 // 30 s — industry-standard cadence
-                                                  // for foreground location updates. Balances
-                                                  // freshness with battery life. Background
-                                                  // updates rely on the OS "significant
-                                                  // change" trigger via expo-location.
-const LAST_KNOWN_KEY = "@app/lastKnownLocation"; // persisted between runs
+const PING_INTERVAL_MS = 5 * 60 * 1000;   // 5 min while the app is open
+const MAX_SILENCE_MS = 20 * 60 * 1000;    // force a refresh after 20 min
+const MIN_MOVE_M = 150;                   // below this, nothing changed
+const LAST_KNOWN_KEY = "@app/lastKnownLocation";
 
 export function useLocationTracking(enabled: boolean) {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const inFlightRef = useRef(false);
   const lastSentRef = useRef<number>(0);
+  const lastSentCoordRef = useRef<Coords | null>(null);
 
   useEffect(() => {
-    if (!enabled) {
-      // Make sure no stale timer survives a logout / role change.
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      return;
-    }
+    if (!enabled) return;
 
     let cancelled = false;
 
-    const persistLastKnown = async (lat: number, lng: number, accuracy_m?: number) => {
+    const persistLastKnown = async (c: Coords) => {
       try {
-        await AsyncStorage.setItem(
-          LAST_KNOWN_KEY,
-          JSON.stringify({ lat, lng, accuracy_m, at: Date.now() }),
-        );
-      } catch {
-        // ignore — best-effort cache
-      }
+        await AsyncStorage.setItem(LAST_KNOWN_KEY, JSON.stringify({ ...c, at: Date.now() }));
+      } catch { /* best-effort cache */ }
     };
 
-    // Try to send the cached coords if we have any (handles the "captured the
-    // last lat/long before data disconnected" requirement — when the device
-    // reconnects, we flush the saved coord so the admin view stays accurate).
+    const post = async (c: Coords) => {
+      await api.post("/service/me/location", {
+        lat: c.lat,
+        lng: c.lng,
+        accuracy_m: c.accuracy_m,
+        sharing: true,
+      });
+      lastSentRef.current = Date.now();
+      lastSentCoordRef.current = c;
+    };
+
+    // If an earlier tick captured coords but the network was down, flush the
+    // cached coordinate once we're back online.
     const flushCached = async () => {
+      if (lastSentRef.current) return;      // already in sync this session
       try {
         const raw = await AsyncStorage.getItem(LAST_KNOWN_KEY);
         if (!raw) return;
         const parsed = JSON.parse(raw);
         if (parsed?.lat == null || parsed?.lng == null) return;
-        await api.post("/service/me/location", {
-          lat: parsed.lat,
-          lng: parsed.lng,
-          accuracy_m: parsed.accuracy_m,
-          sharing: true,
-        });
-      } catch {
-        // still offline — leave the cache for next time.
-      }
+        await post({ lat: parsed.lat, lng: parsed.lng, accuracy_m: parsed.accuracy_m });
+      } catch { /* still offline — try again next tick */ }
     };
 
     const tick = async () => {
-      if (cancelled || inFlightRef.current) return;
+      // Never run the sensor while the app is not on screen.
+      if (cancelled || inFlightRef.current || AppState.currentState !== "active") return;
       inFlightRef.current = true;
       try {
-        const c = await getCurrentCoords();
-        if (!c) return; // permission revoked or sensor unavailable
-        // Persist BEFORE network call so we have a fallback if the request fails.
-        persistLastKnown(c.lat, c.lng, c.accuracy_m);
-        await api.post("/service/me/location", {
-          lat: c.lat,
-          lng: c.lng,
-          accuracy_m: c.accuracy_m,
-          sharing: true,
-        });
-        lastSentRef.current = Date.now();
+        const c = await getTrackingCoords(PING_INTERVAL_MS);
+        if (!c) return;                    // permission not granted / sensor off
+        persistLastKnown(c);
+        const prev = lastSentCoordRef.current;
+        const stale = Date.now() - lastSentRef.current > MAX_SILENCE_MS;
+        if (prev && !stale && metresBetween(prev, c) < MIN_MOVE_M) return;
+        await post(c);
       } catch {
-        // Network failure — silently keep trying on next tick. The cached
-        // last-known coord will be flushed when connectivity returns.
+        // Offline / server hiccup — the cached coord is flushed next time.
       } finally {
         inFlightRef.current = false;
       }
     };
 
-    // Kick off an immediate first ping + try to flush any leftover cache.
-    flushCached();
-    tick();
-
-    // Regular 5-second cadence.
-    intervalRef.current = setInterval(tick, PING_INTERVAL_MS);
-
-    // Foreground/background — when user returns to the app we ping right
-    // away so the admin view reflects the position they're at right now.
-    const onAppState = (s: AppStateStatus) => {
-      if (s === "active") {
-        flushCached();
-        tick();
-      }
+    const start = () => {
+      if (intervalRef.current) return;
+      intervalRef.current = setInterval(tick, PING_INTERVAL_MS);
     };
-    const sub = AppState.addEventListener("change", onAppState);
-
-    return () => {
-      cancelled = true;
-      sub.remove();
+    const stop = () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
+    };
+
+    flushCached();
+    tick();
+    start();
+
+    const sub = AppState.addEventListener("change", (s: AppStateStatus) => {
+      if (s === "active") {
+        // Fresh position for the screen the user is about to look at.
+        flushCached();
+        tick();
+        start();
+      } else {
+        // Backgrounded / phone locked — no timers, no GPS, no radio.
+        stop();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      sub.remove();
+      stop();
     };
   }, [enabled]);
 }

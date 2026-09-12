@@ -17,6 +17,7 @@ import {
   Platform,
   KeyboardAvoidingView,
   Image,
+  AppState,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -121,6 +122,7 @@ export default function UpiManualPayment() {
   useEffect(() => {
     if (!cfg?.pending_payment || cfg.pending_payment.status !== "PENDING") return;
     const t = setInterval(async () => {
+      if (AppState.currentState !== "active") return;   // don't poll from the pocket
       try {
         const { data } = await api.get<{ payment: any; registration_paid: boolean }>("/payment/upi-manual/status");
         if (data.registration_paid) {

@@ -1404,3 +1404,58 @@ warning gone.
   generate Android/iOS build).
 - Note: `GET /api/admin/finance/export/transactions` is CSV; the group-wise
   **xlsx** export is `GET /api/admin/wallet/export/groupwise`.
+
+---
+
+## Nov/Jun 2026 — Heavy battery drain (owner bug) — FIXED · iteration 79
+
+Owner: "registration / login / ordering all work, but the app eats the
+phone's and tablet's battery." Four always-on drains were found; all four are
+now FOREGROUND-ONLY.
+
+1. **The periodic location ping was the main offender.** `LocationGate` runs
+   `useLocationTracking` for EVERY logged-in non-admin, and the hook fired
+   every **30 seconds** — `requestForegroundPermissionsAsync()` **plus a fresh
+   `getCurrentPositionAsync({Balanced})` sensor fix** and a network POST, about
+   **120 GPS + radio wakes an hour, all day**, because the JS timer kept
+   running while the phone was in a pocket.
+   Now: cadence **5 min**, the tick bails unless `AppState.currentState ===
+   "active"` and the interval is torn down on background / rebuilt on
+   foreground, coordinates come from the new
+   `getTrackingCoords()` (`getLastKnownPositionAsync({maxAge})` first — free,
+   no radio wake — falling back to one real fix only when that is stale, and
+   reading the permission with `getForegroundPermissionsAsync` so it can never
+   prompt), and the POST is skipped unless the user moved **≥ 150 m**
+   (`metresBetween` haversine in `location.ts`) or the server copy is older
+   than 20 min. Offline coords still cache in AsyncStorage and flush later.
+2. **Chat WebSocket kept alive in the background** with a 20 s heartbeat, plus
+   reconnect storms every time the carrier dropped the idle socket — bottom
+   tabs stay mounted, so one visit to the Chat tab meant a socket for the rest
+   of the day. It now closes on background (`paused` flag stops the backoff
+   reconnect) and re-opens instantly on foreground; on web `visibilitychange`
+   maps hidden → pause, visible → resume. Offline delivery is the push relay's
+   job, so nothing is lost.
+3. **`shop-layout-renderer` timers**: `useCountdown` ran a **1-second**
+   interval for the whole life of the shop screen **even when no flash sale
+   existed** (≈3,600 re-renders/hour); the banner carousel advanced every 4 s
+   in the background; the impression-analytics flush polled every 5 s. Now the
+   countdown only runs while a sale is genuinely live (and stops on expiry /
+   background), the carousel pauses on background, and the flush is 15 s and
+   skipped when inactive.
+4. **Polling screens** `/admin/products` (15 s), `/admin/shop-layout` (20 s)
+   and `/payment-upi` (6 s) skip the work when the app isn't in the foreground.
+
+Untouched on purpose: the provider background-location task (`bg-location.ts`)
+is already 30 min / 250 m and only runs for providers who switch themselves
+Available.
+
+### Verified (iteration 79)
+`backend/tests/test_iter79_battery_fix.py` 9/9 — `/api/service/me/location`
+still updates `service_location`, shop-layout analytics still accepts batched
+events, chat POST + `/api/ws/chat` (hello / pong) still work, product
+pincode+GPS filtering unchanged, all three logins fine. Browser: buyer / admin
+/ vendor screens render clean; on the Chat tab, dispatching
+`visibilitychange → hidden` **closed** the socket and produced **zero**
+`/api/service/me/location` POSTs, and `→ visible` re-opened it immediately.
+Report `test_reports/iteration_79.json`. Real battery numbers can only be read
+from a published build on a real device.

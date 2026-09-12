@@ -6,7 +6,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
-  Alert, RefreshControl, TextInput, Image, Modal, Switch, Pressable,
+  Alert, RefreshControl, TextInput, Image, Modal, Switch, Pressable, AppState,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -220,7 +220,10 @@ export default function AdminShopLayoutScreen() {
     load();
     // Dec 2026 — Silent auto-refresh so admin sees new blocks / edits
     // from other admins without a manual pull-to-refresh.
-    const iv = setInterval(() => { load(); }, 20000);
+    const iv = setInterval(() => {
+      if (AppState.currentState !== "active") return;   // don't poll from the pocket
+      load();
+    }, 20000);
     return () => clearInterval(iv);
   }, [load]));
 

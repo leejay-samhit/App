@@ -103,6 +103,49 @@ export async function getCurrentCoords(): Promise<Coords | null> {
   }
 }
 
+/**
+ * Battery-friendly coordinate read for the periodic background ping.
+ *
+ * `getCurrentCoords()` forces a FRESH sensor fix every call, which is fine
+ * once (checkout, "use my location") but ruinous when called on a timer —
+ * it wakes the GPS/Wi-Fi scan chip every time. This variant reuses the fix
+ * the OS already has (free, no radio wake) and only pays for a real fix
+ * when that cached one is older than `maxAgeMs`.
+ *
+ * It also never triggers a permission PROMPT — it only reads the current
+ * grant, so it is safe to call silently in the background.
+ */
+export async function getTrackingCoords(maxAgeMs = 5 * 60 * 1000): Promise<Coords | null> {
+  if (Platform.OS === "web") return getCurrentCoords();
+  try {
+    const { status } = await Location.getForegroundPermissionsAsync();
+    if (status !== "granted") return null;
+    const cached = await Location.getLastKnownPositionAsync({ maxAge: maxAgeMs });
+    const pos = cached || await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Balanced,
+    });
+    if (!pos?.coords) return null;
+    return {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      accuracy_m: pos.coords.accuracy ?? undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Straight-line metres between two coordinates (haversine). */
+export function metresBetween(a: Coords, b: Coords): number {
+  const R = 6371000;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
 export function formatDistance(km: number | null | undefined): string {
   if (km == null) return "";
   // Sub-1 km: show one decimal in km (e.g., 0.9 km — instead of "900 m")

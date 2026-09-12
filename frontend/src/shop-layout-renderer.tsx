@@ -11,7 +11,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, Image, TouchableOpacity, StyleSheet, ScrollView,
-  FlatList, Platform, useWindowDimensions,
+  FlatList, Platform, useWindowDimensions, AppState,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { api, resolveImageUrl } from "./api";
@@ -196,11 +196,16 @@ function BannerSliderBlock({
   const height = winW >= 700
     ? Math.min(380, Math.max(220, Math.round(slideWidth / 2.2)))
     : Math.max(180, Math.min(220, heightRaw || 200));
-  // Auto-advance every 4s
+  // Auto-advance every 4s — paused while the app is in the background so a
+  // pocketed phone isn't re-rendering a carousel it can't show.
   useEffect(() => {
     if (items.length <= 1) return;
-    const t = setInterval(() => setIdx((i) => (i + 1) % items.length), 4000);
-    return () => clearInterval(t);
+    let t: ReturnType<typeof setInterval> | null = null;
+    const start = () => { if (!t) t = setInterval(() => setIdx((i) => (i + 1) % items.length), 4000); };
+    const stop = () => { if (t) { clearInterval(t); t = null; } };
+    start();
+    const sub = AppState.addEventListener("change", (s) => (s === "active" ? start() : stop()));
+    return () => { stop(); sub.remove(); };
   }, [items.length]);
   if (items.length === 0) return null;
   return (
@@ -515,12 +520,28 @@ function AnnouncementStripBlock({ block }: { block: LayoutBlock }) {
 
 function useCountdown(endsAt?: string) {
   const [now, setNow] = useState(Date.now());
+  const target = endsAt ? new Date(endsAt).getTime() : NaN;
+  const live = isFinite(target) && target > now;
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
+    // Nov 2026 (battery) — this used to tick every second for the lifetime of
+    // the shop screen even when there was no sale at all, re-rendering the
+    // whole block 3,600 times an hour. Now it only ticks while a sale is
+    // actually counting down, and it stops the moment it expires or the app
+    // leaves the foreground.
+    if (!live) return;
+    let t: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (t) return;
+      t = setInterval(() => setNow(Date.now()), 1000);
+    };
+    const stop = () => { if (t) { clearInterval(t); t = null; } };
+    start();
+    const sub = AppState.addEventListener("change", (s) => {
+      if (s === "active") { setNow(Date.now()); start(); } else stop();
+    });
+    return () => { stop(); sub.remove(); };
+  }, [live]);
   if (!endsAt) return null;
-  const target = new Date(endsAt).getTime();
   const diff = Math.max(0, target - now);
   if (!isFinite(diff)) return null;
   const h = Math.floor(diff / 3_600_000);
@@ -1298,11 +1319,12 @@ export function ShopLayoutRenderer({
       }
     });
     const t = setInterval(() => {
+      if (AppState.currentState !== "active") return;
       if (Date.now() - lastFlushRef.current > 4500 && eventQueueRef.current.length) {
         flush();
         lastFlushRef.current = Date.now();
       }
-    }, 5000);
+    }, 15000);
     return () => { clearInterval(t); flush(); };
   }, [visible, scope, flush]);
 

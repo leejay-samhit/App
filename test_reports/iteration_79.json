@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 79 — battery-drain fix verification. All 4 battery fixes verified without regressions. Backend: 9/9 pytest cases green (login regression for buyer/vendor/admin, POST /api/service/me/location contract + auth guard, /api/shop-layout/analytics event ingestion, chat message delivery, chat WS hello+ping, /api/products location filter). Frontend: buyer login → /shop renders full admin layout (banners, category circles, product grid, trending block) with no red screen and no console errors from the location or chat hooks. Admin login → /admin/home renders overview. Vendor login → /shop with 'Turn on location to shop' gate still works (BATTERY FIX 1 location gate intact). Chat tab: 3 WebSockets opened when active, +1 closed after dispatching visibilitychange→hidden, then reconnected on visible→2 new WS opens (BATTERY FIX 2 verified — socket is torn down on background and reconnects instantly on foreground). No unexpected /api/service/me/location POSTs while tab hidden. Code review of getTrackingCoords confirms use of getForegroundPermissionsAsync (never prompts). All timer effects in shop-layout-renderer, admin/products, admin/shop-layout, payment-upi, chat/[id] guard on AppState.currentState === 'active'. Only console warnings are pre-existing Expo web deprecations ('shadow*' style, expo-notifications listener on web, props.pointerEvents) unrelated to this change.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter79_battery_fix.py",
+    "/app/test_reports/pytest/iter79_battery.xml"
+  ],
+  "action_items": [
+    "None — battery fix is behaviourally equivalent and safe to ship. Real per-second battery measurement isn't possible in the web preview, but the observable proxies all check out: (a) chat WS closes on document visibility hidden and reopens on visible; (b) location POSTs stop while backgrounded; (c) code review confirms getTrackingCoords uses getForegroundPermissionsAsync (no permission prompt); (d) countdown / carousel / analytics timers are gated on AppState.active."
+  ],
+  "critical_code_review_comments": [
+    "use-location-tracking.ts: 5-min interval + 150m/20min guard is correct; foreground-only tick via AppState.currentState check inside tick() and via AppState 'change' listener that stops the interval on background — good.",
+    "location.ts:getTrackingCoords uses Location.getForegroundPermissionsAsync (NOT request*), so the background tick can never trigger a permission dialog — matches the fix spec.",
+    "use-chat-socket.ts: socket is closed on state !== 'active' and reconnect (with backoff reset to 0) fires immediately on state === 'active'; web visibilitychange forwards to the same handler. Verified observable via playwright.",
+    "shop-layout-renderer.tsx:useCountdown early-returns when !live so the 1s interval doesn't even start for expired/absent sales; AppState listener starts/stops the interval on visibility change. BannerSliderBlock carousel uses the same start/stop pattern. Analytics flush interval is 15s and skips work when AppState !== 'active' and when the queue is empty — matches spec.",
+    "admin/products.tsx, admin/shop-layout.tsx, payment-upi.tsx: each polling effect guards with 'if (AppState.currentState !== \"active\") return;' at the top of the tick, so background timers are effectively no-ops. AppState is newly imported in every file — verified no missing-import errors at runtime."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter79_battery_fix.py (new)",
+    "/app/test_reports/pytest/iter79_battery.xml (new)"
+  ],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "100%"
+  },
+  "seed_data_creation": "None; used existing testbuyer / testvendor / admin accounts. Left one 'iter79 battery test <ts>' chat message in the pre-existing buyer↔admin thread.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Battery fix behaviour verified in preview. /api/chat/{thread_id}/messages is the correct path (NOT /api/chat/threads/{thread_id}/messages — that returns 404). Chat threads endpoint returns { threads: [...] } shape (not { items: [...] }). Vendor login lands on /shop (buyer-view first) — that's by design, not a regression. On the web preview headless Chrome blocks geolocation, so /shop shows 'Turn on location to shop' unless localStorage has @app/deliveryPincode / @app/deliveryCoords pre-seeded.",
+  "rca_of_issue": "N/A — this iteration is a fix-verification pass, not a bug hunt. The reported drain came from four always-on timers (30s location ping, 20s WS heartbeat + never-closed socket, 1s countdown regardless of sale state + 4s carousel + 5s analytics, and three admin/upi polls) that all ran while the app was backgrounded. All five sites now (a) stop their intervals on AppState !== 'active' (or document.visibilityState === 'hidden' on web), (b) use cached / last-known data when possible, and (c) skip network work when nothing changed. Verified: chat WS closes on visibility hidden and reopens on visible; no location POSTs while hidden; all admin/shop/chat screens render normally after the edits."
+}
