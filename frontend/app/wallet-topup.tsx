@@ -43,6 +43,11 @@ export default function WalletTopupScreen() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<{ amount: number; balance: number } | null>(null);
+  // Sep 2026 — an unfinished top-up the customer may already have PAID for.
+  const [pendingRecovery, setPendingRecovery] = useState<
+    { payment_id: string; razorpay_order_id?: string } | null
+  >(null);
+  const [recovering, setRecovering] = useState(false);
   // Native Razorpay lives in a WebView modal (same pattern as /payment).
   const [rzpHtml, setRzpHtml] = useState("");
   const [rzpVisible, setRzpVisible] = useState(false);
@@ -60,6 +65,55 @@ export default function WalletTopupScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Any top-up left open from a previous visit is offered for recovery, so a
+  // customer who was charged is never stuck without a way to claim it.
+  useFocusEffect(useCallback(() => {
+    let alive = true;
+    api.get<{ items: any[] }>("/wallet/topup/pending")
+      .then(({ data }) => {
+        if (!alive) return;
+        const row = (data.items || [])[0];
+        if (row) setPendingRecovery({ payment_id: row.id, razorpay_order_id: row.razorpay_order_id });
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []));
+
+  /** Ask the server to ask Razorpay. Returns true when the wallet was credited. */
+  const tryRecover = async (
+    payment_id: string, razorpay_order_id?: string, razorpay_payment_id?: string,
+  ): Promise<boolean> => {
+    try {
+      const { data } = await api.post<{ ok: boolean; amount: number; balance: number }>(
+        "/wallet/topup/recover",
+        { payment_id, razorpay_order_id, razorpay_payment_id },
+      );
+      if (!data?.ok) return false;
+      await refresh();
+      setAmount("");
+      setError("");
+      setPendingRecovery(null);
+      setDone({ amount: data.amount, balance: data.balance });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const recoverNow = async () => {
+    if (!pendingRecovery || recovering) return;
+    setRecovering(true);
+    setError("");
+    const ok = await tryRecover(pendingRecovery.payment_id, pendingRecovery.razorpay_order_id);
+    if (!ok) {
+      setError(
+        "Razorpay has no successful payment for that attempt yet. If your bank shows a debit, " +
+        "it will either auto-refund or our team can release it — nothing is lost.",
+      );
+    }
+    setRecovering(false);
+  };
 
   const value = Number(amount || 0);
   const min = config?.min_amount ?? 10;
@@ -127,7 +181,21 @@ export default function WalletTopupScreen() {
           ? await openRazorpayCheckout(opts)
           : await openNative(buildRazorpayHtml(opts));
         if (!result.ok) {
-          if (!result.cancelled) setError(result.error || "Payment failed. Please try again.");
+          if (result.cancelled) { setBusy(false); return; }
+          // Sep 2026 — a failed/ambiguous checkout callback is NOT proof the
+          // money wasn't taken (app switch to a UPI app, killed webview,
+          // blocked popup). Ask the SERVER to ask Razorpay before telling the
+          // customer it failed. This is what turned "Razorpay successful but
+          // wallet not credited" into a silent loss.
+          const recovered = await tryRecover(
+            start.payment_id, orderId, (result as any).paymentId || "",
+          );
+          if (recovered) return;
+          setError(
+            (result.error || "We could not confirm that payment.") +
+            " If your bank shows a debit, tap “Recover payment” — nothing is lost.",
+          );
+          setPendingRecovery({ payment_id: start.payment_id, razorpay_order_id: orderId });
           setBusy(false);
           return;
         }
@@ -136,18 +204,31 @@ export default function WalletTopupScreen() {
         orderId = result.orderId || orderId;
       }
 
-      const { data: verified } = await api.post<{ amount: number; balance: number }>(
-        "/wallet/topup/verify",
-        {
-          payment_id: start.payment_id,
-          razorpay_order_id: orderId,
-          razorpay_payment_id: paymentId,
-          razorpay_signature: signature,
-        },
-      );
-      await refresh();
-      setAmount("");
-      setDone({ amount: verified.amount, balance: verified.balance });
+      try {
+        const { data: verified } = await api.post<{ amount: number; balance: number }>(
+          "/wallet/topup/verify",
+          {
+            payment_id: start.payment_id,
+            razorpay_order_id: orderId,
+            razorpay_payment_id: paymentId,
+            razorpay_signature: signature,
+          },
+        );
+        await refresh();
+        setAmount("");
+        setDone({ amount: verified.amount, balance: verified.balance });
+      } catch (verifyErr) {
+        // Verify itself failed (signature, network, stale attempt) — the
+        // money may still have been captured, so recover before failing.
+        const recovered = await tryRecover(start.payment_id, orderId, paymentId);
+        if (!recovered) {
+          setError(
+            formatApiError(verifyErr) +
+            " If your money was debited, tap “Recover payment”.",
+          );
+          setPendingRecovery({ payment_id: start.payment_id, razorpay_order_id: orderId });
+        }
+      }
     } catch (e) {
       setError(formatApiError(e));
     } finally {
@@ -227,6 +308,26 @@ export default function WalletTopupScreen() {
             </Text>
           ) : null}
           {error ? <Text style={styles.error} testID="topup-error">{error}</Text> : null}
+          {pendingRecovery ? (
+            <View style={styles.recoverBox}>
+              <Text style={styles.recoverTitle}>Paid but not credited?</Text>
+              <Text style={styles.recoverBody}>
+                We have an unfinished top-up for you. Tap below and we will check directly with
+                Razorpay — if the payment went through, your wallet is credited instantly. It is
+                safe to tap more than once; you can never be credited twice.
+              </Text>
+              <TouchableOpacity
+                onPress={recoverNow}
+                disabled={recovering}
+                style={styles.recoverBtn}
+                testID="topup-recover"
+              >
+                {recovering ? <ActivityIndicator size="small" color={colors.primaryFg} /> : (
+                  <Text style={styles.recoverBtnText}>Recover payment</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          ) : null}
 
           {done ? (
             <View style={styles.success} testID="topup-success">
@@ -334,6 +435,18 @@ const styles = StyleSheet.create({
   presetText: { fontSize: 13, fontWeight: "800", color: colors.textMain },
   presetTextActive: { color: colors.primary },
   error: { marginTop: spacing.md, fontSize: 12.5, color: "#B3261E", fontWeight: "700", lineHeight: 18 },
+  // Recovery for a top-up that was paid but never credited (Sep 2026).
+  recoverBox: {
+    marginTop: spacing.md, backgroundColor: "#FEF3C7", borderRadius: 14, padding: 14,
+  },
+  recoverTitle: { fontSize: 13, fontWeight: "900", color: "#92400E" },
+  recoverBody: { fontSize: 12, color: "#78350F", marginTop: 4, lineHeight: 18 },
+  recoverBtn: {
+    marginTop: 10, backgroundColor: colors.primary, borderRadius: 999, minHeight: 46,
+    alignItems: "center", justifyContent: "center", paddingHorizontal: 16,
+  },
+  recoverBtnText: { color: colors.primaryFg, fontWeight: "900", fontSize: 13 },
+
   success: {
     flexDirection: "row", alignItems: "center", gap: 8, marginTop: spacing.md,
     backgroundColor: colors.surface, borderRadius: radii.card, padding: 12,

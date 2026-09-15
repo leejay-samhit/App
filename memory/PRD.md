@@ -1809,3 +1809,73 @@ raw token absent from the database), RBAC 403 for buyer / vendor /
 products_manager / anonymous, and Phase 1 (56/56) + Phase 2 (81/81) with no
 regression. Tray *display* itself can only be confirmed on the deployed
 Android build — the diagnostics screen is the instrument for that.
+
+---
+
+## Wallet top-up + GST-inclusive pricing fixes (Sep 2026)
+
+### "Razorpay took my money, the app said failed, wallet not credited"
+**Root cause:** `/wallet/topup/start` DELETED any existing open attempt. A
+second tap (or the screen re-mounting) orphaned the attempt the paid callback
+was about to verify → verify returned 404 → the app showed "payment failed,
+please try again" while Razorpay had already collected the money. Nothing was
+credited, so nothing appeared in the wallet or in System Wallet group 2
+(user liability) either.
+
+**Fix**
+* Open attempts are **never deleted** — they are parked as `abandoned`, and
+  verify accepts `created | abandoned`.
+* Verify resolves the attempt by OUR id **or** either Razorpay id, so a client
+  that lost its local id can still claim its own payment.
+* The credit goes through `shop_money.credit()` with idempotency key
+  `TOPUP:{attempt_id}` — so it carries credit/previous/new balance, shows up
+  correctly in the user-liability group, and reconciles in net worth. The
+  matching `bank_ledger` credit is upserted per attempt (asset side), so a
+  top-up leaves company net worth unchanged.
+* **`POST /wallet/topup/recover`** asks *Razorpay* (new
+  `core/razorpay.fetch_order_payments`) whether the order was actually
+  captured, and credits exactly once. Tappable repeatedly, can never double
+  credit, and when Razorpay reports nothing captured NO money is invented.
+* `GET /wallet/topup/pending` lists recoverable attempts; the screen
+  auto-recovers before it will ever show a failure, and shows a
+  "Paid but not credited? → Recover payment" card.
+* A claimed attempt can never end up paid-with-no-money: if the ledger
+  refuses the write, the existing credit is returned or the attempt is handed
+  back as recoverable.
+
+### GST is now INCLUSIVE (owner's rule)
+**Root cause:** `core/gst.py` added GST **on top** of the entered price, so the
+"selling total" came out higher than the price the vendor typed — the exact
+confusion reported.
+
+**Fix:** `pricing_block()` / `public_pricing()` use `split_inclusive()`:
+* the price typed **is** the final price; the tax is pulled out of it
+* `base_amount + total_gst == final_amount` exactly, `CGST = SGST = GST ÷ 2`
+* ₹944 @ 18% → base ₹800 · CGST ₹72 · SGST ₹72 · total stays ₹944
+* ₹1,180 @ 18% → base ₹1,000 · CGST ₹90 · SGST ₹90 · customer pays ₹1,180
+* `/api/gst/compute` now defaults to inclusive (`inclusive=false` for an
+  explicit add-on-top quote)
+* **Cashback** via `cashback_block()` — percentage **or** flat, never both
+  (5% of ₹500 = ₹25, or a flat ₹25, never ₹50); a percentage wins if both are
+  set and a flat amount can never exceed the price
+* **Profit = selling price − purchase price − cashback**, with the margin
+  before cashback reported separately, and potential stock profit = profit ×
+  stock
+* Purchase price / purchase GST remain vendor-private; the customer's
+  breakdown always totals the price on the card
+
+GST is display/reporting only — it never touches money movement, so Phase 1
+and Phase 2 financial behaviour is unchanged.
+
+**Verified:** `tests/verify_wallet_topup.py` 23/23 (run twice),
+`tests/verify_phase2_returns.py` 93/93, `tests/verify_phase1_money.py` 56/56,
+plus the testing agent's `test_iter84_wallet_topup_gst.py` (cross-user 404,
+request-body amount ignored, inclusive default, percent-wins-over-flat) and
+the /wallet-topup + product-editor screens verified on mobile.
+
+## Sep-2026 Cleanup Round
+- Wallet CASHBACK/PENDING chips: solid white labels, stronger chip fill (AA contrast on emerald gradient)
+- GET /api/gst/compute: now vendor/admin-only (buyer 403, unauth 401); tests updated in test_iter84_wallet_topup_gst.py (9 passed)
+- Legacy /my-orders route: verified absent, nothing to remove
+- expo-notifications web warning: deferred per user
+- User confirmed live Razorpay keys uploaded and working

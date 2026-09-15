@@ -1,0 +1,42 @@
+{
+  "summary": "BUG 1 + BUG 2 fixes verified. verify_phase1_money.py (56/56), verify_phase2_returns.py (93/93) and verify_wallet_topup.py (23/23) all green after cleaning up leftover fixed-id fixtures. Extra test suite iter84 (8 passed + 1 skip) covers cross-user safety, GST /gst/compute inclusive vs exclusive, and cashback percent-wins-over-flat maths. Frontend /wallet-topup screen tested end-to-end on mobile viewport: entered ₹100, tapped Add money, success card 'Money added — ₹100 added. New balance ₹49,625.' rendered, and the yellow 'Paid but not credited?' recover card + Recover payment (testID topup-recover) button both appear for the unfinished attempt.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/wallet/topup/verify",
+       "issue": "verify_wallet_topup.py leaves the fixed razorpay_payment_id 'pay_TEST_1' / 'pay_TEST_STALE' in db.transactions across runs, and the unique index uniq_user_type_rzp_payment then causes shop_money.credit() to return None on the next run. When that happens the wallet_topups row is already claimed as 'paid' but no money moved and the request 500s at `row.get(...)` in routes/wallet_topup.py:191 — the attempt is stranded (status=paid, no txn, no bank_ledger). Not exercisable in production (Razorpay ids are unique) but a defensive fix would be: if shop_money.credit() returns None after a successful claim, roll the attempt status back to 'abandoned' AND treat as already_verified (look up by idempotency_key). I cleaned the leftover rows manually to green the suite."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/verify_wallet_topup.py",
+    "/app/backend/tests/verify_phase1_money.py",
+    "/app/backend/tests/verify_phase2_returns.py",
+    "/app/backend/tests/test_iter84_wallet_topup_gst.py",
+    "/app/test_reports/pytest/iter84_wallet_gst.xml"
+  ],
+  "action_items": [
+    "OPTIONAL HARDENING: routes/wallet_topup.py::_credit_topup — after the atomic status claim (created|abandoned→paid), if shop_money.credit() returns None (idempotency or unique-index collision), don't AttributeError on `row.get`; look up the existing transaction row by idempotency_key `TOPUP:{attempt_id}` and return the same 'already_verified' shape, or roll the attempt back to 'abandoned'. Today the request 500s and the attempt is stuck paid-without-money. Not reachable in prod because Razorpay payment ids are unique, but worth defending.",
+    "OPTIONAL: rotate the fixed 'pay_TEST_1' / 'pay_TEST_STALE' payment ids in verify_wallet_topup.py to uuid4-based ids so the suite is idempotent (no manual cleanup needed between runs)."
+  ],
+  "critical_code_review_comments": [
+    "core/gst.py split_inclusive() is clean: `final_amount` is the exact input, `base + total_gst == final` to the paisa, cgst+sgst==total_gst.",
+    "routes/wallet_topup.py correctly parks stale attempts as 'abandoned' instead of deleting them (root-cause fix confirmed by verify_wallet_topup step [2]).",
+    "Recovery path uses shop_money.credit with the same TOPUP:{attempt_id} key, so recover-twice / recover-after-verify never double credit (confirmed).",
+    "Public /products/{id} query excludes purchase_price/purchase_gst_pct at Mongo projection level — vendor cost never leaves the DB."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter84_wallet_topup_gst.py (new)"
+  ],
+  "success_rate": {"backend": "100% (56 + 93 + 23 + 8 = 180 passed, 0 failed, 1 skipped)", "frontend": "100% for wallet-topup flow (login → add ₹100 → success + recover card)"},
+  "seed_data_creation": "Cleaned 6 stuck wallet_topups (status=paid without matching transaction) and 5 old transactions/bank_ledger rows with razorpay_payment_id pay_TEST_* left by earlier verify_wallet_topup runs. No new seed data created.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "verify_wallet_topup.py uses FIXED razorpay_payment_id strings (pay_TEST_1, pay_TEST_STALE) which collide with prior-run rows via the unique index uniq_user_type_rzp_payment on transactions. Between runs, either rotate those ids to uuids or clean `db.transactions.delete_many({razorpay_payment_id:{$regex:'^pay_TEST_'}})` + `db.wallet_topups.delete_many({status:'paid', <no matching txn>})` before re-running. The vendor product editor frontend testIDs product-gst-preview / cashback breakdown were not visually inspected this run — backend maths already verified end-to-end in verify_phase2_returns.py section [8].",
+  "rca_of_issue": "BUG 1 root cause was reconfirmed: prior code deleted open wallet_topups rows on every /start, so a second Add-money tap orphaned the row the paid callback was about to verify → verify 404 → 'payment failed' while Razorpay had collected the money. Fix parks stale attempts as 'abandoned' (still verifiable) and adds /wallet/topup/recover that asks Razorpay directly (mock mode credits without gateway) with the same TOPUP:{attempt_id} idempotency key, so double-tap / retry cannot double credit. BUG 2 root cause was core/gst.py using split_gst (add-on-top) for products — now pricing_block/public_pricing use split_inclusive so the selling total always equals the price the vendor typed, base+GST==final exactly, and cashback is percent-OR-flat (never stacks)."
+}

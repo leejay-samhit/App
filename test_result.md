@@ -9246,3 +9246,16 @@ agent_communication:
       devices.registered to "0 of N reporting", and the test-push hint reads
       it back. Lint + tsc clean, admin bottom nav still the locked 6 tabs.
       Synthetic test rows cleaned from the database afterwards.
+
+  - agent: "main"
+    message: |
+      Sep 2026 — wallet top-up money loss + GST-inclusive product maths.
+      Root causes and fixes recorded in /app/memory/PRD.md. Verified by
+      testing agent iteration_84: verify_phase1_money 56/56,
+      verify_phase2_returns 93/93, verify_wallet_topup 23/23 (re-runnable
+      after switching the fixture payment ids to uuid4), plus
+      test_iter84_wallet_topup_gst.py 8 passed/1 skip and the mobile
+      /wallet-topup + vendor product editor flows. Also applied the
+      tester's hardening note: _credit_topup can no longer leave an attempt
+      marked paid with no money — it returns the existing credit or hands
+      the attempt back as recoverable.

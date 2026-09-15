@@ -313,28 +313,65 @@ async def main():
               round(float(cbl.get("reversed_total") or 0), 2) <= round(float(cbl.get("amount") or 0), 2))
         await c.put(f"{BASE}/admin/settings", json={"cashback_enabled": False}, headers=ah)
 
-        # ── 8. GST + PROFIT ENGINE ──────────────────────────────────────
-        print("\n[8] GST engine + profit")
-        pg = await make_product(c, vh, 1000, purchase=800, pgst=18, sgst=18)
+        # ── 8. GST + PROFIT ENGINE (GST-INCLUSIVE) ──────────────────────
+        print("\n[8] GST engine (inclusive) + cashback + profit")
+        # Purchase ₹944 incl 18%  →  base 800, CGST 72, SGST 72
+        # Selling  ₹1180 incl 18% →  base 1000, CGST 90, SGST 90
+        pg = await make_product(c, vh, 1180, purchase=944, pgst=18, sgst=18, cashback=0)
         pr = (await c.get(f"{BASE}/vendor/me/products/{pg['id']}/pricing", headers=vh)).json()
-        check("purchase CGST 9% = ₹72", pr["purchase"]["cgst_amount"] == 72.0, str(pr["purchase"]))
+        check("purchase total == what the vendor typed (₹944)",
+              pr["purchase"]["final_amount"] == 944.0, str(pr["purchase"]))
+        check("purchase taxable value inside it = ₹800",
+              pr["purchase"]["base_amount"] == 800.0, str(pr["purchase"]))
+        check("purchase CGST 9% = ₹72", pr["purchase"]["cgst_amount"] == 72.0)
         check("purchase SGST 9% = ₹72", pr["purchase"]["sgst_amount"] == 72.0)
-        check("purchase total = ₹944", pr["purchase"]["final_amount"] == 944.0)
-        check("selling CGST 9% = ₹90", pr["selling"]["cgst_amount"] == 90.0, str(pr["selling"]))
-        check("selling total = ₹1180", pr["selling"]["final_amount"] == 1180.0)
-        check("profit per unit = ₹200", pr["profit_per_unit"] == 200.0)
-        check("potential stock profit = ₹200 × stock",
-              pr["potential_stock_profit"] == round(200.0 * pr["stock"], 2), str(pr["stock"]))
+        check("selling total == the price typed (₹1180, GST not added on top)",
+              pr["selling"]["final_amount"] == 1180.0, str(pr["selling"]))
+        check("selling taxable value inside it = ₹1000",
+              pr["selling"]["base_amount"] == 1000.0, str(pr["selling"]))
+        check("selling CGST 9% = ₹90", pr["selling"]["cgst_amount"] == 90.0)
+        check("base + GST == final amount (selling)",
+              pr["selling"]["base_amount"] + pr["selling"]["total_gst"] == pr["selling"]["final_amount"])
         check("CGST + SGST == total GST",
               pr["selling"]["cgst_amount"] + pr["selling"]["sgst_amount"] == pr["selling"]["total_gst"])
+        check("profit per unit = 1180 − 944 = ₹236", pr["profit_per_unit"] == 236.0,
+              str(pr["profit_per_unit"]))
+        check("potential stock profit = ₹236 × stock",
+              pr["potential_stock_profit"] == round(236.0 * pr["stock"], 2), str(pr["stock"]))
+        check("tax basis is inclusive", pr["tax_basis"] == "gst_inclusive", pr["tax_basis"])
         pub = (await c.get(f"{BASE}/products/{pg['id']}")).json()
         check("purchase price hidden from customers", "purchase_price" not in pub, str(list(pub)[:40]))
         check("purchase GST hidden from customers", "purchase_gst_pct" not in pub)
-        check("customer sees selling GST breakdown",
-              (pub.get("gst_breakdown") or {}).get("total_gst") == 180.0, str(pub.get("gst_breakdown")))
+        check("customer breakdown totals the visible price (₹1180)",
+              (pub.get("gst_breakdown") or {}).get("final_amount") == 1180.0,
+              str(pub.get("gst_breakdown")))
+        check("customer sees the GST contained in it (₹180)",
+              (pub.get("gst_breakdown") or {}).get("total_gst") == 180.0,
+              str(pub.get("gst_breakdown")))
+
+        # cashback: percentage OR flat, never both
+        pcb = await make_product(c, vh, 500, purchase=400, pgst=18, sgst=18, cashback=5)
+        pr2 = (await c.get(f"{BASE}/vendor/me/products/{pcb['id']}/pricing", headers=vh)).json()
+        check("5% cashback on ₹500 = ₹25", pr2["cashback"]["amount"] == 25.0, str(pr2["cashback"]))
+        check("cashback mode is percent", pr2["cashback"]["mode"] == "percent")
+        check("profit is after cashback (500 − 400 − 25 = ₹75)",
+              pr2["profit_per_unit"] == 75.0, str(pr2["profit_per_unit"]))
+        check("margin before cashback shown separately (₹100)",
+              pr2["gross_profit_per_unit"] == 100.0, str(pr2["gross_profit_per_unit"]))
+        await db.products.update_one(
+            {"id": pcb["id"]}, {"$set": {"cashback_pct": 0, "cashback_flat": 25}},
+        )
+        pr3 = (await c.get(f"{BASE}/vendor/me/products/{pcb['id']}/pricing", headers=vh)).json()
+        check("flat ₹25 cashback shows ₹25 (not stacked with %)",
+              pr3["cashback"]["amount"] == 25.0 and pr3["cashback"]["mode"] == "flat",
+              str(pr3["cashback"]))
+        check("flat cashback profit also ₹75", pr3["profit_per_unit"] == 75.0)
+        gc = (await c.get(f"{BASE}/gst/compute?base=1180&pct=18", headers=vh)).json()
+        check("/gst/compute defaults to inclusive", gc["final_amount"] == 1180.0 and gc["base_amount"] == 1000.0,
+              str(gc))
         rep = (await c.get(f"{BASE}/vendor/me/profit-report", headers=vh)).json()
         check("profit report lists the product", any(
-            i["product_id"] == pg["id"] and i["profit_per_unit"] == 200.0 for i in rep["items"]
+            i["product_id"] == pg["id"] and i["profit_per_unit"] == 236.0 for i in rep["items"]
         ), f"{rep['total']} items")
 
         # ── 9. NET WORTH + LEDGERS ──────────────────────────────────────

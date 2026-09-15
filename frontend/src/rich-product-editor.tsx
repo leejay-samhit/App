@@ -219,6 +219,9 @@ export function RichProductEditor({
   const [stock, setStock] = useState("100");
   // Purchase cashback the vendor gives on this product (0–10% hard cap).
   const [cashbackPct, setCashbackPct] = useState("");
+  // Sep 2026 — cashback can be a PERCENTAGE or a FLAT rupee amount, never
+  // both. A percentage wins if somehow both are filled.
+  const [cashbackFlat, setCashbackFlat] = useState("");
   const [freeDelivery, setFreeDelivery] = useState(false);
   // ── Pricing & GST (Phase 2) — purchase side is PRIVATE to the seller.
   // CGST/SGST/profit are never computed here: `/api/gst/compute` is the one
@@ -227,7 +230,9 @@ export function RichProductEditor({
   const [purchaseGst, setPurchaseGst] = useState("");
   const [sellingGst, setSellingGst] = useState("");
   const [gstPreview, setGstPreview] = useState<null | {
-    purchase: any; selling: any; profit_per_unit: number; potential: number;
+    purchase: any; selling: any;
+    cashbackMode: string; cashbackPct: number; cashbackAmount: number;
+    grossProfit: number; profit_per_unit: number; potential: number;
   }>(null);
   // Jun 2026 — size / RAM-ROM options (see src/variant-editor.tsx)
   const [variantState, setVariantState] = useState<VariantState>(emptyVariantState);
@@ -569,6 +574,7 @@ export function RichProductEditor({
     setPurchasePrice((existing as any)?.purchase_price != null ? String((existing as any).purchase_price) : "");
     setPurchaseGst((existing as any)?.purchase_gst_pct != null ? String((existing as any).purchase_gst_pct) : "");
     setSellingGst((existing as any)?.selling_gst_pct != null ? String((existing as any).selling_gst_pct) : "");
+    setCashbackFlat((existing as any)?.cashback_flat ? String((existing as any).cashback_flat) : "");
     setVariantState(variantStateFrom(existing));
     setDescription(existing?.description || "");
     setCategory(existing?.category || "");
@@ -634,22 +640,31 @@ export function RichProductEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, existing?.id]);
 
-  // Phase 2 — live purchase/selling GST + profit preview. The numbers come
-  // from the server's ONE GST engine (`/api/gst/compute`), never from a
-  // second implementation on this screen.
+  // Phase 2 — live purchase/selling GST + cashback + profit preview. The
+  // numbers come from the server's ONE GST engine (`/api/gst/compute`),
+  // which is GST-INCLUSIVE: the price typed IS the final price and the tax
+  // is pulled out of it, never added on top.
   useEffect(() => {
-    const sellBase = Number(price) || 0;
-    const buyBase = Number(purchasePrice) || 0;
-    if (!sellBase && !buyBase) { setGstPreview(null); return; }
+    const sellGross = Number(price) || 0;
+    const buyGross = Number(purchasePrice) || 0;
+    if (!sellGross && !buyGross) { setGstPreview(null); return; }
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
         const [buy, sell] = await Promise.all([
-          api.get<any>("/gst/compute", { params: { base: buyBase, pct: Number(purchaseGst) || 0 } }),
-          api.get<any>("/gst/compute", { params: { base: sellBase, pct: Number(sellingGst) || 0 } }),
+          api.get<any>("/gst/compute", { params: { base: buyGross, pct: Number(purchaseGst) || 0, inclusive: true } }),
+          api.get<any>("/gst/compute", { params: { base: sellGross, pct: Number(sellingGst) || 0, inclusive: true } }),
         ]);
         if (cancelled) return;
-        const profit = Math.round((sellBase - buyBase) * 100) / 100;
+        // Cashback: EITHER a percentage of the selling price OR a flat
+        // amount — never both (a 1% entry shows the rupee value).
+        const pct = Number(cashbackPct) || 0;
+        const flat = Number(cashbackFlat) || 0;
+        const cashbackAmount = pct > 0
+          ? Math.round(sellGross * pct) / 100
+          : Math.min(flat, sellGross || flat);
+        const grossProfit = Math.round((sellGross - buyGross) * 100) / 100;
+        const profit = Math.round((grossProfit - cashbackAmount) * 100) / 100;
         const units = Number(
           variantState.rows.length
             ? variantState.rows.reduce((a, r) => a + (Number(r.stock) || 0), 0)
@@ -657,6 +672,10 @@ export function RichProductEditor({
         ) || 0;
         setGstPreview({
           purchase: buy.data, selling: sell.data,
+          cashbackMode: pct > 0 ? "percent" : flat > 0 ? "flat" : "none",
+          cashbackPct: pct,
+          cashbackAmount,
+          grossProfit,
           profit_per_unit: profit,
           potential: Math.round(profit * units * 100) / 100,
         });
@@ -664,7 +683,7 @@ export function RichProductEditor({
     }, 450);
     return () => { cancelled = true; clearTimeout(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [price, purchasePrice, purchaseGst, sellingGst, stock, variantState.rows.length]);
+  }, [price, purchasePrice, purchaseGst, sellingGst, cashbackPct, cashbackFlat, stock, variantState.rows.length]);
 
   // Jun 2026 — Cover picker is now MULTI-select.
   // Owner report: "vendor can only select 1 image for the main photo; if
@@ -1371,6 +1390,11 @@ export function RichProductEditor({
         stock: isNaN(stockN) ? 0 : stockN,
         // 0–10% only. The server clamps again and rejects anything higher.
         cashback_pct: clampCashbackPct(cashbackPct),
+        // Flat cashback is only sent when no percentage is set, so the two
+        // can never stack into a double payout.
+        cashback_flat: clampCashbackPct(cashbackPct) > 0
+          ? 0
+          : Math.max(0, Number(cashbackFlat) || 0),
         free_delivery: freeDelivery,
         // Pricing & GST (Phase 2). Purchase figures stay vendor-private.
         purchase_price: purchasePrice.trim() ? Number(purchasePrice) : undefined,
@@ -1622,12 +1646,12 @@ export function RichProductEditor({
               {/* ── Purchase & selling GST (Phase 2) ────────────────────
                   Purchase price and purchase GST are YOUR cost — customers
                   never see them. CGST/SGST/profit come from the server. */}
-              <Text style={modalStyles.fieldLabel}>Purchase price (₹) · private</Text>
+              <Text style={modalStyles.fieldLabel}>Purchase price (₹) · private · incl. GST</Text>
               <TextInput
                 value={purchasePrice}
                 onChangeText={setPurchasePrice}
                 keyboardType="decimal-pad"
-                placeholder="What you paid per unit"
+                placeholder="What you paid per unit, GST included"
                 placeholderTextColor={colors.textMuted}
                 style={modalStyles.input}
                 testID="product-purchase-price"
@@ -1637,7 +1661,7 @@ export function RichProductEditor({
                 value={purchaseGst}
                 onChangeText={setPurchaseGst}
                 keyboardType="decimal-pad"
-                placeholder="e.g. 18"
+                placeholder="e.g. 18 — taken OUT of the price above"
                 placeholderTextColor={colors.textMuted}
                 style={modalStyles.input}
                 testID="product-purchase-gst"
@@ -1647,29 +1671,63 @@ export function RichProductEditor({
                 value={sellingGst}
                 onChangeText={setSellingGst}
                 keyboardType="decimal-pad"
-                placeholder="e.g. 18"
+                placeholder="e.g. 18 — already inside your selling price"
                 placeholderTextColor={colors.textMuted}
                 style={modalStyles.input}
                 testID="product-selling-gst"
               />
+              <Text style={sectionStyles.helpText}>
+                GST is never added on top. The price you type is the final price — your selling
+                price is exactly what the customer pays.
+              </Text>
+              <Text style={modalStyles.fieldLabel}>Or a flat cashback (₹ per unit)</Text>
+              <TextInput
+                value={cashbackFlat}
+                onChangeText={setCashbackFlat}
+                keyboardType="decimal-pad"
+                placeholder="Leave blank if you set a cashback %"
+                placeholderTextColor={colors.textMuted}
+                editable={clampCashbackPct(cashbackPct) <= 0}
+                style={[
+                  modalStyles.input,
+                  clampCashbackPct(cashbackPct) > 0 && { opacity: 0.5 },
+                ]}
+                testID="product-cashback-flat"
+              />
+              <Text style={sectionStyles.helpText}>
+                {clampCashbackPct(cashbackPct) > 0
+                  ? "A cashback % is set, so the flat amount is ignored — the two never stack."
+                  : "Percentage or flat amount, never both."}
+              </Text>
               {gstPreview ? (
                 <View style={sectionStyles.gstCard} testID="product-gst-preview">
-                  <Text style={sectionStyles.gstTitle}>Tax & profit</Text>
-                  <GstRow label="Purchase base" value={gstPreview.purchase.base_amount} />
-                  <GstRow label={`Purchase CGST ${gstPreview.purchase.cgst_pct}%`} value={gstPreview.purchase.cgst_amount} />
-                  <GstRow label={`Purchase SGST ${gstPreview.purchase.sgst_pct}%`} value={gstPreview.purchase.sgst_amount} />
-                  <GstRow label="Purchase total" value={gstPreview.purchase.final_amount} bold />
+                  <Text style={sectionStyles.gstTitle}>Tax, cashback & profit</Text>
+                  <GstRow label="Purchase price (incl. GST)" value={gstPreview.purchase.final_amount} bold />
+                  <GstRow label="Taxable value inside it" value={gstPreview.purchase.base_amount} />
+                  <GstRow label={`CGST ${gstPreview.purchase.cgst_pct}%`} value={gstPreview.purchase.cgst_amount} />
+                  <GstRow label={`SGST ${gstPreview.purchase.sgst_pct}%`} value={gstPreview.purchase.sgst_amount} />
                   <View style={sectionStyles.gstDivider} />
-                  <GstRow label="Selling base" value={gstPreview.selling.base_amount} />
-                  <GstRow label={`Selling CGST ${gstPreview.selling.cgst_pct}%`} value={gstPreview.selling.cgst_amount} />
-                  <GstRow label={`Selling SGST ${gstPreview.selling.sgst_pct}%`} value={gstPreview.selling.sgst_amount} />
-                  <GstRow label="Selling total" value={gstPreview.selling.final_amount} bold />
+                  <GstRow label="Selling price · customer pays" value={gstPreview.selling.final_amount} bold />
+                  <GstRow label="Taxable value inside it" value={gstPreview.selling.base_amount} />
+                  <GstRow label={`CGST ${gstPreview.selling.cgst_pct}%`} value={gstPreview.selling.cgst_amount} />
+                  <GstRow label={`SGST ${gstPreview.selling.sgst_pct}%`} value={gstPreview.selling.sgst_amount} />
                   <View style={sectionStyles.gstDivider} />
-                  <GstRow label="Profit per unit" value={gstPreview.profit_per_unit} bold />
+                  <GstRow
+                    label={
+                      gstPreview.cashbackMode === "percent"
+                        ? `Cashback ${gstPreview.cashbackPct}% to customer`
+                        : gstPreview.cashbackMode === "flat"
+                          ? "Flat cashback to customer"
+                          : "Cashback"
+                    }
+                    value={gstPreview.cashbackAmount}
+                  />
+                  <GstRow label="Margin before cashback" value={gstPreview.grossProfit} />
+                  <GstRow label="Your profit per unit" value={gstPreview.profit_per_unit} bold />
                   <GstRow label="Potential profit on stock" value={gstPreview.potential} bold />
                   <Text style={sectionStyles.helpText}>
-                    Both sides use the same GST-exclusive basis. Customers only ever see the selling
-                    price and its GST — never your cost or margin.
+                    Profit = selling price − purchase price − cashback. Customers only ever see the
+                    selling price and the GST inside it — never your cost or margin.
                   </Text>
                 </View>
               ) : null}

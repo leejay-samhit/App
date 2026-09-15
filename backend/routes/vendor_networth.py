@@ -29,6 +29,12 @@ async def require_vendor(user: Dict[str, Any] = Depends(get_current_user)) -> Di
     return user
 
 
+async def require_vendor_or_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if user.get("role") == "admin" or user.get("is_admin") or (user.get("is_vendor") and user.get("is_vendor_approved")):
+        return user
+    raise HTTPException(status_code=403, detail="Vendor or admin access required")
+
+
 def _f(v: Any) -> float:
     try:
         x = float(v or 0)
@@ -599,11 +605,17 @@ async def compute_gst(
     base: float = Query(..., ge=0),
     pct: float = Query(0, ge=0, le=100),
     qty: float = Query(1, gt=0),
-    inclusive: bool = False,
-    _user: Dict[str, Any] = Depends(get_current_user),
+    inclusive: bool = True,
+    _user: Dict[str, Any] = Depends(require_vendor_or_admin),
 ):
-    """THE GST calculator, exposed so no screen ever does its own maths
-    (Phase 2 §18). Same function the invoice, ledger and Excel use."""
+    """THE GST calculator, exposed so no screen ever does its own maths.
+
+    Vendor/admin only — buyers never price anything, so they never need it.
+
+    Defaults to INCLUSIVE: `base` is treated as the final price and the tax
+    is pulled out of it, which is how the whole app prices things. Pass
+    `inclusive=false` only for an explicit add-on-top quote.
+    """
     if inclusive:
         return gst_engine.split_inclusive(base, pct, qty=qty)
     return gst_engine.split_gst(base, pct, qty=qty)
@@ -625,8 +637,8 @@ async def profit_report(vendor: Dict[str, Any] = Depends(require_vendor), limit:
     vendor-private, always from the one GST engine."""
     rows = await db.products.find(
         {"vendor_id": vendor["id"]},
-        {"_id": 0, "id": 1, "name": 1, "price": 1, "stock": 1,
-         "purchase_price": 1, "purchase_gst_pct": 1, "selling_gst_pct": 1},
+        {"_id": 0, "id": 1, "name": 1, "price": 1, "stock": 1, "cashback_pct": 1,
+         "cashback_flat": 1, "purchase_price": 1, "purchase_gst_pct": 1, "selling_gst_pct": 1},
     ).limit(max(1, min(int(limit or 500), 2000))).to_list(2000)
     items = []
     for p in rows:
@@ -634,12 +646,18 @@ async def profit_report(vendor: Dict[str, Any] = Depends(require_vendor), limit:
         items.append({
             "product_id": p.get("id"),
             "name": p.get("name"),
+            # Purchase and selling are the FINAL, GST-inclusive prices the
+            # vendor typed; the base/GST split is what sits inside them.
+            "purchase_total": block["purchase"]["final_amount"],
             "purchase_base": block["purchase"]["base_amount"],
             "purchase_gst": block["purchase"]["total_gst"],
-            "purchase_total": block["purchase"]["final_amount"],
+            "selling_total": block["selling"]["final_amount"],
             "selling_base": block["selling"]["base_amount"],
             "selling_gst": block["selling"]["total_gst"],
-            "selling_total": block["selling"]["final_amount"],
+            "cashback_mode": block["cashback"]["mode"],
+            "cashback_pct": block["cashback"]["pct"],
+            "cashback_amount": block["cashback"]["amount"],
+            "gross_profit_per_unit": block["gross_profit_per_unit"],
             "profit_per_unit": block["profit_per_unit"],
             "margin_pct": block["margin_pct"],
             "stock": block["stock"],
@@ -653,5 +671,5 @@ async def profit_report(vendor: Dict[str, Any] = Depends(require_vendor), limit:
         "priced_count": len(priced),
         "missing_purchase_price": len(items) - len(priced),
         "total_potential_profit": _r(sum(i["potential_stock_profit"] for i in priced)),
-        "tax_basis": "gst_exclusive",
+        "tax_basis": "gst_inclusive",
     }

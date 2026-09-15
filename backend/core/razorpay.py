@@ -85,3 +85,28 @@ async def fetch_payment(payment_id: str, creds: Optional[Dict[str, Any]] = None)
     except Exception as e:  # network hiccup — caller falls back to HMAC trust
         logger.warning(f"Razorpay payment fetch failed: {e}")
     return None
+
+async def fetch_order_payments(
+    order_id: str, creds: Optional[Dict[str, Any]] = None,
+) -> list:
+    """Every payment Razorpay has recorded against an order.
+
+    This is the ONLY reliable way to recover the case the owner hit: the card
+    was charged but the checkout callback came back as a failure (app killed,
+    UPI app switch, browser popup blocked), so the client never asked us to
+    verify. Asking Razorpay directly means a real captured payment is always
+    found and credited exactly once, instead of the customer losing money to
+    a handshake glitch. Empty list in mock mode / on any failure.
+    """
+    creds = creds or await get_creds()
+    if creds.get("is_mock") or not creds.get("key_secret") or not order_id:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15.0, auth=(creds["key_id"], creds["key_secret"])) as client:
+            r = await client.get(f"https://api.razorpay.com/v1/orders/{order_id}/payments")
+        if r.status_code == 200:
+            return list((r.json() or {}).get("items") or [])
+        logger.warning(f"Razorpay order payments fetch returned {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Razorpay order payments fetch failed: {e}")
+    return []

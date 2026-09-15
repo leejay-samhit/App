@@ -225,7 +225,7 @@ export default function WalletScreen() {
 
           {summary.pending_cashback > 0 ? (
             <View style={styles.pendingStrip}>
-              <Feather name="clock" size={11} color="rgba(255,255,255,0.9)" />
+              <Feather name="clock" size={11} color="#fff" />
               <Text style={styles.pendingStripText} testID="wallet-pending-strip">
                 {formatINR(summary.pending_cashback)} cashback arriving soon from your sellers
               </Text>
@@ -553,12 +553,13 @@ const styles = StyleSheet.create({
   balanceLabel: { color: "rgba(255,255,255,0.7)", fontSize: 10, letterSpacing: 1.6, fontWeight: "800" },
   balanceAmount: { color: colors.primaryFg, fontSize: 44, fontWeight: "800", marginTop: 6, letterSpacing: -1.5 },
   balanceAmountCompact: { color: colors.primaryFg, fontSize: 26, fontWeight: "900", marginTop: 2, letterSpacing: -0.8 },
-  miniStatsCol: { backgroundColor: "rgba(255,255,255,0.14)", borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12, alignItems: "center", minWidth: 110 },
+  miniStatsCol: { backgroundColor: "rgba(255,255,255,0.24)", borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12, alignItems: "center", minWidth: 110 },
   miniStat: { alignItems: "center" },
   // Contrast fix (Jun-2026): 0.75 white on the dark hero read as washed-out.
-  miniStatLabel: { color: "rgba(255,255,255,0.92)", fontSize: 9.5, fontWeight: "900", letterSpacing: 1.2 },
+  // Sep-2026: solid white labels + stronger chip fill for AA contrast on the emerald gradient.
+  miniStatLabel: { color: "#fff", fontSize: 10, fontWeight: "900", letterSpacing: 1.2 },
   miniStatValue: { color: "#fff", fontSize: 13, fontWeight: "800", marginTop: 1, letterSpacing: -0.2 },
-  miniStatDivider: { width: 28, height: 1, backgroundColor: "rgba(255,255,255,0.25)", marginVertical: 5 },
+  miniStatDivider: { width: 28, height: 1, backgroundColor: "rgba(255,255,255,0.5)", marginVertical: 5 },
   statsRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginTop: 18, paddingTop: 16, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)" },
   statCol: { flex: 1, alignItems: "flex-start" },
   statColRight: { flex: 1, alignItems: "flex-end" },
@@ -584,7 +585,7 @@ const styles = StyleSheet.create({
     marginTop: 10, paddingTop: 9,
     borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)",
   },
-  pendingStripText: { color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: "700", flex: 1 },
+  pendingStripText: { color: "#fff", fontSize: 11, fontWeight: "700", flex: 1 },
   transferBtnCompact: {    flex: 1,
     flexDirection: "row", alignItems: "center", justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.95)",
