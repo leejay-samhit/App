@@ -736,7 +736,12 @@ async def get_product(product_id: str):
     returned cleanly with safe defaults for any missing rich field, so the UI
     never explodes on `undefined` accesses.
     """
-    p = await db.products.find_one({"id": product_id}, {"_id": 0})
+    p = await db.products.find_one(
+        {"id": product_id},
+        # Phase 2 §16 — purchase price / purchase GST are VENDOR-PRIVATE and
+        # must never reach a customer. Excluded at the query, not after.
+        {"_id": 0, "purchase_price": 0, "purchase_gst_pct": 0},
+    )
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")
     # Hide unpublished products from the public endpoint (admins use a
@@ -788,6 +793,9 @@ async def get_product(product_id: str):
         "label": chart["label"], "unit": chart["unit"],
         "columns": chart["columns"], "guide": chart["guide"],
     } if chart else None
+    # Phase 2 §18 — customer-facing tax breakdown from the ONE GST engine.
+    from core import gst as _gst
+    p["gst_breakdown"] = _gst.public_pricing(p)["selling"]
     return _shape_product(p)
 
 

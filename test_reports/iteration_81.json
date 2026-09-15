@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 81 — Slangcart PHASE 1 financial engine verification. FULL PASS. Backend: verify_phase1_money.py 56/56 green (TEST A–H + withdrawal rules), and my new gap-coverage suite tests/test_iter81_phase1_gaps.py 14/14 green (role-based access on /admin/finance/reconciliations for admin/buyer/vendor/anon, note-length + empty-note + invalid-action guards on /resolve, buyer forbidden on /resolve, vendor wallet view shape + buyer denied, /withdrawals min ₹5,000 + buyer 403, /orders/payment/start shape amount==goods+delivery, and full request→admin-reject flow verifying money is returned to VENDOR_EARNINGS not wallet_balance, idempotent — a second reject 400s and does not double-credit). Frontend (mobile 390×844, browser automation): buyer checkout renders backend-driven total ₹279 (₹249 items + ₹30 delivery), all four payment testIDs present (pay-wallet / pay-cod / pay-wallet-cod / pay-online) plus place-order + checkout-delivery-row; /orders shows the seeded run — SC-4D3B5A 'Paid online · Paid ₹500', SC-B04FF0 'Wallet + Online · ₹200 wallet + ₹300 online', SC-850C1B 'Wallet + Cash · ₹200 paid, ₹300 on delivery' — with Reorder / Invoice / Cancel order buttons; buyer /wallet history shows the TEST G refund row 'Payment ₹500 refunded to wallet — order could not be created (order never created) +₹500' and the TEST C/E COD row 'Cash on Delivery order SC-850C1B — ₹300 to be paid to the delivery agent +₹0' with zero wallet impact, exact owner-mandated wording. Vendor /wallet shows SETTLEMENT HISTORY (1 pending + 2 rejected ₹5,000 rows from this run), Withdraw button, and transactions confirming 'Sale credited for order SC-…' credits (₹500 online full; ₹200 for the wallet-slice-only COD combo; ₹470 for free-delivery product) plus 'Delivery charge paid to Slangcart' −₹30 rows only on delivered orders — matching TEST A/B/C/D/E/F end-to-end. No red screens, no page errors; only pre-existing Expo web deprecation warnings (shadow*, pointerEvents, expo-notifications on web). Razorpay is in mock mode as documented; live-key/signature path was verified by code review of routes/payment_recon.py: signed path enforced when RAZORPAY_WEBHOOK_SECRET is set OR live keys are configured without a secret (401 in that case), unsigned only accepted in mock mode. Cashback flow untouched (verify_cashback_flow.py was not re-run per the agent-to-agent note — no regression expected).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/wallet (vendor + buyer)", "issues": ["The AVAILABLE BALANCE card's right-side CASHBACK / PENDING chips render dark text on the same dark-green tile background — ₹0/₹110 values are legible only on close inspection. Cosmetic, not blocking Phase-1 fix."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/verify_phase1_money.py (owner's own script — re-verified 56/56)",
+    "/app/backend/tests/test_iter81_phase1_gaps.py (new — 14 pytest cases)",
+    "/app/test_reports/pytest/iter81_phase1_gaps.xml"
+  ],
+  "action_items": [
+    "None blocking. Optional: tighten contrast on the CASHBACK / PENDING chips on the wallet balance card (dark text on dark-green looks washed out on the 390-wide mobile viewport).",
+    "Optional cleanup: /my-orders is a dead route — a couple of legacy log lines still reference it; the live route is /orders. Not user-facing, just noise."
+  ],
+  "critical_code_review_comments": [
+    "routes/payment_recon.py — role gate on both /admin/finance/reconciliations GET and /resolve uses require_admin_role('super_admin','finance') (verified 403 for buyer/vendor/unauth). Note-length guard `if len(body.note.strip()) < 3` at line 167 fires before any DB write — verified. Action whitelist ('refund_to_wallet' | 'close') at line 165. Idempotent refund via shop_money.credit with idempotency_key=f'RECON:{payment_id}' — a second /resolve returns refunded=0 (test G in verify_phase1_money.py). Webhook idempotency backed by unique _id=f'WH:{rzp_payment_id}:{kind}' insert; duplicate is a no-op returning duplicate:true.",
+    "routes/withdrawals.py — MIN_WITHDRAWAL_AMOUNT=5000, seller-only via is_vendor+is_vendor_approved, single-open-settlement guard (line 88), and the hold is a ledgered debit against vendor_earnings only (extra:{'wallet_impact':'vendor_earnings_only'}). InsufficientFunds rolls back the withdrawal row → 'No money has been deducted' wording preserved.",
+    "server.py:/admin/withdrawals/{wid}/reject — refunds via shop_money.credit against w.get('wallet_field') (persisted at request time, so a seller always refunds to vendor_earnings and admin refunds to wallet_balance). Idempotency_key f'WDL_REJECT:{wid}' + the 'status != pending' guard at line 1816 means a second /reject 400s with 'Already processed' and does NOT credit twice — verified live.",
+    "core/shop_money.py credit/debit are keyed on `idempotency_key`; each operation writes exactly one transaction row and one ledger row; a re-run with the same key is a no-op — that is the invariant Phase 1 relies on and it holds across tests A–H.",
+    "frontend/app/checkout.tsx — the TOTAL banner and payment-method buttons read from the server response of /orders/payment/start (amount, goods_total, delivery_total). The FE does not recompute the payable total; the screenshot shows ₹249+₹30=₹279 identical to what /payment/start returns. Good.",
+    "frontend/app/(tabs)/wallet.tsx — shows Withdraw button + SETTLEMENT HISTORY only for approved sellers; buyer wallet does not render either; COD rows appear with +₹0 impact and the exact 'to be paid to the delivery agent' string coming from the backend txn.description."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter81_phase1_gaps.py (new)",
+    "/app/test_reports/pytest/iter81_phase1_gaps.xml (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (56/56 verify + 14/14 pytest)",
+    "frontend": "100% (checkout, /orders, buyer + vendor wallet screens rendered clean on mobile)"
+  },
+  "seed_data_creation": "Owner's verify_phase1_money.py seeded ~10 orders (SC-4D3B5A, SC-B04FF0, SC-850C1B, SC-7C9C17, SC-3D2DC1, SC-71FB40, ...) plus 1 orphan-payment reconciliation refund on testbuyer, and 3 withdrawal rows (1 pending, 2 rejected) on testvendor. My gap test cleaned up the pre-existing 'pending' withdrawal by rejecting it in the DB and then reset testvendor.vendor_earnings=15000 so the reject-flow could exercise cleanly; final state: testvendor pending=1 (from that reject-flow request that WAS actually rejected by /admin/withdrawals/{id}/reject, so it is 'rejected'), and vendor_earnings sits at ~₹5,000. testbuyer.wallet_balance ≈ ₹49,130.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Owner's spec is fully implemented. Endpoints of interest: POST /api/orders/payment/start returns {amount,goods_total,delivery_total,payment_id,razorpay_order_id,prefill}; POST /api/orders/checkout accepts payment_method in {wallet,cod,wallet_cod,wallet_online,online}; PATCH /api/admin/orders/{id}/status {status:'delivered'} triggers the -30/+30 delivery settlement (unless product.free_delivery); GET /api/admin/finance/reconciliations returns {reconciliations:[...], open_total, count}; POST /api/admin/finance/reconciliations/{payment_id}/resolve enforces note>=3 chars and action in {refund_to_wallet, close}; POST /api/admin/withdrawals/{wid}/reject 400s on non-pending, and refunds to whichever wallet_field the withdrawal was held from (vendor_earnings for sellers). Razorpay is mock so /payment/verify accepts any non-empty razorpay_payment_id and the webhook accepts unsigned payloads. Buyer testbuyer@test.com password Test@1234 (pincode 517644). Vendor testvendor@test.com password Test@1234. Admin support@slangcart.com password 3)Ywxtic. Login response field is `token`. Route to My Orders is /orders (NOT /my-orders — that returns Unmatched Route).",
+  "rca_of_issue": "N/A — this iteration is a verification pass, not a bug hunt. The main agent's Phase-1 financial engine (shop_money.credit/debit with idempotency_key, single-source-of-truth delivery-fee row, wallet-slice-only credit for combo orders, admin reconciliation desk for orphan payments, seller-only ₹5k+ withdrawal with atomic hold and refund-to-source-wallet on reject) is behaving exactly as the owner specified across all owner-listed test cases A–H plus the vendor wallet + withdrawal rules."
+}

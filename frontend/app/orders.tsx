@@ -45,6 +45,15 @@ type Order = {
   delivery_person_name?: string | null;
   delivery_person_phone?: string | null;
   delivery_info_updated_at?: string | null;
+  // Phase 2 — server-computed return state (7-day window from delivery).
+  return_eligible?: boolean;
+  return_days_left?: number;
+  return_window_expired?: boolean;
+  return_deadline?: string | null;
+  has_returns?: boolean;
+  returns?: { id: string; return_number: string; status: string }[];
+  display_status?: string;
+  can_cancel?: boolean;
 };
 
 const PAY_LABEL: Record<string, string> = {
@@ -65,6 +74,9 @@ const STATUS_META: Record<string, { color: string; label: string; icon: any }> =
   out_for_delivery: { color: "#0EA5E9", label: "On the way", icon: "truck" },
   delivered:        { color: "#10B981", label: "Delivered",  icon: "check-circle" },
   cancelled:        { color: "#EF4444", label: "Cancelled",  icon: "x-circle" },
+  // Phase 2 — a delivered order past its 7-day return window is simply done.
+  completed:        { color: "#166534", label: "Completed",  icon: "check-circle" },
+  returned:         { color: "#8B5CF6", label: "Returned",   icon: "rotate-ccw" },
 };
 const FILTERS = ["all", "placed", "confirmed", "shipped", "out_for_delivery", "delivered", "cancelled"] as const;
 
@@ -202,7 +214,13 @@ export default function OrdersScreen() {
           <Feather name="arrow-left" size={20} color={colors.textMain} />
         </TouchableOpacity>
         <Text style={styles.title}>My orders</Text>
-        <View style={{ width: 40 }} />
+        <TouchableOpacity
+          onPress={() => router.push("/returns" as any)}
+          style={styles.backBtn}
+          testID="orders-my-returns"
+        >
+          <Feather name="rotate-ccw" size={18} color={colors.primary} />
+        </TouchableOpacity>
       </View>
 
       {/* Filter chips */}
@@ -263,7 +281,8 @@ export default function OrdersScreen() {
           data={filtered}
           keyExtractor={(o) => o.id}
           renderItem={({ item, index }) => {
-            const meta = STATUS_META[item.status || "placed"] || STATUS_META.placed;
+            const meta = STATUS_META[item.display_status || item.status || "placed"]
+              || STATUS_META[item.status || "placed"] || STATUS_META.placed;
             const totalItems = (item.items || []).reduce((a, i) => a + (i.qty || 0), 0);
             const orderRef = item.order_number || `#${item.id.slice(0, 8).toUpperCase()}`;
             const codDue = Number(item.cod_due || 0);
@@ -482,6 +501,34 @@ export default function OrdersScreen() {
                     <Text style={styles.invoiceBtnText}>Invoice</Text>
                   </TouchableOpacity>
                 </View>
+
+                {/* Phase 2 — a DELIVERED order inside the 7-day window offers
+                    Return (never Cancel). Past the window it just reads
+                    Completed, and the button disappears. */}
+                {item.return_eligible ? (
+                  <TouchableOpacity
+                    onPress={() => router.push(`/returns/new?order_id=${item.id}` as any)}
+                    style={styles.returnBtn}
+                    testID={`user-return-${item.id}`}
+                  >
+                    <Feather name="rotate-ccw" size={13} color={colors.primary} />
+                    <Text style={styles.returnBtnText}>
+                      Return items · {item.return_days_left} day{item.return_days_left === 1 ? "" : "s"} left
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                {item.has_returns ? (
+                  <TouchableOpacity
+                    onPress={() => router.push("/returns" as any)}
+                    style={styles.returnBtn}
+                    testID={`user-view-returns-${item.id}`}
+                  >
+                    <Feather name="file-text" size={13} color={colors.primary} />
+                    <Text style={styles.returnBtnText}>
+                      View return{(item.returns || []).length > 1 ? "s" : ""}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
 
                 {item.status === "placed" && !item.delivery_info_updated_at ? (
                   <TouchableOpacity
@@ -797,6 +844,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: "#FCA5A5", backgroundColor: "#FEF2F2",
   },
   cancelBtnText: { fontSize: 12, fontWeight: "800", color: "#B3261E" },
+  // Phase 2 — Return items (delivered, inside the 7-day window).
+  returnBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    marginTop: 8, minHeight: 44, borderRadius: 999, borderWidth: 1,
+    borderColor: colors.primary, backgroundColor: colors.brand100, paddingHorizontal: 14,
+  },
+  returnBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
   // Invoice preview styles
   invHead: { alignItems: "center", marginTop: 8, marginBottom: 14, paddingVertical: 14, borderBottomWidth: 2, borderBottomColor: colors.primary },
   invBrand: { fontSize: 28, fontWeight: "900", color: colors.primary, letterSpacing: 3 },

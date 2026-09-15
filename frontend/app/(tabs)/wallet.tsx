@@ -555,7 +555,8 @@ const styles = StyleSheet.create({
   balanceAmountCompact: { color: colors.primaryFg, fontSize: 26, fontWeight: "900", marginTop: 2, letterSpacing: -0.8 },
   miniStatsCol: { backgroundColor: "rgba(255,255,255,0.14)", borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12, alignItems: "center", minWidth: 110 },
   miniStat: { alignItems: "center" },
-  miniStatLabel: { color: "rgba(255,255,255,0.75)", fontSize: 9, fontWeight: "800", letterSpacing: 1.2 },
+  // Contrast fix (Jun-2026): 0.75 white on the dark hero read as washed-out.
+  miniStatLabel: { color: "rgba(255,255,255,0.92)", fontSize: 9.5, fontWeight: "900", letterSpacing: 1.2 },
   miniStatValue: { color: "#fff", fontSize: 13, fontWeight: "800", marginTop: 1, letterSpacing: -0.2 },
   miniStatDivider: { width: 28, height: 1, backgroundColor: "rgba(255,255,255,0.25)", marginVertical: 5 },
   statsRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginTop: 18, paddingTop: 16, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.18)" },

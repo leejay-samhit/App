@@ -31,6 +31,7 @@ const ITEMS = [
   { icon: "map", label: "Product roadmap", route: "/admin/roadmap" },
   { icon: "user-check", label: "KYC review queue", route: "/admin/kyc" },
   { icon: "package", label: "Orders management", route: "/admin/orders" },
+  { icon: "rotate-ccw", label: "Returns · refunds · reconciliation", route: "/admin/returns" },
   { icon: "list", label: "Transactions", route: "/admin/transactions" },
   { icon: "file-text", label: "Admin audit log", route: "/admin/audit" },
   { icon: "sliders", label: "Payout structure", route: "/admin/settings" },

@@ -1,0 +1,53 @@
+{
+  "summary": "Iteration 82 — Slangcart PHASE 2 (Returns · Refunds · Vendor Net Worth · GST · Reconciliation) full-stack verification. Backend: owner's verify_phase2_returns.py 81/81 PASS and verify_phase1_money.py 56/56 PASS (after clearing one legacy pending withdrawal that blocks the settlement test — see rca). My new gap-coverage suite tests/test_iter82_phase2_gaps.py 19 passed, 2 skipped, 0 failed. Covers: (a) GET /api/gst/compute?base=1000&pct=18 returns cgst_pct=9 / cgst_amount=90 / sgst_amount=90 / total_gst=180 / final_amount=1180 exactly per owner spec, plus zero-pct edge; (b) cross-role authorisation matrix — buyer→/vendor/me/returns 403, buyer→/vendor/me/net-worth 403, buyer→/vendor/me/sales-ledger 403, buyer→/vendor/me/net-worth/export 403, vendor→/admin/returns 403, vendor→/admin/reconciliation 403, vendor→/admin/financial-errors 403, anon→admin 401/403, anon→vendor networth 401/403; (c) GET /api/products/{id} does NOT contain purchase_price / purchase_gst_pct / purchase_total / profit_per_unit / potential_stock_profit (verified with deep dict walk on a published vendor product); (d) GET /api/vendor/me/products/{id}/pricing DOES expose purchase + selling + profit_per_unit; (e) admin reconciliation returns balanced=True for inventory, returns and gst (vendor_wallets was also balanced on this run — the legacy −14,050 drift seen in an earlier iteration has since been settled); (f) POST /admin/reconciliation/opening-balance is verified NOT to mutate users.wallet_balance or users.vendor_earnings (before/after snapshot of testbuyer and testvendor identical); (g) GET /api/vendor/me/net-worth/export returns a valid .xlsx workbook with all six required sheets 'Net Worth Ledger', 'Sales · COD', 'Sales · Wallet', 'Sales · Online', 'Return Items', 'Reconciliation'; (h) GET /api/vendor/me/net-worth shape has available_balance, pending_balance, pending_withdrawals, breakdown{opening,sales,delivery_charges,refunds,withdrawals}, reconciliation.balanced; (i) /api/vendor/me/sales-ledger has cod/wallet/online/returns sections; (j) /api/vendor/me/offline-ledger has cash/upi/card. Frontend (mobile 390×844, browser automation): buyer /orders shows the green 'Return items · N days left' pill; tap opens /returns/new?order_id=… with '7 days left to return · until 2026-09-22' header, qty steppers, six reason chips (Damaged/Wrong/Not as described/Missing/Size/Quality/Changed), free-text comments, and a 'Refund you will receive' summary card that reads 'Delivery charge · Not refundable' — verbatim per owner spec; buyer /returns lists prior returns as REF## cards with COMPLETED status, ₹credited to wallet, and cashback-reversal note where applicable; vendor /vendor/returns renders four tabs 'To review / Approved / Received / Refund due' (currently empty because verify_phase2_returns cleans up); vendor /vendor/net-worth hero shows Available balance ₹4,000, Cash to collect (COD) ₹4,905.50, Pending withdrawal ₹5,000, Withdraw button, plus the 'Where the money came from and went' card with Opening/Sales/Delivery/Refunds/Withdrawals/Cashback/Ledger balance rows, and switchable tabs Net worth · Cash on delivery · Wallet · Online · Returns · Counter offline. Excel button in header. Admin /admin/returns renders four tabs 'Returns / Refunds due / Error register / Reconciliation' with the search bar and REF list. No red screens, only pre-existing Expo deprecation warnings (shadow*, pointerEvents, expo-notifications on web).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/gst/compute", "issue": "Owner spec worded as public (`GET /api/gst/compute?base=1000&pct=18`) but the endpoint currently requires authentication — anonymous request returns 401. Not a bug for authenticated app users, but worth confirming with owner whether the tax calculator should be publicly reachable for the product detail page."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/verify_phase1_money.py (owner script — 56/56)",
+    "/app/backend/tests/verify_phase2_returns.py (owner script — 81/81)",
+    "/app/backend/tests/test_iter82_phase2_gaps.py (new — 19 passed, 2 skipped)",
+    "/app/test_reports/pytest/iter82_phase2_gaps.xml",
+    "/app/test_reports/iter82_returns_new.png",
+    "/app/test_reports/iter82_returns_list.png",
+    "/app/test_reports/iter82_vendor_returns.png",
+    "/app/test_reports/iter82_vendor_networth.png",
+    "/app/test_reports/iter82_admin_returns.png"
+  ],
+  "action_items": [
+    "Optional (owner clarification): decide whether GET /api/gst/compute should be public (no auth) — owner listed it without auth headers in the request; currently returns 401 for unauthenticated requests.",
+    "Optional cleanup: the legacy pending-withdrawal blocker between verify_phase1 and verify_phase2 runs (§I 'valid settlement accepted' / 'held out of vendor wallet') is only surfaced when Phase-1 is re-run after Phase-2; documenting a `cd /app/backend && python -c ...update_many({'status':'pending'},...)` reset step at the top of verify_phase1_money.py would remove the manual step for future testers.",
+    "No blocking bugs. Phase 2 is production-ready per the owner's own 81-case verification and the additional 19 gap-coverage cases."
+  ],
+  "critical_code_review_comments": [
+    "core/returns.py — all money movement funnels through core.shop_money.credit/debit with idempotency_key patterns like RETURN_REFUND:<return_id> and INV_RESTORE:<return_line_id>, so a repeated /refund or /received is a no-op (verified by verify_phase2_returns cases 4/6/9 and the inventory 'restored_twice: 0' check in admin/reconciliation).",
+    "routes/returns.py — the state machine is enforced by rt.decide_return / rt.mark_product_returned / rt.process_refund raising ReturnError which the routes translate to HTTP 400; the 'refund could not be completed' branch correctly returns 409 with the owner-mandated 'Nothing has been deducted' wording (line 202–207).",
+    "routes/products_public.py:GET /products/{id} — purchase_price and purchase_gst_pct are projected OUT at the Mongo query itself ({'purchase_price':0,'purchase_gst_pct':0}), not stripped after the fact — this is the safe pattern and it holds even for legacy documents.",
+    "routes/vendor_networth.py — every number is derived from the ledger (transactions collection) or source documents (orders/returns/offline_sales); no re-computation on the frontend. The Excel export renders the same JSON ledger totals into the workbook, so the 'sheet totals match JSON' invariant is by construction rather than by a second query path.",
+    "routes/reconciliation.py:POST /admin/reconciliation/opening-balance — verified by black-box before/after: users.wallet_balance and users.vendor_earnings of both testbuyer and testvendor are byte-identical after the call; only ledger rows are written. Matches the owner rule 'must NOT change any users.wallet_balance or users.vendor_earnings'.",
+    "routes/vendor_networth.py:GET /gst/compute — signature is (base:float, pct:float) with Depends(get_current_user). Owner spec worded the endpoint without auth; if the tax-calculator ever needs to be surfaced on a public product-detail render, drop the dependency."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter82_phase2_gaps.py (new — 21 test cases)",
+    "/app/test_reports/pytest/iter82_phase2_gaps.xml (new)",
+    "/app/test_reports/iter82_*.png (5 screenshots)"
+  ],
+  "success_rate": {
+    "backend": "100% (56/56 verify_phase1 + 81/81 verify_phase2 + 19/19 iter82 gap suite)",
+    "frontend": "100% (buyer /orders + /returns/new + /returns, vendor /vendor/returns + /vendor/net-worth, admin /admin/returns all render cleanly on mobile 390×844)"
+  },
+  "seed_data_creation": "Owner's verify_phase2_returns.py seeded the multi-vendor returns fixture (REF19–REF24 visible in /returns and /admin/returns, all COMPLETED with wallet credit + stock restored + cashback reversed where applicable). I also cleared one lingering testvendor withdrawal that was left in 'pending' by iteration_81 so verify_phase1_money's §I settlement test could pass — final withdrawal state: 0 pending.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Phase 2 endpoints live: /orders/{id}/return-state (customer), /returns (POST/GET/GET-me/GET-by-id), /vendor/me/returns and /vendor/me/returns/{id}/{approve,reject,received,refund}, /admin/returns[/{id}/{refund,audit}], /admin/financial-errors[/{id}/resolve], /admin/reconciliation, /admin/reconciliation/opening-balance, /vendor/me/net-worth[/export], /vendor/me/sales-ledger, /vendor/me/offline-ledger, /vendor/me/profit-report, /vendor/me/products/{id}/pricing, /gst/compute. Login response field is `token` (not access_token). Send User-Agent: curl/8.5.0 for any curl. Buyer testbuyer@test.com/Test@1234 (pincode 517644, preseed via localStorage.@app/deliveryPincode). Vendor testvendor@test.com/Test@1234. Admin support@slangcart.com/3)Ywxtic. If you re-run verify_phase1_money.py right after verify_phase2_returns.py you'll get a 'settlement already in progress' failure on §I; reset with a single Mongo update `withdrawals.update_many({'status':'pending'},{'\\$set':{'status':'rejected'}})` before running. /api/admin/reconciliation returns a LIST of check objects (not a dict) — normalise by name. /api/admin/users?q=… returns a LIST directly, not a wrapper.",
+  "rca_of_issue": "N/A — verification pass. Only observation of interest is the small ordering coupling between the two verify_phase*.py scripts: Phase-2 leaves testvendor sitting with vendor_earnings ≈ 4,000 and the 5,000 hold from the accepted-settlement step is later rejected but a new run of Phase-1 §I 'valid settlement accepted' fails because the reset in verify_phase1_money.py itself doesn't clear the earlier hold. Manual one-line Mongo update resets it; owner may want that added to the top of verify_phase1_money.py for hands-free re-runs."
+}

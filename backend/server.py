@@ -84,6 +84,7 @@ from core.config import (  # noqa: E402
     REFERRAL_GST_PCT,
 )
 from core.password_recovery import password_fields  # noqa: E402
+from core import shop_money  # noqa: E402
 
 # Assignable admin sub-roles. The four scoped ones are what the promote screen
 # offers now; manager/support/finance stay valid for admins promoted earlier.
@@ -150,6 +151,7 @@ from routes import legal_pages as legal_pages_router  # noqa: E402
 from routes import upi_manual as upi_manual_router  # noqa: E402
 from routes import wallet as wallet_router  # noqa: E402
 from routes import wallet_topup as wallet_topup_router  # noqa: E402
+from routes import payment_recon as payment_recon_router  # noqa: E402
 from routes import withdrawals as withdrawals_router  # noqa: E402
 from routes import cart as cart_router  # noqa: E402
 from routes import admin_ai as admin_ai_router  # noqa: E402
@@ -158,6 +160,9 @@ from routes import service_admin as service_admin_router  # noqa: E402
 from routes import service_provider as service_provider_router  # noqa: E402
 from routes import finance as finance_router  # noqa: E402
 from routes import refunds as refunds_router  # noqa: E402
+from routes import returns as returns_router  # noqa: E402
+from routes import vendor_networth as vendor_networth_router  # noqa: E402
+from routes import reconciliation as reconciliation_router  # noqa: E402
 from routes import privacy as privacy_router  # noqa: E402
 from routes import push as push_router  # noqa: E402
 from routes import vendor_pos as vendor_pos_router  # noqa: E402
@@ -1813,8 +1818,21 @@ async def admin_reject_withdrawal(
         raise HTTPException(status_code=404, detail="Withdrawal not found")
     if w["status"] != "pending":
         raise HTTPException(status_code=400, detail="Already processed")
-    # Refund the locked amount
-    await db.users.update_one({"id": w["user_id"]}, {"$inc": {"wallet_balance": w["amount"]}})
+    # Refund the locked amount back to the SAME wallet it was held from
+    # (a seller's settlement comes out of the shop wallet, not the
+    # customer/referral wallet) — ledgered and replay-safe.
+    _wf = w.get("wallet_field") or "wallet_balance"
+    await shop_money.credit(
+        w["user_id"], _wf, float(w["amount"]),
+        idempotency_key=f"WDL_REJECT:{wid}",
+        group="withdrawal",
+        txn_type="withdrawal_refund",
+        source_wallet="pending_withdrawal",
+        settlement_status="rejected",
+        description=f"Settlement rejected — ₹{float(w['amount']):,.0f} returned" + (f" ({reason})" if reason else ""),
+        extra={"withdrawal_id": wid,
+               **({"wallet_impact": "vendor_earnings_only"} if _wf == shop_money.VENDOR_WALLET else {})},
+    )
     await db.withdrawals.update_one(
         {"id": wid},
         {"$set": {
@@ -3459,11 +3477,13 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             line_total = round(unit_price * qty, 2)
             total += line_total
             vendor_id = product.get("vendor_id")
-            vendor_share = 0.0
-            platform_share = line_total
+            # Phase 1 (Jun-2026) — NO SHOP COMMISSION on the shop delivery
+            # flow. The vendor is entitled to 100 % of the goods value; the
+            # only money Slangcart takes is the delivery charge, and that is
+            # settled from the vendor wallet AFTER successful delivery.
+            vendor_share = line_total if vendor_id else 0.0
+            platform_share = 0.0 if vendor_id else line_total
             if vendor_id:
-                vendor_share = round(line_total * (vendor_pct / 100.0), 2)
-                platform_share = round(line_total - vendor_share, 2)
                 vendor_payouts[vendor_id] = vendor_payouts.get(vendor_id, 0.0) + vendor_share
             enriched.append({
                 "product_id": product["id"],
@@ -3615,7 +3635,31 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 else:
                     await db.products.update_one({"id": d["product_id"]}, {"$inc": {"stock": d["qty"]}})
             raise
-
+        # Phase 1 — payment reconciliation. The money is captured; from here
+        # on, if ANYTHING stops the order from being created, this row is the
+        # trace: it stays `awaiting_order` and shows up in
+        # GET /api/admin/finance/reconciliations (and the customer can resume
+        # via GET /orders/payment/pending — never paying twice).
+        try:
+            await db.payment_reconciliations.update_one(
+                {"_id": f"PAY:{online_attempt['id']}"},
+                {"$setOnInsert": {
+                    "payment_id": online_attempt["id"],
+                    "razorpay_order_id": online_attempt.get("razorpay_order_id"),
+                    "razorpay_payment_id": online_attempt.get("razorpay_payment_id"),
+                    "user_id": user["id"],
+                    "user_email": user.get("email"),
+                    "amount": round(float(online_attempt.get("online_amount") or 0), 2),
+                    "wallet_amount": round(float(online_attempt.get("wallet_amount") or 0), 2),
+                    "intended_total": round(float(online_attempt.get("cart_total") or 0), 2),
+                    "status": "awaiting_order",
+                    "error": None,
+                    "created_at": now_utc().isoformat(),
+                }},
+                upsert=True,
+            )
+        except Exception as _rc_err:
+            logger.warning(f"reconciliation row failed: {str(_rc_err)[:160]}")
     if wallet_target > 0:
         # ATOMIC debit — guards against rapid double-clicks creating
         # duplicate orders. Only succeeds if the balance still covers it.
@@ -3799,81 +3843,63 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         except Exception as e:
             logging.warning(f"order notification failed (non-blocking): {e}")
 
-        # Platform margin + vendor payout are credited immediately ONLY
-        # when the sub-order is FULLY prepaid (wallet, Razorpay online, or
-        # a wallet+online combo).  Anything carrying a cash-on-delivery
-        # balance defers until delivery is confirmed (settled in
-        # PATCH /admin/orders/{id}/status).
+        # ── Phase 1 money movement ─────────────────────────────────────
+        # The vendor is credited the PREPAID money for this sub-order
+        # (wallet slice + Razorpay slice, delivery included) — exactly once,
+        # through the single shop-money engine. Cash-on-delivery money is
+        # collected physically by the seller, so it is never credited into a
+        # wallet and never faked into the customer's wallet.
+        #
+        # The delivery charge is NOT recognised here any more: it is settled
+        # vendor wallet → system treasury when the order is DELIVERED
+        # (PATCH …/orders/{id}/status), which is the only point the service
+        # has actually been performed. No shop commission is taken at all.
+        fresh_sub = await db.orders.find_one({"id": order_id}, {"_id": 0})
         if cod_due > 0.009:
-            continue
-
-        # ── Delivery revenue (own accounting category) ─────────────────
-        # Prepaid delivery money is platform income the moment it lands.
-        # COD delivery money is recognised when the cash is collected
-        # (PATCH …/orders/{id}/status → delivered).
-        if delivery_charge > 0.009:
-            await credit_admin_bucket("delivery_collected", delivery_charge, also_total_earned=False)
-            try:
-                await db.transactions.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": (admin_doc or {}).get("id") or None,
-                    "type": "delivery_charge_collected",
-                    "amount": delivery_charge,
-                    "status": "success",
-                    "description": f"Delivery charge collected on order {order_number}",
-                    "order_id": order_id,
-                    "vendor_id": vendor_id,
-                    "created_at": ts_now,
-                })
-            except DuplicateKeyError:
-                pass
-            await db.orders.update_one(
-                {"id": order_id},
-                {"$set": {"delivery_settled": True, "delivery_settled_at": ts_now}},
+            # Cash-on-delivery leg: no money moves, but the customer must SEE
+            # the order in their history and on the invoice as a cash order.
+            await shop_money.post(
+                group="customer_liability",
+                txn_type="cod_order",
+                amount=0.0,
+                idempotency_key=f"COD:{order_id}",
+                user_id=user["id"],
+                order_id=order_id,
+                order_number=order_number,
+                vendor_id=vendor_id,
+                shop_name=(fresh_sub or {}).get("vendor_name"),
+                payment_method=(fresh_sub or {}).get("paid_via") or "cod",
+                delivery_charge=delivery_charge,
+                settlement_status="pay_on_delivery",
+                description=(
+                    f"Cash on Delivery order {order_number} — ₹{cod_due:.0f} to be paid "
+                    f"to the delivery agent"
+                ),
+                extra={"order_amount": round(float(sub_total), 2),
+                       "cod_amount": cod_due,
+                       "wallet_paid": round(float(sub_total) - cod_due, 2),
+                       "wallet_impact": "none"},
             )
-
-        platform_total = round(sum(float(i.get("platform_share") or 0) for i in vitems), 2)
-        if shop_margin_on and platform_total > 0 and admin_doc:
-            await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
+        try:
+            await shop_money.credit_vendor_for_order(
+                fresh_sub or {"id": order_id, "vendor_id": vendor_id,
+                              "order_number": order_number,
+                              "total": sub_total, "cod_due": cod_due},
+            )
+        except Exception as _vc_err:
+            logger.warning(f"vendor credit failed for {order_id}: {str(_vc_err)[:200]}")
+            await shop_money.record_financial_error(
+                "vendor_credit_failed", str(_vc_err), order_id=order_id, vendor_id=vendor_id,
+            )
+        if vendor_id and shop_money.prepaid_amount(fresh_sub or {"total": sub_total, "cod_due": cod_due}) > 0.009:
             try:
-                await db.transactions.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": admin_doc["id"],
-                    "type": "shop_commission",
-                    "amount": platform_total,
-                    "status": "success",
-                    "description": f"Shop margin from order {order_number}",
-                    "order_id": order_id,
-                    "source_user_name": user.get("name"),
-                    "created_at": ts_now,
-                })
-            except DuplicateKeyError:
+                await _create_notification(
+                    vendor_id, "vendor", "New sale!",
+                    f"₹{shop_money.prepaid_amount(fresh_sub or {'total': sub_total, 'cod_due': cod_due}):.0f} "
+                    f"credited from order {order_number}.",
+                )
+            except Exception:
                 pass
-
-        if vendor_id:
-            vendor_amount = round(sum(float(i.get("vendor_share") or 0) for i in vitems), 2)
-            if vendor_amount > 0:
-                # Sept 2026 — shop earnings stay OFF `wallet_balance`
-                # (that field represents referral money only).
-                await db.users.update_one({"id": vendor_id}, {"$inc": {"vendor_earnings": vendor_amount}})
-                try:
-                    await db.transactions.insert_one({
-                        "id": str(uuid.uuid4()),
-                        "user_id": vendor_id,
-                        "type": "vendor_sale",
-                        "amount": vendor_amount,
-                        "status": "success",
-                        "description": f"Vendor share credited from order {order_number}",
-                        "order_id": order_id,
-                        "created_at": ts_now,
-                        "wallet_impact": "vendor_earnings_only",
-                    })
-                except DuplicateKeyError:
-                    pass
-                try:
-                    await _create_notification(vendor_id, "vendor", "New sale!", f"₹{vendor_amount:.0f} credited from order {order_number}.")
-                except Exception:
-                    pass
 
     # Vendors with a cash balance still need a heads-up about the order.
     for o in created_orders:
@@ -3893,6 +3919,14 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     if online_attempt:
         from routes.order_payments import mark_attempt_consumed
         await mark_attempt_consumed(online_attempt["id"], group_id)
+        await db.payment_reconciliations.update_one(
+            {"_id": f"PAY:{online_attempt['id']}"},
+            {"$set": {
+                "status": "completed",
+                "order_group_id": group_id,
+                "completed_at": now_utc().isoformat(),
+            }},
+        )
 
     wallet_total_used = round(sum(float(o["wallet_paid"]) for o in created_orders), 2)
     online_total_used = round(sum(float(o.get("online_paid") or 0) for o in created_orders), 2)
@@ -5506,99 +5540,36 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         except Exception as _cb_err:
             logger.warning(f"cashback settlement failed for {order_id}: {str(_cb_err)[:300]}")
 
-    # ── COD delivery → settle commission + vendor wallets ────────────────
-    # COD orders DEFER the admin commission credit and vendor wallet credit
-    # until delivery is confirmed (cash actually collected). This keeps the
-    # ledger honest: admin only counts money that was truly earned.
+    # ── DELIVERED → settle the delivery charge, once, for EVERY order ────
+    # Phase 1: the ONLY money Slangcart takes on a shop order is the
+    # delivery charge, and it is recognised the moment delivery succeeds:
+    # vendor wallet → system treasury + Revenue Ledger. Free delivery moves
+    # nothing. There is NO shop commission anywhere in this flow.
     paid_via = order.get("paid_via") or "wallet"
     items = order.get("items") or []
-    if (payload.status == "delivered"
-            and prev_status != "delivered"
-            and paid_via in ("cod", "wallet_cod")
-            and not order.get("commission_settled")):
-        # 1) Mark order paid + settled so we never double-credit
-        await db.orders.update_one(
-            {"id": order_id},
-            {"$set": {"payment_status": "paid", "commission_settled": True}},
-        )
-        # 2) Admin platform commission (skipped when shop_margin_enabled=False)
-        settings_now2 = await get_settings()
-        shop_margin_on2 = bool(settings_now2.get("shop_margin_enabled", False))
-        # 2a) Delivery charge collected in cash — recognised now, in its own
-        #     accounting category (never mixed with goods revenue or GST).
-        cod_delivery = round(float(order.get("delivery_charge") or 0), 2)
-        if cod_delivery > 0.009 and not order.get("delivery_settled"):
-            await credit_admin_bucket("delivery_collected", cod_delivery, also_total_earned=False)
-            admin_for_del = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
-            try:
-                await db.transactions.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": (admin_for_del or {}).get("id"),
-                    "type": "delivery_charge_collected",
-                    "amount": cod_delivery,
-                    "status": "success",
-                    "description": f"Delivery charge collected in cash on order #{order_id[:8]}",
-                    "order_id": order_id,
-                    "vendor_id": order.get("vendor_id"),
-                    "created_at": now_utc().isoformat(),
-                })
-            except DuplicateKeyError:
-                pass
+    if payload.status == "delivered" and prev_status != "delivered":
+        fresh_for_fee = await db.orders.find_one({"id": order_id}, {"_id": 0}) or order
+        admin_for_del = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
+        try:
+            await shop_money.settle_delivery_fee(
+                fresh_for_fee,
+                credit_admin_bucket=credit_admin_bucket,
+                admin_id=(admin_for_del or {}).get("id"),
+            )
+        except Exception as _df_err:
+            logger.warning(f"delivery fee settlement failed for {order_id}: {str(_df_err)[:200]}")
+            await shop_money.record_financial_error(
+                "delivery_fee_settlement_failed", str(_df_err),
+                order_id=order_id, vendor_id=order.get("vendor_id"),
+            )
+        # COD money never enters a wallet — the seller collected the cash in
+        # person. We only stamp the order as paid/settled.
+        if paid_via in ("cod", "wallet_cod") and not order.get("commission_settled"):
             await db.orders.update_one(
                 {"id": order_id},
-                {"$set": {"delivery_settled": True, "delivery_settled_at": now_utc().isoformat()}},
+                {"$set": {"payment_status": "paid", "commission_settled": True,
+                          "cod_collected": True, "cod_collected_at": now_utc().isoformat()}},
             )
-        platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
-        if shop_margin_on2 and platform_total > 0:
-            admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-            if admin_doc:
-                await credit_admin_bucket("shopping_margin", platform_total, also_total_earned=True)
-                await db.transactions.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": admin_doc["id"],
-                    "type": "shop_commission",
-                    "amount": platform_total,
-                    "status": "success",
-                    "description": f"Shop margin from COD order #{order_id[:8]} (settled on delivery)",
-                    "order_id": order_id,
-                    "created_at": now_utc().isoformat(),
-                })
-        # 3) Vendor share credits
-        vendor_payouts: Dict[str, float] = {}
-        for it in items:
-            vid = it.get("vendor_id")
-            vshare = float(it.get("vendor_share") or 0)
-            if vid and vshare > 0:
-                vendor_payouts[vid] = vendor_payouts.get(vid, 0) + vshare
-        for vid, amt in vendor_payouts.items():
-            amt = round(amt, 2)
-            # Sept 2026 — same treatment as checkout site above; keep
-            # shop earnings off `wallet_balance` (which is referral-only).
-            # Belt-and-braces: if a legacy `vendor_sale` row for this
-            # order already exists (double-fire from an old buggy build),
-            # skip the increment + insert instead of 500-ing.
-            existing_credit = await db.transactions.find_one({
-                "user_id": vid, "type": "vendor_sale", "order_id": order_id,
-            })
-            if existing_credit:
-                continue
-            await db.users.update_one({"id": vid}, {"$inc": {"vendor_earnings": amt}})
-            try:
-              await db.transactions.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": vid,
-                "type": "vendor_sale",
-                "amount": amt,
-                "status": "success",
-                "description": f"Vendor share — COD order #{order_id[:8]} delivered",
-                "order_id": order_id,
-                "created_at": now_utc().isoformat(),
-                "wallet_impact": "vendor_earnings_only",
-            })
-            except DuplicateKeyError:
-              # Idempotent — another concurrent delivery-status update
-              # already recorded the vendor_sale. Skip silently.
-              pass
 
     if payload.status == "cancelled" and prev_status != "cancelled":
         order_total = float(order.get("total") or 0)
@@ -5673,70 +5644,26 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                     "created_at": now_utc().isoformat(),
                 })
 
-        # ── Reverse the delivery charge the customer paid ─────────────────
-        if float(order.get("delivery_charge") or 0) > 0.009 and order.get("delivery_settled"):
-            _del = round(float(order.get("delivery_charge") or 0), 2)
-            await credit_admin_bucket("delivery_collected", -_del, also_total_earned=False)
-            _adm = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
-            await db.transactions.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": (_adm or {}).get("id"),
-                "type": "delivery_charge_reversal",
-                "amount": -_del,
-                "status": "success",
-                "description": f"Delivery charge reversed — order #{order_id[:8]} cancelled",
-                "order_id": order_id,
-                "created_at": now_utc().isoformat(),
-            })
-            await db.orders.update_one({"id": order_id}, {"$set": {"delivery_settled": False}})
-
-        # ── Reverse the LEDGER credits booked at order placement ─────────
-        # For wallet-paid orders we DID credit shop_commission + vendor_share
-        # at placement, so we must reverse both on cancellation. For COD
-        # orders nothing was credited yet (deferred to delivery) so there is
-        # nothing to reverse — unless the COD was already delivered and
-        # later cancelled, in which case order.commission_settled is True
-        # and we reverse the same way.
-        should_reverse_commission = (
-            paid_via in ("wallet", "online", "wallet_online")
-            or (paid_via in ("cod", "wallet_cod") and order.get("commission_settled"))
-        )
-        if should_reverse_commission:
-            platform_total = round(sum(float(it.get("platform_share") or 0) for it in items), 2)
-            if platform_total > 0:
-                admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-                if admin_doc:
-                    await credit_admin_bucket("shopping_margin", -platform_total, also_total_earned=True)
-                    await db.transactions.insert_one({
-                        "id": str(uuid.uuid4()),
-                        "user_id": admin_doc["id"],
-                        "type": "shop_commission_reversal",
-                        "amount": -platform_total,
-                        "status": "success",
-                        "description": f"Reversal — order #{order_id[:8]} cancelled",
-                        "order_id": order_id,
-                        "created_at": now_utc().isoformat(),
-                    })
-            # Reverse vendor credits
-            vendor_payouts2: Dict[str, float] = {}
-            for it in items:
-                vid = it.get("vendor_id")
-                vshare = float(it.get("vendor_share") or 0)
-                if vid and vshare > 0:
-                    vendor_payouts2[vid] = vendor_payouts2.get(vid, 0) + vshare
-            for vid, amt in vendor_payouts2.items():
-                amt = round(amt, 2)
-                await db.users.update_one({"id": vid}, {"$inc": {"wallet_balance": -amt}})
-                await db.transactions.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": vid,
-                    "type": "vendor_sale_reversal",
-                    "amount": -amt,
-                    "status": "success",
-                    "description": f"Vendor share reversed — order #{order_id[:8]} cancelled",
-                    "order_id": order_id,
-                    "created_at": now_utc().isoformat(),
-                })
+        # ── Reverse exactly what was posted (Phase 1 engine) ─────────────
+        # One call undoes the recorded vendor credit and, if it had already
+        # been settled, the delivery fee (vendor refunded, treasury debited).
+        # Amounts come from the LEDGER, so a reversal can never differ from
+        # the original movement, and it is idempotent. There is no shop
+        # commission in this flow, so there is none to reverse.
+        try:
+            fresh_cancel = await db.orders.find_one({"id": order_id}, {"_id": 0}) or order
+            _adm_c = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
+            await shop_money.reverse_order_money(
+                fresh_cancel, f"order {payload.status}",
+                credit_admin_bucket=credit_admin_bucket,
+                admin_id=(_adm_c or {}).get("id"),
+            )
+        except Exception as _rev_err:
+            logger.warning(f"order money reversal failed for {order_id}: {str(_rev_err)[:200]}")
+            await shop_money.record_financial_error(
+                "order_reversal_failed", str(_rev_err),
+                order_id=order_id, vendor_id=order.get("vendor_id"),
+            )
 
         await _create_notification(
             order["user_id"], "order", "Order cancelled",
@@ -7055,6 +6982,12 @@ async def on_startup():
     try:
         await db.users.create_index("email", unique=True)
         await db.users.create_index("referral_code", unique=True)
+        # Phase 1 — idempotency for every money movement is enforced by the
+        # DATABASE, so a replayed webhook / double tap cannot move money twice.
+        await shop_money.ensure_indexes()
+        # Phase 2 — returns / inventory-restoration lookups + guards.
+        from core import returns as _returns_core
+        await _returns_core.ensure_indexes()
     except Exception as _idx_err:
         logger.warning(f"User-unique-index setup failed (non-fatal): {_idx_err}")
 
@@ -10115,6 +10048,7 @@ app.include_router(upi_manual_router.router, prefix="/api")
 # Phase 2B Iter 4 (2026-05-27) — wallet / withdrawals / cart routers
 app.include_router(wallet_router.router, prefix="/api")
 app.include_router(wallet_topup_router.router, prefix="/api")
+app.include_router(payment_recon_router.router, prefix="/api")
 app.include_router(withdrawals_router.router, prefix="/api")
 from routes import cashback as cashback_router  # noqa: E402
 app.include_router(cashback_router.router, prefix="/api")
@@ -10127,6 +10061,9 @@ app.include_router(service_admin_router.router, prefix="/api")
 app.include_router(service_provider_router.router, prefix="/api")
 app.include_router(finance_router.router, prefix="/api")
 app.include_router(refunds_router.router, prefix="/api")
+app.include_router(returns_router.router, prefix="/api")
+app.include_router(vendor_networth_router.router, prefix="/api")
+app.include_router(reconciliation_router.router, prefix="/api")
 # Vendor Cloud-POS (SALES_BACKEND_SPEC, 29-Jun-2026). Strictly vendor
 # business-records + inventory sync — does NOT touch wallets/ledgers.
 app.include_router(vendor_pos_router.router, prefix="/api")

@@ -1523,3 +1523,229 @@ top-up screen with every limit/preset/success state (₹500 credited, balance
 history, vendor has both, admin has neither, admin credit ₹50 succeeds and
 net worth moves −50 (restored by the debit). Report
 `test_reports/iteration_80.json`.
+
+---
+
+## Jun 2026 — PHASE 1: core checkout / payment / wallet / treasury financial fix (iteration 81)
+
+### The one money engine — `core/shop_money.py` (NEW)
+Every shop-order rupee now moves through ONE module, so App, Customer Web,
+Vendor and Admin can never calculate differently (the frontend computes
+nothing — it renders what the backend returns).
+* `post()` writes a fully-described ledger row: `short_id` (**TXNA<n>**, also
+  the user-facing `reference_number`), txn_group, type, customer/vendor,
+  shop, order id + number, payment id, source/destination wallet, debit,
+  credit, amount, **previous_balance / new_balance**, cashback % + amount,
+  delivery charge, GST, settlement status, payment method, remarks.
+* `credit()` / `debit()` — a debit is a CONDITIONAL `$inc` guarded by the
+  balance, so a wallet can never go negative and a transaction can never
+  half-complete; a refused debit raises `InsufficientFunds` ("…available
+  balance is insufficient. No money has been deducted.") and is recorded in
+  `financial_errors` for admin (`GET /api/admin/finance/errors`).
+* **Idempotency is enforced by the DATABASE**: unique sparse index on
+  `transactions.idempotency_key`, keys like `VENDORSALE:{order}`,
+  `DELFEE:{order}`, `DELREV:{order}`, `WDL:{id}`, `RECON:{payment}`. A
+  replayed webhook / double tap / retried status change moves money zero
+  extra times. If a ledger row loses the race after a deduction, the money
+  is put straight back — a deduction can never exist without its row.
+
+### Money model, as specified
+* **Shop commission = ₹0.** `platform_share` is now 0 and `vendor_share` is
+  the full line total; no `shop_commission` row is written anywhere in the
+  shop flow (legacy historical rows are left untouched).
+* **Vendor is credited the PREPAID money** (wallet slice + Razorpay slice,
+  delivery included) at placement — `₹470 + ₹30 = +₹500` — exactly once.
+* **COD** credits nobody: the seller takes the cash in person. No fake
+  customer-wallet credit, and the customer's history/invoice now carries a
+  "Cash on Delivery order — ₹X to be paid to the delivery agent" row
+  (`cod_order`, zero wallet impact).
+* **Wallet + COD**: only the wallet slice is credited (₹200), never the cash
+  ₹300. **Wallet + online**: one single ₹500 vendor credit linked to the
+  wallet txn, the Razorpay payment id and the order id.
+* **Delivery fee settles ONCE, on delivered**: vendor wallet −₹30 → treasury
+  +₹30 + Revenue-Ledger row (`delivery_charge_collected`). It is no longer
+  taken at placement. **Free delivery moves ₹0 and writes no revenue row.**
+  If the vendor wallet cannot cover the fee, nothing is deducted: a
+  `vendor_outstanding` (kind `delivery_fee`) + a financial error are raised.
+* **Cancellation** reverses exactly what the LEDGER recorded (vendor credit,
+  and the delivery fee back to the vendor / out of the treasury). This also
+  fixed a real defect: the old cancel path debited the vendor reversal from
+  `wallet_balance` (customer/referral money) instead of the vendor wallet.
+
+### Checkout ↔ Razorpay mismatch (₹470 collected on a ₹500 order) — FIXED
+`routes/order_payments._price_cart()` priced the GOODS only. It now runs the
+same `compute_cart_delivery` engine as checkout and returns
+`{goods, delivery, total}`, so `items + delivery − wallet = online amount`,
+and `/orders/payment/start` also returns `goods_total` / `delivery_total`.
+The app already renders `amount_paise` from the server, so display and
+collection can no longer disagree.
+
+### Paid but no order — `routes/payment_recon.py` (NEW)
+* Every online checkout writes a `payment_reconciliations` row the instant the
+  payment is claimed (`awaiting_order`) and flips it to `completed` when the
+  order group exists. Anything left behind is a real orphan.
+* `GET /api/admin/finance/reconciliations` lists them (plus a scan for paid,
+  unconsumed attempts) with the open total;
+  `POST …/{payment_id}/resolve {action: refund_to_wallet|close, note}`
+  refunds to the customer wallet exactly once (`RECON:` key) and is audited.
+* The customer can always resume instead of paying again
+  (`GET /orders/payment/pending`); the amount is never applied to a later
+  order and no fake wallet balance is created.
+* `POST /api/payment/webhook` — HMAC-verified (`RAZORPAY_WEBHOOK_SECRET`;
+  refuses unsigned payloads on live keys), idempotent per Razorpay payment id
+  via `payment_webhook_events`, and it only marks the matching attempt paid —
+  it never moves money itself.
+
+### Vendor wallet + withdrawal
+`users.vendor_earnings` IS the vendor wallet. New `GET /api/vendor/me/wallet`
+returns available balance, ledger credits/debits, `unledgered_difference`,
+`in_sync`, outstanding, `min_withdrawal` and `can_withdraw` — computed by the
+BACKEND so the UI can never show a different number.
+Withdrawals: **minimum ₹5,000**, eligibility from the AVAILABLE balance only
+(never total/lifetime sales, pending money or customer liability), the hold is
+a ledgered atomic debit out of the correct wallet, one settlement in progress
+at a time (double-tap / duplicate-callback proof), and a rejection returns the
+money to the SAME wallet it was held from (`WDL_REJECT:` key).
+
+### Audit (read-only)
+`tests/audit_phase1_finance.py` reports payment-without-order,
+order-without-payment, duplicate Razorpay ids, duplicate vendor/delivery/
+cashback postings, post-cutover commission rows, unsettled delivery fees,
+negative wallets, vendor ledger drift, the net-worth formula (unchanged:
+bank_tally_net + pending − user wallets − pending withdrawals − GST) and open
+financial errors. It never writes.
+
+### Verified — TEST A … H all pass
+`tests/verify_phase1_money.py` **56/56**: online ₹500 (Razorpay collects 500,
+vendor +500, then −30/treasury +30, commission 0, re-delivery takes nothing
+twice), wallet ₹500, COD ₹500 (no wallet credit either side), free delivery
+(₹0 both sides, no revenue row), wallet+COD (no duplicate ₹300), wallet+online
+(single ₹500 credit), paid-but-no-order (resume + reconciliation + one-time
+refund), duplicate webhook (one payment, one order, one vendor credit, same
+payment can't buy twice), plus the withdrawal rules. The earlier
+`verify_cashback_flow.py` still passes 36/36 — no regression.
+
+---
+
+## PHASE 2 — Returns · Refunds · Inventory · Vendor Net Worth · GST · Profit · Excel · Reconciliation
+*(Jun-2026 — built on the verified Phase-1 engine; Phase-1 rules unchanged)*
+
+### One engine per concern
+* `core/gst.py` — **THE** GST calculator. `split_gst(base, pct, qty)`,
+  `split_inclusive()`, `pricing_block(product)`, `public_pricing()`.
+  Whole app is **GST-EXCLUSIVE**: `base` is the taxable value, GST is added on
+  top, and `CGST = SGST = GST ÷ 2` (cgst + sgst always equals total_gst to the
+  paisa). Product, invoice, purchase, sales, vendor ledger, reports, Excel,
+  returns and refunds all call it. `GET /api/gst/compute?base=&pct=&qty=`
+  (auth'd) exposes it so **no screen ever does its own GST maths** — the
+  product editor's live CGST/SGST/profit panel is server-computed.
+* `core/returns.py` — the only place a delivered order can travel backwards:
+  eligibility, request, seller decision, goods received, refund, cashback
+  claw-back, inventory restoration, per-return audit.
+* `core/shop_money.py` — still the only place money moves.
+  Added `post_opening_balance()`: an audited **opening balance journal entry**
+  that explains a pre-ledger / directly-seeded balance without moving a rupee,
+  so `opening + credits − debits = closing` becomes provable everywhere.
+
+### Return lifecycle
+`delivered → return_eligible → requested → vendor_review → approved →
+returned (goods back) → refund_processed → inventory_restored → completed`,
+with `rejected` and `refund_pending` as the two off-ramps. Every stage is
+appended to `returns.timeline` with actor + timestamp + note and is shown to
+the customer, the seller and admin.
+
+### The money rules (exactly as the owner specified)
+* **Window** — `settings.return_window_days` (default **7**) from
+  `delivered_at`. Inside it a delivered order offers **Return** and never
+  Cancel; past it the order simply reads **Completed** and the button is gone.
+  The window is computed on the SERVER (`/orders/me` and
+  `GET /api/orders/{id}/return-state`) so app and web can never disagree.
+* **Direction** — refunds are **always vendor wallet → customer wallet**, for
+  wallet, COD and online orders alike. COD cash was physically collected by
+  the seller and an online payment was already credited to the seller, so the
+  seller is the payer in every case. No money is ever generated.
+* **Partial returns** refund the returned line only, priced from what was
+  actually charged (`line_total ÷ qty × returned_qty`) — never re-derived from
+  the live product price. ₹200 + ₹300 + ₹500 returning the ₹300 item refunds
+  ₹300, not ₹1,000, and restocks only that product.
+* **Delivery charge is NOT refunded** (`settings.return_delivery_refundable`,
+  default off). When switched on it is refunded only on a whole-order return
+  and always as its own ledger component — never mixed into the item refund.
+* **Cashback** — `reverse_partial_cashback()` claws back only the cashback
+  ACTUALLY credited for the returned lines, capped by the order's remaining
+  un-reversed cashback (several partial returns can never over-recover), it
+  references the original cashback transaction, refunds the funder
+  (vendor wallet or platform bucket) for what was recovered, and nets any
+  shortfall the customer's wallet couldn't cover off the refund instead of
+  pushing a wallet negative.
+* **Vendor balance safety** — if the seller wallet can't cover the refund,
+  **NOTHING is deducted**: the return parks as `refund_pending`, a
+  `vendor_outstanding` row and a `financial_errors` entry are written, the
+  seller is notified, and admin retries via
+  `POST /api/admin/returns/{id}/refund` once the seller funds up. Admin
+  cannot conjure the money — the debit still comes from the seller.
+* **Duplicate-proof** — `RETURNDEBIT:{return_id}` / `RETURNCREDIT:{return_id}`
+  idempotency keys, and stock restoration is *claimed* with a unique
+  `_id = INV:{return}:{product}:{variant}` in `inventory_adjustments`
+  (referencing product, order, return, qty and the refund txn id), so a
+  retried request, a double tap or a replayed webhook acts exactly once.
+* **Purchase price privacy (§16)** — `purchase_price` and `purchase_gst_pct`
+  are excluded **at the query** from customer-facing product responses;
+  customers get `gst_breakdown` (selling side only) and never see cost or
+  margin.
+
+### Vendor Net Worth & ledgers (all backend-derived)
+* `GET /api/vendor/me/net-worth` — available balance, COD cash still to
+  collect, pending withdrawals, and a breakdown of opening / sales / delivery
+  charges / refunds / withdrawals / cashback funded / adjustments, plus a
+  `reconciliation` block proving `opening + sales − delivery − refunds −
+  withdrawals = available`.
+* `GET /api/vendor/me/sales-ledger` — four sections with the exact fields
+  requested: **Cash on Delivery**, **Wallet Payment**, **Online Payment**,
+  **Return Items** (original order, return id, product, qty, original amount,
+  refund amount, original payment method, vendor debit, customer credit,
+  inventory restored, transaction id).
+* `GET /api/vendor/me/offline-ledger` — counter sales split Cash / UPI / Card
+  with reference, GST and net-worth impact.
+* `GET /api/vendor/me/profit-report` — profit per unit, margin % and total
+  potential stock profit, from the one GST engine.
+* `GET /api/vendor/me/net-worth/export` — an 8-sheet workbook (Net Worth
+  Ledger with all 23 specified columns, Sales · COD / Wallet / Online, Return
+  Items, Offline · Cash / UPI / Card, Reconciliation) filterable by date,
+  order id, payment method, transaction type, settlement status and sale type.
+
+### Error register & final reconciliation
+* `financial_errors` records error id, type, transaction / order / payment /
+  return / vendor refs, expected vs actual vs difference, timestamp and
+  resolution status. `GET /api/admin/financial-errors` +
+  `POST …/{id}/resolve`.
+* `GET /api/admin/reconciliation` re-derives and PROVES: customer wallets,
+  vendor wallets, treasury (delegating to the approved company net-worth
+  formula so nothing is double counted), inventory (every completed return
+  restored its units exactly once — none missing, none doubled), return money
+  (vendor debit = customer credit = refund paid) and GST. It is read-only: it
+  reports and logs, it never "fixes" a balance.
+  `POST /api/admin/reconciliation/opening-balance` posts the audited opening
+  entries (verified NOT to mutate `wallet_balance` / `vendor_earnings`).
+
+### Screens
+Buyer: `/returns/new` (qty steppers, reason chips, refund preview stating the
+delivery charge is not refundable) and `/returns` (status + full stage
+timeline). Seller: `/vendor/returns` (approve · decline · item received · pay
+refund, with the honest short-balance message) and `/vendor/net-worth` (hero,
+breakdown, five ledger tabs, date filters, Excel). Admin: `/admin/returns`
+(returns · refunds due · error register · run reconciliation). Product editor
+gained Purchase price (private) / Purchase GST / Selling GST with the
+server-computed tax & profit panel. `/orders` now shows Return inside the
+window, no Cancel on delivered orders, and a Completed badge after expiry.
+
+### Verified
+`tests/verify_phase2_returns.py` **81/81** (run twice), covering full return,
+partial return, wallet / COD / online returns, duplicate refund, duplicate
+return request, vendor-short refund + admin resolve, 7-day expiry, cashback
+reversal, GST + profit, purchase-price privacy, net worth, all ledgers, Excel
+sheet totals and global reconciliation. `tests/verify_phase1_money.py`
+re-run **56/56** — Phase 1 did not regress. The testing agent's independent
+gap suite `tests/test_iter82_phase2_gaps.py` passes 19/19 (state-machine
+skipping, cross-role 403 matrix, cost-leak protection, Excel sheets, and
+proof that the opening-balance entry moves no money).

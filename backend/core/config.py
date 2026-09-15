@@ -48,6 +48,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # Cashback already credited is always clawed back on a return; if the
     # wallet is short the shortfall is netted off the refund payout.
     "cashback_clawback_on_return": True,
+    # Phase 2 — product returns after successful delivery.
+    "return_window_days": 7,
+    # Delivery charge is NOT refunded by default (owner's policy). When
+    # switched on it is refunded as its own ledger component, never mixed
+    # into the item refund.
+    "return_delivery_refundable": False,
+    "return_refund_method": "customer_wallet",
     "auto_approve_on_payment": True,
     # ── Service Provider — "Get phone number" reveal fee (June 2026 model) ──
     # Customer pays this small fee to reveal a service-provider's phone number

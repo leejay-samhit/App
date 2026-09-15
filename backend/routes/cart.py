@@ -13,7 +13,7 @@ POST /orders/checkout is intentionally NOT moved here — it depends on the
 commission engine which still lives in server.py.
 """
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -378,6 +378,70 @@ async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
                 2,
             )
         o["vendor_count"] = len(vids) or 1
+
+    # ── Phase 2 — return eligibility (7 days from successful delivery) ──
+    # Computed on the SERVER so app and web can never disagree about which
+    # orders still show "Return" (and which are simply "Completed").
+    from core import returns as _rt
+    from core.utils import get_settings as _get_settings
+    from datetime import datetime, timezone
+    _s = await _get_settings()
+    try:
+        window = max(0, int(_s.get("return_window_days") or _rt.DEFAULT_WINDOW_DAYS))
+    except (TypeError, ValueError):
+        window = _rt.DEFAULT_WINDOW_DAYS
+    ret_rows = await db.returns.find(
+        {"user_id": user["id"]},
+        {"_id": 0, "order_id": 1, "status": 1, "items": 1, "return_number": 1, "id": 1},
+    ).to_list(1000)
+    by_order: Dict[str, List[Dict[str, Any]]] = {}
+    for r in ret_rows:
+        by_order.setdefault(r.get("order_id"), []).append(r)
+    now = datetime.now(timezone.utc)
+    for o in items:
+        status = (o.get("status") or "").lower()
+        rows = by_order.get(o.get("id")) or []
+        returned: Dict[str, int] = {}
+        for r in rows:
+            if r.get("status") in ("rejected", "cancelled"):
+                continue
+            for it in r.get("items") or []:
+                k = f"{it.get('product_id')}|{it.get('variant_id') or ''}"
+                returned[k] = returned.get(k, 0) + int(float(it.get("qty") or 0))
+        units_left = 0
+        for it in o.get("items") or []:
+            k = f"{it.get('product_id')}|{it.get('variant_id') or ''}"
+            units_left += max(0, int(float(it.get("qty") or 1)) - returned.get(k, 0))
+        deadline = _rt._deadline(o.get("delivered_at"), window) if status == "delivered" else None
+        within = False
+        days_left = 0
+        if deadline:
+            try:
+                dl = datetime.fromisoformat(deadline)
+                if dl.tzinfo is None:
+                    dl = dl.replace(tzinfo=timezone.utc)
+                within = now <= dl
+                if within:
+                    gap = dl - now
+                    days_left = gap.days + (1 if gap.seconds > 0 else 0)
+            except ValueError:
+                within = False
+        o["return_window_days"] = window
+        o["return_deadline"] = deadline
+        o["return_days_left"] = days_left
+        o["return_eligible"] = bool(status == "delivered" and within and units_left > 0)
+        o["return_window_expired"] = bool(status == "delivered" and deadline and not within)
+        o["returnable_units"] = units_left
+        o["has_returns"] = bool(rows)
+        o["returns"] = [
+            {"id": r.get("id"), "return_number": r.get("return_number"), "status": r.get("status")}
+            for r in rows
+        ]
+        o["can_cancel"] = bool(status == "placed" and not o.get("delivery_info_updated_at"))
+        o["display_status"] = (
+            "completed"
+            if (status == "delivered" and (not within or units_left <= 0)) else status
+        )
     return items
 
 

@@ -178,6 +178,19 @@ function StyledTextEditor({ value, onChange, placeholder, testID }: {
   );
 }
 
+/** One row of the server-computed tax & profit panel. */
+function GstRow({ label, value, bold }: { label: string; value: number; bold?: boolean }) {
+  return (
+    <View style={sectionStyles.gstRow}>
+      <Text style={sectionStyles.gstLabel}>{label}</Text>
+      <Text style={[sectionStyles.gstValue, bold && { fontWeight: "900" }]}>
+        ₹{(Number(value) || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      </Text>
+    </View>
+  );
+}
+
+
 // ─── Main component ───
 
 export function RichProductEditor({
@@ -207,6 +220,15 @@ export function RichProductEditor({
   // Purchase cashback the vendor gives on this product (0–10% hard cap).
   const [cashbackPct, setCashbackPct] = useState("");
   const [freeDelivery, setFreeDelivery] = useState(false);
+  // ── Pricing & GST (Phase 2) — purchase side is PRIVATE to the seller.
+  // CGST/SGST/profit are never computed here: `/api/gst/compute` is the one
+  // engine, shared with the invoice, the ledger and the Excel export.
+  const [purchasePrice, setPurchasePrice] = useState("");
+  const [purchaseGst, setPurchaseGst] = useState("");
+  const [sellingGst, setSellingGst] = useState("");
+  const [gstPreview, setGstPreview] = useState<null | {
+    purchase: any; selling: any; profit_per_unit: number; potential: number;
+  }>(null);
   // Jun 2026 — size / RAM-ROM options (see src/variant-editor.tsx)
   const [variantState, setVariantState] = useState<VariantState>(emptyVariantState);
   const [description, setDescription] = useState("");
@@ -544,6 +566,9 @@ export function RichProductEditor({
     setStock(existing?.stock != null ? String(existing.stock) : "100");
     setCashbackPct(existing?.cashback_pct != null ? String(existing.cashback_pct) : "");
     setFreeDelivery(!!existing?.free_delivery);
+    setPurchasePrice((existing as any)?.purchase_price != null ? String((existing as any).purchase_price) : "");
+    setPurchaseGst((existing as any)?.purchase_gst_pct != null ? String((existing as any).purchase_gst_pct) : "");
+    setSellingGst((existing as any)?.selling_gst_pct != null ? String((existing as any).selling_gst_pct) : "");
     setVariantState(variantStateFrom(existing));
     setDescription(existing?.description || "");
     setCategory(existing?.category || "");
@@ -608,6 +633,38 @@ export function RichProductEditor({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, existing?.id]);
+
+  // Phase 2 — live purchase/selling GST + profit preview. The numbers come
+  // from the server's ONE GST engine (`/api/gst/compute`), never from a
+  // second implementation on this screen.
+  useEffect(() => {
+    const sellBase = Number(price) || 0;
+    const buyBase = Number(purchasePrice) || 0;
+    if (!sellBase && !buyBase) { setGstPreview(null); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const [buy, sell] = await Promise.all([
+          api.get<any>("/gst/compute", { params: { base: buyBase, pct: Number(purchaseGst) || 0 } }),
+          api.get<any>("/gst/compute", { params: { base: sellBase, pct: Number(sellingGst) || 0 } }),
+        ]);
+        if (cancelled) return;
+        const profit = Math.round((sellBase - buyBase) * 100) / 100;
+        const units = Number(
+          variantState.rows.length
+            ? variantState.rows.reduce((a, r) => a + (Number(r.stock) || 0), 0)
+            : stock,
+        ) || 0;
+        setGstPreview({
+          purchase: buy.data, selling: sell.data,
+          profit_per_unit: profit,
+          potential: Math.round(profit * units * 100) / 100,
+        });
+      } catch { /* preview only — the server recomputes on save */ }
+    }, 450);
+    return () => { cancelled = true; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [price, purchasePrice, purchaseGst, sellingGst, stock, variantState.rows.length]);
 
   // Jun 2026 — Cover picker is now MULTI-select.
   // Owner report: "vendor can only select 1 image for the main photo; if
@@ -1315,6 +1372,10 @@ export function RichProductEditor({
         // 0–10% only. The server clamps again and rejects anything higher.
         cashback_pct: clampCashbackPct(cashbackPct),
         free_delivery: freeDelivery,
+        // Pricing & GST (Phase 2). Purchase figures stay vendor-private.
+        purchase_price: purchasePrice.trim() ? Number(purchasePrice) : undefined,
+        purchase_gst_pct: purchaseGst.trim() ? Number(purchaseGst) : undefined,
+        selling_gst_pct: sellingGst.trim() ? Number(sellingGst) : undefined,
         // Sizes / RAM-ROM. The server recomputes `stock` as the sum of the
         // options and `price` as the cheapest buyable one.
         ...variantPayload(variantState),
@@ -1556,6 +1617,61 @@ export function RichProductEditor({
                 <Text style={sectionStyles.helpText}>
                   Calculated from your size options below.
                 </Text>
+              ) : null}
+
+              {/* ── Purchase & selling GST (Phase 2) ────────────────────
+                  Purchase price and purchase GST are YOUR cost — customers
+                  never see them. CGST/SGST/profit come from the server. */}
+              <Text style={modalStyles.fieldLabel}>Purchase price (₹) · private</Text>
+              <TextInput
+                value={purchasePrice}
+                onChangeText={setPurchasePrice}
+                keyboardType="decimal-pad"
+                placeholder="What you paid per unit"
+                placeholderTextColor={colors.textMuted}
+                style={modalStyles.input}
+                testID="product-purchase-price"
+              />
+              <Text style={modalStyles.fieldLabel}>Purchase GST (%)</Text>
+              <TextInput
+                value={purchaseGst}
+                onChangeText={setPurchaseGst}
+                keyboardType="decimal-pad"
+                placeholder="e.g. 18"
+                placeholderTextColor={colors.textMuted}
+                style={modalStyles.input}
+                testID="product-purchase-gst"
+              />
+              <Text style={modalStyles.fieldLabel}>Selling GST (%)</Text>
+              <TextInput
+                value={sellingGst}
+                onChangeText={setSellingGst}
+                keyboardType="decimal-pad"
+                placeholder="e.g. 18"
+                placeholderTextColor={colors.textMuted}
+                style={modalStyles.input}
+                testID="product-selling-gst"
+              />
+              {gstPreview ? (
+                <View style={sectionStyles.gstCard} testID="product-gst-preview">
+                  <Text style={sectionStyles.gstTitle}>Tax & profit</Text>
+                  <GstRow label="Purchase base" value={gstPreview.purchase.base_amount} />
+                  <GstRow label={`Purchase CGST ${gstPreview.purchase.cgst_pct}%`} value={gstPreview.purchase.cgst_amount} />
+                  <GstRow label={`Purchase SGST ${gstPreview.purchase.sgst_pct}%`} value={gstPreview.purchase.sgst_amount} />
+                  <GstRow label="Purchase total" value={gstPreview.purchase.final_amount} bold />
+                  <View style={sectionStyles.gstDivider} />
+                  <GstRow label="Selling base" value={gstPreview.selling.base_amount} />
+                  <GstRow label={`Selling CGST ${gstPreview.selling.cgst_pct}%`} value={gstPreview.selling.cgst_amount} />
+                  <GstRow label={`Selling SGST ${gstPreview.selling.sgst_pct}%`} value={gstPreview.selling.sgst_amount} />
+                  <GstRow label="Selling total" value={gstPreview.selling.final_amount} bold />
+                  <View style={sectionStyles.gstDivider} />
+                  <GstRow label="Profit per unit" value={gstPreview.profit_per_unit} bold />
+                  <GstRow label="Potential profit on stock" value={gstPreview.potential} bold />
+                  <Text style={sectionStyles.helpText}>
+                    Both sides use the same GST-exclusive basis. Customers only ever see the selling
+                    price and its GST — never your cost or margin.
+                  </Text>
+                </View>
               ) : null}
 
               {/* ── Purchase cashback (Jun-2026) ─────────────────────────
@@ -2388,6 +2504,16 @@ const sectionStyles = StyleSheet.create({
   freeImgBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary, letterSpacing: 0.2 },
   freeImgBtnHint: { fontSize: 10, color: colors.textMuted, marginLeft: "auto" },
   helpText: { fontSize: 10.5, color: colors.textMuted, marginTop: 4, lineHeight: 15 },
+  // Phase 2 — tax & profit preview (server-computed).
+  gstCard: {
+    marginTop: 10, backgroundColor: colors.surfaceMuted, borderRadius: 12, padding: 12,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  gstTitle: { fontSize: 12, fontWeight: "900", color: colors.textMain, marginBottom: 6 },
+  gstRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 2 },
+  gstLabel: { fontSize: 11.5, color: colors.textMuted, flexShrink: 1 },
+  gstValue: { fontSize: 11.5, fontWeight: "700", color: colors.textMain },
+  gstDivider: { height: 1, backgroundColor: colors.border, marginVertical: 6 },
   freeImgSearchBtn: { width: 48, borderRadius: 12, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
   freeImgError: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: "#FEE2E2", borderWidth: 1, borderColor: "#FCA5A5" },
   freeImgCell: { width: "31%", aspectRatio: 1, borderRadius: 10, overflow: "hidden", backgroundColor: colors.surfaceMuted, borderWidth: 2, borderColor: "transparent", position: "relative" },

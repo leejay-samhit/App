@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field
 from core.db import db
 from core.razorpay import create_order, fetch_payment, get_creds, verify_signature
 from core.security import get_current_user
-from core.utils import now_utc
+from core.utils import now_utc, get_settings
+from core.delivery_charges import compute_cart_delivery
 from core.variants import effective_line_price, find_variant
 
 router = APIRouter()
@@ -44,8 +45,16 @@ class VerifyOnlinePayment(BaseModel):
     razorpay_signature: str = ""
 
 
-async def _price_cart(user_id: str) -> float:
-    """Authoritative cart total — never trust a client-sent amount."""
+async def _price_cart(user_id: str) -> Dict[str, float]:
+    """Authoritative payable total — NEVER trust a client-sent amount.
+
+    Phase-1 fix: this used to price the GOODS only, while checkout showed
+    goods + delivery, so Razorpay collected ₹470 for a ₹500 order. The same
+    delivery engine the checkout screen uses now runs here, so the gateway
+    amount is always exactly what the customer was shown:
+
+        items + delivery − wallet portion = online amount
+    """
     rows = await db.cart_items.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
     if not rows:
         raise HTTPException(status_code=400, detail="Cart is empty")
@@ -54,17 +63,42 @@ async def _price_cart(user_id: str) -> float:
         p["id"]: p
         async for p in db.products.find({"id": {"$in": pids}}, {"_id": 0, "images": 0, "description": 0})
     }
-    total = 0.0
+    groups: Dict[str, Dict[str, Any]] = {}
+    goods = 0.0
     for r in rows:
         p = products.get(r.get("product_id"))
         if not p:
             continue
         variant = find_variant(p, r.get("variant_id"))
-        total += effective_line_price(p, variant) * float(r.get("qty") or 0)
-    total = round(total, 2)
-    if total <= 0:
+        line = round(effective_line_price(p, variant) * float(r.get("qty") or 0), 2)
+        goods += line
+        vkey = p.get("vendor_id") or "__no_vendor__"
+        g = groups.setdefault(vkey, {
+            "vendor_key": vkey,
+            "vendor_id": p.get("vendor_id"),
+            "subtotal": 0.0,
+            "free_delivery": True,
+        })
+        g["subtotal"] = round(g["subtotal"] + line, 2)
+        g["free_delivery"] = g["free_delivery"] and bool(p.get("free_delivery"))
+    goods = round(goods, 2)
+    if goods <= 0:
         raise HTTPException(status_code=400, detail="Cart total invalid")
-    return total
+
+    settings = await get_settings()
+    vendor_docs: Dict[str, Any] = {}
+    for vkey in groups:
+        if vkey == "__no_vendor__":
+            continue
+        vd = await db.users.find_one(
+            {"id": vkey},
+            {"_id": 0, "id": 1, "delivery_charge_flat": 1, "delivery_free_threshold": 1},
+        )
+        if vd:
+            vendor_docs[vkey] = vd
+    quote = compute_cart_delivery(list(groups.values()), settings, vendor_docs)
+    delivery = round(float(quote.get("total") or 0), 2)
+    return {"goods": goods, "delivery": delivery, "total": round(goods + delivery, 2)}
 
 
 def _public(attempt: Dict[str, Any], creds: Dict[str, Any]) -> Dict[str, Any]:
@@ -87,7 +121,8 @@ async def start_online_payment(
     payload: StartOnlinePayment,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    total = await _price_cart(user["id"])
+    priced = await _price_cart(user["id"])
+    total = priced["total"]
     balance = float(user.get("wallet_balance") or 0)
     if user.get("wallet_frozen"):
         balance = 0.0
@@ -124,6 +159,8 @@ async def start_online_payment(
         "id": str(uuid.uuid4()),
         "user_id": user["id"],
         "cart_total": total,
+        "goods_total": priced["goods"],
+        "delivery_total": priced["delivery"],
         "wallet_amount": wallet_amount,
         "online_amount": online_amount,
         "razorpay_order_id": rzp_order_id,
@@ -136,6 +173,8 @@ async def start_online_payment(
     await db.order_payments.insert_one(dict(attempt))
     out = _public(attempt, creds)
     out["prefill"] = prefill
+    out["goods_total"] = priced["goods"]
+    out["delivery_total"] = priced["delivery"]
     out["description"] = f"Slangcart order · ₹{online_amount:.0f}"
     return out
 

@@ -9090,3 +9090,60 @@ agent_communication:
       transcript where the offending bubble carries a SCAM badge;
       "Mark reviewed" moves the row to the Reviewed filter with
       "reviewed by support@slangcart.com".
+
+  - agent: "main"
+    message: |
+      PHASE 2 (Jun-2026) — Returns · Refunds · Inventory · Vendor Net Worth ·
+      GST · Profit · Excel · Reconciliation. Implemented and self-verified.
+
+      New backend modules
+        core/gst.py            THE centralized GST engine (split_gst,
+                               split_inclusive, pricing_block, public_pricing).
+                               GST-exclusive basis everywhere; CGST=SGST=GST/2.
+        core/returns.py        Return lifecycle + refund + inventory restore +
+                               cashback claw-back + vendor-balance safety.
+        routes/returns.py      Customer / vendor / admin return endpoints +
+                               financial-error register.
+        routes/vendor_networth.py  Net worth, online sales ledger (COD /
+                               wallet / online / returns), offline ledger
+                               (cash / UPI / card), /gst/compute, profit
+                               report, 8-sheet Excel export.
+        routes/reconciliation.py   Final reconciliation prover + opening
+                               balance journal entry.
+        core/cashback.py       + reverse_partial_cashback() (pro-rata,
+                               never over-recovers, references original txn).
+
+      Money rules implemented exactly as specified
+        * Refund direction is always vendor wallet -> customer wallet for
+          wallet, COD and online orders. No money is ever generated.
+        * Partial return refunds only the returned line (line_total/qty x qty).
+        * Delivery charge is NOT refunded (settings.return_delivery_refundable,
+          default false); when enabled it is a separate ledger component.
+        * Vendor balance safety: insufficient balance deducts NOTHING, parks
+          the return in refund_pending, writes a vendor outstanding + a
+          financial error, and admin can retry after the seller funds.
+        * Idempotency keys RETURNDEBIT/RETURNCREDIT:{return_id} and a unique
+          _id claim per (return, line) in inventory_adjustments make duplicate
+          refunds and duplicate restocks impossible.
+        * Purchase price / purchase GST are excluded at the query level from
+          every customer-facing product response.
+
+      Self-verification: tests/verify_phase2_returns.py -> 81 PASS / 0 FAIL
+      (run twice). tests/verify_phase1_money.py re-run -> 56 PASS / 0 FAIL,
+      so Phase 1 has not regressed.
+
+      New frontend screens
+        app/returns/new.tsx        request a return (qty steppers, reason,
+                                   refund preview, 7-day window pill)
+        app/returns/index.tsx      my returns + full stage timeline
+        app/vendor/returns.tsx     seller review: approve / decline / received
+                                   / pay refund (short-balance message)
+        app/vendor/net-worth.tsx   net worth, 4 online ledger tabs, offline
+                                   ledger, date filters, Excel download
+        app/admin/returns.tsx      returns, refunds due, financial error
+                                   register, run full reconciliation
+      Edits: orders.tsx (Return button inside window, no Cancel on delivered,
+      Completed badge after expiry, My returns entry), vendor/dashboard.tsx +
+      admin/more.tsx (nav), rich-product-editor.tsx (purchase price / purchase
+      GST / selling GST + server-computed CGST/SGST/profit panel),
+      (tabs)/wallet.tsx (CASHBACK/PENDING chip contrast fix).

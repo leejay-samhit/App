@@ -554,6 +554,149 @@ async def reverse_order_cashback(
     }
 
 
+async def reverse_partial_cashback(
+    order: Dict[str, Any],
+    amount: float,
+    *,
+    reason: str,
+    return_id: str,
+    credit_admin_bucket,
+    notify=None,
+) -> Dict[str, Any]:
+    """Claw back cashback for the RETURNED LINES ONLY (Phase 2).
+
+    Owner rules honoured here:
+      * Reverse only what was ACTUALLY credited. If the cashback was never
+        paid (pending / cancelled / disabled) nothing is clawed back.
+      * Never reverse more than the order's remaining un-reversed cashback,
+        so several partial returns can never over-recover.
+      * The claw-back references the original cashback transaction.
+      * Whatever the customer's wallet cannot cover is netted off the refund
+        payout instead of pushing the wallet negative.
+    """
+    order_id = order.get("id")
+    want = round(float(amount or 0), 2)
+    ledger_id = f"CB:{order_id}"
+    row = await db.cashback_ledger.find_one({"_id": ledger_id})
+    if not row or want <= 0.009:
+        return {"reversed": 0.0, "from_wallet": 0.0, "netted_off_refund": 0.0, "reason": "no_cashback"}
+
+    settings = await get_settings()
+    if not settings.get("cashback_clawback_on_return", True):
+        return {"reversed": 0.0, "from_wallet": 0.0, "netted_off_refund": 0.0, "reason": "clawback_disabled"}
+    if row.get("status") not in ("paid", "partially_reversed"):
+        # Never credited → cancel the promise for this return, move no money.
+        return {"reversed": 0.0, "from_wallet": 0.0, "netted_off_refund": 0.0, "reason": "was_not_paid"}
+
+    paid = round(float(row.get("amount") or 0), 2)
+    already = round(float(row.get("reversed_total") or 0), 2)
+    reversible = round(max(0.0, paid - already), 2)
+    take = round(min(want, reversible), 2)
+    if take <= 0.009:
+        return {"reversed": 0.0, "from_wallet": 0.0, "netted_off_refund": 0.0, "reason": "nothing_left"}
+
+    ts = now_utc().isoformat()
+    customer_id = row.get("user_id")
+    vendor_id = row.get("vendor_id")
+    order_no = row.get("order_number") or str(order_id)[:8]
+
+    # Original cashback credit txn — every reversal must reference it.
+    original = await db.transactions.find_one(
+        {"order_id": order_id, "type": "cashback_credit", "status": "success"},
+        {"_id": 0, "id": 1},
+    )
+
+    cust = await db.users.find_one({"id": customer_id}, {"_id": 0, "wallet_balance": 1})
+    held = round(float((cust or {}).get("wallet_balance") or 0), 2)
+    from_wallet = round(max(0.0, min(take, held)), 2)
+    shortfall = round(take - from_wallet, 2)
+
+    if from_wallet > 0:
+        await db.users.update_one({"id": customer_id}, {"$inc": {"wallet_balance": -from_wallet}})
+        await _txn({
+            "user_id": customer_id,
+            "type": "cashback_reversal",
+            "amount": -from_wallet,
+            "status": "success",
+            "description": f"Cashback reversed on returned item(s) — order {order_no} ({reason})",
+            "order_id": order_id,
+            "return_id": return_id,
+            "cashback_ledger_id": ledger_id,
+            "reverses": (original or {}).get("id"),
+            "reverses_cashback": True,
+            "created_at": ts,
+        })
+        # Give the funder back the part we actually recovered.
+        funded_by = row.get("funded_by")
+        if funded_by == "vendor" and vendor_id:
+            await db.users.update_one({"id": vendor_id}, {"$inc": {"wallet_balance": from_wallet}})
+            await _txn({
+                "user_id": vendor_id,
+                "type": "cashback_funding_refund",
+                "amount": from_wallet,
+                "status": "success",
+                "description": f"Cashback funding returned — item(s) returned on order {order_no}",
+                "order_id": order_id,
+                "return_id": return_id,
+                "cashback_ledger_id": ledger_id,
+                "created_at": ts,
+            })
+        elif funded_by == "platform":
+            await credit_admin_bucket("cashback_funded", from_wallet, also_total_earned=False)
+            await _txn({
+                "user_id": None,
+                "type": "cashback_vendor_recovery",
+                "amount": from_wallet,
+                "status": "success",
+                "description": f"Fronted cashback recovered — item(s) returned on order {order_no}",
+                "order_id": order_id,
+                "vendor_id": vendor_id,
+                "return_id": return_id,
+                "cashback_ledger_id": ledger_id,
+                "created_at": ts,
+            })
+            if vendor_id:
+                await db.users.update_one(
+                    {"id": vendor_id}, {"$inc": {"cashback_outstanding": -from_wallet}},
+                )
+                await db.vendor_outstanding.update_many(
+                    {"cashback_ledger_id": ledger_id, "status": "open"},
+                    {"$inc": {"recovered": from_wallet}},
+                )
+
+    new_total = round(already + take, 2)
+    fully = new_total >= paid - 0.009
+    await db.cashback_ledger.update_one(
+        {"_id": ledger_id},
+        {"$set": {
+            "status": "reversed" if fully else "partially_reversed",
+            "reversed_total": new_total,
+            "last_reversed_at": ts,
+            "last_reverse_reason": reason,
+        }},
+    )
+    order_upd: Dict[str, Any] = {
+        "$set": {"cashback_status": "reversed" if fully else "partially_reversed"},
+    }
+    if shortfall > 0.009:
+        order_upd["$inc"] = {"cashback_recoverable": shortfall}
+    await db.orders.update_one({"id": order_id}, order_upd)
+    if notify and customer_id and take > 0.009:
+        tail = f" ₹{shortfall:g} was deducted from your refund." if shortfall > 0.009 else ""
+        await notify(
+            customer_id, "cashback", "Cashback adjusted",
+            f"₹{take:g} cashback for the returned item(s) on order {order_no} was reversed.{tail}",
+        )
+    return {
+        "reversed": take,
+        "from_wallet": from_wallet,
+        "netted_off_refund": shortfall,
+        "funded_by": row.get("funded_by"),
+        "reverses": (original or {}).get("id"),
+    }
+
+
+
 async def recover_vendor_outstanding(
     vendor_id: str,
     amount: float,

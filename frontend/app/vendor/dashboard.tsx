@@ -244,6 +244,8 @@ export default function VendorDashboard() {
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
               {[
                 { key: "orders", label: "Shop orders", icon: "package", path: "/vendor/orders", primary: true },
+                { key: "returns", label: "Returns", icon: "rotate-ccw", path: "/vendor/returns" },
+                { key: "networth", label: "Net worth", icon: "trending-up", path: "/vendor/net-worth" },
                 { key: "pos", label: "New sale", icon: "shopping-cart", path: "/vendor/pos" },
                 // Sep 2026 — "Store sale" history tile removed on the owner's
                 // request: it listed every order with ₹0 amounts and simply
