@@ -9147,3 +9147,66 @@ agent_communication:
       admin/more.tsx (nav), rich-product-editor.tsx (purchase price / purchase
       GST / selling GST + server-computed CGST/SGST/profit panel),
       (tabs)/wallet.tsx (CASHBACK/PENDING chip contrast fix).
+
+  - agent: "main"
+    message: |
+      ANDROID TRAY PUSH BUG — full pipeline audit + fix (Sep 2026).
+
+      ROOT CAUSES (two, both real; one is environmental)
+      1. EVIDENCE BLACKOUT (why nobody could tell where it stopped):
+         send_push() returned a status string that EVERY call-site threw
+         away. Nothing recorded the relay HTTP status or body, so a database
+         notification row was being treated as proof of delivery. In THIS
+         environment the relay answers 401 {"error":"invalid X-Push-Key"}
+         because EMERGENT_PUSH_KEY is still the literal "placeholder" — i.e.
+         nothing was ever handed to Firebase, and the same 401 also rejected
+         every DEVICE REGISTRATION (users.push_registration was
+         "deferred_key_missing", push_devices had 0 rows). That alone fully
+         explains "in-app works, tray shows nothing".
+      2. ANDROID CHANNEL IMPORTANCE FREEZE: Android freezes a channel's
+         importance/sound at CREATION. The "default"/"chat" channels already
+         existed on the owner's phone from earlier builds, so raising
+         importance to MAX in app code afterwards had NO effect (and a user/
+         OEM toggle can silence it outright) — a push can be accepted,
+         delivered, written to the in-app bell and still never reach the tray.
+
+      FIXES
+      * backend/routes/push.py — every attempt persisted to `push_log`
+        with stage (created→sent_to_relay→accepted|rejected|skipped),
+        http_status, upstream_body, channel, category, recipients.
+        Registrations persisted to `push_devices` with a NON-REVERSIBLE
+        token fingerprint (sha256 prefix + last 6 + length; the raw token is
+        never stored — verified by a field scan), upstream status/body, build
+        ownership, real-device flag, OS version and live permission status.
+      * Central Android channel routing in send_push(): chats→chat_v2,
+        everything else→orders_v2; legacy "chat"/"default" transparently
+        remapped. No call-site had to change.
+      * frontend/app/_layout.tsx — orders_v2 + chat_v2 created at MAX
+        importance, PUBLIC lockscreen visibility, vibration, badge; the old
+        channels are still created (nothing deleted, no user settings lost).
+        app.json defaultChannel moved to orders_v2.
+      * frontend/src/push.ts — re-registers when the USER *or the TOKEN*
+        changes (the old guard skipped a rotated token for the whole
+        session) and attaches Notifications.addPushTokenListener so an FCM
+        rotation re-registers immediately; sends diagnostics fields.
+      * core/login_history.py — new-device sign-in pushed TWICE (once via
+        create_notification, once via an explicit send_push). Now push=False
+        on the record → exactly one DB row and one push.
+      * New admin screen /admin/push-diagnostics + GET
+        /api/admin/push/diagnostics, GET /api/admin/push/diagnostics/user,
+        and POST /api/push/test upgraded to return relay_http_status,
+        relay_response, channel, stage, device list and a verdict.
+
+      NOT CHANGED: the in-app notification system (records, history,
+      read/unread, UI, categories, targeting), EMERGENT_PUSH_KEY, the
+      Emergent/SuprSend relay choice, and all unrelated business logic.
+      No local-notification workaround was added.
+
+      VERIFIED: tests/test_iter83_push_pipeline.py 14/14,
+      tests/iter83_direct_pipeline.py 5/5 (channel routing per kind, legacy
+      remap, opt-out logging, single-push per login, multi-device rows, raw
+      token absent), RBAC 403 for buyer/vendor/products_manager/anon,
+      verify_phase1_money.py 56/56, verify_phase2_returns.py 81/81, and the
+      admin screen rendering the literal relay body. Tray DISPLAY itself can
+      only be confirmed on the deployed Android build — the diagnostics
+      screen is the instrument for that.

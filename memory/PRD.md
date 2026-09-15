@@ -1749,3 +1749,63 @@ re-run **56/56** — Phase 1 did not regress. The testing agent's independent
 gap suite `tests/test_iter82_phase2_gaps.py` passes 19/19 (state-machine
 skipping, cross-role 403 matrix, cost-leak protection, Excel sheets, and
 proof that the opening-balance entry moves no money).
+
+---
+
+## Android tray push notifications — root cause & fix (Sep 2026)
+
+**Symptom:** in-app notification rows appear, the native Android notification
+bar stays empty.
+
+**Root cause 1 — nothing was ever handed to Firebase, and nobody could see it.**
+`send_push()` returned a status string that every call-site discarded, so a
+`notifications` row was being read as proof of delivery. The relay actually
+answers `401 {"error":"invalid X-Push-Key"}` whenever `EMERGENT_PUSH_KEY` is
+the placeholder — and the *same* 401 was silently rejecting DEVICE
+REGISTRATIONS too, so the relay held no token for any phone.
+
+**Root cause 2 — Android freezes a notification channel at creation.**
+The `default` / `chat` channels already existed on devices from earlier
+builds, so raising `importance` to MAX in app code afterwards had no effect
+(and a user/OEM toggle can mute them outright). A push can then be accepted,
+delivered, written to the in-app bell and still never surface in the tray.
+
+**Fix**
+* `push_log` records EVERY attempt — stage
+  (`created → sent_to_relay → accepted | rejected | skipped`), relay HTTP
+  status, relay response body, channel, category, recipient count.
+* `push_devices` records every registration with a non-reversible token
+  fingerprint (sha256 prefix + last 6 chars + length — the raw token is never
+  stored), the relay's answer, build ownership (Expo Go cannot receive push),
+  real-device flag, OS version and the live permission status. Multiple
+  devices per user are kept.
+* Channel migration to `orders_v2` (Orders & delivery) and `chat_v2` (Chat
+  messages), both born at MAX importance with PUBLIC lockscreen visibility;
+  the legacy channels are still created so nothing already routed to them
+  breaks and no user's channel settings are lost. `app.json`
+  `defaultChannel` → `orders_v2`. `send_push()` fills `channel_id` in
+  centrally from the category and remaps legacy ids, so no call-site changed.
+* `src/push.ts` re-registers when the user **or the token** changes and
+  listens for FCM token rotation (`addPushTokenListener`) — previously a
+  rotated token was never re-sent, leaving the relay with a dead token.
+* `core/login_history.py` pushed a new-device alert twice (once through
+  `create_notification`, once through an explicit `send_push`) → one event now
+  produces exactly one DB row and one push.
+* **Admin → More → Push notification diagnostics** (`/admin/push-diagnostics`)
+  and `GET /api/admin/push/diagnostics[/user]` expose the whole pipeline:
+  relay key state, live relay probe, per-device registration, and the last 50
+  attempts with the relay's literal status and body. `POST /api/push/test`
+  can target any account by email and returns `relay_http_status`,
+  `relay_response`, `channel_id`, `stage` and the device list — it can never
+  report success when the relay rejected the send.
+
+**Untouched:** the in-app notification system (records, history, read/unread,
+UI, categories, targeting), `EMERGENT_PUSH_KEY`, the Emergent/SuprSend relay,
+and all unrelated business logic. No local-notification workaround was added.
+
+**Verified:** 14/14 pipeline tests + 5/5 direct-DB checks (channel routing per
+kind, legacy remap, opt-out logging, one-push-per-login, multi-device rows,
+raw token absent from the database), RBAC 403 for buyer / vendor /
+products_manager / anonymous, and Phase 1 (56/56) + Phase 2 (81/81) with no
+regression. Tray *display* itself can only be confirmed on the deployed
+Android build — the diagnostics screen is the instrument for that.

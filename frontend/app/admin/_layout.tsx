@@ -118,6 +118,11 @@ export default function AdminLayout() {
          tab strip; keep it reachable only via /admin/broadcast direct
          URL if needed. */}
       <Tabs.Screen name="broadcast" options={{ href: null }} />
+      {/* Sep 2026 — Phase 2 returns/reconciliation + push diagnostics.
+         Reachable from /admin/more.tsx; hidden so the bottom nav stays
+         locked to the 6 tabs. */}
+      <Tabs.Screen name="returns" options={{ href: null }} />
+      <Tabs.Screen name="push-diagnostics" options={{ href: null }} />
     </Tabs>
   );
 }

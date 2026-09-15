@@ -6988,6 +6988,16 @@ async def on_startup():
         # Phase 2 — returns / inventory-restoration lookups + guards.
         from core import returns as _returns_core
         await _returns_core.ensure_indexes()
+        # Push diagnostics (Sep 2026): the send log is evidence, not data —
+        # keep 30 days of it and index the lookups the admin screen uses.
+        try:
+            await db.push_log.create_index("created_at")
+            await db.push_log.create_index("recipients")
+            await db.push_log.create_index("stage")
+            await db.push_devices.create_index([("user_id", 1), ("token_fingerprint", 1)])
+            await db.push_devices.create_index("last_seen_at")
+        except Exception as _pl_err:
+            logger.warning(f"push diagnostics index setup: {str(_pl_err)[:160]}")
     except Exception as _idx_err:
         logger.warning(f"User-unique-index setup failed (non-fatal): {_idx_err}")
 

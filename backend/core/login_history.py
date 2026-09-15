@@ -126,6 +126,10 @@ async def record_login(
             await create_notification(
                 user_id, "security", "New device signed in", body,
                 extra={"action_url": "/login-history", "login_id": doc["id"]},
+                # Sep 2026 — the explicit send_push below already delivers the
+                # tray copy. Letting create_notification push as well produced
+                # TWO notifications for one sign-in.
+                push=False,
             )
             try:
                 from routes.push import send_push

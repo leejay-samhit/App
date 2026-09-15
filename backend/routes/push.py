@@ -17,8 +17,10 @@ CRITICAL (per the integration playbook):
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -31,6 +33,29 @@ logger = logging.getLogger(__name__)
 
 PUSH_BASE_URL = os.environ.get("EMERGENT_PUSH_BASE_URL", "https://integrations.emergentagent.com")
 PUSH_KEY = os.environ.get("EMERGENT_PUSH_KEY", "placeholder")
+KEY_CONFIGURED = bool(PUSH_KEY) and PUSH_KEY != "placeholder"
+
+# ── Android notification channels (Sep 2026 root-cause fix) ────────────
+# Android FREEZES a channel's importance/sound the moment it is created. The
+# original "default" / "chat" channels were created on devices by earlier
+# builds, so raising `importance` in app code afterwards has NO effect — the
+# OS keeps whatever the channel was born with (and whatever the user later
+# toggled). That is exactly how a push can be accepted by FCM, handed to the
+# app, written to the in-app bell, and still never appear in the tray.
+#
+# The only supported migration is a NEW channel id. Every send is therefore
+# routed to a v2 channel, created at MAX importance in app/_layout.tsx, and
+# the legacy ids are transparently remapped so no call-site has to change.
+CHANNEL_ORDERS = "orders_v2"
+CHANNEL_CHAT = "chat_v2"
+CHANNEL_BY_CATEGORY = {
+    "chats": CHANNEL_CHAT,
+    "orders": CHANNEL_ORDERS,
+    "offers": CHANNEL_ORDERS,
+    "login_alerts": CHANNEL_ORDERS,
+    "vendor_new_order": CHANNEL_ORDERS,
+}
+LEGACY_CHANNEL_MAP = {"chat": CHANNEL_CHAT, "default": CHANNEL_ORDERS}
 
 # Module-level shared async client. Kept alive across the FastAPI lifespan
 # so connection pooling pays off.
@@ -112,6 +137,79 @@ class RegisterPushBody(BaseModel):
     user_id: str = Field(..., min_length=1)
     platform: str = Field(..., min_length=2, max_length=16)  # "android" | "ios" | "web"
     device_token: str = Field(..., min_length=1)
+    # Sep 2026 — diagnostics only. Stripped before the relay call; they exist
+    # so "no tray notification" can be told apart from "this phone never had
+    # a usable token" (Expo Go, emulator, permission denied, …).
+    app_ownership: Optional[str] = Field(default=None, max_length=32)
+    is_device: Optional[bool] = None
+    os_version: Optional[str] = Field(default=None, max_length=32)
+    device_name: Optional[str] = Field(default=None, max_length=64)
+    app_version: Optional[str] = Field(default=None, max_length=32)
+    permission_status: Optional[str] = Field(default=None, max_length=24)
+
+
+def token_fingerprint(token: str) -> str:
+    """A stable, non-reversible id for a device token.
+
+    The playbook forbids storing device tokens (SuprSend owns them), but
+    without ANY identifier it is impossible to prove the backend is targeting
+    the phone that is actually in the owner's hand. A sha256 prefix plus the
+    last 6 characters is enough to compare across registrations and is
+    useless to an attacker.
+    """
+    if not token:
+        return ""
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+    return f"{digest}…{token[-6:]} ({len(token)} chars)"
+
+
+async def _record_device(body: RegisterPushBody, status: str, upstream: Dict[str, Any]) -> None:
+    """Device registration evidence — one row per (user, device token).
+
+    Keeps the whole history so multiple devices per user, token rotation and
+    logout/login are all visible, and stamps `users.push_registration` for
+    the quick check the rest of the app already reads.
+    """
+    from core.db import db
+    from core.utils import now_utc
+
+    ts = now_utc().isoformat()
+    fp = token_fingerprint(body.device_token)
+    await db.push_devices.update_one(
+        {"user_id": body.user_id, "token_fingerprint": fp},
+        {
+            "$set": {
+                "platform": body.platform,
+                "status": status,
+                "upstream_status": upstream.get("status"),
+                "upstream_body": str(upstream.get("body") or "")[:300],
+                "key_configured": KEY_CONFIGURED,
+                "app_ownership": body.app_ownership,
+                "is_device": body.is_device,
+                "os_version": body.os_version,
+                "device_name": body.device_name,
+                "app_version": body.app_version,
+                "permission_status": body.permission_status,
+                "last_seen_at": ts,
+            },
+            "$setOnInsert": {"id": str(uuid.uuid4()), "first_seen_at": ts},
+            "$inc": {"registrations": 1},
+        },
+        upsert=True,
+    )
+    await db.users.update_one(
+        {"id": body.user_id},
+        {"$set": {"push_registration": {
+            "status": status,
+            "platform": body.platform,
+            "token_fingerprint": fp,
+            "app_ownership": body.app_ownership,
+            "is_device": body.is_device,
+            "permission_status": body.permission_status,
+            "upstream_status": upstream.get("status"),
+            "at": ts,
+        }}},
+    )
 
 
 @router.post("/register-push", status_code=201)
@@ -127,51 +225,49 @@ async def register_push(
     if body.user_id != user.get("id"):
         raise HTTPException(status_code=403, detail="user_id mismatch with JWT")
 
-    async def _stamp(status: str) -> None:
-        """Record WHETHER the device registered (never the token itself) so
-        the owner can tell 'phone never registered' apart from 'relay key
-        missing' when tray notifications don't arrive."""
-        from core.db import db
-        from core.utils import now_utc
-
-        await db.users.update_one(
-            {"id": user["id"]},
-            {"$set": {"push_registration": {
-                "status": status,
-                "platform": body.platform,
-                "at": now_utc().isoformat(),
-            }}},
-        )
-
+    # Only the three fields the relay contract defines go upstream.
+    relay_body = {
+        "user_id": body.user_id,
+        "platform": body.platform,
+        "device_token": body.device_token,
+    }
     try:
-        resp = await _client.post(
-            "/api/v1/push/users/register",
-            json=body.model_dump(),
-        )
+        resp = await _client.post("/api/v1/push/users/register", json=relay_body)
     except httpx.HTTPError as e:
         logger.warning(f"register-push relay failed: {e}")
         # Don't 5xx the caller — push registration is best-effort.
-        await _stamp("deferred_upstream_unreachable")
+        await _record_device(body, "deferred_upstream_unreachable", {"status": None, "body": str(e)})
         return {"status": "deferred", "reason": "upstream_unreachable"}
 
+    upstream = {"status": resp.status_code, "body": resp.text[:300]}
     if resp.status_code == 401:
         # During local dev the key is the literal "placeholder". Don't 500
         # the client; just report the deferred status so the FE still
         # remembers to retry later.
         logger.info("register-push: EMERGENT_PUSH_KEY missing/invalid (expected in dev)")
-        await _stamp("deferred_key_missing")
+        await _record_device(body, "deferred_key_missing", upstream)
         return {"status": "deferred", "reason": "key_missing"}
     if resp.status_code >= 500:
         logger.warning(f"register-push: upstream {resp.status_code} {resp.text[:200]}")
-        await _stamp("deferred_upstream_5xx")
+        await _record_device(body, "deferred_upstream_5xx", upstream)
         return {"status": "deferred", "reason": "upstream_5xx"}
     if 400 <= resp.status_code < 500:
         # Surface 4xx as a soft warning — don't break the client.
         logger.warning(f"register-push: upstream {resp.status_code} {resp.text[:200]}")
-        await _stamp(f"deferred_upstream_{resp.status_code}")
+        await _record_device(body, f"deferred_upstream_{resp.status_code}", upstream)
         return {"status": "deferred", "reason": f"upstream_{resp.status_code}"}
-    await _stamp("registered")
-    return {"status": "registered"}
+    await _record_device(body, "registered", upstream)
+    return {"status": "registered", "token_fingerprint": token_fingerprint(body.device_token)}
+
+
+async def _log_send(entry: Dict[str, Any]) -> None:
+    """Persist one push attempt. Without this the pipeline is a black box:
+    a database notification row proves NOTHING about tray delivery."""
+    try:
+        from core.db import db
+        await db.push_log.insert_one(entry)
+    except Exception as e:  # pragma: no cover — logging must never break a send
+        logger.info(f"push_log write skipped: {e}")
 
 
 async def send_push(
@@ -184,7 +280,8 @@ async def send_push(
 
     `data` must include `title` and `message`. Optional keys: `subtext`,
     `image_url` (HTTPS), `action_url` (used as deep-link on tap),
-    `channel_id` (Android channel, e.g. "chat").
+    `channel_id` (Android channel — filled in automatically from `category`
+    when the caller omits it, and legacy ids are remapped to the v2 channels).
 
     `category` opts the send into the user's notification preferences
     (Profile → Notification settings): "orders" | "chats" | "offers" |
@@ -193,40 +290,90 @@ async def send_push(
     must-deliver messages (e.g. the admin's own test push).
 
     NEVER raises. Failures are logged-and-swallowed so callers (chat post,
-    broadcast, etc.) never break on a push relay hiccup.
+    broadcast, etc.) never break on a push relay hiccup — but EVERY attempt
+    is now recorded in `push_log` with the exact relay status and body, so
+    CREATED / SENT TO RELAY / ACCEPTED / REJECTED are separate, provable
+    states instead of an assumption.
     """
-    if not recipients:
+    from core.utils import now_utc
+
+    requested = list(dict.fromkeys([r for r in (recipients or []) if r]))
+    entry: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "created_at": now_utc().isoformat(),
+        "stage": "created",
+        "title": str(data.get("title") or "")[:120],
+        "message": str(data.get("message") or "")[:200],
+        "category": category,
+        "idempotency_key": idempotency_key,
+        "requested_recipients": len(requested),
+        "recipients": requested[:20],
+        "key_configured": KEY_CONFIGURED,
+    }
+
+    if not requested:
+        entry.update({"stage": "skipped", "result": "no_recipients"})
+        await _log_send(entry)
         return "no_recipients"
     if "title" not in data or "message" not in data:
         logger.warning("send_push: missing title/message in payload")
+        entry.update({"stage": "skipped", "result": "bad_payload"})
+        await _log_send(entry)
         return "bad_payload"
     if category:
-        recipients = await filter_by_prefs(recipients, category)
-        if not recipients:
+        requested = await filter_by_prefs(requested, category)
+        if not requested:
+            entry.update({"stage": "skipped", "result": "opted_out"})
+            await _log_send(entry)
             return "opted_out"
     # Chunk over 100 — playbook hard limit.
-    if len(recipients) > 100:
-        for i in range(0, len(recipients), 100):
-            await send_push(recipients[i:i + 100], data, idempotency_key=idempotency_key)
+    if len(requested) > 100:
+        for i in range(0, len(requested), 100):
+            await send_push(requested[i:i + 100], data, idempotency_key=idempotency_key)
+        entry.update({"stage": "chunked", "result": "chunked"})
+        await _log_send(entry)
         return "chunked"
 
-    payload: Dict[str, Any] = {"recipients": recipients, "data": data}
+    # Android channel routing. An explicit legacy id is remapped, an absent
+    # one is derived from the category — so every payload names a v2 channel
+    # that was born at MAX importance.
+    payload_data = dict(data)
+    channel = payload_data.get("channel_id")
+    channel = LEGACY_CHANNEL_MAP.get(channel, channel) if channel else None
+    if not channel:
+        channel = CHANNEL_BY_CATEGORY.get(category or "", CHANNEL_ORDERS)
+    payload_data["channel_id"] = channel
+    entry["channel_id"] = channel
+    entry["sent_recipients"] = len(requested)
+
+    payload: Dict[str, Any] = {"recipients": requested, "data": payload_data}
     if idempotency_key:
         payload["$idempotency_key"] = idempotency_key
 
+    entry["stage"] = "sent_to_relay"
     try:
         resp = await _client.post("/api/v1/push/trigger", json=payload)
     except httpx.HTTPError as e:
         logger.warning(f"send_push: relay error {e}")
+        entry.update({"stage": "rejected", "result": "relay_unreachable", "error": str(e)[:300]})
+        await _log_send(entry)
         return "relay_unreachable"
 
+    entry["http_status"] = resp.status_code
+    entry["upstream_body"] = resp.text[:400]
     if resp.status_code == 401:
         # Expected in dev — placeholder key.
         logger.info("send_push: EMERGENT_PUSH_KEY missing/invalid (dev placeholder)")
+        entry.update({"stage": "rejected", "result": "key_missing"})
+        await _log_send(entry)
         return "key_missing"
     if resp.status_code >= 400:
         logger.warning(f"send_push: upstream {resp.status_code} {resp.text[:300]}")
+        entry.update({"stage": "rejected", "result": f"upstream_{resp.status_code}"})
+        await _log_send(entry)
         return f"upstream_{resp.status_code}"
+    entry.update({"stage": "accepted", "result": "sent"})
+    await _log_send(entry)
     return "sent"
 
 
@@ -235,6 +382,10 @@ async def send_push(
 class TestPushBody(BaseModel):
     title: str = Field(default="Slangcart Test")
     message: str = Field(default="If you see this, push notifications are wired up.")
+    # Sep 2026 — target another account (by email) so the owner can fire a
+    # test at the exact phone that is failing, not only at their own.
+    target_email: Optional[str] = Field(default=None, max_length=200)
+    channel_id: Optional[str] = Field(default=None, max_length=40)
 
 
 @router.post("/push/test")
@@ -242,42 +393,191 @@ async def push_test(
     body: TestPushBody,
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
-    """Super admin smoke test — sends a push to themselves AND reports why
-    it would not arrive (relay key not injected yet / this phone never
-    registered a device token), so "no tray notifications" can be
-    diagnosed without guesswork."""
+    """Super admin smoke test — sends a push and returns the FULL evidence:
+    the relay HTTP status, the relay's response body, whether the relay key
+    is injected, and the target device's registration record. This is the
+    proof that separates "server didn't send" from "Firebase rejected" from
+    "this phone never registered"."""
+    from core.db import db
+
+    target = admin
+    if body.target_email:
+        found = await db.users.find_one(
+            {"email": body.target_email.strip().lower()}, {"_id": 0},
+        )
+        if not found:
+            raise HTTPException(status_code=404, detail="No user with that email")
+        target = found
+
     relay = await send_push(
-        recipients=[admin["id"]],
+        recipients=[target["id"]],
         data={
             "title": body.title,
             "message": body.message,
-            "channel_id": "default",
+            "channel_id": body.channel_id or CHANNEL_ORDERS,
+            "action_url": "/notifications",
         },
-        idempotency_key=f"push-test-{admin['id']}",
+        idempotency_key=f"push-test-{target['id']}-{uuid.uuid4().hex[:8]}",
     )
-    reg = admin.get("push_registration") or {}
-    key_configured = bool(PUSH_KEY) and PUSH_KEY != "placeholder"
-    if not key_configured:
+    log = await db.push_log.find({}, {"_id": 0}).sort("created_at", -1).limit(1).to_list(1)
+    devices = await db.push_devices.find(
+        {"user_id": target["id"]}, {"_id": 0},
+    ).sort("last_seen_at", -1).to_list(20)
+    reg = target.get("push_registration") or {}
+
+    if not KEY_CONFIGURED:
         hint = (
-            "This environment has no push relay key yet. Tray notifications "
-            "start working once you Publish/Deploy the app and generate the "
-            "Android/iOS build."
+            "This environment has no push relay key yet (EMERGENT_PUSH_KEY is still "
+            "'placeholder'), so nothing was sent to Firebase. The key is injected "
+            "automatically when you Publish/Deploy — test again on the deployed build."
+        )
+    elif not devices:
+        hint = (
+            "The relay key is live but this account has never registered a device. "
+            "Open the INSTALLED app (not Expo Go, not the web preview), allow "
+            "notifications, then retry."
         )
     elif reg.get("status") != "registered":
         hint = (
-            "The relay key is live but this account has no registered device. "
-            "Open the installed app (not Expo Go / web), allow notifications, "
-            "then run this test again."
+            f"The last registration attempt from this account ended as "
+            f"'{reg.get('status')}' (upstream {reg.get('upstream_status')}), so the relay "
+            f"may not hold a usable token. Reopen the installed app and retry."
+        )
+    elif reg.get("app_ownership") == "expo":
+        hint = (
+            "This device registered from Expo Go, which cannot receive push at all. "
+            "Install the generated APK/AAB build and retry."
         )
     elif relay != "sent":
-        hint = f"Relay rejected the send ({relay}). Try again in a minute."
+        hint = (
+            f"The relay REJECTED the send ({relay}). See relay_http_status and "
+            f"relay_response below — that is Firebase's / SuprSend's own answer."
+        )
     else:
-        hint = "Sent. It should appear in your phone's notification tray within a few seconds."
+        hint = (
+            "Accepted by the relay. If it still does not appear in the tray, the phone "
+            "either has the channel muted or the app was force-stopped — check "
+            "Android Settings → Apps → Slangcart → Notifications → "
+            "'Orders & delivery' / 'Chat messages'."
+        )
+    last = log[0] if log else {}
     return {
         "ok": relay == "sent",
-        "sent_to": admin["id"],
+        "sent_to": target["id"],
+        "sent_to_email": target.get("email"),
         "relay": relay,
-        "key_configured": key_configured,
+        "relay_http_status": last.get("http_status"),
+        "relay_response": last.get("upstream_body"),
+        "channel_id": last.get("channel_id"),
+        "stage": last.get("stage"),
+        "key_configured": KEY_CONFIGURED,
         "device_registration": reg or None,
+        "devices": devices,
         "hint": hint,
+    }
+
+
+# ── Diagnostics (Sep 2026) ─────────────────────────────────────────────
+
+@router.get("/admin/push/diagnostics")
+async def push_diagnostics(
+    limit: int = 50,
+    _admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """The whole pipeline in one response: relay key state, device
+    registrations, and the last N send attempts with the exact upstream
+    status and body. Nothing here is inferred — every field is what the
+    relay actually answered."""
+    from core.db import db
+    from core.utils import now_utc
+
+    limit = max(1, min(int(limit or 50), 300))
+    stages = await db.push_log.aggregate([
+        {"$group": {"_id": "$stage", "n": {"$sum": 1}}},
+    ]).to_list(20)
+    results = await db.push_log.aggregate([
+        {"$group": {"_id": "$result", "n": {"$sum": 1}}},
+    ]).to_list(40)
+    recent = await db.push_log.find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    devices = await db.push_devices.find({}, {"_id": 0}).sort("last_seen_at", -1).limit(100).to_list(100)
+    dev_status = await db.push_devices.aggregate([
+        {"$group": {"_id": "$status", "n": {"$sum": 1}}},
+    ]).to_list(20)
+
+    # Live reachability probe — proves whether the relay host answers at all
+    # from this pod, without sending a notification to anybody.
+    probe: Dict[str, Any] = {}
+    try:
+        r = await _client.post("/api/v1/push/trigger", json={"recipients": [], "data": {}})
+        probe = {"reachable": True, "http_status": r.status_code, "body": r.text[:200]}
+    except httpx.HTTPError as e:
+        probe = {"reachable": False, "error": str(e)[:200]}
+
+    accepted = sum(s["n"] for s in stages if s["_id"] == "accepted")
+    rejected = sum(s["n"] for s in stages if s["_id"] == "rejected")
+    return {
+        "key_configured": KEY_CONFIGURED,
+        "relay_base_url": PUSH_BASE_URL,
+        "channels": {
+            "orders": CHANNEL_ORDERS,
+            "chat": CHANNEL_CHAT,
+            "legacy_remap": LEGACY_CHANNEL_MAP,
+            "note": (
+                "Android freezes a channel's importance at creation. The v2 ids "
+                "were introduced because the original 'default'/'chat' channels "
+                "already existed on devices at a lower importance, which silences "
+                "the tray while the in-app bell keeps working."
+            ),
+        },
+        "totals": {
+            "attempts": sum(s["n"] for s in stages),
+            "accepted_by_relay": accepted,
+            "rejected": rejected,
+            "by_stage": {s["_id"]: s["n"] for s in stages},
+            "by_result": {r["_id"]: r["n"] for r in results},
+        },
+        "devices": {
+            "total": len(devices),
+            "by_status": {d["_id"]: d["n"] for d in dev_status},
+            "rows": devices,
+        },
+        "relay_probe": probe,
+        "recent_sends": recent,
+        "generated_at": now_utc().isoformat(),
+        "verdict": (
+            "relay_key_missing" if not KEY_CONFIGURED
+            else "no_device_registered" if not devices
+            else "relay_rejecting" if rejected and not accepted
+            else "pipeline_healthy" if accepted
+            else "nothing_sent_yet"
+        ),
+    }
+
+
+@router.get("/admin/push/diagnostics/user")
+async def push_diagnostics_user(
+    email: str,
+    _admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """One account's push truth: its devices and its last 50 attempts."""
+    from core.db import db
+
+    user = await db.users.find_one({"email": email.strip().lower()}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="No user with that email")
+    devices = await db.push_devices.find(
+        {"user_id": user["id"]}, {"_id": 0},
+    ).sort("last_seen_at", -1).to_list(50)
+    sends = await db.push_log.find(
+        {"recipients": user["id"]}, {"_id": 0},
+    ).sort("created_at", -1).limit(50).to_list(50)
+    return {
+        "user": {
+            "id": user["id"], "email": user.get("email"), "name": user.get("name"),
+            "notification_prefs": normalise_prefs(user.get("notification_prefs")),
+            "push_registration": user.get("push_registration"),
+        },
+        "devices": devices,
+        "recent_sends": sends,
+        "in_app_notifications": await db.notifications.count_documents({"user_id": user["id"]}),
     }

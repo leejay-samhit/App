@@ -35,20 +35,52 @@ if (Platform.OS !== "web") {
   });
 }
 
-// Android: a high-importance default channel must exist BEFORE any push
-// lands, so create it at module scope.
+// Android: a high-importance channel must exist BEFORE any push lands, so
+// create them at module scope.
+//
+// ROOT CAUSE (Sep 2026): Android freezes a channel's importance and sound at
+// CREATION. The "default" and "chat" channels were already created on devices
+// by earlier builds, so raising `importance` to MAX in code afterwards has no
+// effect — the OS keeps the original (lower) importance, and an OEM/user
+// toggle can silence it completely. The push was still delivered and still
+// written to the in-app bell, which is exactly the reported symptom:
+// "in-app notification works, tray shows nothing".
+//
+// The ONLY supported migration is a NEW channel id, so every send now routes
+// to `orders_v2` / `chat_v2` (the backend fills `channel_id` in centrally and
+// remaps the legacy ids). The old channels are still created so anything
+// already queued against them keeps working, and so users who tuned them
+// don't lose their settings.
 if (Platform.OS === "android") {
+  Notifications.setNotificationChannelAsync("orders_v2", {
+    name: "Orders & delivery",
+    description: "Order confirmations, payments, delivery and wallet updates",
+    importance: Notifications.AndroidImportance.MAX,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    sound: "default",
+    enableVibrate: true,
+    vibrationPattern: [0, 250, 150, 250],
+    showBadge: true,
+  }).catch(() => {});
+  Notifications.setNotificationChannelAsync("chat_v2", {
+    name: "Chat messages",
+    description: "Replies from sellers, support and the team",
+    importance: Notifications.AndroidImportance.MAX,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    sound: "default",
+    enableVibrate: true,
+    vibrationPattern: [0, 120, 80, 120],
+    showBadge: true,
+  }).catch(() => {});
+  // Legacy channels — kept (not deleted) for backward compatibility.
   Notifications.setNotificationChannelAsync("default", {
     name: "Default",
     importance: Notifications.AndroidImportance.MAX,
     sound: "default",
   }).catch(() => {});
-  // Jun 2026 — chats get their OWN channel so the user can give messages a
-  // different sound / vibration from order updates straight from the phone's
-  // notification settings (a custom bundled sound can be added later).
   Notifications.setNotificationChannelAsync("chat", {
-    name: "Chat messages",
-    description: "Replies from sellers, support and the team",
+    name: "Chat messages (old)",
+    description: "Replaced by “Chat messages” — safe to leave off",
     importance: Notifications.AndroidImportance.MAX,
     sound: "default",
     vibrationPattern: [0, 120, 80, 120],

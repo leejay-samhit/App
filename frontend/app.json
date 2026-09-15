@@ -109,7 +109,7 @@
         "expo-notifications",
         {
           "color": "#143D2E",
-          "defaultChannel": "default"
+          "defaultChannel": "orders_v2"
         }
       ],
       [
