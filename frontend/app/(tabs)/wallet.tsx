@@ -155,7 +155,10 @@ export default function WalletScreen() {
   // not a general-purpose money service).
   const isSeller = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
   const isAdminUser = user?.role === "admin";
-  const canWithdraw = isSeller || isAdminUser;
+  // Jun 2026 — bank settlement is a SELLER feature only (owner's rule).
+  // Customers, service providers and admins use the wallet inside the app;
+  // company money is settled from Admin → System wallet.
+  const canWithdraw = isSeller;
 
   if (loading) {
     return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
@@ -233,7 +236,7 @@ export default function WalletScreen() {
           <View style={styles.actionsRowCompact}>
             <TouchableOpacity
               style={styles.withdrawBtnCompact}
-              onPress={() => router.push("/payment" as any)}
+              onPress={() => router.push("/wallet-topup" as any)}
               testID="wallet-add-money"
             >
               <Feather name="plus" size={14} color={colors.accentFg} />

@@ -343,7 +343,7 @@ export default function DashboardScreen() {
                 </View>
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => router.push("/(tabs)/wallet")}
+                onPress={() => router.push(isSeller ? "/(tabs)/wallet" : "/wallet-topup" as any)}
                 style={styles.withdrawBtnCompact}
                 testID="dashboard-withdraw-btn"
               >

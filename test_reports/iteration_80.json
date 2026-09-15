@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 80 — verified the two user-reported bugs. BUG 1a/1b/1c (wallet top-up + withdraw guard) and BUG 2 (admin wallet adjust funded from Company Net Worth) all pass. Backend 11/11 pytest cases green (tests/test_iter80_wallet_topup_and_admin_adjust.py): config shape (min 10 / max 5000 / mock true / presets include 500), auth guard on config, /start rejects 5001 and 5 with 400 and accepts 500 (returns payment_id + razorpay_order_id + amount_paise=50000 + prefill), frozen-wallet /start returns 403, /verify credits +250 exactly once with a TXNA<n> short reference AND writes a wallet_topup transaction row, second /verify returns already_verified:true and does NOT double-credit, unauthenticated /verify is rejected, buyer POST /withdrawals is 4xx-blocked, /admin/finance/net-worth returns and admin credit of ₹50 succeeds with funded_from='company_net_worth', user balance +50, net worth −50, then debit restores both. Frontend flows on mobile viewport (390×844): buyer /wallet shows wallet-add-money → routes to /wallet-topup (no ₹118, no SUBSCRIPTION), all topup-* testIDs present, 9000 triggers topup-over-limit and aria-disabled=true on topup-pay, preset-500 → topup-success shows '₹500 added. New balance ₹19,875' and balance updates. Buyer wallet does NOT render wallet-request-withdraw or SETTLEMENT HISTORY. dashboard-withdraw-btn for buyer is labelled 'Add money' and routes to /wallet-topup (NOT /payment). Vendor wallet DOES render wallet-request-withdraw + SETTLEMENT HISTORY + wallet-add-money. Admin wallet does NOT render wallet-request-withdraw. Admin → Users → edit testbuyer → adjust-networth-note reads 'Funded from Company Net Worth · available ₹-20,001.78'; 'Direct-Added' bucket text is gone. System Wallet screen still renders with the new 'Company Net Worth' block. No red screens; only pre-existing Expo web deprecation warnings (shadow*, pointerEvents, expo-notifications). Note: the preview DB legitimately reports a NEGATIVE company net worth (−20,001.78) from legacy MLM data, matching the main-agent's explicit design note in the request — the screen shows it, and the credit still went through, which is the point of removing the Direct-Added gate.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter80_wallet_topup_and_admin_adjust.py",
+    "/app/test_reports/pytest/iter80_wallet_topup.xml"
+  ],
+  "action_items": [
+    "None — both user-reported bugs are fixed and verified end-to-end. Safe to ship.",
+    "Optional: the negative company net worth (−₹20,001.78) shown in Admin → Users adjust-networth-note is factually correct given the legacy MLM data but reads oddly to a store owner ('available ₹-20,001.78'). Not a bug per the request note; consider a future cosmetic tweak (e.g. show '(overdrawn)' badge instead of a negative number)."
+  ],
+  "critical_code_review_comments": [
+    "routes/wallet_topup.py: exactly-once credit via a two-step Mongo update — first update sets status=paid conditioned on status=created; only if modified_count==1 does the wallet get incremented and the txn/ledger rows written. Verified with a double /verify call in the test — no double credit. Good.",
+    "wallet_topup.py also writes a bank_ledger CREDIT tagged category='wallet_topup' next to the wallet credit, so net worth is unchanged by a top-up (cash asset + wallet liability). Correct.",
+    "server.py:/admin/users/{id}/wallet — the Insufficient-Direct-Added guard is fully removed; the response now returns funded_from='company_net_worth' with user_balance, and the audit log tags funded_from too. The mirrored admin bucket row is a signed admin_credit (negative for credit, positive for debit) which matches the sign convention used elsewhere. Verified.",
+    "wallet.tsx: canWithdraw = isSeller (vendor+approved), so buyers/admins/service providers never see the withdraw button or settlement history — verified live for all three roles.",
+    "dashboard.tsx: dashboard-withdraw-btn routes to /(tabs)/wallet for sellers and /wallet-topup for non-sellers, and its label switches to 'Add money' for non-sellers. Verified live for the buyer.",
+    "wallet-topup.tsx: client mirrors the ₹5,000 ceiling (invalid flag), disables the pay button on invalid/busy/frozen, auto-simulates the gateway in mock mode (900ms sleep + fake pay_MOCK id) — matches order_payments.py pattern. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter80_wallet_topup_and_admin_adjust.py (new)",
+    "/app/test_reports/pytest/iter80_wallet_topup.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "100%"},
+  "seed_data_creation": "None new. testbuyer wallet gained ~₹750 across the test run (₹250 topup + ₹500 topup in UI + ₹50 admin credit that was then debited back). Buyer balance now ~₹19,875 in the preview DB.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "New endpoints registered under /api: /wallet/topup/config, /wallet/topup/start, /wallet/topup/verify. Mock Razorpay: any non-empty razorpay_payment_id passes /verify. Short-id sequence for top-up txns is prefixed 'TXNA' (TXNA + running counter). The user's login response field is `token` (not access_token). Buyer→/withdrawals returns 403 (or 400). /admin/finance/net-worth returns a nested object — the net-worth value is at data.master.net_worth (not top-level). Admin adjustment endpoint no longer 400s on empty Direct-Added bucket; it always succeeds and reports funded_from='company_net_worth'. The preview DB's net worth is currently negative (~−₹20k) due to legacy MLM debt — that's expected, not a bug.",
+  "rca_of_issue": "N/A — verification pass. Both fixes were implemented by the main agent before this run and land as spec'd."
+}

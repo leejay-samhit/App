@@ -660,7 +660,7 @@ export default function AdminSystemWallet() {
             the Treasury numbers untrustworthy. Nothing else on this screen
             changed; the Direct-Added bucket itself still reports whatever
             was posted before. */}
-        <Text style={styles.helpText}>Only Direct-Added funds can be posted to user wallets.</Text>
+        <Text style={styles.helpText}>User wallet credits are funded from Company Net Worth (Admin → Users → Wallet adjust).</Text>
 
         <TouchableOpacity
           style={[styles.depositBtn, { backgroundColor: "#B45309", marginTop: 12 }]}

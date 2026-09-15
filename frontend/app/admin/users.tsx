@@ -543,6 +543,18 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
   const [shownPassword, setShownPassword] = useState<string | null>(null);
   const [pwNote, setPwNote] = useState("");
   const [pwBusy, setPwBusy] = useState<"" | "show" | "reset">("");
+  // Jun 2026 — wallet credits are funded from COMPANY NET WORTH (the
+  // Direct-Added / UTR deposit route was removed), so the admin needs to see
+  // how much the company actually has before handing money out.
+  const [netWorth, setNetWorth] = useState<number | null>(null);
+  useEffect(() => {
+    if (!user) { setNetWorth(null); return; }
+    let alive = true;
+    api.get<{ master: { net_worth: number } }>("/admin/finance/net-worth")
+      .then(({ data }) => { if (alive) setNetWorth(Number(data?.master?.net_worth ?? 0)); })
+      .catch(() => { if (alive) setNetWorth(null); });
+    return () => { alive = false; };
+  }, [user?.id]);
 
   // Reset form when user changes
   if (user && (name === "" || email === "" || (user.email !== email && msg === ""))) {
@@ -811,7 +823,7 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
                 </View>
               </View>
               <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, lineHeight: 16 }}>
-                Wallet balance can&apos;t be edited directly. Use <Text style={{ fontWeight: "800", color: colors.primary }}>Wallet adjust ⤵</Text> below to credit/debit — it will atomically debit the System Wallet&apos;s Direct-Added bucket so every rupee paid out maps to a real deposit.
+                Wallet balance can&apos;t be edited directly. Use <Text style={{ fontWeight: "800", color: colors.primary }}>Wallet adjust ⤵</Text> below to credit/debit — a credit is paid out of <Text style={{ fontWeight: "800", color: colors.primary }}>Company Net Worth</Text> and a debit returns the money to it.
               </Text>
             </Field>
 
@@ -966,6 +978,17 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
             </View>
 
             <Text style={modalStyles.section}>WALLET ADJUST</Text>
+            <View style={{ backgroundColor: colors.surfaceMuted, borderRadius: 12, padding: 10, marginBottom: 10, flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Feather name="briefcase" size={13} color={colors.primary} />
+              <Text style={{ fontSize: 11.5, color: colors.textMuted, fontWeight: "600", flex: 1, lineHeight: 16 }} testID="adjust-networth-note">
+                Funded from <Text style={{ fontWeight: "800", color: colors.textMain }}>Company Net Worth</Text>
+                {netWorth != null
+                  ? (netWorth < 0
+                      ? ` · overdrawn by ₹${Math.abs(netWorth).toLocaleString("en-IN")}`
+                      : ` · available ₹${netWorth.toLocaleString("en-IN")}`)
+                  : ""}
+              </Text>
+            </View>
             <View style={{ flexDirection: "row", gap: 8, marginBottom: 8 }}>
               <View style={{ flex: 1 }}>
                 <Text style={{ fontSize: 11, color: colors.textMuted, fontWeight: "600", marginBottom: 4 }}>Amount (₹)</Text>

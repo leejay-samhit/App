@@ -149,6 +149,7 @@ from routes import pincodes as pincodes_router  # noqa: E402
 from routes import legal_pages as legal_pages_router  # noqa: E402
 from routes import upi_manual as upi_manual_router  # noqa: E402
 from routes import wallet as wallet_router  # noqa: E402
+from routes import wallet_topup as wallet_topup_router  # noqa: E402
 from routes import withdrawals as withdrawals_router  # noqa: E402
 from routes import cart as cart_router  # noqa: E402
 from routes import admin_ai as admin_ai_router  # noqa: E402
@@ -5223,13 +5224,21 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
     if delta < 0 and target.get("wallet_balance", 0) + delta < 0:
         raise HTTPException(status_code=400, detail="Cannot debit beyond available balance")
 
-    # CREDIT path: must come from the system wallet's direct_added bucket.
+    # ── FUNDING SOURCE: COMPANY NET WORTH (Jun-2026) ─────────────────────
+    # It used to require a balance in the system wallet's `direct_added`
+    # bucket, which could only be filled by the "Add Direct-Added Money
+    # (UTR)" button — and that button was REMOVED, so every admin credit
+    # failed with "Insufficient Direct-Added funds". Admin credits now come
+    # straight out of COMPANY NET WORTH, which is honest accounting:
+    # crediting a customer raises the user-wallet liability, and net worth
+    # already subtracts that liability, so the money is accounted for with
+    # no extra ledger row. No hard block here — the company's own owner
+    # decides what to hand out; the current net worth is surfaced in the UI
+    # and returned below so the decision is always informed.
     if payload.type == "credit":
-        ok = await debit_admin_bucket("direct_added", payload.amount)
-        if not ok:
-            raise HTTPException(status_code=400, detail="Insufficient Direct-Added funds in system wallet. Please deposit first.")
+        await credit_admin_bucket("direct_added", -payload.amount, also_total_earned=False)
 
-    # DEBIT path: return funds to direct_added bucket so they're re-spendable.
+    # DEBIT path: money comes back out of the user's wallet into the company.
     if payload.type == "debit":
         await credit_admin_bucket("direct_added", payload.amount, also_total_earned=False)
 
@@ -5280,8 +5289,14 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
             "created_at": now_utc().isoformat(),
         })
     await _create_notification(user_id, "wallet", f"Wallet {payload.type}ed by ₹{int(payload.amount)}", payload.reason.strip())
-    await _audit_log(admin, f"wallet.{payload.type}", "user", user_id, {"amount": payload.amount, "reason": payload.reason})
-    return {"ok": True, "transaction_id": txn_id}
+    await _audit_log(admin, f"wallet.{payload.type}", "user", user_id, {"amount": payload.amount, "reason": payload.reason, "funded_from": "company_net_worth"})
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "wallet_balance": 1})
+    return {
+        "ok": True,
+        "transaction_id": txn_id,
+        "funded_from": "company_net_worth",
+        "user_balance": round(float((fresh or {}).get("wallet_balance") or 0), 2),
+    }
 
 
 @api_router.post("/admin/users/{user_id}/wallet/freeze")
@@ -10099,6 +10114,7 @@ app.include_router(legal_pages_router.router, prefix="/api")
 app.include_router(upi_manual_router.router, prefix="/api")
 # Phase 2B Iter 4 (2026-05-27) — wallet / withdrawals / cart routers
 app.include_router(wallet_router.router, prefix="/api")
+app.include_router(wallet_topup_router.router, prefix="/api")
 app.include_router(withdrawals_router.router, prefix="/api")
 from routes import cashback as cashback_router  # noqa: E402
 app.include_router(cashback_router.router, prefix="/api")

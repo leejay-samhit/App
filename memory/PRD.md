@@ -1459,3 +1459,67 @@ pincode+GPS filtering unchanged, all three logins fine. Browser: buyer / admin
 `/api/service/me/location` POSTs, and `→ visible` re-opened it immediately.
 Report `test_reports/iteration_79.json`. Real battery numbers can only be read
 from a published build on a real device.
+
+---
+
+## Jun 2026 — "Add money" opened the ₹118 subscription + admin wallet credits were dead (iteration 80)
+
+### 1. Add money is now a real wallet top-up (was: the subscription wall)
+`Add money` on the wallet screen pushed `/payment` — the ₹118 SUBSCRIPTION
+screen — so nobody could load their wallet. New flow:
+
+* **`routes/wallet_topup.py`** (NEW, mounted with the `/api` prefix):
+  - `GET /wallet/topup/config` → `{min_amount: 10, max_amount: 5000, presets,
+    balance, wallet_frozen, key_id, is_mock}`; max is tunable via
+    `settings.wallet_topup_max` (owner's rule: **₹5,000 per top-up**).
+  - `POST /wallet/topup/start {amount}` → server-side clamp (400 outside
+    10 … 5,000, 403 on a frozen wallet), creates the Razorpay order and ONE
+    open `wallet_topups` attempt per user.
+  - `POST /wallet/topup/verify` → live mode HMAC-verifies + cross-checks the
+    captured amount; then a `created → paid` claim on the attempt gates the
+    money, so a double tap / retry / webhook replay returns
+    `already_verified` and can **never** credit twice. Writes the wallet
+    credit, a `wallet_topup` transaction with a sequential `TXNA<n>`
+    reference, and a `bank_ledger` CREDIT (cash in the company account
+    against the new wallet liability → company net worth unchanged, which is
+    the correct treatment).
+* **`app/wallet-topup.tsx`** (NEW): balance card, amount field, preset chips
+  (₹100 … ₹5,000), live "You can add ₹10 to ₹5,000 in one go" hint, an
+  over-limit warning that disables the pay button, mock-mode notice, and a
+  success strip with the new balance. Live Razorpay opens in the WebView
+  modal on native / Checkout on web; mock mode simulates the gateway so the
+  whole path is exercisable before the owner supplies live keys.
+* `wallet-add-money` and the buyer dashboard's "Add money" button both route
+  here; nothing points at `/payment` any more.
+
+### 2. Withdraw is VENDOR-ONLY in the app
+`canWithdraw` was `isSeller || isAdminUser`. It is now approved vendors only —
+customers and service providers use the wallet inside the app, and company
+money is settled from Admin → System wallet. The backend still 403s plain
+buyers.
+
+### 3. Admin → Users → Wallet adjust now spends COMPANY NET WORTH
+Root cause: the credit path called `debit_admin_bucket("direct_added", …)`,
+and the only way to fill that bucket — the "Add Direct-Added Money (UTR)"
+button — was deleted in iteration 64. So **every** admin credit failed with
+"Insufficient Direct-Added funds in system wallet".
+Credits now come straight out of company net worth: the user-wallet liability
+rises and `net_worth` already subtracts that liability, so the rupee is
+accounted for with no extra ledger row. The treasury mirror
+(`direct_added`) still moves (it may go negative — that honestly means more
+has been paid out than was ever deposited) and the response returns
+`funded_from: "company_net_worth"` plus the user's new balance.
+Deliberately **no hard cap** on the figure: this DB reports a negative net
+worth from legacy MLM data, and a guard would have re-broken credits exactly
+like the old gate. The number is shown instead — the admin edit sheet now
+reads "Funded from Company Net Worth · available ₹X" (or "overdrawn by ₹X"),
+and the old Direct-Added copy is gone from both `admin/users` and
+`admin/system-wallet`.
+
+### Verified (iteration 80)
+`tests/test_iter80_wallet_topup_and_admin_adjust.py` 11/11 + Playwright:
+top-up screen with every limit/preset/success state (₹500 credited, balance
+₹19,875), over-limit disables pay, buyer has no withdraw button or settlement
+history, vendor has both, admin has neither, admin credit ₹50 succeeds and
+net worth moves −50 (restored by the debit). Report
+`test_reports/iteration_80.json`.
