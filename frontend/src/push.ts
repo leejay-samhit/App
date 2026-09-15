@@ -31,20 +31,45 @@ let lastRegisteredUserId: string | null = null;
 let lastRegisteredToken: string | null = null;
 let tokenListenerAttached = false;
 
-async function postToken(userId: string, token: string, permissionStatus: string) {
+async function deviceInfo() {
   const Constants = await import("expo-constants");
   const Device = await import("expo-device");
-  const { data } = await api.post<{ status?: string; reason?: string }>("/register-push", {
-    user_id: userId,
+  return {
     platform: Platform.OS,
-    device_token: token,
-    // Diagnostics — stripped by the backend before the relay call.
     app_ownership: Constants.default?.appOwnership || (Constants.default?.executionEnvironment ?? null),
     is_device: Device.isDevice,
     os_version: String(Device.osVersion || ""),
     device_name: String(Device.modelName || ""),
     app_version: String(Constants.default?.expoConfig?.version || ""),
+  };
+}
+
+/**
+ * Tell the backend WHY this phone could not register.
+ *
+ * Silently swallowing these failures is what made the bug undebuggable: a
+ * phone that never gets an FCM token (permission refused, a Dual-App/cloned
+ * instance with no Play Services binding, an emulator, a Firebase init
+ * failure) looked identical to a server that never sent. Both showed up as
+ * "no device registered".
+ */
+async function reportClientStatus(stage: string, detail?: string, extra?: Record<string, unknown>) {
+  try {
+    const info = await deviceInfo();
+    await api.post("/push/client-status", { stage, detail: detail?.slice(0, 300), ...info, ...extra });
+  } catch {
+    /* diagnostics only — never let this break anything */
+  }
+}
+
+async function postToken(userId: string, token: string, permissionStatus: string) {
+  const info = await deviceInfo();
+  const { data } = await api.post<{ status?: string; reason?: string }>("/register-push", {
+    user_id: userId,
+    device_token: token,
+    // Diagnostics — stripped by the backend before the relay call.
     permission_status: permissionStatus,
+    ...info,
   });
   return data;
 }
@@ -58,23 +83,54 @@ export async function registerForPush(userId: string): Promise<void> {
     const Device = await import("expo-device");
 
     // expo-notifications still ships push registration even on emulators,
-    // but device tokens are only meaningful on real hardware. Skip on
-    // simulators to avoid noisy backend warnings.
-    if (!Device.isDevice) return;
+    // but device tokens are only meaningful on real hardware.
+    if (!Device.isDevice) {
+      await reportClientStatus("not_a_device", "Emulator/simulator — FCM tokens are not issued");
+      return;
+    }
 
     const perms = await Notifications.getPermissionsAsync();
     let status = perms.status;
+    let canAskAgain = perms.canAskAgain;
     if (status !== "granted") {
       const req = await Notifications.requestPermissionsAsync();
       status = req.status;
+      canAskAgain = req.canAskAgain;
     }
-    if (status !== "granted") return;
+    if (status !== "granted") {
+      await reportClientStatus(
+        "permission_denied",
+        canAskAgain
+          ? "User dismissed the notification permission prompt"
+          : "Notifications are blocked in system settings (cannot re-prompt)",
+        { permission_status: status, can_ask_again: canAskAgain },
+      );
+      return;
+    }
 
     // Re-register whenever the user OR the token changes. (The old guard
     // returned early on the same user id, so a rotated token was never sent.)
-    const tokenResp = await Notifications.getDevicePushTokenAsync();
-    const device_token = (tokenResp && (tokenResp.data as string)) || "";
-    if (!device_token) return;
+    let device_token = "";
+    try {
+      const tokenResp = await Notifications.getDevicePushTokenAsync();
+      device_token = (tokenResp && (tokenResp.data as string)) || "";
+    } catch (e: any) {
+      // The classic Dual-App / cloned-instance failure, and what a broken
+      // Firebase setup looks like from the phone's side.
+      await reportClientStatus(
+        "token_error",
+        String(e?.message || e) +
+          " — cloned/Dual-App instances and devices without Google Play services cannot get an FCM token",
+        { permission_status: status },
+      );
+      return;
+    }
+    if (!device_token) {
+      await reportClientStatus("no_token", "Firebase returned an empty device token", {
+        permission_status: status,
+      });
+      return;
+    }
 
     if (lastRegisteredUserId === userId && lastRegisteredToken === device_token) {
       // Nothing changed — but make sure the rotation listener is live.
@@ -96,7 +152,9 @@ export async function registerForPush(userId: string): Promise<void> {
     attachTokenListener(userId);
   } catch (e) {
     // Best-effort. Don't surface to the user — push is non-critical for
-    // sign-in. Backend already returns 201/deferred semantics.
+    // sign-in. Backend already returns 201/deferred semantics, and the
+    // failure is reported so Admin → Push diagnostics can name it.
+    await reportClientStatus("setup_error", String((e as any)?.message || e));
     if (__DEV__) console.warn("[push] registerForPush failed:", e);
   }
 }

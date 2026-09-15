@@ -270,6 +270,81 @@ async def _log_send(entry: Dict[str, Any]) -> None:
         logger.info(f"push_log write skipped: {e}")
 
 
+class ClientPushStatus(BaseModel):
+    """What the PHONE experienced. Reported even (especially) when it failed."""
+    stage: str = Field(..., max_length=40)      # permission_denied | no_token | token_error | not_a_device | ok
+    detail: Optional[str] = Field(default=None, max_length=300)
+    permission_status: Optional[str] = Field(default=None, max_length=24)
+    can_ask_again: Optional[bool] = None
+    platform: Optional[str] = Field(default=None, max_length=16)
+    app_ownership: Optional[str] = Field(default=None, max_length=32)
+    is_device: Optional[bool] = None
+    os_version: Optional[str] = Field(default=None, max_length=32)
+    device_name: Optional[str] = Field(default=None, max_length=64)
+    app_version: Optional[str] = Field(default=None, max_length=32)
+
+
+@router.post("/push/client-status")
+async def push_client_status(
+    body: ClientPushStatus,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """The phone tells us why it could NOT register.
+
+    Without this, a device that never obtains an FCM token (notification
+    permission refused, a Dual-App / cloned instance with no Play Services
+    binding, an emulator, a Firebase init failure) is indistinguishable from
+    a server that never sent — both just look like "no device registered".
+    Recorded against the account so Admin → Push diagnostics can name the
+    real blocker instead of guessing.
+    """
+    from core.db import db
+    from core.utils import now_utc
+
+    ts = now_utc().isoformat()
+    key = f"client:{body.platform or 'unknown'}:{body.device_name or 'device'}"
+    await db.push_devices.update_one(
+        {"user_id": user["id"], "token_fingerprint": key},
+        {
+            "$set": {
+                "platform": body.platform,
+                "status": f"client_{body.stage}",
+                "client_stage": body.stage,
+                "client_detail": body.detail,
+                "permission_status": body.permission_status,
+                "can_ask_again": body.can_ask_again,
+                "app_ownership": body.app_ownership,
+                "is_device": body.is_device,
+                "os_version": body.os_version,
+                "device_name": body.device_name,
+                "app_version": body.app_version,
+                "upstream_status": None,
+                "last_seen_at": ts,
+            },
+            "$setOnInsert": {"id": str(uuid.uuid4()), "first_seen_at": ts},
+            "$inc": {"reports": 1},
+        },
+        upsert=True,
+    )
+    # Only overwrite the account-level summary while there is no WORKING
+    # registration — a good token must never be masked by a clone's failure.
+    current = (user.get("push_registration") or {}).get("status")
+    if current != "registered":
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"push_registration": {
+                "status": f"client_{body.stage}",
+                "platform": body.platform,
+                "client_detail": body.detail,
+                "permission_status": body.permission_status,
+                "app_ownership": body.app_ownership,
+                "is_device": body.is_device,
+                "at": ts,
+            }}},
+        )
+    return {"ok": True, "recorded": body.stage}
+
+
 async def send_push(
     recipients: List[str],
     data: Dict[str, Any],
@@ -424,6 +499,8 @@ async def push_test(
         {"user_id": target["id"]}, {"_id": 0},
     ).sort("last_seen_at", -1).to_list(20)
     reg = target.get("push_registration") or {}
+    registered = [d for d in devices if d.get("status") == "registered"]
+    blocked = [d for d in devices if str(d.get("status") or "").startswith("client_")]
 
     if not KEY_CONFIGURED:
         hint = (
@@ -431,17 +508,20 @@ async def push_test(
             "'placeholder'), so nothing was sent to Firebase. The key is injected "
             "automatically when you Publish/Deploy — test again on the deployed build."
         )
-    elif not devices:
+    elif blocked and not registered:
+        b = blocked[0]
         hint = (
-            "The relay key is live but this account has never registered a device. "
-            "Open the INSTALLED app (not Expo Go, not the web preview), allow "
-            "notifications, then retry."
+            f"This phone could not get a Firebase token: {b.get('client_stage')} — "
+            f"{b.get('client_detail') or 'no detail'}. "
+            "Cloned 'Dual App' instances and emulators cannot receive push at all; "
+            "if it says permission_denied, turn notifications on in Android Settings → "
+            "Apps → Slangcart → Notifications."
         )
-    elif reg.get("status") != "registered":
+    elif not registered:
         hint = (
-            f"The last registration attempt from this account ended as "
-            f"'{reg.get('status')}' (upstream {reg.get('upstream_status')}), so the relay "
-            f"may not hold a usable token. Reopen the installed app and retry."
+            "The relay key is live but this account has no successfully registered "
+            "device. Open the INSTALLED app (not Expo Go, not the web preview), allow "
+            "notifications, then retry."
         )
     elif reg.get("app_ownership") == "expo":
         hint = (
@@ -515,6 +595,20 @@ async def push_diagnostics(
 
     accepted = sum(s["n"] for s in stages if s["_id"] == "accepted")
     rejected = sum(s["n"] for s in stages if s["_id"] == "rejected")
+    registered = [d for d in devices if d.get("status") == "registered"]
+    blockers = [
+        {
+            "user_id": d.get("user_id"),
+            "platform": d.get("platform"),
+            "device_name": d.get("device_name"),
+            "stage": d.get("client_stage"),
+            "detail": d.get("client_detail"),
+            "permission_status": d.get("permission_status"),
+            "app_ownership": d.get("app_ownership"),
+            "last_seen_at": d.get("last_seen_at"),
+        }
+        for d in devices if str(d.get("status") or "").startswith("client_")
+    ]
     return {
         "key_configured": KEY_CONFIGURED,
         "relay_base_url": PUSH_BASE_URL,
@@ -538,15 +632,21 @@ async def push_diagnostics(
         },
         "devices": {
             "total": len(devices),
+            "registered": len(registered),
             "by_status": {d["_id"]: d["n"] for d in dev_status},
             "rows": devices,
         },
+        # Failures the PHONE reported — permission refused, a cloned/Dual-App
+        # instance that cannot get an FCM token, an emulator, a broken
+        # Firebase init. Without these, "no device registered" is ambiguous.
+        "device_blockers": blockers,
         "relay_probe": probe,
         "recent_sends": recent,
         "generated_at": now_utc().isoformat(),
         "verdict": (
             "relay_key_missing" if not KEY_CONFIGURED
-            else "no_device_registered" if not devices
+            else "device_cannot_register" if (not registered and blockers)
+            else "no_device_registered" if not registered
             else "relay_rejecting" if rejected and not accepted
             else "pipeline_healthy" if accepted
             else "nothing_sent_yet"

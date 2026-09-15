@@ -9210,3 +9210,39 @@ agent_communication:
       admin screen rendering the literal relay body. Tray DISPLAY itself can
       only be confirmed on the deployed Android build — the diagnostics
       screen is the instrument for that.
+
+  - agent: "main"
+    message: |
+      PUSH — follow-up after owner retest ("still no tray notification, tested
+      with Dual App on one phone, two logins texting each other").
+
+      Evidence pulled from the new log for that exact session: EVERY attempt
+      (New order / Order delivered / chat / Refund credited / New device
+      signed in) was recorded as stage=rejected result=key_missing HTTP 401
+      {"error":"invalid X-Push-Key"}, and the only device registration on
+      record was status=deferred_key_missing upstream=401 — i.e. nothing
+      reached Firebase and the relay holds no token. Two additional facts:
+      (a) the owner's APK was generated BEFORE the channel-migration +
+      diagnostics fix, so that build still carries the frozen legacy
+      channels and has no diagnostics screen; (b) cloned "Dual App"
+      instances typically cannot obtain an FCM token at all.
+
+      Added so the next build self-diagnoses instead of guessing:
+      * POST /api/push/client-status — the PHONE reports why it could not
+        register (permission_denied with can_ask_again, token_error, no_token,
+        not_a_device, setup_error) and it is stored per device in
+        push_devices. A working registration is never masked by a clone's
+        failure.
+      * src/push.ts reports every early-return/exception path through it.
+      * GET /api/admin/push/diagnostics now returns devices.registered and a
+        `device_blockers` list, and the verdict distinguishes
+        `device_cannot_register` (handset fault) from `no_device_registered`
+        and `relay_key_missing` (server fault).
+      * POST /api/push/test hint now names the handset's own reason.
+      * Admin screen shows a "Phone-side blockers" card.
+
+      Verified by curl against the live pod: a simulated cloned-instance
+      token_error is recorded, surfaces in device_blockers, flips
+      devices.registered to "0 of N reporting", and the test-push hint reads
+      it back. Lint + tsc clean, admin bottom nav still the locked 6 tabs.
+      Synthetic test rows cleaned from the database afterwards.

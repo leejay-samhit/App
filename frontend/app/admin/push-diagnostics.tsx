@@ -21,7 +21,8 @@ type Diag = {
     attempts: number; accepted_by_relay: number; rejected: number;
     by_stage: Record<string, number>; by_result: Record<string, number>;
   };
-  devices: { total: number; by_status: Record<string, number>; rows: any[] };
+  devices: { total: number; registered?: number; by_status: Record<string, number>; rows: any[] };
+  device_blockers?: any[];
   relay_probe: { reachable?: boolean; http_status?: number; body?: string; error?: string };
   recent_sends: any[];
   verdict: string;
@@ -36,6 +37,11 @@ const VERDICT: Record<string, { title: string; body: string; ok: boolean }> = {
   no_device_registered: {
     title: "No phone has registered",
     body: "The key is live but no device token has reached the relay. Open the installed APK/AAB build (Expo Go and the web preview cannot receive push), allow notifications, then retry.",
+    ok: false,
+  },
+  device_cannot_register: {
+    title: "The phone cannot get a Firebase token",
+    body: "The server is fine — the handset itself never obtained an FCM token. The exact reason each phone reported is listed under 'Phone-side blockers' below. Cloned 'Dual App' instances and emulators can never receive push; a blocked permission must be turned back on in Android Settings → Apps → Slangcart → Notifications.",
     ok: false,
   },
   relay_rejecting: {
@@ -143,11 +149,32 @@ export default function PushDiagnosticsScreen() {
             <Row label="Send attempts" value={String(diag?.totals?.attempts ?? 0)} />
             <Row label="Accepted by relay" value={String(diag?.totals?.accepted_by_relay ?? 0)} />
             <Row label="Rejected" value={String(diag?.totals?.rejected ?? 0)} />
-            <Row label="Registered devices" value={String(diag?.devices?.total ?? 0)} />
+            <Row label="Registered devices" value={`${diag?.devices?.registered ?? 0} of ${diag?.devices?.total ?? 0} reporting`} />
             <Row label="Android channel (orders)" value={diag?.channels?.orders || "—"} />
             <Row label="Android channel (chat)" value={diag?.channels?.chat || "—"} />
             <Text style={styles.note}>{diag?.channels?.note}</Text>
           </Block>
+
+          {(diag?.device_blockers || []).length > 0 ? (
+            <Block title="Phone-side blockers">
+              <Text style={styles.note}>
+                These handsets told us why they could not register — reported by the handset
+                itself, not guessed by the server.
+              </Text>
+              {diag!.device_blockers!.map((b: any, i: number) => (
+                <View key={i} style={styles.mini} testID={`push-blocker-${i}`}>
+                  <Text style={styles.miniTitle}>
+                    {b.platform} · {b.device_name || "device"} · {String(b.stage || "").replace(/_/g, " ")}
+                  </Text>
+                  <Text style={styles.miniBody}>{b.detail || "—"}</Text>
+                  <Text style={styles.miniBody}>
+                    permission {b.permission_status || "—"} · build {b.app_ownership || "—"} ·
+                    {" "}{String(b.last_seen_at || "").slice(0, 19).replace("T", " ")}
+                  </Text>
+                </View>
+              ))}
+            </Block>
+          ) : null}
 
           <Block title="Send a test push">
             <TextInput
