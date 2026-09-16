@@ -3015,8 +3015,8 @@ async def admin_account_reset(
     mode = (payload.mode or "clear").lower()
     if mode not in ("clear", "delete"):
         raise HTTPException(status_code=400, detail="mode must be 'clear' or 'delete'")
-    if payload.user_id == admin["id"]:
-        raise HTTPException(status_code=400, detail="You can't reset your own admin account")
+    if payload.user_id == admin["id"] and mode == "delete":
+        raise HTTPException(status_code=400, detail="You can't delete your own admin account — use Clear data instead.")
 
     target = await db.users.find_one({"id": payload.user_id}, {"_id": 0})
     if not target:
@@ -3060,6 +3060,7 @@ async def admin_account_reset(
     else:
         await db.users.update_one({"id": target["id"]}, {"$set": {
             "wallet_balance": 0.0,
+            "wallet_buckets": {b: 0.0 for b in SYSTEM_WALLET_BUCKETS},
             "total_earned": 0.0,
             "direct_referrals_count": 0,
             "payouts_received": 0,

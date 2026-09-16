@@ -1879,3 +1879,8 @@ the /wallet-topup + product-editor screens verified on mobile.
 - Legacy /my-orders route: verified absent, nothing to remove
 - expo-notifications web warning: deferred per user
 - User confirmed live Razorpay keys uploaded and working
+
+## Sep-2026 Reset Center Self-Clear Fix
+- /admin/system/account-reset: self-reset now allowed in mode=clear (wipes own test data, keeps login); self-delete still blocked with clearer message
+- Clear now also zeroes wallet_buckets so wallet truly reads ₹0
+- E2E test: backend/tests/test_self_account_reset.py (7/7 PASS, temp admin + temp danger PIN, fully restored after)
