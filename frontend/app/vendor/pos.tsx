@@ -9,6 +9,7 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, spacing, formatINR } from "../../src/theme";
+import { matchDeviceCode } from "../../src/device-identity";
 import {
   PosSaleItem, PosPayment, PosCustomer, PosPaymentMode,
   computeBillTotals, createSale, getPosSettings, peekInvoiceNo, PosSettings,
@@ -58,8 +59,17 @@ export default function VendorPOS() {
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
-    if (!s) return products;
-    return products.filter(p => (p.name || "").toLowerCase().includes(s));
+    if (!s) return products.map(p => ({ p, hit: null as any }));
+    // Oct 2026 — POS search now also matches serial numbers and IMEIs,
+    // including every per-unit code, so a phone shop can bill by scanning
+    // the box instead of remembering the product name.
+    const out: { p: Product; hit: { code: string; label: string } | null }[] = [];
+    for (const p of products) {
+      if ((p.name || "").toLowerCase().includes(s)) { out.push({ p, hit: null }); continue; }
+      const hit = matchDeviceCode(p as any, q);
+      if (hit) out.push({ p, hit });
+    }
+    return out;
   }, [q, products]);
 
   const addToCart = (p: Product) => {
@@ -126,13 +136,40 @@ export default function VendorPOS() {
           {/* Search + product list */}
           <View style={styles.searchWrap}>
             <Feather name="search" size={16} color={colors.textMuted} />
-            <TextInput value={q} onChangeText={setQ} placeholder="Search product…" placeholderTextColor={colors.textMuted} style={styles.searchInput} />
+            <TextInput
+              value={q}
+              onChangeText={setQ}
+              placeholder="Search name, serial number or IMEI…"
+              placeholderTextColor={colors.textMuted}
+              style={styles.searchInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              testID="pos-search"
+            />
+            {q ? (
+              <TouchableOpacity onPress={() => setQ("")} style={styles.clearBtn} testID="pos-search-clear">
+                <Feather name="x" size={15} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : null}
           </View>
+          {q.trim() && filtered.length === 0 ? (
+            <Text style={styles.noMatch} testID="pos-no-match">
+              No product matches “{q.trim()}”. Serial numbers and IMEIs are searched too — check the product's Device Identity.
+            </Text>
+          ) : null}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
-            {filtered.slice(0, 30).map(p => (
-              <TouchableOpacity key={p.id} onPress={() => addToCart(p)} style={styles.prodChip}>
+            {filtered.slice(0, 30).map(({ p, hit }) => (
+              <TouchableOpacity
+                key={p.id}
+                onPress={() => addToCart(p)}
+                style={styles.prodChip}
+                testID={`pos-product-${p.id}`}
+              >
                 <Text style={styles.prodName} numberOfLines={1}>{p.name}</Text>
                 <Text style={styles.prodMeta}>{formatINR(p.price)} · stock {p.stock}</Text>
+                {hit ? (
+                  <Text style={styles.prodHit} numberOfLines={1}>{hit.label}: {hit.code}</Text>
+                ) : null}
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -306,6 +343,9 @@ const styles = StyleSheet.create({
   prodChip: { minWidth: 140, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 10, marginRight: 8 },
   prodName: { fontSize: 13, fontWeight: "700", color: colors.textMain },
   prodMeta: { fontSize: 11, color: colors.textMuted, marginTop: 3 },
+  prodHit: { fontSize: 10.5, color: colors.primary, fontWeight: "700", marginTop: 3 },
+  clearBtn: { width: 28, height: 28, alignItems: "center", justifyContent: "center" },
+  noMatch: { fontSize: 12, color: colors.textMuted, marginTop: 10, lineHeight: 17 },
   section: { fontSize: 15, fontWeight: "800", color: colors.textMain, marginBottom: 8 },
   emptyHint: { color: colors.textMuted, fontSize: 12 },
   cartRow: { padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, marginBottom: 8 },

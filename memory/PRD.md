@@ -1942,3 +1942,44 @@ Backfill:     `backend/tests/backfill_bank_ledger.py` (idempotent)
   webhook → Group 7 + Group 2 vendor-wise split, Excel, restricted nav,
   min withdrawal ₹1000, no earnings per delivery)
 - Phase 7: Web parity pass on everything above
+
+## Oct 2026 — Update pack (4 owner-reported items)
+
+1. **POS search by serial / IMEI.** `frontend/src/device-identity.ts` is the
+   single matcher (case-insensitive, ignores spaces/dashes, walks
+   `serial_number`, `imei_1`, `imei_2` and every `device_units[]` row).
+   `/vendor/pos` now searches name **or** any device code and shows a
+   "Serial: 12340987" hint explaining WHY a chip matched.
+2. **Per-unit device identity.** New `DeviceUnit` model + `device_units[]` on
+   ProductCreate/ProductUpdate. The Device Identity section has a
+   "Track every unit separately" switch: stock 10 ⇒ 10 unit cards, each with
+   serial + IMEI-1 + IMEI-2 and a scan button. Rows resize with stock (capped
+   at 200), duplicate codes across units are rejected on save, and unit #1 is
+   mirrored into the legacy single serial/IMEI fields. `device_units: []` is
+   sent when the switch is OFF so the server clears old rows.
+3. **Admin bottom nav.** `delivery-partners` was auto-registering as a 7th tab
+   and broke the locked 6-tab bar; it is now `href: null` and lives in
+   /admin/more. New shared `src/tab-bar-icon.tsx` gives both the admin and
+   buyer bars the same active-pill treatment (admin active tint moved from
+   accent to primary for consistency).
+4. **Map-shops 500 + rider-owned order flow.**
+   * ROOT CAUSE of "could not load shops": `GET /admin/delivery-partners/
+     {dp_id}/vendors` projected `{"id":1, ..., "dp_pincodes":0}` — MongoDB
+     rejects inclusion mixed with exclusion. Rewritten to return every
+     approved seller with `pincodes[]`, plus `all_pincodes` and the rider's
+     own `dp_pincodes`.
+   * Admin sheet: pincode filter chips (rider's PINs pre-selected),
+     Select all / Clear, multi-select, save.
+   * Rider `/delivery/orders` is grouped RETAILER-WISE (sticky shop header,
+     "Only this shop").
+   * `GET /vendor/me/delivery-partners` tells the seller panel it is
+     rider-managed. `VENDOR_ALLOWED_WHEN_DP_MANAGED = ("confirmed",
+     "cancelled")` — `PATCH /vendor/orders/{id}/status` 403s on shipped /
+     out_for_delivery / delivered when a rider is mapped, and the seller UI
+     shows a banner + inline lock instead of the advance button. Unmapped
+     sellers are untouched. The return flow is unchanged.
+
+Verified: `tests/verify_oct2026_updates.py` 27/27, plus regressions
+verify_phase1_money 56/56, verify_phase2_returns 93/93,
+verify_delivery_partner 40/40, and testing-agent iteration 86 green on
+mobile 390x844 and desktop 1440x900.

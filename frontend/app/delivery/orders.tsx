@@ -1,9 +1,9 @@
 // Delivery Partner — order management for MAPPED shops only.
 // confirmed → shipped → on the way → delivered, plus the delivery info the
 // customer sees. The server owns all money side-effects.
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
-  View, Text, StyleSheet, FlatList, RefreshControl, ActivityIndicator,
+  View, Text, StyleSheet, SectionList, RefreshControl, ActivityIndicator,
   TouchableOpacity, Alert, Linking, Modal, TextInput, Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -55,6 +55,24 @@ export default function DeliveryOrders() {
     finally { setLoading(false); setRefreshing(false); }
   }, [status, vendorId]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Oct 2026 — riders think shop-by-shop, so the list is grouped retailer-wise
+  // with a sticky header per shop showing how many orders are still open there.
+  const sections = useMemo(() => {
+    const byShop = new Map<string, { title: string; vendorId: string; data: any[] }>();
+    for (const o of items) {
+      const key = o.vendor_id || o.vendor_name || "shop";
+      if (!byShop.has(key)) {
+        byShop.set(key, {
+          title: o.vendor_name || "Shop",
+          vendorId: o.vendor_id || "",
+          data: [],
+        });
+      }
+      byShop.get(key)!.data.push(o);
+    }
+    return Array.from(byShop.values()).sort((a, b) => b.data.length - a.data.length);
+  }, [items]);
 
   const advance = async (o: any, to: string) => {
     setBusy(o.id);
@@ -207,10 +225,29 @@ export default function DeliveryOrders() {
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
       ) : (
-        <FlatList
-          data={items}
+        <SectionList
+          sections={sections}
           keyExtractor={(o) => o.id}
           renderItem={renderItem}
+          stickySectionHeadersEnabled
+          renderSectionHeader={({ section }) => (
+            <View style={s.shopHeader}>
+              <Feather name="home" size={13} color={colors.primary} />
+              <Text style={s.shopHeaderText} numberOfLines={1}>{section.title}</Text>
+              <Text style={s.shopHeaderCount}>
+                {`${section.data.length} order${section.data.length === 1 ? "" : "s"}`}
+              </Text>
+              {!vendorId && section.vendorId ? (
+                <TouchableOpacity
+                  onPress={() => router.push(`/delivery/orders?vendor_id=${section.vendorId}` as any)}
+                  testID={`dp-only-shop-${section.vendorId}`}
+                  style={s.onlyBtn}
+                >
+                  <Text style={s.onlyBtnText}>Only this shop</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          )}
           contentContainerStyle={{ paddingBottom: 24 }}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }}
@@ -260,6 +297,19 @@ export default function DeliveryOrders() {
 
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
+  shopHeader: {
+    flexDirection: "row", alignItems: "center", gap: 7,
+    paddingHorizontal: spacing.screen, paddingVertical: 9,
+    backgroundColor: colors.background,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  shopHeaderText: { flex: 1, fontSize: 13, fontWeight: "800", color: colors.textMain },
+  shopHeaderCount: { fontSize: 11.5, fontWeight: "700", color: colors.textMuted },
+  onlyBtn: {
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.border, minHeight: 30, justifyContent: "center",
+  },
+  onlyBtnText: { fontSize: 11, fontWeight: "700", color: colors.primary },
   card: {
     marginHorizontal: spacing.screen, marginBottom: 12, padding: 13,
     backgroundColor: colors.surface, borderRadius: radii.card,

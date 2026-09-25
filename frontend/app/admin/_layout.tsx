@@ -1,10 +1,10 @@
 import { Tabs } from "expo-router";
-import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 import { useAuth } from "../../src/auth";
 import { SCOPED_ADMIN_ROLES } from "../../src/admin-roles";
+import { tabIcon, TAB_LABEL_STYLE } from "../../src/tab-bar-icon";
 
 /** Sep 2026 — scoped manager roles see ONLY their own section. */
 const SCOPED_ROLES = SCOPED_ADMIN_ROLES;
@@ -41,36 +41,36 @@ export default function AdminLayout() {
       initialRouteName={scoped ? "manager-home" : "shop"}
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: colors.accent,
+        tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.textMuted,
         tabBarHideOnKeyboard: true,
         tabBarStyle: {
           backgroundColor: colors.surface,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: 62 + bottomPad,
-          paddingTop: 10,
+          height: 66 + bottomPad,
+          paddingTop: 8,
           paddingBottom: bottomPad,
         },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: "600", marginTop: 2 },
+        tabBarLabelStyle: TAB_LABEL_STYLE,
         tabBarItemStyle: { paddingVertical: 4 },
       }}
     >
-      <Tabs.Screen name="home" options={tab(!scoped, { title: "Home", tabBarIcon: ({ color, size }: any) => <Feather name="grid" size={size} color={color} /> })} />
-      <Tabs.Screen name="users" options={tab(!scoped, { title: "Users", tabBarIcon: ({ color, size }: any) => <Feather name="users" size={size} color={color} /> })} />
-      <Tabs.Screen name="shop" options={tab(!scoped, { title: "Shop", tabBarIcon: ({ color, size }: any) => <Feather name="shopping-bag" size={size} color={color} /> })} />
-      <Tabs.Screen name="payouts" options={tab(!scoped, { title: "Payouts", tabBarIcon: ({ color, size }: any) => <MaterialCommunityIcons name="currency-inr" size={size} color={color} /> })} />
-      <Tabs.Screen name="wallet" options={tab(!scoped, { title: "Wallet", tabBarIcon: ({ color, size }: any) => <Feather name="credit-card" size={size} color={color} /> })} />
-      <Tabs.Screen name="more" options={tab(!scoped, { title: "More", tabBarIcon: ({ color, size }: any) => <Feather name="more-horizontal" size={size} color={color} /> })} />
+      <Tabs.Screen name="home" options={tab(!scoped, { title: "Home", tabBarIcon: tabIcon("grid") })} />
+      <Tabs.Screen name="users" options={tab(!scoped, { title: "Users", tabBarIcon: tabIcon("users") })} />
+      <Tabs.Screen name="shop" options={tab(!scoped, { title: "Shop", tabBarIcon: tabIcon("shopping-bag") })} />
+      <Tabs.Screen name="payouts" options={tab(!scoped, { title: "Payouts", tabBarIcon: tabIcon("currency-inr", "mci") })} />
+      <Tabs.Screen name="wallet" options={tab(!scoped, { title: "Wallet", tabBarIcon: tabIcon("credit-card") })} />
+      <Tabs.Screen name="more" options={tab(!scoped, { title: "More", tabBarIcon: tabIcon("more-horizontal") })} />
       <Tabs.Screen
         name="manager-home"
-        options={tab(scoped, { title: "My section", tabBarIcon: ({ color, size }: any) => <Feather name="grid" size={size} color={color} /> })}
+        options={tab(scoped, { title: "My section", tabBarIcon: tabIcon("grid") })}
       />
       <Tabs.Screen name="transactions" options={{ href: null }} />
       <Tabs.Screen name="settings" options={{ href: null }} />
       <Tabs.Screen
         name="profile"
-        options={tab(scoped, { title: "Profile", tabBarIcon: ({ color, size }: any) => <Feather name="user" size={size} color={color} /> })}
+        options={tab(scoped, { title: "Profile", tabBarIcon: tabIcon("user") })}
       />
       <Tabs.Screen name="kyc" options={{ href: null }} />
       <Tabs.Screen name="orders" options={{ href: null }} />
@@ -123,6 +123,9 @@ export default function AdminLayout() {
          locked to the 6 tabs. */}
       <Tabs.Screen name="returns" options={{ href: null }} />
       <Tabs.Screen name="push-diagnostics" options={{ href: null }} />
+      {/* Oct 2026 — Delivery Partners was auto-registering as a 7th tab and
+         breaking the locked 6-tab bar. It lives in /admin/more.tsx instead. */}
+      <Tabs.Screen name="delivery-partners" options={{ href: null }} />
     </Tabs>
   );
 }

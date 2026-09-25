@@ -8716,6 +8716,21 @@ async def vendor_update_order_status(
     owns = await db.vendor_sales.find_one({"order_id": order_id, "vendor_id": vendor["id"]})
     if not owns:
         raise HTTPException(status_code=403, detail="Not your order")
+    # Oct 2026 — if admin mapped a delivery partner to this shop, the seller
+    # only accepts or cancels. Every delivery stage belongs to the rider so
+    # the two panels can never fight over the same order.
+    from routes.delivery_partner import (
+        VENDOR_ALLOWED_WHEN_DP_MANAGED, vendor_dp_partners,
+    )
+    if payload.status not in VENDOR_ALLOWED_WHEN_DP_MANAGED:
+        partners = await vendor_dp_partners(vendor["id"])
+        if partners:
+            names = ", ".join(p["name"] for p in partners)
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your deliveries are handled by {names}. You can accept or "
+                       f"cancel an order — the delivery partner marks it shipped and delivered.",
+            )
     # Delegate to the admin handler so the commission-settle side-effects
     # (COD delivery credit, refunds on cancel) fire identically.
     return await admin_update_order_status(

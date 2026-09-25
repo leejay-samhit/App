@@ -45,6 +45,10 @@ router = APIRouter()
 CASH_FIELD = "dp_cash_in_hand"
 MIN_WITHDRAWAL = 1000.0            # owner's rule for delivery partners
 DP_STATUSES = ("confirmed", "shipped", "out_for_delivery", "delivered")
+# Oct 2026 — when a rider is mapped to a shop, the SELLER's order management
+# stops at accepting (or cancelling) the order. Everything after that is the
+# rider's job, so the seller panel and API both refuse those transitions.
+VENDOR_ALLOWED_WHEN_DP_MANAGED = ("confirmed", "cancelled")
 STATUS_LABELS = {
     "confirmed": "Confirmed",
     "shipped": "Shipped",
@@ -266,20 +270,48 @@ class DPMapping(BaseModel):
 
 @router.get("/admin/delivery-partners/{dp_id}/vendors")
 async def admin_dp_vendors(dp_id: str, _admin: Dict[str, Any] = Depends(require_admin)):
-    """Which sellers this rider delivers for, plus every seller to choose from."""
+    """Which sellers this rider delivers for, plus every seller to choose from.
+
+    Oct 2026 — the projection used to mix inclusion with `"dp_pincodes": 0`,
+    which MongoDB rejects, so this endpoint always 500'd and the admin saw
+    "could not load shops". Every seller is now returned with the pincodes
+    they serve so the admin can filter the list PIN-wise before selecting.
+    """
+    dp = await db.users.find_one(
+        {"id": dp_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "dp_pincodes": 1},
+    )
+    if not dp:
+        raise HTTPException(status_code=404, detail="Delivery partner not found")
     mapped = await db.dp_vendor_map.find(
         {"dp_id": dp_id, "active": True}, {"_id": 0, "vendor_id": 1},
     ).to_list(1000)
     mapped_ids = [m["vendor_id"] for m in mapped]
     vendors = await db.users.find(
         {"is_vendor": True, "is_vendor_approved": True},
-        {"_id": 0, "id": 1, "name": 1, "email": 1, "vendor_business_name": 1,
-         "shop_name": 1, "pincode": 1, "dp_pincodes": 0},
-    ).sort("vendor_business_name", 1).to_list(2000)
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1,
+         "vendor_business_name": 1, "shop_name": 1, "pincode": 1,
+         "store_pincode": 1, "delivery_pincodes": 1, "city": 1, "state": 1},
+    ).to_list(2000)
     for v in vendors:
         v["shop"] = v.get("vendor_business_name") or v.get("shop_name") or v.get("name")
         v["mapped"] = v["id"] in mapped_ids
-    return {"dp_id": dp_id, "mapped_vendor_ids": mapped_ids, "vendors": vendors}
+        pins = {str(p).strip() for p in (v.get("delivery_pincodes") or []) if str(p).strip()}
+        for key in ("pincode", "store_pincode"):
+            if str(v.get(key) or "").strip():
+                pins.add(str(v[key]).strip())
+        v["pincodes"] = sorted(pins)
+        v["pincode"] = v.get("pincode") or v.get("store_pincode") or (v["pincodes"][0] if v["pincodes"] else "")
+    vendors.sort(key=lambda r: (not r["mapped"], str(r.get("shop") or "").lower()))
+    # Every PIN any seller covers — powers the admin's pincode filter chips.
+    all_pins = sorted({p for v in vendors for p in v["pincodes"]})
+    return {
+        "dp_id": dp_id,
+        "dp_name": dp.get("name") or dp.get("email"),
+        "dp_pincodes": [str(p).strip() for p in (dp.get("dp_pincodes") or []) if str(p).strip()],
+        "mapped_vendor_ids": mapped_ids,
+        "vendors": vendors,
+        "all_pincodes": all_pins,
+    }
 
 
 @router.put("/admin/delivery-partners/{dp_id}/vendors")
@@ -315,6 +347,50 @@ async def admin_set_dp_vendors(
     await _audit_log(admin, "delivery_partner.map_vendors", "user", dp_id,
                      {"count": len(wanted)})
     return {"ok": True, "mapped": len(wanted)}
+
+
+# ── Seller side: "is a rider handling my deliveries?" ──────────────────
+
+async def _require_vendor(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """Local approved-seller gate (server.require_vendor would be circular)."""
+    if not (user.get("is_vendor") and user.get("is_vendor_approved")):
+        raise HTTPException(status_code=403, detail="Vendor access required")
+    return user
+
+
+async def vendor_dp_partners(vendor_id: str) -> List[Dict[str, Any]]:
+    """Active riders mapped to this seller. Empty list = seller self-delivers."""
+    rows = await db.dp_vendor_map.find(
+        {"vendor_id": vendor_id, "active": True}, {"_id": 0, "dp_id": 1},
+    ).to_list(100)
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        u = await db.users.find_one(
+            {"id": r["dp_id"], "is_delivery_partner_approved": True},
+            {"_id": 0, "id": 1, "name": 1, "phone": 1, "dp_phone": 1},
+        )
+        if u:
+            out.append({
+                "id": u["id"],
+                "name": u.get("name") or "Delivery partner",
+                "phone": u.get("dp_phone") or u.get("phone") or "",
+            })
+    return out
+
+
+@router.get("/vendor/me/delivery-partners")
+async def vendor_my_delivery_partners(vendor: Dict[str, Any] = Depends(_require_vendor)):
+    """The seller's panel calls this to know whether order movement is his job.
+
+    When a rider is mapped to the shop, the SELLER only accepts (confirms) or
+    cancels an order — every delivery stage after that belongs to the rider.
+    """
+    partners = await vendor_dp_partners(vendor["id"])
+    return {
+        "managed": bool(partners),
+        "partners": partners,
+        "seller_statuses": list(VENDOR_ALLOWED_WHEN_DP_MANAGED) if partners else None,
+    }
 
 
 # ── Rider: mapped sellers + orders ─────────────────────────────────────
@@ -392,10 +468,22 @@ async def dp_my_orders(
             {"id": {"$in": buyer_ids}}, {"_id": 0, "id": 1, "name": 1, "phone": 1},
         ):
             buyers[u["id"]] = u
+    # Shop names for the retailer-wise grouping the rider sees.
+    shops: Dict[str, str] = {}
+    async for v in db.users.find(
+        {"id": {"$in": vids}},
+        {"_id": 0, "id": 1, "name": 1, "vendor_business_name": 1, "shop_name": 1},
+    ):
+        shops[v["id"]] = (
+            v.get("vendor_business_name") or v.get("shop_name") or v.get("name") or "Shop"
+        )
     for r in rows:
         b = buyers.get(r.get("user_id") or "") or {}
         r["buyer_name"] = b.get("name") or "Customer"
         r["buyer_phone"] = b.get("phone")
+        r["vendor_name"] = (
+            shops.get(r.get("vendor_id") or "") or r.get("vendor_name") or "Shop"
+        )
         r["cash_to_collect"] = _r(r.get("cod_due"))
         r["is_mine"] = r.get("dp_id") == dp["id"]
         r["status_label"] = STATUS_LABELS.get(r.get("status") or "", (r.get("status") or "").title())

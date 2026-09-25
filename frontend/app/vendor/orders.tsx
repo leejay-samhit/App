@@ -165,13 +165,16 @@ export default function VendorOrders() {
   const [editName, setEditName] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [savingInfo, setSavingInfo] = useState(false);
+  // Oct 2026 — when admin maps a delivery partner to this shop, the rider owns
+  // every stage after "Confirm order". The seller can still accept or cancel.
+  const [dpPartners, setDpPartners] = useState<{ id: string; name: string; phone: string }[]>([]);
+  const dpManaged = dpPartners.length > 0;
 
   const load = useCallback(async () => {
     try {
       const { data } = await api.get<{ items: VendorSale[]; total?: number } | VendorSale[]>(
         filter === "all" ? "/vendor/me/sales" : `/vendor/me/sales?status=${filter}`,
-      );
-      const raw = Array.isArray(data) ? data : (data?.items || []);
+      );      const raw = Array.isArray(data) ? data : (data?.items || []);
       // Defensive normalise + never let one bad row kill the list.
       const shaped: any[] = [];
       for (const r of raw) {
@@ -192,20 +195,16 @@ export default function VendorOrders() {
     // a cleanup fn or undefined.  If we naively return `load()` React
     // thinks the Promise IS the cleanup and crashes on unmount.
     load();
+    api.get("/vendor/me/delivery-partners")
+      .then(({ data }) => setDpPartners((data as any)?.partners || []))
+      .catch(() => setDpPartners([]));
     return undefined;
   }, [load]));
 
   const setStatus = async (orderId: string, status: string) => {
     setBusy(orderId);
     try {
-      // Try vendor-scoped endpoint first (web spec).  If backend hasn't
-      // shipped it yet, fall back to the admin endpoint which every
-      // approved vendor is also authorised to hit for their own orders.
-      try {
-        await api.patch(`/vendor/orders/${orderId}/status`, { status });
-      } catch {
-        await api.patch(`/admin/orders/${orderId}/status`, { status });
-      }
+      await api.patch(`/vendor/orders/${orderId}/status`, { status });
       await load();
     } catch (e) {
       Alert.alert("Couldn't update status", formatApiError(e));
@@ -285,6 +284,14 @@ export default function VendorOrders() {
       {/* Jun 2026 — Same left/right swipe as everywhere else in the app:
           flick the list body to move through the status tabs. */}
       <View style={{ flex: 1 }} {...swipeHandlers}>
+      {dpManaged ? (
+        <View style={styles.dpBanner} testID="vorder-dp-banner">
+          <Feather name="truck" size={15} color={colors.primary} />
+          <Text style={styles.dpBannerText}>
+            {`Deliveries are handled by ${dpPartners.map((p) => p.name).join(", ")}. You accept the order — they mark it shipped and delivered.`}
+          </Text>
+        </View>
+      ) : null}
       {loading ? (
         <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
           {[...Array(5)].map((_, i) => <ListRowSkeleton key={i} />)}
@@ -461,7 +468,8 @@ export default function VendorOrders() {
                   ) : null}
 
                   <View style={styles.btnRow}>
-                    {item.channel !== "pos" && NEXT_STAGE[item.status] && (
+                    {item.channel !== "pos" && NEXT_STAGE[item.status]
+                      && !(dpManaged && item.status !== "placed") && (
                       <TouchableOpacity
                         onPress={() => setStatus(orderId, NEXT_STAGE[item.status].next)}
                         disabled={busy === orderId}
@@ -472,7 +480,16 @@ export default function VendorOrders() {
                         <Text style={styles.primaryBtnText}>{NEXT_STAGE[item.status].label}</Text>
                       </TouchableOpacity>
                     )}
-                    {item.channel !== "pos" && OPEN_STATUSES.includes(item.status) && (
+                    {dpManaged && item.channel !== "pos" && item.status !== "placed"
+                      && OPEN_STATUSES.includes(item.status) ? (
+                      <View style={styles.dpLockBox} testID={`vdplock-${orderId}`}>
+                        <Feather name="truck" size={13} color={colors.textMuted} />
+                        <Text style={styles.dpLockText} numberOfLines={2}>
+                          {`${dpPartners[0]?.name || "Your delivery partner"} moves this order from here`}
+                        </Text>
+                      </View>
+                    ) : null}
+                    {item.channel !== "pos" && OPEN_STATUSES.includes(item.status) && !dpManaged && (
                       <TouchableOpacity
                         onPress={() => {
                           setEditingOrder(item);
@@ -681,6 +698,18 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.brand100,
   },
   infoBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary },
+  dpBanner: {
+    flexDirection: "row", alignItems: "center", gap: 9,
+    marginHorizontal: spacing.screen, marginTop: 8, padding: 11,
+    backgroundColor: colors.brand100, borderRadius: 14,
+  },
+  dpBannerText: { flex: 1, fontSize: 11.5, fontWeight: "700", color: colors.textMain, lineHeight: 16 },
+  dpLockBox: {
+    flexDirection: "row", alignItems: "center", gap: 6, flex: 1,
+    paddingHorizontal: 11, paddingVertical: 9, borderRadius: 999,
+    backgroundColor: colors.surfaceMuted, minHeight: 36,
+  },
+  dpLockText: { flex: 1, fontSize: 11, fontWeight: "700", color: colors.textMuted },
 
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   modalSheet: {

@@ -23,6 +23,8 @@ export default function AdminDeliveryPartners() {
   const [vendors, setVendors] = useState<any[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
+  const [allPins, setAllPins] = useState<string[]>([]);
+  const [pinFilter, setPinFilter] = useState<Set<string>>(new Set());
   const [mapBusy, setMapBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -55,10 +57,19 @@ export default function AdminDeliveryPartners() {
     setMapFor(dp);
     setSearch("");
     setVendors([]);
+    setAllPins([]);
+    setPinFilter(new Set());
     try {
       const { data } = await api.get(`/admin/delivery-partners/${dp.id}/vendors`);
-      setVendors((data as any)?.vendors || []);
-      setPicked(new Set((data as any)?.mapped_vendor_ids || []));
+      const d = data as any;
+      setVendors(d?.vendors || []);
+      setPicked(new Set(d?.mapped_vendor_ids || []));
+      setAllPins(d?.all_pincodes || []);
+      // Pre-select the PINs the rider said he covers so the admin instantly
+      // sees the shops that actually match his area.
+      const riderPins: string[] = (d?.dp_pincodes || []).filter((p: string) =>
+        (d?.all_pincodes || []).includes(p));
+      setPinFilter(new Set(riderPins));
     } catch (e) {
       Alert.alert("Could not load shops", formatApiError(e));
       setMapFor(null);
@@ -79,8 +90,32 @@ export default function AdminDeliveryPartners() {
     } finally { setMapBusy(false); }
   };
 
-  const shown = vendors.filter((v) =>
-    !search.trim() || String(v.shop || "").toLowerCase().includes(search.trim().toLowerCase()));
+  const shown = vendors.filter((v) => {
+    const q = search.trim().toLowerCase();
+    const pins: string[] = v.pincodes || [];
+    const hitSearch = !q
+      || String(v.shop || "").toLowerCase().includes(q)
+      || String(v.email || "").toLowerCase().includes(q)
+      || pins.some((p) => p.includes(q));
+    const hitPin = pinFilter.size === 0 || pins.some((p) => pinFilter.has(p));
+    return hitSearch && hitPin;
+  });
+
+  const togglePin = (p: string) => {
+    const next = new Set(pinFilter);
+    if (next.has(p)) next.delete(p); else next.add(p);
+    setPinFilter(next);
+  };
+  const selectAllShown = () => {
+    const next = new Set(picked);
+    shown.forEach((v) => next.add(v.id));
+    setPicked(next);
+  };
+  const clearShown = () => {
+    const next = new Set(picked);
+    shown.forEach((v) => next.delete(v.id));
+    setPicked(next);
+  };
 
   return (
     <SafeAreaView style={s.safe} edges={["top"]}>
@@ -207,17 +242,59 @@ export default function AdminDeliveryPartners() {
             style={s.search}
             value={search}
             onChangeText={setSearch}
-            placeholder="Search shops"
+            placeholder="Search shop name, email or pincode"
             placeholderTextColor={colors.textMuted}
             testID="adp-map-search"
           />
+          {allPins.length > 0 ? (
+            <View>
+              <Text style={s.filterLabel}>Filter by pincode</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={s.pinRow}
+              >
+                <TouchableOpacity
+                  style={[s.pinChip, pinFilter.size === 0 && s.pinChipOn]}
+                  onPress={() => setPinFilter(new Set())}
+                  testID="adp-pin-all"
+                >
+                  <Text style={[s.pinText, pinFilter.size === 0 && s.pinTextOn]}>All</Text>
+                </TouchableOpacity>
+                {allPins.map((p) => {
+                  const on = pinFilter.has(p);
+                  return (
+                    <TouchableOpacity
+                      key={p}
+                      style={[s.pinChip, on && s.pinChipOn]}
+                      onPress={() => togglePin(p)}
+                      testID={`adp-pin-${p}`}
+                    >
+                      <Text style={[s.pinText, on && s.pinTextOn]}>{p}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          ) : null}
+          <View style={s.bulkRow}>
+            <Text style={s.bulkCount}>{`${shown.length} shop${shown.length === 1 ? "" : "s"} shown`}</Text>
+            <TouchableOpacity onPress={selectAllShown} style={s.bulkBtn} testID="adp-select-all">
+              <Feather name="check-square" size={13} color={colors.primary} />
+              <Text style={s.bulkText}>Select all</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={clearShown} style={s.bulkBtn} testID="adp-clear-all">
+              <Feather name="square" size={13} color={colors.textMuted} />
+              <Text style={[s.bulkText, { color: colors.textMuted }]}>Clear</Text>
+            </TouchableOpacity>
+          </View>
           <ScrollView contentContainerStyle={{ paddingBottom: 90 }}>
             {shown.map((v) => {
               const on = picked.has(v.id);
               return (
                 <TouchableOpacity
                   key={v.id}
-                  style={s.vendorRow}
+                  style={[s.vendorRow, on && s.vendorRowOn]}
                   onPress={() => {
                     const next = new Set(picked);
                     if (on) next.delete(v.id); else next.add(v.id);
@@ -232,7 +309,11 @@ export default function AdminDeliveryPartners() {
                   />
                   <View style={{ flex: 1 }}>
                     <Text style={s.vendorName} numberOfLines={1}>{v.shop}</Text>
-                    <Text style={s.meta}>{v.pincode ? `Pincode ${v.pincode}` : v.email}</Text>
+                    <Text style={s.meta} numberOfLines={1}>
+                      {(v.pincodes || []).length
+                        ? `PIN ${(v.pincodes || []).join(", ")}`
+                        : v.email}
+                    </Text>
                   </View>
                 </TouchableOpacity>
               );
@@ -330,6 +411,31 @@ const s = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border, minHeight: 56,
   },
   vendorName: { fontSize: 14, fontWeight: "700", color: colors.textMain },
+  vendorRowOn: { borderColor: colors.primary, backgroundColor: colors.brand100 },
+  filterLabel: {
+    fontSize: 11.5, fontWeight: "700", color: colors.textMuted,
+    paddingHorizontal: spacing.screen, marginBottom: 6, letterSpacing: 0.3,
+  },
+  pinRow: { paddingHorizontal: spacing.screen, gap: 8, paddingBottom: 4 },
+  pinChip: {
+    paddingHorizontal: 13, paddingVertical: 8, borderRadius: 999,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    minHeight: 34, justifyContent: "center",
+  },
+  pinChipOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  pinText: { fontSize: 12.5, fontWeight: "700", color: colors.textMain },
+  pinTextOn: { color: colors.primaryFg },
+  bulkRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: spacing.screen, paddingVertical: 10,
+  },
+  bulkCount: { flex: 1, fontSize: 12, fontWeight: "700", color: colors.textMuted },
+  bulkBtn: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.border, minHeight: 34,
+  },
+  bulkText: { fontSize: 12, fontWeight: "700", color: colors.primary },
   mapFooter: {
     position: "absolute", left: 0, right: 0, bottom: 0,
     padding: spacing.screen, paddingBottom: Platform.OS === "ios" ? 30 : spacing.screen,

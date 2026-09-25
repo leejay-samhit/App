@@ -53,6 +53,19 @@ class SpecTab(BaseModel):
     rows: List[SpecRow] = Field(default_factory=list)
 
 
+class DeviceUnit(BaseModel):
+    """One physical unit of a product (Oct 2026).
+
+    A vendor stocking 10 identical phones now records 10 of these, so POS
+    billing can be searched by ANY of those serials / IMEIs instead of only
+    the first one. `serial_number` / `imei_1` / `imei_2` on the product stay
+    as a mirror of unit #1 for backwards compatibility.
+    """
+    serial_number: Optional[str] = ""
+    imei_1: Optional[str] = ""
+    imei_2: Optional[str] = ""
+
+
 class ProductCreate(BaseModel):
     name: str
     price: float
@@ -93,6 +106,8 @@ class ProductCreate(BaseModel):
     serial_number: Optional[str] = ""
     imei_1: Optional[str] = ""
     imei_2: Optional[str] = ""
+    # Per-unit identity (Oct 2026). One row per unit in stock.
+    device_units: Optional[List[DeviceUnit]] = None
     # ── Variants (Jun 2026) — size / RAM-ROM options with their own
     # stock and price. See core/variants.py for the chart catalogue.
     #   variant_chart      "apparel" | "footwear_uk" | "ram_rom" | ...
@@ -148,6 +163,8 @@ class ProductUpdate(BaseModel):
     serial_number: Optional[str] = None
     imei_1: Optional[str] = None
     imei_2: Optional[str] = None
+    # Per-unit identity (Oct 2026). One row per unit in stock.
+    device_units: Optional[List[DeviceUnit]] = None
 
     # ── Variants (Jun 2026) — size / RAM-ROM options with their own
     # stock and price. See core/variants.py for the chart catalogue.

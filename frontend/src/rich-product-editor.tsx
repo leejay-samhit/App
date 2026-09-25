@@ -10,7 +10,7 @@
 // between admin and vendor (admin posts to `/admin/products`, vendor posts to
 // `/vendor/me/products`).
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, Modal,
   TextInput, ScrollView, Switch, Image, KeyboardAvoidingView, Platform, Linking,
@@ -26,6 +26,7 @@ import {
 } from "./variant-editor";
 import { useAuth } from "./auth";
 import { BarcodeScannerModal, type ScannerTarget } from "./barcode-scanner-modal";
+import type { DeviceUnit } from "./device-identity";
 
 // ── Types ──
 export type StyledText = { text?: string; bold?: boolean; font_size?: number | null; align?: "left" | "center" | "right" };
@@ -273,6 +274,15 @@ export function RichProductEditor({
   const [serialNumber, setSerialNumber] = useState<string>("");
   const [imei1, setImei1] = useState<string>("");
   const [imei2, setImei2] = useState<string>("");
+  // ── Per-unit identity (Oct 2026) — 10 qty ⇒ 10 serial + IMEI boxes ──
+  // When the vendor turns this on, the form renders one row per unit in
+  // stock. Unit #1 stays mirrored into the single serial/IMEI fields above
+  // so older products and every existing report keep working.
+  const [perUnit, setPerUnit] = useState(false);
+  const [deviceUnits, setDeviceUnits] = useState<DeviceUnit[]>([]);
+  const [unitScanTarget, setUnitScanTarget] = useState<
+    { index: number; field: "serial_number" | "imei_1" | "imei_2" } | null
+  >(null);
   // ── UPDATE 3 (August 2026) — Barcode scanner target + spec-not-found hint ──
   const [scannerTarget, setScannerTarget] = useState<ScannerTarget | null>(null);
   const [specsNotFoundHint, setSpecsNotFoundHint] = useState<string>("");
@@ -563,6 +573,49 @@ export function RichProductEditor({
     setMasterQuery(row.name || "");
   };
 
+  // ── Per-unit device identity: keep the row count equal to the stock ──
+  // "10 qty ⇒ 10 serial boxes". Existing rows keep whatever the vendor
+  // already typed; growing the stock appends blanks, shrinking trims the
+  // tail. Capped at 200 rows so a 10 000-unit SKU can't freeze the form.
+  const unitTarget = useMemo(() => {
+    const n = variantState.rows.length
+      ? variantState.rows.reduce((a, r) => a + (Number(r.stock) || 0), 0)
+      : Number(stock);
+    return Math.max(0, Math.min(Number.isFinite(n) ? Math.floor(n) : 0, 200));
+  }, [stock, variantState.rows]);
+
+  useEffect(() => {
+    if (!perUnit) return;
+    setDeviceUnits((prev) => {
+      if (prev.length === unitTarget) return prev;
+      if (prev.length > unitTarget) return prev.slice(0, unitTarget);
+      const next = [...prev];
+      while (next.length < unitTarget) {
+        next.push({ serial_number: "", imei_1: "", imei_2: "" });
+      }
+      return next;
+    });
+  }, [perUnit, unitTarget]);
+
+  const setUnitField = (
+    index: number,
+    field: "serial_number" | "imei_1" | "imei_2",
+    value: string,
+  ) => {
+    setDeviceUnits((prev) => {
+      const next = [...prev];
+      next[index] = { ...(next[index] || {}), [field]: value };
+      return next;
+    });
+  };
+
+  const filledUnitCount = useMemo(
+    () => deviceUnits.filter(
+      (u) => (u.serial_number || "").trim() || (u.imei_1 || "").trim() || (u.imei_2 || "").trim(),
+    ).length,
+    [deviceUnits],
+  );
+
   // Hydrate when modal opens (or when switching to a different product)
   useEffect(() => {
     if (!visible) return;
@@ -603,6 +656,15 @@ export function RichProductEditor({
     setSerialNumber((e as any).serial_number || "");
     setImei1((e as any).imei_1 || "");
     setImei2((e as any).imei_2 || "");
+    const savedUnits: DeviceUnit[] = Array.isArray((e as any).device_units)
+      ? (e as any).device_units.map((u: any) => ({
+          serial_number: String(u?.serial_number || ""),
+          imei_1: String(u?.imei_1 || ""),
+          imei_2: String(u?.imei_2 || ""),
+        }))
+      : [];
+    setDeviceUnits(savedUnits);
+    setPerUnit(savedUnits.length > 0);
     // Reset AI state — reference image is never persisted on the product.
     setAiReference("");
     setAiProduced(false);
@@ -1377,6 +1439,40 @@ export function RichProductEditor({
       Alert.alert("Duplicate IMEIs", "IMEI-1 and IMEI-2 cannot be identical.");
       return;
     }
+    // Per-unit identity (Oct 2026) — same IMEI rules, plus no duplicate code
+    // across units so two units can never claim the same handset.
+    if (perUnit) {
+      const seen = new Map<string, number>();
+      for (let i = 0; i < Math.min(deviceUnits.length, unitTarget); i++) {
+        const u = deviceUnits[i] || {};
+        for (const [label, val] of [["IMEI-1", u.imei_1], ["IMEI-2", u.imei_2]] as const) {
+          if (val && !isValidImei(val)) {
+            Alert.alert(
+              `Unit ${i + 1}: invalid ${label}`,
+              `${label} must be 15 digits and pass the Luhn checksum. Dial *#06# on the device to read it exactly.`,
+            );
+            return;
+          }
+        }
+        if (u.imei_1 && u.imei_2 && u.imei_1 === u.imei_2) {
+          Alert.alert(`Unit ${i + 1}: duplicate IMEIs`, "IMEI-1 and IMEI-2 cannot be identical.");
+          return;
+        }
+        for (const val of [u.serial_number, u.imei_1, u.imei_2]) {
+          const code = (val || "").trim().toLowerCase();
+          if (!code) continue;
+          const first = seen.get(code);
+          if (first != null) {
+            Alert.alert(
+              "Duplicate code",
+              `"${(val || "").trim()}" is used by both unit ${first + 1} and unit ${i + 1}. Every unit needs its own serial / IMEI.`,
+            );
+            return;
+          }
+          seen.set(code, i);
+        }
+      }
+    }
     setSaving(true);
     try {
       const extras: Record<string, string> = {};
@@ -1426,9 +1522,21 @@ export function RichProductEditor({
         clothing_size: isClothes ? (clothingSize || undefined) : undefined,
         // Device identity (July 2026) — trimmed, `undefined` when blank so
         // the backend keeps a null/empty value rather than a literal "".
-        serial_number: serialNumber.trim() || undefined,
-        imei_1: imei1.replace(/\s+/g, "") || undefined,
-        imei_2: imei2.replace(/\s+/g, "") || undefined,
+        serial_number: (serialNumber.trim()
+          || (perUnit ? (deviceUnits[0]?.serial_number || "").trim() : "")) || undefined,
+        imei_1: (imei1.replace(/\s+/g, "")
+          || (perUnit ? (deviceUnits[0]?.imei_1 || "").replace(/\s+/g, "") : "")) || undefined,
+        imei_2: (imei2.replace(/\s+/g, "")
+          || (perUnit ? (deviceUnits[0]?.imei_2 || "").replace(/\s+/g, "") : "")) || undefined,
+        // Per-unit identity (Oct 2026). `[]` (not undefined) when the vendor
+        // switches tracking OFF so the server actually clears old rows.
+        device_units: perUnit
+          ? deviceUnits.slice(0, unitTarget).map((u) => ({
+              serial_number: (u.serial_number || "").trim(),
+              imei_1: (u.imei_1 || "").replace(/\s+/g, ""),
+              imei_2: (u.imei_2 || "").replace(/\s+/g, ""),
+            }))
+          : [],
       };
       // UPDATE 1 — Only admin editor sends is_published. Vendor editor omits
       // it entirely so the server keeps its own decision (backend also strips
@@ -2016,9 +2124,10 @@ export function RichProductEditor({
               icon="hash"
               summary={
                 [
-                  serialNumber && `SN ${serialNumber.slice(0, 8)}${serialNumber.length > 8 ? "…" : ""}`,
-                  imei1 && `IMEI-1 ${imei1.slice(0, 6)}…`,
-                  imei2 && `IMEI-2 ${imei2.slice(0, 6)}…`,
+                  perUnit && `${filledUnitCount}/${unitTarget} units tracked`,
+                  !perUnit && serialNumber && `SN ${serialNumber.slice(0, 8)}${serialNumber.length > 8 ? "…" : ""}`,
+                  !perUnit && imei1 && `IMEI-1 ${imei1.slice(0, 6)}…`,
+                  !perUnit && imei2 && `IMEI-2 ${imei2.slice(0, 6)}…`,
                 ].filter(Boolean).join(" · ") || "Serial number • IMEI-1 • IMEI-2 (optional)"
               }
               testID="section-device-id"
@@ -2126,6 +2235,101 @@ export function RichProductEditor({
                     IMEI-1 and IMEI-2 cannot be identical.
                   </Text>
                 </View>
+              ) : null}
+
+              {/* ── Per-unit tracking (Oct 2026) — 10 qty ⇒ 10 boxes ── */}
+              <View style={sectionStyles.unitDivider} />
+              <View style={modalStyles.switchRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={modalStyles.switchTitle}>Track every unit separately</Text>
+                  <Text style={modalStyles.switchSub}>
+                    {`Gives you one serial + IMEI box per unit in stock (${unitTarget} right now). POS billing can then be searched by any of those codes.`}
+                  </Text>
+                </View>
+                <Switch value={perUnit} onValueChange={setPerUnit} testID="product-per-unit-toggle" />
+              </View>
+
+              {perUnit ? (
+                unitTarget === 0 ? (
+                  <Text style={sectionStyles.unitHint}>
+                    Set the stock quantity first — the boxes appear one per unit.
+                  </Text>
+                ) : (
+                  <View>
+                    <Text style={sectionStyles.unitHint}>
+                      {`${filledUnitCount} of ${unitTarget} unit${unitTarget === 1 ? "" : "s"} filled. Leave a unit blank if you don't have its code yet.`}
+                    </Text>
+                    {deviceUnits.slice(0, unitTarget).map((u, i) => (
+                      <View key={i} style={sectionStyles.unitCard} testID={`product-unit-${i}`}>
+                        <Text style={sectionStyles.unitTitle}>{`Unit ${i + 1}`}</Text>
+                        <View style={sectionStyles.scanRow}>
+                          <TextInput
+                            value={u.serial_number || ""}
+                            onChangeText={(t) => setUnitField(i, "serial_number", t)}
+                            placeholder="Serial number"
+                            placeholderTextColor={colors.textMuted}
+                            style={[modalStyles.input, { flex: 1, marginBottom: 0 }]}
+                            autoCapitalize="characters"
+                            testID={`product-unit-${i}-serial`}
+                          />
+                          <TouchableOpacity
+                            onPress={() => setUnitScanTarget({ index: i, field: "serial_number" })}
+                            style={sectionStyles.scanBtn}
+                            testID={`product-unit-${i}-serial-scan`}
+                          >
+                            <Feather name="camera" size={16} color={colors.primary} />
+                          </TouchableOpacity>
+                        </View>
+                        <View style={[sectionStyles.scanRow, { marginTop: 8 }]}>
+                          <TextInput
+                            value={u.imei_1 || ""}
+                            onChangeText={(t) => setUnitField(i, "imei_1", t.replace(/[^\d]/g, "").slice(0, 15))}
+                            placeholder="IMEI-1 (15 digits)"
+                            placeholderTextColor={colors.textMuted}
+                            keyboardType="number-pad"
+                            maxLength={15}
+                            style={[
+                              modalStyles.input,
+                              { flex: 1, marginBottom: 0 },
+                              !!u.imei_1 && !isValidImei(u.imei_1) && sectionStyles.inputError,
+                            ]}
+                            testID={`product-unit-${i}-imei-1`}
+                          />
+                          <TouchableOpacity
+                            onPress={() => setUnitScanTarget({ index: i, field: "imei_1" })}
+                            style={sectionStyles.scanBtn}
+                            testID={`product-unit-${i}-imei-1-scan`}
+                          >
+                            <Feather name="camera" size={16} color={colors.primary} />
+                          </TouchableOpacity>
+                        </View>
+                        <View style={[sectionStyles.scanRow, { marginTop: 8 }]}>
+                          <TextInput
+                            value={u.imei_2 || ""}
+                            onChangeText={(t) => setUnitField(i, "imei_2", t.replace(/[^\d]/g, "").slice(0, 15))}
+                            placeholder="IMEI-2 (dual SIM, optional)"
+                            placeholderTextColor={colors.textMuted}
+                            keyboardType="number-pad"
+                            maxLength={15}
+                            style={[
+                              modalStyles.input,
+                              { flex: 1, marginBottom: 0 },
+                              !!u.imei_2 && !isValidImei(u.imei_2) && sectionStyles.inputError,
+                            ]}
+                            testID={`product-unit-${i}-imei-2`}
+                          />
+                          <TouchableOpacity
+                            onPress={() => setUnitScanTarget({ index: i, field: "imei_2" })}
+                            style={sectionStyles.scanBtn}
+                            testID={`product-unit-${i}-imei-2-scan`}
+                          >
+                            <Feather name="camera" size={16} color={colors.primary} />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )
               ) : null}
             </Section>
 
@@ -2408,6 +2612,22 @@ export function RichProductEditor({
           else if (scannerTarget === "imei_1") setImei1(value.replace(/\D/g, "").slice(0, 15));
           else if (scannerTarget === "imei_2") setImei2(value.replace(/\D/g, "").slice(0, 15));
           setScannerTarget(null);
+        }}
+      />
+
+      {/* Oct 2026 — same scanner, but writing into one of the per-unit rows. */}
+      <BarcodeScannerModal
+        visible={unitScanTarget !== null}
+        target={(unitScanTarget?.field === "serial_number" ? "serial" : unitScanTarget?.field || "serial") as any}
+        onClose={() => setUnitScanTarget(null)}
+        onScanned={(value) => {
+          if (unitScanTarget) {
+            const clean = unitScanTarget.field === "serial_number"
+              ? value
+              : value.replace(/\D/g, "").slice(0, 15);
+            setUnitField(unitScanTarget.index, unitScanTarget.field, clean);
+          }
+          setUnitScanTarget(null);
         }}
       />
 
@@ -2702,6 +2922,13 @@ const sectionStyles = StyleSheet.create({
     marginTop: 6, paddingHorizontal: 4,
   },
   imeiHintText: { fontSize: 11, fontWeight: "700" },
+  unitDivider: { height: 1, backgroundColor: colors.border, marginTop: 16, marginBottom: 12 },
+  unitHint: { fontSize: 11.5, color: colors.textMuted, fontWeight: "600", marginBottom: 10, lineHeight: 17 },
+  unitCard: {
+    backgroundColor: colors.surfaceMuted, borderRadius: 14, padding: 12,
+    marginBottom: 10, borderWidth: 1, borderColor: colors.border,
+  },
+  unitTitle: { fontSize: 12, fontWeight: "800", color: colors.textMain, marginBottom: 8 },
   // Scan-button row (Serial / IMEI-1 / IMEI-2)
   scanRow: { flexDirection: "row", alignItems: "stretch", gap: 8 },
   scanBtn: {

@@ -1,5 +1,4 @@
 import { Tabs, useRouter, useSegments } from "expo-router";
-import { Feather } from "@expo/vector-icons";
 import { Platform, View } from "react-native";
 import { useCallback } from "react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -7,6 +6,7 @@ import { colors } from "../../src/theme";
 import { useBranding } from "../../src/branding";
 import { DesktopShell, useIsDesktop } from "../../src/desktop-shell";
 import { useSwipePager } from "../../src/use-swipe-pager";
+import { tabIcon, TAB_LABEL_STYLE } from "../../src/tab-bar-icon";
 
 // Hardcoded visible-tab order per current UX spec:
 // SHOP · SERVICES · DASHBOARD · CHAT · PROFILE
@@ -106,11 +106,11 @@ export default function TabsLayout() {
             backgroundColor: colors.surface,
             borderTopColor: colors.border,
             borderTopWidth: 1,
-            height: 62 + bottomPad,
-            paddingTop: 10,
+            height: 66 + bottomPad,
+            paddingTop: 8,
             paddingBottom: bottomPad,
           },
-          tabBarLabelStyle: { fontSize: 11, fontWeight: "600", marginTop: 2 },
+          tabBarLabelStyle: TAB_LABEL_STYLE,
           tabBarItemStyle: { paddingVertical: 4 },
         }}
       >
@@ -132,7 +132,7 @@ export default function TabsLayout() {
               tabBarItemStyle: { display: "none" },
             } : {
               title: label,
-              tabBarIcon: ({ color, size }) => <Feather name={iconName} size={size} color={color} />,
+              tabBarIcon: tabIcon(iconName),
             }}
           />
         );
