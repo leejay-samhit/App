@@ -21,6 +21,7 @@ from core.db import db
 from core.security import get_current_user
 from core.utils import now_utc
 from core.variants import effective_line_price, find_variant
+from core import gst as _gst
 from models import CartItem, CartAdjust, CartRemove
 
 router = APIRouter()
@@ -291,6 +292,12 @@ async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
             unit = effective_line_price(product, variant)
             line_total = round(unit * float(it.get("qty", 0)), 2)
             total += line_total
+            # Sep-2026 — prices are GST-INCLUSIVE, so the tax already sits
+            # inside `line_total`. Pull it out here (ONE calculator, the
+            # server's) so checkout, the order and the web invoice can never
+            # print three different CGST/SGST figures.
+            pct = _gst.clamp_gst_pct(product.get("selling_gst_pct"))
+            split = _gst.split_inclusive(line_total, pct)
             enriched.append({
                 **it,
                 "product": product,
@@ -298,8 +305,43 @@ async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
                 "variant_label": (variant or {}).get("label", it.get("variant_label") or ""),
                 "variant_stock": int((variant or {}).get("stock") or 0) if variant else None,
                 "line_total": line_total,
+                "gst_pct": pct,
+                "taxable_value": split["base_amount"],
+                "cgst_pct": split["cgst_pct"],
+                "sgst_pct": split["sgst_pct"],
+                "cgst_amount": split["cgst_amount"],
+                "sgst_amount": split["sgst_amount"],
+                "gst_amount": split["total_gst"],
             })
-    return {"items": enriched, "total": total, "count": sum(int(i.get("qty", 0)) for i in items)}
+    taxable = round(sum(float(e.get("taxable_value") or 0) for e in enriched), 2)
+    cgst = round(sum(float(e.get("cgst_amount") or 0) for e in enriched), 2)
+    sgst = round(sum(float(e.get("sgst_amount") or 0) for e in enriched), 2)
+    # Rate-wise roll-up so a mixed basket (5% food + 18% electronics) shows
+    # each slab instead of a meaningless blended number.
+    by_rate: Dict[float, Dict[str, float]] = {}
+    for e in enriched:
+        p = float(e.get("gst_pct") or 0)
+        slot = by_rate.setdefault(p, {"gst_pct": p, "taxable_value": 0.0,
+                                      "cgst_amount": 0.0, "sgst_amount": 0.0, "gst_amount": 0.0})
+        slot["taxable_value"] = round(slot["taxable_value"] + float(e.get("taxable_value") or 0), 2)
+        slot["cgst_amount"] = round(slot["cgst_amount"] + float(e.get("cgst_amount") or 0), 2)
+        slot["sgst_amount"] = round(slot["sgst_amount"] + float(e.get("sgst_amount") or 0), 2)
+        slot["gst_amount"] = round(slot["gst_amount"] + float(e.get("gst_amount") or 0), 2)
+    return {
+        "items": enriched,
+        "total": total,
+        "count": sum(int(i.get("qty", 0)) for i in items),
+        "gst_summary": {
+            "inclusive": True,
+            "items_total": round(total, 2),
+            "taxable_value": taxable,
+            "cgst_amount": cgst,
+            "sgst_amount": sgst,
+            "total_gst": round(cgst + sgst, 2),
+            "by_rate": sorted(by_rate.values(), key=lambda r: r["gst_pct"]),
+            "note": "Item prices include GST. Delivery charges, if any, also include 18% GST.",
+        },
+    }
 
 
 @router.post("/cart/remove")
@@ -379,17 +421,13 @@ async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
             )
         o["vendor_count"] = len(vids) or 1
 
-    # ── Phase 2 — return eligibility (7 days from successful delivery) ──
+    # ── Phase 2 — return eligibility (Sep-2026: 10 MINUTES from delivery) ──
     # Computed on the SERVER so app and web can never disagree about which
     # orders still show "Return" (and which are simply "Completed").
     from core import returns as _rt
-    from core.utils import get_settings as _get_settings
     from datetime import datetime, timezone
-    _s = await _get_settings()
-    try:
-        window = max(0, int(_s.get("return_window_days") or _rt.DEFAULT_WINDOW_DAYS))
-    except (TypeError, ValueError):
-        window = _rt.DEFAULT_WINDOW_DAYS
+    window_minutes = await _rt._window_minutes()
+    vendor_hours = await _rt._vendor_window_hours()
     ret_rows = await db.returns.find(
         {"user_id": user["id"]},
         {"_id": 0, "order_id": 1, "status": 1, "items": 1, "return_number": 1, "id": 1},
@@ -412,23 +450,16 @@ async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
         for it in o.get("items") or []:
             k = f"{it.get('product_id')}|{it.get('variant_id') or ''}"
             units_left += max(0, int(float(it.get("qty") or 1)) - returned.get(k, 0))
-        deadline = _rt._deadline(o.get("delivered_at"), window) if status == "delivered" else None
-        within = False
-        days_left = 0
-        if deadline:
-            try:
-                dl = datetime.fromisoformat(deadline)
-                if dl.tzinfo is None:
-                    dl = dl.replace(tzinfo=timezone.utc)
-                within = now <= dl
-                if within:
-                    gap = dl - now
-                    days_left = gap.days + (1 if gap.seconds > 0 else 0)
-            except ValueError:
-                within = False
-        o["return_window_days"] = window
+        deadline = (
+            _rt._shift(o.get("delivered_at"), minutes=window_minutes)
+            if status == "delivered" else None
+        )
+        within, seconds_left = _rt._still_open(deadline)
+        o["return_window_minutes"] = window_minutes
+        o["vendor_window_hours"] = vendor_hours
         o["return_deadline"] = deadline
-        o["return_days_left"] = days_left
+        o["return_seconds_left"] = seconds_left
+        o["return_minutes_left"] = (seconds_left + 59) // 60
         o["return_eligible"] = bool(status == "delivered" and within and units_left > 0)
         o["return_window_expired"] = bool(status == "delivered" and deadline and not within)
         o["returnable_units"] = units_left

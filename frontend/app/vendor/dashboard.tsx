@@ -327,9 +327,14 @@ export default function VendorDashboard() {
             <View style={styles.statCell}>
               <StatCard icon="box" label="PRODUCTS" value={`${stats.published_count}/${stats.products_count}`} color="#1F5E9E" />
             </View>
-            <View style={styles.statCell}>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={styles.statCell}
+              onPress={() => router.push("/(tabs)/wallet" as any)}
+              testID="stat-wallet"
+            >
               <StatCard icon="credit-card" label="WALLET" value={formatINR(stats.wallet_balance)} color="#1F6B44" />
-            </View>
+            </TouchableOpacity>
           </View>
           </FadeSlideIn>
           {/* Per-channel breakdown pill (Shop orders + Store sale) */}

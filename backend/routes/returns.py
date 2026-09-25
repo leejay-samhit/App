@@ -269,6 +269,28 @@ async def admin_refund(return_id: str, admin: Dict[str, Any] = Depends(require_a
     return {**out, "return": await db.returns.find_one({"id": return_id}, {"_id": 0})}
 
 
+@router.post("/admin/returns/{return_id}/refund-from-company")
+async def admin_refund_from_company(return_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    """Cover a short seller out of the COMPANY treasury so the customer is
+    refunded now. The amount is booked as a recoverable vendor outstanding —
+    nothing is forgiven, and the customer never waits on a seller's balance.
+    """
+    row = await db.returns.find_one({"id": return_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(status_code=404, detail="Return not found")
+    credit_admin_bucket, notify = await _injected()
+    try:
+        out = await rt.process_refund(
+            row, credit_admin_bucket=credit_admin_bucket, notify=notify, actor=admin,
+            company_funded=True,
+        )
+    except rt.ReturnError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    if not out.get("ok"):
+        raise HTTPException(status_code=409, detail=f"Refund could not be completed: {out.get('reason')}")
+    return {**out, "return": await db.returns.find_one({"id": return_id}, {"_id": 0})}
+
+
 @router.get("/admin/returns/{return_id}/audit")
 async def admin_return_audit(return_id: str, _admin: Dict[str, Any] = Depends(require_admin)):
     try:

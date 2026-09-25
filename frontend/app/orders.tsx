@@ -47,7 +47,7 @@ type Order = {
   delivery_info_updated_at?: string | null;
   // Phase 2 — server-computed return state (7-day window from delivery).
   return_eligible?: boolean;
-  return_days_left?: number;
+  return_minutes_left?: number;
   return_window_expired?: boolean;
   return_deadline?: string | null;
   has_returns?: boolean;
@@ -513,7 +513,7 @@ export default function OrdersScreen() {
                   >
                     <Feather name="rotate-ccw" size={13} color={colors.primary} />
                     <Text style={styles.returnBtnText}>
-                      Return items · {item.return_days_left} day{item.return_days_left === 1 ? "" : "s"} left
+                      {`Return items · ${Math.max(0, Number(item.return_minutes_left || 0))} min left`}
                     </Text>
                   </TouchableOpacity>
                 ) : null}

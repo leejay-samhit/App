@@ -1,6 +1,7 @@
 // Request a product return — Phase 2 (Jun-2026).
-// The server decides what is returnable (7-day window, remaining units) and
-// what the refund will be; this screen only collects the choice.
+// The server decides what is returnable (Sep-2026: a 10-MINUTE window from
+// delivery, plus remaining units) and what the refund will be; this screen
+// only collects the choice and counts the window down live.
 import React, { useCallback, useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
@@ -25,9 +26,10 @@ type Line = {
   cashback_pct: number;
 };
 type State = {
-  return_window_days: number;
+  return_window_minutes: number;
   return_deadline?: string | null;
-  days_left: number;
+  seconds_left: number;
+  minutes_left: number;
   return_eligible: boolean;
   window_expired: boolean;
   items: Line[];
@@ -68,6 +70,19 @@ export default function NewReturnScreen() {
   }, [order_id]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The window is minutes long, so it has to tick. Seed from the server's
+  // `seconds_left` (never the device clock) and count down locally.
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  useEffect(() => {
+    setSecondsLeft(Number(state?.seconds_left || 0));
+  }, [state?.seconds_left]);
+  const ticking = secondsLeft > 0;
+  useEffect(() => {
+    if (!ticking) return;
+    const t = setInterval(() => setSecondsLeft((s) => (s > 0 ? s - 1 : 0)), 1000);
+    return () => clearInterval(t);
+  }, [ticking]);
 
   const key = (l: Line) => `${l.product_id}|${l.variant_id || ""}`;
   const bump = (l: Line, delta: number) => {
@@ -126,7 +141,7 @@ export default function NewReturnScreen() {
             <Feather name="clock" size={18} color={colors.textMuted} />
             <Text style={styles.infoText}>
               {state.window_expired
-                ? `The ${state.return_window_days}-day return window for this order has closed. The order is now complete.`
+                ? `The ${state.return_window_minutes}-minute return window for this order has closed. The order is now complete.`
                 : "There are no items left to return on this order."}
             </Text>
           </View>
@@ -136,8 +151,9 @@ export default function NewReturnScreen() {
           <View style={styles.windowPill}>
             <Feather name="refresh-ccw" size={13} color={colors.primary} />
             <Text style={styles.windowText}>
-              {state.days_left} day{state.days_left === 1 ? "" : "s"} left to return
-              {state.return_deadline ? ` · until ${String(state.return_deadline).slice(0, 10)}` : ""}
+              {secondsLeft > 0
+                ? `${Math.floor(secondsLeft / 60)}m ${String(secondsLeft % 60).padStart(2, "0")}s left to return`
+                : "Return window closed"}
             </Text>
           </View>
 

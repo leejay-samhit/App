@@ -85,6 +85,8 @@ from core.config import (  # noqa: E402
 )
 from core.password_recovery import password_fields  # noqa: E402
 from core import shop_money  # noqa: E402
+from core import bank  # noqa: E402
+from core import gst as _gst_engine  # noqa: E402
 
 # Assignable admin sub-roles. The four scoped ones are what the promote screen
 # offers now; manager/support/finance stay valid for admins promoted earlier.
@@ -1208,6 +1210,20 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
             # Idempotent: a parallel call already wrote the txn. Treat as success.
             pass
 
+    # Sep-2026 — the cash is in the COMPANY BANK ACCOUNT. One bank row per
+    # Razorpay receipt so Bank Ledger == Bank Statement (Group 7).
+    await bank.post_bank(
+        kind="credit",
+        amount=fee,
+        category="registration_fee",
+        description=f"Registration fee · {user.get('name') or user.get('email')}",
+        ref_key=f"REGFEE:{payload.razorpay_order_id}",
+        utr=utr or payload.razorpay_payment_id,
+        user_id=user["id"],
+        extra={"razorpay_payment_id": payload.razorpay_payment_id,
+               "razorpay_order_id": payload.razorpay_order_id},
+    )
+
     if auto_approve:
         # Trigger commission cascade + archive into approved_registrations
         fresh = await db.users.find_one({"id": user["id"]})
@@ -1749,6 +1765,17 @@ async def admin_complete_withdrawal(
         {"user_id": w["user_id"], "type": "withdrawal", "status": "processing", "amount": -w["amount"]},
         {"$set": {"status": "success", "description": desc, "reference_number": ref}},
     )
+    # Money physically left the company bank account → Group 7 debit.
+    await bank.post_bank(
+        kind="debit",
+        amount=float(w["amount"]),
+        category="withdrawal_payout",
+        description=f"Payout to {w.get('user_name') or w.get('user_email')}" + (f" · UTR {ref}" if ref else ""),
+        ref_key=f"WDLPAY:{wid}",
+        utr=ref or None,
+        user_id=w["user_id"],
+        payment_method="bank_transfer",
+    )
     await _create_notification(
         w["user_id"], "withdrawal", "Withdrawal successful",
         f"₹{int(w['amount'])} has been paid" + (f" · UTR {ref}" if ref else "."),
@@ -1797,6 +1824,16 @@ async def admin_approve_and_complete_withdrawal(
         "reference_number": ref,
         "created_at": ts,
     })
+    await bank.post_bank(
+        kind="debit",
+        amount=float(w["amount"]),
+        category="withdrawal_payout",
+        description=f"Instant payout to {w.get('user_name') or w.get('user_email')}" + (f" · UTR {ref}" if ref else ""),
+        ref_key=f"WDLPAY:{wid}",
+        utr=ref or None,
+        user_id=w["user_id"],
+        payment_method="bank_transfer",
+    )
     await _create_notification(
         w["user_id"], "withdrawal", "Withdrawal successful",
         f"₹{int(w['amount'])} has been paid" + (f" · UTR {ref}" if ref else "."),
@@ -3515,6 +3552,23 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 "cashback_pct": _cb_line_pct(product),
                 "cashback_amount": _cb_amount(line_total, _cb_line_pct(product)),
                 "free_delivery": bool(product.get("free_delivery")),
+                # ── GST snapshot (Sep-2026) ────────────────────────────
+                # Prices are GST-INCLUSIVE, so the tax is pulled OUT of
+                # `line_total` and frozen onto the order line. Checkout, the
+                # order screen and the web invoice all read these same
+                # numbers, so the customer's CGST/SGST can never differ
+                # between screens or change if the vendor edits the product.
+                **(lambda sp: {
+                    "gst_pct": sp["gst_pct"],
+                    "taxable_value": sp["base_amount"],
+                    "cgst_pct": sp["cgst_pct"],
+                    "sgst_pct": sp["sgst_pct"],
+                    "cgst_amount": sp["cgst_amount"],
+                    "sgst_amount": sp["sgst_amount"],
+                    "gst_amount": sp["total_gst"],
+                })(_gst_engine.split_inclusive(
+                    line_total, _gst_engine.clamp_gst_pct(product.get("selling_gst_pct")),
+                )),
             })
         if total <= 0:
             raise HTTPException(status_code=400, detail="Cart total invalid")
@@ -3739,6 +3793,20 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             # never mixes delivery money with product revenue or cashback.
             "goods_total": goods_total,
             "delivery_charge": delivery_charge,
+            # GST snapshot for this seller's sub-order (prices are inclusive).
+            "gst_summary": {
+                "inclusive": True,
+                "taxable_value": round(sum(float(i.get("taxable_value") or 0) for i in vitems), 2),
+                "cgst_amount": round(sum(float(i.get("cgst_amount") or 0) for i in vitems), 2),
+                "sgst_amount": round(sum(float(i.get("sgst_amount") or 0) for i in vitems), 2),
+                "total_gst": round(sum(float(i.get("gst_amount") or 0) for i in vitems), 2),
+                "delivery_gst": round(
+                    float(_gst_engine.split_inclusive(delivery_charge, 18.0)["total_gst"]), 2,
+                ) if delivery_charge > 0 else 0.0,
+                "delivery_taxable": round(
+                    float(_gst_engine.split_inclusive(delivery_charge, 18.0)["base_amount"]), 2,
+                ) if delivery_charge > 0 else 0.0,
+            },
             "delivery_free": bool((delivery_quote["per_vendor"].get(vkey) or {}).get("free")),
             "delivery_reason": (delivery_quote["per_vendor"].get(vkey) or {}).get("reason"),
             # Cashback promised on this sub-order, credited only on delivery.
@@ -3794,6 +3862,9 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 "buyer_email": user.get("email"),
                 "product_id": it["product_id"],
                 "product_name": it["name"],
+                # Sep-2026 — store the image so the vendor's order card can
+                # render a thumbnail without re-joining the catalogue.
+                "product_image_url": it.get("image_url") or "",
                 "qty": it["qty"],
                 "line_total": it["line_total"],
                 "vendor_share": it["vendor_share"],
@@ -3920,6 +3991,28 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     if online_attempt:
         from routes.order_payments import mark_attempt_consumed
         await mark_attempt_consumed(online_attempt["id"], group_id)
+        # Sep-2026 — the customer's online money physically landed in OUR
+        # bank account, so it must appear in the Bank Ledger (Group 7).
+        # It is NOT our revenue: the goods belong to the vendor, so the
+        # matching vendor payable sits in Group 2 (user/vendor liability).
+        await bank.post_bank(
+            kind="credit",
+            amount=float(online_attempt.get("online_amount") or 0),
+            category="shop_order_online",
+            description=(
+                f"Shop order paid online · {user.get('name') or user.get('email')} "
+                f"· group {group_id[:8]}"
+            ),
+            ref_key=f"ORDERPAY:{online_attempt['id']}",
+            utr=online_attempt.get("razorpay_payment_id"),
+            user_id=user["id"],
+            extra={
+                "order_group_id": group_id,
+                "razorpay_payment_id": online_attempt.get("razorpay_payment_id"),
+                "razorpay_order_id": online_attempt.get("razorpay_order_id"),
+                "vendor_ids": [o.get("vendor_id") for o in created_orders if o.get("vendor_id")],
+            },
+        )
         await db.payment_reconciliations.update_one(
             {"_id": f"PAY:{online_attempt['id']}"},
             {"$set": {
@@ -6986,6 +7079,7 @@ async def on_startup():
         # Phase 1 — idempotency for every money movement is enforced by the
         # DATABASE, so a replayed webhook / double tap cannot move money twice.
         await shop_money.ensure_indexes()
+        await bank.ensure_indexes()
         # Phase 2 — returns / inventory-restoration lookups + guards.
         from core import returns as _returns_core
         await _returns_core.ensure_indexes()
@@ -8124,7 +8218,13 @@ async def vendor_my_stats(vendor: Dict[str, Any] = Depends(require_vendor)):
         "pos_orders_today": pos_orders_today,
         "products_count": products_count,
         "published_count": published_count,
-        "wallet_balance": round(float(vendor.get("wallet_balance") or 0), 2),
+        # Sep-2026 — "WALLET" on the vendor dashboard means the SHOP wallet
+        # (`vendor_earnings`), which is what sales credit and what a
+        # settlement withdraws. It used to report the personal/referral
+        # wallet, so sales money looked like it had vanished.
+        "wallet_balance": round(float(vendor.get(shop_money.VENDOR_WALLET) or 0), 2),
+        "shop_wallet_balance": round(float(vendor.get(shop_money.VENDOR_WALLET) or 0), 2),
+        "personal_wallet_balance": round(float(vendor.get("wallet_balance") or 0), 2),
         # Jun 2026 — Cash-to-collect summary so vendors can tally their
         # drawer at closing time. `cod_pending_*` is money still out with
         # riders (placed/shipped), `cod_collected_today` is cash actually
@@ -8419,17 +8519,47 @@ async def vendor_my_sales(
             buyers_by_id[u["id"]] = u
 
     # Group by order_id so the vendor sees one card per order
+    # Sep-2026 — `vendor_sales` rows never stored a product image, so the
+    # vendor's order cards rendered blank thumbnails. Fall back to the
+    # parent order's line item (same product_id) and finally to the product
+    # catalogue, so the seller sees exactly what the customer saw.
+    order_item_images: Dict[str, Dict[str, str]] = {}
+    for oid, o in orders_by_id.items():
+        for it in o.get("items") or []:
+            if it.get("product_id") and it.get("image_url"):
+                order_item_images.setdefault(oid, {})[it["product_id"]] = it["image_url"]
+    missing_pids = list({
+        s.get("product_id") for s in sales
+        if s.get("product_id")
+        and not s.get("product_image_url")
+        and not (order_item_images.get(s.get("order_id") or "", {}).get(s.get("product_id")))
+    })
+    product_images: Dict[str, str] = {}
+    if missing_pids:
+        async for p in db.products.find(
+            {"id": {"$in": missing_pids}}, {"_id": 0, "id": 1, "image_url": 1, "images": 1},
+        ):
+            imgs = p.get("images") or []
+            product_images[p["id"]] = p.get("image_url") or (imgs[0] if imgs else "")
+
     grouped: Dict[str, Dict[str, Any]] = {}
     for s in sales:
         oid = s.get("order_id") or s.get("id")
         line_total = float(s.get("line_total") or 0)
         qty = int(s.get("qty") or 1) or 1
         unit_price = round(line_total / qty, 2) if qty else line_total
+        pid = s.get("product_id") or ""
         item = {
+            "product_id": pid,
             "name": s.get("product_name") or "Product",
             "price": unit_price,
             "qty": qty,
-            "image_url": s.get("product_image_url") or "",
+            "image_url": (
+                s.get("product_image_url")
+                or order_item_images.get(oid, {}).get(pid)
+                or product_images.get(pid)
+                or ""
+            ),
             "line_total": line_total,
         }
         if oid not in grouped:
@@ -10088,6 +10218,8 @@ app.include_router(delivery_router.router, prefix="/api")
 app.include_router(admin_passwords_router.router, prefix="/api")
 app.include_router(login_history_router.router, prefix="/api")
 app.include_router(order_payments_router.router, prefix="/api")
+from routes import delivery_partner as delivery_partner_router  # noqa: E402
+app.include_router(delivery_partner_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

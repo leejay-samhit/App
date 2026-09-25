@@ -96,9 +96,19 @@ export default function WalletScreen() {
     }
   };
   // Type-aware classification (some legacy txns store positive amount for debits like registration_fee/order).
+  // Same rule as the row renderer: the ledger's credit/debit fields decide
+  // direction, with the type list only as a legacy fallback.
   const isDebit = (t: Txn) => {
+    const a = t as any;
+    if (Number(a.debit) > 0) return true;
+    if (Number(a.credit) > 0) return false;
     if ((t.amount || 0) < 0) return true;
-    return ["withdrawal", "transfer_out", "order", "registration_fee"].includes(t.type);
+    return [
+      "withdrawal", "transfer_out", "order", "registration_fee", "admin_debit",
+      "withdrawal_hold", "delivery_charge_paid", "return_refund_debit",
+      "cashback_funding", "cashback_reversal", "vendor_sale_reversal",
+      "phone_reveal_fee", "dp_cash_remitted",
+    ].includes(t.type);
   };
   const filteredTxns = txns.filter((t) => {
     if (txFilter === "all") return true;
@@ -109,13 +119,25 @@ export default function WalletScreen() {
     cashback_earned: 0,
     pending_cashback: 0,
   });
+  // Sep-2026 — a seller's SHOP wallet lives in `vendor_earnings` on the
+  // server, not `wallet_balance`. This screen used to read the personal
+  // wallet, so sales money looked like it had vanished and withdrawals
+  // were refused as "insufficient balance". One endpoint now feeds the
+  // hero, the withdraw gate and the dashboard tile alike.
+  const [shopWallet, setShopWallet] = useState<{
+    available: number; personal_wallet: number; pending_withdrawals: number;
+    cod_to_collect: number; min_withdrawal: number; can_withdraw: boolean;
+    withdraw_blocked_reason: string; payout_promise: string; in_sync: boolean;
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [w, t, d] = await Promise.all([
+      const isVendor = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
+      const [w, t, d, sw] = await Promise.all([
         api.get<Withdrawal[]>("/withdrawals/me"),
         api.get<Txn[]>("/transactions/me"),
         api.get("/users/me/dashboard"),
+        isVendor ? api.get("/vendor/me/wallet").catch(() => null) : Promise.resolve(null),
       ]);
       setWithdrawals(w.data);
       setTxns(t.data);
@@ -123,19 +145,24 @@ export default function WalletScreen() {
         cashback_earned: Number(d.data?.cashback_earned || 0),
         pending_cashback: Number(d.data?.pending_cashback || 0),
       });
+      setShopWallet(sw ? (sw as any).data : null);
       await refresh();
     } catch {}
     finally { setLoading(false); setRefreshing(false); }
-  }, [refresh]);
+  }, [refresh, user]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const isSeller = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
 
   const onSubmit = async () => {
     setError("");
     const amt = parseFloat(amount);
+    const pot = isSeller ? (shopWallet?.available ?? 0) : (user?.wallet_balance || 0);
+    const floor = isSeller ? (shopWallet?.min_withdrawal ?? 5000) : 100;
     if (!amt || amt <= 0) { setError("Enter valid amount"); return; }
-    if (amt < 100) { setError("Minimum withdrawal amount is ₹100"); return; }
-    if (amt > (user?.wallet_balance || 0)) { setError("Insufficient balance"); return; }
+    if (amt < floor) { setError(`Minimum withdrawal amount is ${formatINR(floor)}`); return; }
+    if (amt > pot) { setError(`Insufficient balance — you have ${formatINR(pot)} available`); return; }
     setSubmitting(true);
     try {
       await api.post("/withdrawals", { amount: amt });
@@ -153,7 +180,6 @@ export default function WalletScreen() {
   // Bank withdrawals are a SELLER settlement feature. A shopper's Slangcart
   // wallet is spent inside the app on purchases (requirement: the wallet is
   // not a general-purpose money service).
-  const isSeller = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
   const isAdminUser = user?.role === "admin";
   // Jun 2026 — bank settlement is a SELLER feature only (owner's rule).
   // Customers, service providers and admins use the wallet inside the app;
@@ -179,7 +205,9 @@ export default function WalletScreen() {
           {/* Top row — balance + chips on right */}
           <View style={styles.balanceTopRow}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.balanceLabel}>AVAILABLE BALANCE</Text>
+              <Text style={styles.balanceLabel}>
+                {isSeller ? "SHOP EARNINGS · WITHDRAWABLE" : "AVAILABLE BALANCE"}
+              </Text>
               <Text
                 style={styles.balanceAmountCompact}
                 testID="wallet-balance"
@@ -189,9 +217,13 @@ export default function WalletScreen() {
                 {(() => {
                   // Admin sees only their own personal bucket here; the
                   // platform treasury lives in Admin → System Wallet.
+                  // A SELLER sees their shop wallet — the pot that sales
+                  // credit and that a settlement actually withdraws from.
                   const buckets = (user as any)?.wallet_buckets || {};
                   const value = isAdminUser
                     ? Number(buckets.referral_commission || 0)
+                    : isSeller
+                    ? Number(shopWallet?.available ?? 0)
                     : Number(user?.wallet_balance || 0);
                   return formatINR(value);
                 })()}
@@ -199,6 +231,13 @@ export default function WalletScreen() {
               {isAdminUser ? (
                 <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700", marginTop: 2, letterSpacing: 0.3 }}>
                   Personal bucket only · See System Wallet for treasury
+                </Text>
+              ) : isSeller ? (
+                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700", marginTop: 2, letterSpacing: 0.3 }}>
+                  {`Shopping wallet ${formatINR(shopWallet?.personal_wallet ?? user?.wallet_balance ?? 0)}`}
+                  {(shopWallet?.cod_to_collect ?? 0) > 0
+                    ? ` · ${formatINR(shopWallet?.cod_to_collect ?? 0)} cash to collect`
+                    : ""}
                 </Text>
               ) : (
                 <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.85)", fontWeight: "700", marginTop: 2, letterSpacing: 0.3 }}>
@@ -255,6 +294,10 @@ export default function WalletScreen() {
                         { text: "Add now", onPress: () => router.push("/payout-details" as any) },
                       ],
                     );
+                    return;
+                  }
+                  if (shopWallet && !shopWallet.can_withdraw) {
+                    Alert.alert("Settlement not available yet", shopWallet.withdraw_blocked_reason);
                     return;
                   }
                   setShowModal(true);
@@ -331,11 +374,23 @@ export default function WalletScreen() {
             // a row as debit if EITHER the amount is < 0 OR the type is
             // one of the known outgoing types. Per user request: debits
             // must always render in red, credits in green.
+            // Sep-2026 — the ledger already records direction in `credit` /
+            // `debit`, so trust that first. The type list is only a fallback
+            // for legacy rows written before those fields existed (which is
+            // why "Delivery charge paid" used to render as a green credit).
             const DEBIT_TYPES = new Set([
               "withdrawal", "transfer_out", "admin_debit", "order",
-              "vendor_payout_debit", "purchase",
+              "vendor_payout_debit", "purchase", "withdrawal_hold",
+              "delivery_charge_paid", "return_refund_debit", "cashback_funding",
+              "cashback_reversal", "vendor_sale_reversal", "registration_fee",
+              "phone_reveal_fee", "dp_cash_remitted",
             ]);
-            const isDebit = (Number(t.amount) < 0) || DEBIT_TYPES.has(t.type);
+            const anyT = t as any;
+            const isDebit = (Number(anyT.debit) > 0)
+              ? true
+              : (Number(anyT.credit) > 0)
+                ? false
+                : (Number(t.amount) < 0) || DEBIT_TYPES.has(t.type);
             const icon = t.type === "cashback_credit" ? "gift"
               : t.type === "cashback_pending" ? "clock"
               : t.type === "cashback_reversal" ? "rotate-ccw"
@@ -387,12 +442,18 @@ export default function WalletScreen() {
           <View style={styles.modalSheet}>
             <View style={styles.modalHandle} />
             <Text style={styles.modalTitle}>Schedule withdrawal</Text>
-            <Text style={styles.modalSub}>Available: {formatINR(user?.wallet_balance || 0)}{"\n"}Minimum ₹100. Funds reach your bank within 48 hours after admin approval.</Text>
+            <Text style={styles.modalSub}>
+              {`Available: ${formatINR(isSeller ? (shopWallet?.available ?? 0) : (user?.wallet_balance || 0))}`}
+              {"\n"}
+              {isSeller
+                ? `Minimum ${formatINR(shopWallet?.min_withdrawal ?? 5000)}. ${shopWallet?.payout_promise || "Approved settlements reach your bank within 24 hours on banking days."}`
+                : "Minimum ₹100. Funds reach your bank within 48 hours after admin approval."}
+            </Text>
             <TextInput
               testID="withdraw-amount-input"
               value={amount}
               onChangeText={setAmount}
-              placeholder="Enter amount in ₹ (min ₹100)"
+              placeholder={`Enter amount in ₹ (min ${formatINR(isSeller ? (shopWallet?.min_withdrawal ?? 5000) : 100)})`}
               placeholderTextColor={colors.textMuted}
               keyboardType="numeric"
               style={styles.modalInput}

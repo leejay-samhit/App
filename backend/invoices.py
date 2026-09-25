@@ -69,10 +69,41 @@ NO_GST_INVOICE_TYPES = {
 }
 
 
+def suppresses_gst(tx: Dict[str, Any]) -> bool:
+    """Sep-2026 — GST rows are shown ONLY when there is a real tax event.
+
+    This used to be a hand-maintained blocklist, so every newly-added txn
+    type (cashback, refunds, top-ups…) silently rendered a bogus 18% split.
+    Now the default is "no tax", and GST appears only for a genuine taxable
+    supply or when the row carries its own captured GST snapshot.
+    """
+    if is_tax_invoice(tx):
+        return False
+    if tx.get("gst_amount") is not None or tx.get("gross_amount") is not None:
+        return False
+    return True
+
+
 def is_invoiceable(tx: Dict[str, Any]) -> bool:
-    """Whether this txn supports an invoice/statement document."""
-    t = (tx.get("type") or "").lower()
-    return t in INVOICEABLE_TAX_INVOICE or t in INVOICEABLE_COMMISSION
+    """Whether this txn supports an invoice/statement document.
+
+    Sep-2026 — EVERY money row now gets a document. Customers kept tapping
+    cashback, refund and top-up rows only to be told "No invoice available",
+    which read as "my transaction is missing". There is exactly ONE simple
+    layout for all of them; only genuine taxable supplies (see
+    `is_tax_invoice`) additionally show the CGST/SGST break-up.
+    """
+    if not tx:
+        return False
+    if not tx.get("type"):
+        return False
+    # COD rows carry ₹0 in `amount` (the cash never touched a wallet) but the
+    # customer still needs a receipt, so fall back to the cash amounts.
+    return bool(
+        float(tx.get("amount") or 0) != 0
+        or float(tx.get("cod_amount") or 0) != 0
+        or float(tx.get("order_amount") or 0) != 0
+    )
 
 
 def is_tax_invoice(tx: Dict[str, Any]) -> bool:
@@ -191,6 +222,40 @@ def _description_for(tx: Dict[str, Any], counter_party: Optional[Dict[str, Any]]
         return "Wallet withdrawal to bank/UPI"
     if t == "system_deposit":
         return "Admin direct cash deposit to system wallet"
+    # Sep-2026 — every money row now prints a document, so each type needs
+    # a plain-English line the customer can actually understand.
+    if t == "wallet_topup":
+        return "Money added to Slangcart wallet"
+    if t == "cashback_credit":
+        return "Cashback credited on a delivered order"
+    if t == "cashback_pending":
+        return "Cashback promised — credited after delivery"
+    if t == "cashback_reversal":
+        return "Cashback recovered on a returned item"
+    if t in ("refund", "payment_reconciliation_refund"):
+        return "Refund credited to wallet"
+    if t == "return_refund_credit":
+        return "Refund for a returned item"
+    if t == "return_refund_debit":
+        return "Refund paid to customer for a returned item"
+    if t == "cod_order":
+        return "Cash on Delivery order — paid in cash to the delivery agent"
+    if t == "vendor_sale_reversal":
+        return "Sale reversed (order cancelled or returned)"
+    if t == "delivery_charge_paid":
+        return "Delivery charge paid to Slangcart"
+    if t == "delivery_charge_collected":
+        return "Delivery charge revenue (net of GST)"
+    if t == "cashback_funding":
+        return "Cashback funded to customer"
+    if t == "withdrawal_hold":
+        return "Settlement requested — amount moved to pending"
+    if t == "withdrawal_refund":
+        return "Settlement returned to wallet"
+    if t == "opening_balance":
+        return "Opening balance journal entry"
+    if t == "refund_company_funded":
+        return "Refund funded by Slangcart on the seller's behalf"
     return desc or t.replace("_", " ").title()
 
 
@@ -208,7 +273,7 @@ def _make_invoice_data(
     is_tax = is_tax_invoice(tx)
     amt = abs(float(tx.get("amount") or 0))
 
-    is_no_gst = (tx.get("type") or "") in NO_GST_INVOICE_TYPES
+    is_no_gst = suppresses_gst(tx)
     # If the txn was written with explicit gross / gst snapshots (referral
     # payouts in particular), use THOSE — that's the ground truth captured
     # at credit-time. Recomputing from `amount` (net) gives a wrong gross
@@ -291,7 +356,7 @@ def invoice_html(
     # Skip GST rows entirely for internal-app movements (UTR deposit, admin
     # wallet adjustment, peer transfer, withdrawal). For these, the invoice
     # is just a receipt of the gross transfer with no tax breakdown.
-    suppress_gst = (tx.get("type") or "") in NO_GST_INVOICE_TYPES
+    suppress_gst = suppresses_gst(tx)
     inter = (not suppress_gst) and gst["igst"] > 0
     gst_rows = ""
     if suppress_gst:
@@ -403,7 +468,7 @@ def invoice_pdf(
     # Same suppression rule as the HTML invoice — internal app movements
     # (UTR deposit, admin adjustment, peer transfer, withdrawal) print
     # without any GST breakdown.
-    suppress_gst = (tx.get("type") or "") in NO_GST_INVOICE_TYPES
+    suppress_gst = suppresses_gst(tx)
     inter = (not suppress_gst) and gst["igst"] > 0
 
     buf = BytesIO()

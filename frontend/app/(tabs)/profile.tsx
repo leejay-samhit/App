@@ -142,6 +142,9 @@ export default function ProfileScreen() {
   // Service Providers + Vendors are locked to "everyone" by the backend.
   const [privacyVis, setPrivacyVis] = useState<string>(((user as any)?.profile_visibility) || "everyone");
   const [privacyLocked, setPrivacyLocked] = useState<boolean>(false);
+  // Sep-2026 — an approved delivery partner is a rider, never a seller, so
+  // the vendor / service-provider entries are hidden for him.
+  const isApprovedDP = !!(user as any)?.is_delivery_partner_approved;
   const [privacySaving, setPrivacySaving] = useState<string | null>(null);
   useEffect(() => {
     (async () => {
@@ -342,9 +345,55 @@ export default function ProfileScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* ───── SELL ON SLANGCART GROUP ───── */}
+          {/* ───── SELL ON SLANGCART GROUP ─────
+              Sep-2026 — an APPROVED delivery partner is a rider, not a
+              seller: the "Become a Vendor" / "Become a Service Provider"
+              entries are hidden for him (owner's rule) and replaced by a
+              link to his delivery dashboard. */}
+          {isApprovedDP ? (
+            <>
+              <Text style={styles.groupLabel}>DELIVERY</Text>
+              <View style={styles.groupCard}>
+                <TouchableOpacity
+                  onPress={() => router.push("/delivery/dashboard" as any)}
+                  style={styles.rowItem}
+                  testID="profile-delivery-link"
+                >
+                  <View style={[styles.kycDot, { backgroundColor: colors.success }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.kycTitle}>Delivery Partner</Text>
+                    <Text style={styles.kycSub}>APPROVED · TAP TO OPEN DASHBOARD</Text>
+                  </View>
+                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+          <>
           <Text style={styles.groupLabel}>SELL ON SLANGCART</Text>
           <View style={styles.groupCard}>
+            <TouchableOpacity
+              onPress={() => router.push("/delivery/apply" as any)}
+              style={styles.rowItem}
+              testID="profile-delivery-apply-link"
+            >
+              {(() => {
+                const st = (user as any)?.dp_status as string | undefined;
+                const dot = st === "pending" ? colors.warning
+                  : st === "rejected" ? "#B3261E" : "#94A3B8";
+                return <View style={[styles.kycDot, { backgroundColor: dot }]} />;
+              })()}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>Become a Delivery Partner</Text>
+                <Text style={styles.kycSub}>
+                  {(user as any)?.dp_status === "pending" ? "APPLICATION UNDER REVIEW"
+                    : (user as any)?.dp_status === "rejected" ? "APPLY AGAIN"
+                    : "DELIVER ORDERS IN YOUR AREA"}
+                </Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
             <TouchableOpacity
               onPress={() => {
                 const u: any = user;
@@ -439,6 +488,8 @@ export default function ProfileScreen() {
               </>
             ) : null}
           </View>
+          </>
+          )}
 
           {/* ───── PRIVACY GROUP (June 2026) ─────
               Lets normal users restrict who can see their profile picture.

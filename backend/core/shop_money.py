@@ -33,11 +33,14 @@ from typing import Any, Dict, List, Optional
 from core.db import db
 from core.utils import now_utc
 from core import seq_ids
+from core import gst as gst_engine
 
 logger = logging.getLogger(__name__)
 
 VENDOR_WALLET = "vendor_earnings"          # the vendor wallet field
 CUSTOMER_WALLET = "wallet_balance"
+# Delivery charges are collected GST-INCLUSIVE at 18%.
+DELIVERY_GST_PCT = 18.0
 
 
 class InsufficientFunds(Exception):
@@ -349,12 +352,22 @@ async def settle_delivery_fee(
         return {"settled": True, "amount": 0.0, "reason": "already_settled"}
 
     # Treasury + Revenue Ledger (Group 1 · delivery-charge revenue).
+    #
+    # Sep-2026 — the delivery charge the customer paid is GST-INCLUSIVE, so
+    # it is split before it is recognised:
+    #     revenue (Group 1) = fee × 100/118
+    #     GST     (Group 3) = fee × 18/118
+    # Revenue + GST always add back to exactly the cash collected, so there
+    # is one movement and no double entry.
+    split = gst_engine.split_inclusive(fee, DELIVERY_GST_PCT)
+    rev_base = round(float(split["base_amount"]), 2)
+    rev_gst = round(float(split["total_gst"]), 2)
     await credit_admin_bucket("delivery_collected", fee, also_total_earned=False)
     await post(
         group="revenue_ledger",
         txn_type="delivery_charge_collected",
-        amount=fee,
-        credit=fee,
+        amount=rev_base,
+        credit=rev_base,
         idempotency_key=f"DELREV:{order_id}",
         user_id=admin_id,
         vendor_id=vendor_id,
@@ -362,9 +375,34 @@ async def settle_delivery_fee(
         order_number=order.get("order_number"),
         destination_wallet="system_treasury",
         delivery_charge=fee,
+        gst=rev_gst,
         payment_method=order.get("paid_via"),
-        description=f"Delivery charge revenue · order {order.get('order_number') or order_id}",
+        description=(
+            f"Delivery charge revenue · order {order.get('order_number') or order_id} "
+            f"· ₹{fee:.2f} incl. GST ({DELIVERY_GST_PCT:g}%)"
+        ),
+        extra={"gross_amount": fee, "gst_amount": rev_gst, "gst_pct": DELIVERY_GST_PCT},
     )
+    if rev_gst > 0.009:
+        await post(
+            group="gst_ledger",
+            txn_type="gst_collected",
+            amount=rev_gst,
+            credit=rev_gst,
+            idempotency_key=f"DELGST:{order_id}",
+            user_id=admin_id,
+            vendor_id=vendor_id,
+            order_id=order_id,
+            order_number=order.get("order_number"),
+            destination_wallet="system_treasury",
+            gst=rev_gst,
+            description=(
+                f"GST {DELIVERY_GST_PCT:g}% on delivery charge ₹{fee:.2f} "
+                f"· order {order.get('order_number') or order_id}"
+            ),
+            extra={"gst_kind": "delivery_charge", "gross_amount": fee,
+                   "taxable_value": rev_base, "gst_pct": DELIVERY_GST_PCT},
+        )
     await db.orders.update_one(
         {"id": order_id},
         {"$set": {
@@ -432,6 +470,40 @@ async def reverse_order_money(
             )
             if row:
                 await credit_admin_bucket("delivery_collected", -fee, also_total_earned=False)
+                # Reverse the revenue + GST recognition too, so Group 1 and
+                # Group 3 never keep income for a delivery that was undone.
+                rsplit = gst_engine.split_inclusive(fee, DELIVERY_GST_PCT)
+                await post(
+                    group="revenue_ledger",
+                    txn_type="delivery_revenue_reversal",
+                    amount=round(float(rsplit["base_amount"]), 2),
+                    debit=round(float(rsplit["base_amount"]), 2),
+                    idempotency_key=f"DELREV_REV:{order_id}",
+                    user_id=admin_id,
+                    vendor_id=vendor_id,
+                    order_id=order_id,
+                    order_number=order.get("order_number"),
+                    source_wallet="system_treasury",
+                    delivery_charge=fee,
+                    description=f"Delivery revenue reversed — {reason}",
+                    extra={"original_type": "delivery_charge_collected"},
+                )
+                if float(rsplit["total_gst"]) > 0.009:
+                    await post(
+                        group="gst_ledger",
+                        txn_type="gst_reversal",
+                        amount=round(float(rsplit["total_gst"]), 2),
+                        debit=round(float(rsplit["total_gst"]), 2),
+                        idempotency_key=f"DELGST_REV:{order_id}",
+                        user_id=admin_id,
+                        vendor_id=vendor_id,
+                        order_id=order_id,
+                        order_number=order.get("order_number"),
+                        source_wallet="system_treasury",
+                        gst=round(float(rsplit["total_gst"]), 2),
+                        description=f"Delivery GST reversed — {reason}",
+                        extra={"gst_kind": "delivery_charge", "original_type": "gst_collected"},
+                    )
                 await db.orders.update_one(
                     {"id": order_id},
                     {"$set": {"delivery_settled": False, "delivery_settlement_status": "reversed"}},

@@ -34,7 +34,7 @@ from core.razorpay import (
 )
 from core.security import get_current_user
 from core.utils import now_utc, get_settings
-from core import seq_ids, shop_money
+from core import seq_ids, shop_money, bank
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -210,21 +210,16 @@ async def _credit_topup(
     short_code = row.get("reference_number") or row.get("id")
     # Asset side: the cash is in the company account, the wallet balance is
     # the matching liability — company net worth is unchanged by a top-up.
-    await db.bank_ledger.update_one(
-        {"topup_id": attempt["id"]},
-        {"$setOnInsert": {
-            "id": str(uuid.uuid4()),
-            "kind": "credit",
-            "amount": amount,
-            "description": f"Wallet top-up by {user.get('name') or user.get('email')} ({short_code})",
-            "category": "wallet_topup",
-            "utr": razorpay_payment_id,
-            "happened_at": ts,
-            "created_at": ts,
-            "user_id": user["id"],
-            "topup_id": attempt["id"],
-        }},
-        upsert=True,
+    await bank.post_bank(
+        kind="credit",
+        amount=amount,
+        category="wallet_topup",
+        description=f"Wallet top-up by {user.get('name') or user.get('email')} ({short_code})",
+        ref_key=f"TOPUP:{attempt['id']}",
+        utr=razorpay_payment_id,
+        user_id=user["id"],
+        happened_at=ts,
+        extra={"topup_id": attempt["id"]},
     )
     try:
         from core.notifications import create_notification

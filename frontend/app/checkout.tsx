@@ -140,15 +140,22 @@ export default function CheckoutScreen() {
   const [pendingPay, setPendingPay] = useState<
     { payment_id: string; online_amount: number; wallet_amount: number; total: number } | null
   >(null);
+  // GST is computed SERVER-SIDE on /cart (prices are GST-inclusive) — the
+  // screen only prints it, so the app can never disagree with the invoice.
+  const [gstSummary, setGstSummary] = useState<{
+    taxable_value: number; cgst_amount: number; sgst_amount: number;
+    total_gst: number; by_rate: any[];
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
       const [cRes, meRes, pRes] = await Promise.all([
-        api.get<{ items: CartItem[] }>("/cart"),
+        api.get<{ items: CartItem[]; gst_summary?: any }>("/cart"),
         api.get<any>("/auth/me"),
         api.get<any>("/orders/payment/pending").catch(() => ({ data: { pending: null } })),
       ]);
       setItems(cRes.data?.items || []);
+      setGstSummary(cRes.data?.gst_summary || null);
       const bal = Number(meRes.data?.wallet_balance || 0);
       setWalletBalance(bal);
       setPendingPay(pRes.data?.pending || null);
@@ -619,6 +626,43 @@ export default function CheckoutScreen() {
             <Text style={styles.breakdownLabel}>Items subtotal</Text>
             <Text style={styles.breakdownValue}>{formatINR(goodsTotal)}</Text>
           </View>
+          {/* Sep-2026 — prices INCLUDE GST, so show the customer exactly
+              what tax sits inside the amount they are paying. Every figure
+              is computed by the server (one calculator) and simply printed
+              here, so the app, the order and the web invoice always agree. */}
+          {gstSummary && gstSummary.total_gst > 0 ? (
+            <View style={styles.gstBox} testID="checkout-gst-breakdown">
+              <View style={styles.gstHeaderRow}>
+                <Feather name="file-text" size={12} color={colors.textMuted} />
+                <Text style={styles.gstHeaderText}>TAX BREAK-UP (INCLUDED IN PRICE)</Text>
+              </View>
+              <View style={styles.gstRow}>
+                <Text style={styles.gstLabel}>Taxable value</Text>
+                <Text style={styles.gstValue}>{formatINR(gstSummary.taxable_value)}</Text>
+              </View>
+              {(gstSummary.by_rate || []).map((r: any) => (
+                <View key={`rate-${r.gst_pct}`}>
+                  <View style={styles.gstRow}>
+                    <Text style={styles.gstLabel}>{`CGST ${r.cgst_pct ?? r.gst_pct / 2}% (on ${formatINR(r.taxable_value)})`}</Text>
+                    <Text style={styles.gstValue}>{formatINR(r.cgst_amount)}</Text>
+                  </View>
+                  <View style={styles.gstRow}>
+                    <Text style={styles.gstLabel}>{`SGST ${r.sgst_pct ?? r.gst_pct / 2}% (on ${formatINR(r.taxable_value)})`}</Text>
+                    <Text style={styles.gstValue}>{formatINR(r.sgst_amount)}</Text>
+                  </View>
+                </View>
+              ))}
+              <View style={[styles.gstRow, styles.gstTotalRow]}>
+                <Text style={styles.gstTotalLabel}>Total GST</Text>
+                <Text style={styles.gstTotalValue}>{formatINR(gstSummary.total_gst)}</Text>
+              </View>
+              {deliveryTotal > 0 ? (
+                <Text style={styles.gstFootnote}>
+                  Delivery charge also includes 18% GST
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
           <View style={styles.breakdownRow} testID="checkout-delivery-row">
             <Text style={styles.breakdownLabel}>
               Delivery{deliveryCapped ? ` (capped at ${formatINR(moneyCfg.delivery_cart_max)})` : ""}
@@ -1016,6 +1060,21 @@ const styles = StyleSheet.create({
   breakdownRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, paddingVertical: 7 },
   breakdownLabel: { fontSize: 13, color: colors.textMuted, fontWeight: "600" },
   breakdownValue: { fontSize: 13, color: colors.textMain, fontWeight: "800" },
+  // Sep-2026 — GST break-up card (prices are GST-inclusive).
+  gstBox: {
+    marginHorizontal: 12, marginTop: 4, marginBottom: 2, paddingVertical: 8,
+    paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surfaceMuted,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  gstHeaderRow: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 4 },
+  gstHeaderText: { fontSize: 9.5, letterSpacing: 0.8, fontWeight: "900", color: colors.textMuted },
+  gstRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 2.5 },
+  gstLabel: { fontSize: 11.5, color: colors.textMuted, fontWeight: "600", flex: 1 },
+  gstValue: { fontSize: 11.5, color: colors.textMain, fontWeight: "700" },
+  gstTotalRow: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: 4, paddingTop: 5 },
+  gstTotalLabel: { fontSize: 12, color: colors.textMain, fontWeight: "800", flex: 1 },
+  gstTotalValue: { fontSize: 12, color: colors.textMain, fontWeight: "900" },
+  gstFootnote: { fontSize: 10, color: colors.textMuted, fontWeight: "600", marginTop: 4 },
   cashbackBanner: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, padding: 10, backgroundColor: "#F0FDF4", borderWidth: 1, borderColor: "#BBF7D0", borderRadius: 12 },
   cashbackBannerText: { flex: 1, fontSize: 12, fontWeight: "700", color: "#15803D" },
   totalRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, backgroundColor: colors.brand100, borderRadius: 12, marginTop: 4 },

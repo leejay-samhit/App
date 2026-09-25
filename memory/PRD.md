@@ -1884,3 +1884,61 @@ the /wallet-topup + product-editor screens verified on mobile.
 - /admin/system/account-reset: self-reset now allowed in mode=clear (wipes own test data, keeps login); self-delete still blocked with clearer message
 - Clear now also zeroes wallet_buckets so wallet truly reads ₹0
 - E2E test: backend/tests/test_self_account_reset.py (7/7 PASS, temp admin + temp danger PIN, fully restored after)
+
+## Sep-2026 Money/GST Rework — Phases 1-5 DONE (42/42 E2E pass)
+
+Verification: `backend/tests/verify_sep2026_money.py` (42 checks, all pass)
+Backfill:     `backend/tests/backfill_bank_ledger.py` (idempotent)
+
+### Phase 1 — Money core
+- NEW `core/bank.py`: Group 7 bank ledger. One idempotent row (`ref_key` unique)
+  per real bank event, so **bank balance = Σcredits − Σdebits = bank statement**.
+- Razorpay receipts now ALL land in bank_ledger: shop orders paid online,
+  registration fees, wallet top-ups. Payouts write debits.
+- Backfilled history: 51 order receipts, 3 reg fees, 27 top-ups keyed.
+- **Vendor wallet unified**: shop money lives in `users.vendor_earnings`. The
+  Vendor Wallet screen, Dashboard WALLET tile and withdraw gate now all read
+  `/vendor/me/wallet` (ledger-derived). Was reading `wallet_balance` → money
+  "invisible" + false "insufficient balance".
+- Group 2 liability now includes **vendor_payable** (money owed to sellers).
+- Group 2 drilldown lists EVERY liability row (was 3 legacy types → empty list).
+- Net worth = bank + cash_on_hand + receivables − customer wallet − vendor
+  payable − pending withdrawals − GST payable.
+- Vendor Net Worth "Withdraw" now routes to the wallet; min ₹5,000; 24h promise.
+
+### Phase 2 — Delivery charge + GST
+- Delivery charge is GST-INCLUSIVE 18%: revenue row = fee×100/118 (Group 1),
+  GST row = fee×18/118 (Group 3, `gst_kind=delivery_charge`). Reversal undoes both.
+- Free delivery → no charge, no revenue row, no net-worth impact.
+- Registration cash (offline/UPI-manual) + un-remitted COD = `cash_on_hand`,
+  reported beside the bank balance, never mixed into it.
+- Checkout shows Taxable value / CGST% / SGST% / Total GST, computed by the
+  server on `GET /cart` (`gst_summary`, rate-wise). Frozen onto order lines
+  + `orders.gst_summary` so app/order/invoice can never disagree.
+
+### Phase 3 — Transactions & one invoice format
+- `invoices.is_invoiceable` → EVERY money row gets a document (was a blocklist,
+  so cashback/refund/top-up rows said "no invoice available").
+- GST rows now suppressed BY DEFAULT (`suppresses_gst`) and shown only for a
+  real taxable supply — no more bogus 18% on internal movements.
+- Plain-English descriptions added for all 15+ money types.
+
+### Phase 4 — Return retiming
+- Customer window: **10 minutes** from delivery (`return_window_minutes`).
+- Vendor window: **24 hours** (`return_vendor_window_hours`) — `vendor_can_act`.
+- Return screen counts down live from the server's `seconds_left`.
+- Refund stays vendor wallet → customer wallet; delivery charge never refunded.
+- NEW `POST /admin/returns/{id}/refund-from-company`: admin covers a short
+  seller from company net worth, booked as a recoverable vendor outstanding.
+
+### Phase 5 — Vendor orders UX
+- `vendor_sales` now stores `product_image_url`; older rows fall back to the
+  parent order's item image, then the catalogue. Images no longer blank.
+- Vendor order items are tappable → product page (same as the customer side).
+
+### STILL PENDING
+- Phase 6: Delivery Partner role (apply, admin vendor-mapping, order mgmt,
+  net worth + wallet, COD collected → wallet, Pay-To-Admin via Razorpay
+  webhook → Group 7 + Group 2 vendor-wise split, Excel, restricted nav,
+  min withdrawal ₹1000, no earnings per delivery)
+- Phase 7: Web parity pass on everything above

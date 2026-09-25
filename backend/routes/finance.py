@@ -158,6 +158,17 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     shop_reversed = await _sum_amount({"type": "shop_commission_reversal", "status": "success"})
     shop_revenue = shop_rev_agg - abs(shop_reversed)
 
+    # Sep-2026 — DELIVERY CHARGE REVENUE (the only slice of a marketplace
+    # order that is genuinely ours). Rows are written net of 18% GST by
+    # `shop_money.settle_delivery_fee`; the GST half lands in Group 3.
+    # Free-delivery orders write no row at all, so they correctly contribute
+    # ₹0 revenue and ₹0 net worth.
+    delivery_rev_agg = await _sum_amount({
+        "type": "delivery_charge_collected", "status": {"$in": PAID},
+    })
+    delivery_reversed = await _sum_amount({"type": "delivery_revenue_reversal", "status": {"$in": PAID}})
+    delivery_revenue = round(delivery_rev_agg - abs(delivery_reversed), 2)
+
     # Bug-fix · 2026-05-31: platform_fee_revenue is NOT external revenue —
     # it's the 18% withheld INTERNALLY when L1-L10 payouts fire. Adding it
     # to gross_revenue double-counted the same rupee in both Group 1
@@ -169,7 +180,7 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     # sub-bucket so admins can see what portion of payouts the platform
     # retained, but it no longer flows into the Bank Tally inflow.
     gross_revenue = round(
-        registration_revenue + service_revenue + shop_revenue,
+        registration_revenue + service_revenue + shop_revenue + delivery_revenue,
         2,
     )
 
@@ -196,6 +207,19 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
         {"$group": {"_id": None, "sum": {"$sum": "$wallet_balance"}}},
     ]).to_list(1)
     user_wallet_balance = float((user_balance_agg or [{}])[0].get("sum") or 0)
+
+    # Sep-2026 — VENDOR PAYABLE is a liability too. `users.vendor_earnings`
+    # is the shop wallet: money already collected from customers that we owe
+    # sellers until they withdraw it. Leaving it out made every marketplace
+    # order look like company profit.
+    vendor_payable_agg = await db.users.aggregate([
+        {"$match": {"vendor_earnings": {"$gt": 0}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$vendor_earnings"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    vendor_payable = round(float((vendor_payable_agg or [{}])[0].get("sum") or 0), 2)
+    vendor_payable_count = int((vendor_payable_agg or [{}])[0].get("count") or 0)
+
+    total_liability = round(user_wallet_balance + vendor_payable, 2)
 
     # ── Group 3 — GST Ledger ──────────────────────────────────────────
     # Business rule (June-2026): the ₹18-of-₹118 ENTRY GST is recognised
@@ -287,20 +311,15 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     debt_total = float((debt_agg or [{}])[0].get("sum")   or 0)
     debt_count = int((debt_agg or [{}])[0].get("count") or 0)
 
-    # ── Group 7 — Bank Ledger ─────────────────────────────────────────
-    bank_in = await db.bank_ledger.aggregate([
-        {"$match": {"kind": "credit"}},
-        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
-    ]).to_list(1)
-    bank_credits = float((bank_in or [{}])[0].get("sum") or 0)
-
-    bank_out = await db.bank_ledger.aggregate([
-        {"$match": {"kind": "debit"}},
-        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
-    ]).to_list(1)
-    bank_debits = float((bank_out or [{}])[0].get("sum") or 0)
-
-    bank_balance = round(bank_credits - bank_debits, 2)
+    # ── Group 7 — Bank Ledger (Sep-2026: the ONLY cash source of truth) ──
+    # Every rupee that entered or left the company bank account has exactly
+    # one row in `bank_ledger`, so this figure IS the bank statement.
+    from core import bank as bank_engine
+    bank_tot = await bank_engine.totals()
+    bank_credits = bank_tot["credits"]
+    bank_debits = bank_tot["debits"]
+    bank_balance = bank_tot["balance"]
+    bank_by_category = await bank_engine.by_category()
 
     # ── Reversals & Adjustments aggregate (for the Bank-Tally reconciliation
     # at the top of the System Wallet). Reversals are stored with amount as
@@ -343,12 +362,43 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     neg_adj = max(0.0, -adjustments_amount)
     abs_reversals = abs(reversals_amount)
 
-    bank_tally_in  = round(gross_revenue + utr_deposits_total + bank_credits + pos_adj, 2)
-    bank_tally_out = round(
-        total_withdrawals_settled + bank_debits + abs_reversals + neg_adj + total_expenses,
-        2,
-    )
-    bank_tally_net = round(bank_tally_in - bank_tally_out, 2)
+    # Sep-2026 — BANK TALLY IS NOW THE BANK LEDGER, FULL STOP.
+    # It used to be re-derived from revenue tables, which (a) double-counted
+    # every Razorpay receipt once bank rows existed and (b) could never be
+    # reconciled against a real statement. Now:
+    #
+    #     inflow  = Σ bank_ledger credits      (money that actually arrived)
+    #     outflow = Σ bank_ledger debits       (money that actually left)
+    #     net     = the bank balance           (== bank statement)
+    #
+    # Cash that has NOT gone through the bank (offline registration cash,
+    # COD still with sellers) is reported separately as `cash_on_hand` so
+    # the two are never mixed.
+    bank_tally_in = bank_credits
+    bank_tally_out = bank_debits
+    bank_tally_net = bank_balance
+
+    # Cash-on-hand — physical / non-bank money the company holds. Offline
+    # cash + UPI-manual joinings are collected by hand, so they are cash,
+    # not bank. Shown next to the bank balance, never added into it.
+    cash_reg_agg = await db.transactions.aggregate([
+        {"$match": {"type": "registration_fee", "status": {"$in": PAID}}},
+        {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "_u"}},
+        {"$unwind": {"path": "$_u", "preserveNullAndEmptyArrays": True}},
+        {"$match": {"_u.registration_source": {"$in": ["offline_cash", "upi_manual"]}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$amount"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    cash_registration = round(float((cash_reg_agg or [{}])[0].get("sum") or 0), 2)
+    cash_registration_count = int((cash_reg_agg or [{}])[0].get("count") or 0)
+
+    # COD cash physically held by sellers / delivery partners, not yet remitted.
+    cod_agg = await db.orders.aggregate([
+        {"$match": {"status": "delivered", "cod_due": {"$gt": 0}, "cod_remitted": {"$ne": True}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$cod_due"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    cod_in_field = round(float((cod_agg or [{}])[0].get("sum") or 0), 2)
+    cod_in_field_count = int((cod_agg or [{}])[0].get("count") or 0)
+    cash_on_hand = round(cash_registration + cod_in_field, 2)
 
     # Bug-3 fix · 2026-05-30: Use the reconciliation-aware Bank Tally Net
     # (true cash on hand) as the asset component instead of just Group-7's
@@ -360,9 +410,18 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     #             − User wallet balance (liability — we owe users)
     #             − Pending withdrawals (liability — approved payouts queued)
     #             − GST payable (liability — owed to govt)
+    # Sep-2026 net worth — assets we hold minus every rupee we owe:
+    #
+    #   Net Worth = bank balance (Group 7, == bank statement)
+    #             + cash on hand (offline cash + COD not yet remitted)
+    #             + pending collections (receivables)
+    #             − customer wallet liability (Group 2)
+    #             − vendor payable liability  (Group 2)
+    #             − pending withdrawals       (Group 6)
+    #             − GST payable               (Group 3)
     net_worth = round(
-        bank_tally_net + pending_collections
-        - user_wallet_balance - pending_withdrawals - gst_payable,
+        bank_balance + cash_on_hand + pending_collections
+        - user_wallet_balance - vendor_payable - pending_withdrawals - gst_payable,
         2,
     )
 
@@ -372,6 +431,7 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "service":      round(service_revenue, 2),
             "platform_fee": round(platform_fee_revenue, 2),
             "shop":         round(shop_revenue, 2),
+            "delivery":     delivery_revenue,
             "gross":        gross_revenue,
             # NEW: per-source breakdown of joinings so admins can see how
             # much came via Razorpay vs UPI manual vs Offline cash.
@@ -386,6 +446,10 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "total_reward_credits":       round(total_reward_credits, 2),
             "total_withdrawals_settled":  round(total_withdrawals_settled, 2),
             "available_user_balance":     round(user_wallet_balance, 2),
+            # Sep-2026 — vendor payables are a liability of the same kind.
+            "vendor_payable":             vendor_payable,
+            "vendor_payable_sellers":     vendor_payable_count,
+            "total_liability":            total_liability,
         },
         "group_3_gst": {
             "collected": round(gst_collected, 2),
@@ -414,6 +478,8 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "credits": round(bank_credits, 2),
             "debits":  round(bank_debits, 2),
             "balance": bank_balance,
+            "by_category": bank_by_category,
+            "note": "Every Razorpay receipt and every payout has one row here — this equals the bank statement.",
         },
         "group_8_refunds": {
             "total":                  round(refund_total, 2),
@@ -434,16 +500,28 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "reversals_amount": round(abs_reversals, 2),
             "adjustments_count":  adjustments_count,
             "adjustments_amount": round(adjustments_amount, 2),
-            "formula": "Inflow (revenue + UTR + bank credits + +adjust) − Outflow (withdrawals + bank debits + reversals + −adjust)",
+            "formula": "Inflow (bank ledger credits) − Outflow (bank ledger debits) = bank statement balance",
+        },
+        "cash_on_hand": {
+            "total":                cash_on_hand,
+            "registration_cash":    cash_registration,
+            "registration_count":   cash_registration_count,
+            "cod_with_collectors":  cod_in_field,
+            "cod_orders":           cod_in_field_count,
+            "note": "Physical cash the company holds — offline/UPI-manual joinings plus COD not yet remitted. Kept out of the bank balance.",
         },
         "master": {
             "pending_collections": round(pending_collections, 2),
             "net_worth":           net_worth,
-            "formula":             "bank_tally_net + pending − user_wallet − pending_withdrawals − gst_payable",
+            "formula":             "bank_balance + cash_on_hand + pending − customer_wallet − vendor_payable − pending_withdrawals − gst_payable",
             "components": {
+                "bank_balance":        bank_balance,
                 "bank_tally_net":      bank_tally_net,
+                "cash_on_hand":        cash_on_hand,
                 "pending_collections": round(pending_collections, 2),
                 "user_wallet_balance": round(user_wallet_balance, 2),
+                "vendor_payable":      vendor_payable,
+                "total_liability":     total_liability,
                 "pending_withdrawals": round(pending_withdrawals, 2),
                 "gst_payable":         gst_payable,
             },
@@ -489,6 +567,12 @@ async def admin_finance_group_transactions(
             "description":  t.get("description") or "",
             "source":       t.get("source"),
             "user_id":      t.get("user_id"),
+            "vendor_id":    t.get("vendor_id"),
+            "shop_name":    t.get("shop_name"),
+            "order_number": t.get("order_number"),
+            "wallet":       "vendor" if t.get("wallet_impact") == "vendor_earnings_only" else "customer",
+            "credit":       float(t.get("credit") or 0),
+            "debit":        float(t.get("debit") or 0),
             "reversed_by":  t.get("reversed_by"),
             "reverses":     t.get("reverses"),
             "created_at":   t.get("created_at"),
@@ -502,6 +586,8 @@ async def admin_finance_group_transactions(
                 "phone_reveal_invoice", "service_request_fee",
                 "platform_fee_collected",
                 "shop_purchase", "shop_revenue", "shopping_margin", "shop_commission",
+                # Sep-2026 — delivery revenue (net of 18% GST) belongs here.
+                "delivery_charge_collected", "delivery_revenue_reversal",
             ]},
             "status": {"$in": PAID},
         }
@@ -509,14 +595,37 @@ async def admin_finance_group_transactions(
         subtotal = sum(float(r.get("amount") or 0) for r in rows)
         return {"title": "Group 1 · Revenue Ledger", "subtotal": round(subtotal, 2), "items": [_shape_txn(r) for r in rows]}
 
-    # ── Group 2 — User Liability Wallet (referral payouts + withdrawals) ──
+    # ── Group 2 — Liability wallet (customer wallets + vendor payables) ──
+    # Sep-2026 — this used to match only 3 legacy referral types, so the
+    # group showed a correct total with an empty list ("money untraceable").
+    # It now lists EVERY row that moves a liability wallet: vendor sale
+    # credits, top-ups, cashback, refunds, withdrawals and adjustments.
     if group_id == "group_2_liability":
         rows = await db.transactions.find({
-            "type": {"$in": ["referral_payout", "withdrawal", "direct_signup_credit"]},
-            "status": {"$in": PAID},
+            "type": {"$in": [
+                # customer wallet
+                "referral_payout", "direct_signup_credit", "wallet_topup",
+                "cashback_credit", "cashback_reversal", "cashback_pending",
+                "refund", "return_refund_credit", "payment_reconciliation_refund",
+                "transfer_in", "transfer_out", "order",
+                "admin_credit", "admin_debit",
+                # vendor (shop) wallet
+                "vendor_sale", "vendor_sale_reversal", "return_refund_debit",
+                "cashback_funding", "cashback_funding_refund",
+                "vendor_adjustment_credit", "vendor_adjustment_debit",
+                # settlement out of either wallet
+                "withdrawal", "withdrawal_hold", "withdrawal_refund",
+            ]},
+            "status": {"$in": PAID + ["processing", "pending"]},
         }).sort("created_at", -1).limit(limit).to_list(limit)
+        for r in rows:
+            r["level"] = "vendor" if r.get("wallet_impact") == "vendor_earnings_only" else "customer"
         subtotal = sum(float(r.get("amount") or 0) for r in rows)
-        return {"title": "Group 2 · User Liability Wallet", "subtotal": round(subtotal, 2), "items": [_shape_txn(r) for r in rows]}
+        return {
+            "title": "Group 2 · Liability Wallet (customers + vendors)",
+            "subtotal": round(subtotal, 2),
+            "items": [_shape_txn(r) for r in rows],
+        }
 
     # ── Group 3 — GST Ledger ─────────────────────────────────────────
     # Entry GST is DERIVED per Razorpay joining (fee × 18/118) so every

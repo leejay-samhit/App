@@ -9259,3 +9259,23 @@ agent_communication:
       tester's hardening note: _credit_topup can no longer leave an attempt
       marked paid with no money — it returns the existing credit or hands
       the attempt back as recoverable.
+
+  - agent: "main"
+    message: |
+      Sep 2026 fork — FULL E2E VERIFICATION of the untested 7-phase drop
+      (cleanups, bank_ledger, GST checkout, unified invoices, 10-min/24-h
+      returns, vendor order thumbnails, Delivery Partner role).
+      testing_agent result: ALL GREEN — 253/254 backend assertions across
+      verify_phase1_money (56/56), verify_sep2026_money (42/42),
+      verify_delivery_partner (40/40), verify_wallet_topup (23/23),
+      test_self_account_reset (pass), plus RBAC probes
+      (/api/gst/compute 401 anon / 403 buyer / 200 admin+vendor; admin-DP
+      endpoints 401/403/200; DP endpoints 403 for buyer & vendor).
+      Frontend mobile 390x844: shop + wallet render clean, chip contrast
+      readable, +/- signs correct.
+      Only finding was a STALE TEST, not a product bug:
+      verify_phase2_returns.py still asserted a multi-day return window.
+      Fixed to the 10-minute rule (11-min back-date for expiry, 2-min
+      back-date + minutes_left >= 7 for in-window). Re-run: 93/93 PASS.
+      Razorpay exercised via the server-side mock token path (pay_MOCK_*) —
+      no real charges. Push cannot deliver in preview.

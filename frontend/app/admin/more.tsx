@@ -16,6 +16,7 @@ const ITEMS = [
   { icon: "message-square", label: "Support tickets", route: "/admin/tickets" },
   { icon: "credit-card", label: "Payment gateway (Razorpay)", route: "/admin/payment-gateway" },
   { icon: "shopping-bag", label: "Vendor applications", route: "/admin/vendor-applications" },
+  { icon: "truck", label: "Delivery partners", route: "/admin/delivery-partners" },
   { icon: "edit-3", label: "Vendor edit requests", route: "/admin/vendor-edit-requests" },
   { icon: "briefcase", label: "Service applications", route: "/admin/service-applications" },
   { icon: "grid", label: "Service Application Management", route: "/admin/service-management" },

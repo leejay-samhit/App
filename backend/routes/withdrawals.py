@@ -184,4 +184,27 @@ async def vendor_wallet_summary(user: Dict[str, Any] = Depends(get_current_user)
         and view["has_payout_method"]
         and not user.get("wallet_frozen")
     )
+    # Sep-2026 — the app's Wallet screen reads these. `available` is the
+    # SHOP wallet (`vendor_earnings`); the personal/shopping wallet is
+    # reported alongside it and is never mixed in.
+    view["available"] = view["available_balance"]
+    view["shop_wallet"] = view["available_balance"]
+    view["personal_wallet"] = round(float(user.get("wallet_balance") or 0), 2)
+    cod_rows = await db.orders.find(
+        {"vendor_id": user["id"], "cod_due": {"$gt": 0},
+         "status": {"$in": ["placed", "confirmed", "shipped", "out_for_delivery"]}},
+        {"_id": 0, "cod_due": 1},
+    ).to_list(20000)
+    view["cod_to_collect"] = round(sum(float(o.get("cod_due") or 0) for o in cod_rows), 2)
+    view["wallet_frozen"] = bool(user.get("wallet_frozen"))
+    view["payout_promise"] = (
+        "Approved settlements are deposited to your bank within 24 hours on banking days."
+    )
+    view["withdraw_blocked_reason"] = (
+        "Wallet is frozen — contact support." if user.get("wallet_frozen")
+        else "Add a UPI ID or bank account to settle your sales." if not view["has_payout_method"]
+        else "You already have a settlement in progress." if view["pending_withdrawals"] > 0.009
+        else "" if view["available_balance"] >= MIN_WITHDRAWAL_AMOUNT
+        else f"You need at least ₹{int(MIN_WITHDRAWAL_AMOUNT):,} in shop earnings to raise a settlement."
+    )
     return view

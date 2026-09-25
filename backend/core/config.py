@@ -49,7 +49,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # wallet is short the shortfall is netted off the refund payout.
     "cashback_clawback_on_return": True,
     # Phase 2 — product returns after successful delivery.
-    "return_window_days": 7,
+    "return_window_minutes": 10,
+    "return_vendor_window_hours": 24,
     # Delivery charge is NOT refunded by default (owner's policy). When
     # switched on it is refunded as its own ledger component, never mixed
     # into the item refund.

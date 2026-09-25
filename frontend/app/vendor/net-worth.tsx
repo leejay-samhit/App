@@ -137,11 +137,11 @@ export default function VendorNetWorthScreen() {
                   <HeroChip label="Pending withdrawal" value={formatINR(nw.pending_withdrawals)} />
                 </View>
                 <TouchableOpacity
-                  onPress={() => router.push("/vendor/dashboard" as any)}
+                  onPress={() => router.push("/(tabs)/wallet" as any)}
                   style={styles.heroLink}
                   testID="networth-withdraw"
                 >
-                  <Text style={styles.heroLinkText}>Withdraw from Dashboard</Text>
+                  <Text style={styles.heroLinkText}>Withdraw to bank</Text>
                   <Feather name="arrow-right" size={13} color={colors.primary} />
                 </TouchableOpacity>
               </View>

@@ -42,7 +42,7 @@ type VendorSale = {
   created_at: string;
   status: string;
   total?: number;
-  items?: Array<{ name: string; price: number; image_url?: string; qty: number }>;
+  items?: Array<{ product_id?: string; name: string; price: number; image_url?: string; qty: number }>;
   // Fallback flat shape some backends return
   product_name?: string; product_image_url?: string; qty?: number; unit_price?: number;
   buyer_name?: string; buyer_email?: string; buyer_phone?: string;
@@ -106,6 +106,7 @@ function normaliseSale(s: any): VendorSale & { items: NonNullable<VendorSale["it
         let price = Number(it?.price ?? it?.unit_price ?? 0) || 0;
         if (!price && lineTotal && qty) price = Math.round((lineTotal / qty) * 100) / 100;
         return {
+          product_id: it?.product_id || undefined,
           name: String(it?.name || it?.product_name || safe.product_name || "Product"),
           price,
           image_url: it?.image_url || it?.product_image_url || undefined,
@@ -118,6 +119,7 @@ function normaliseSale(s: any): VendorSale & { items: NonNullable<VendorSale["it
         const lineTotal = Number(safe.line_total ?? 0) || 0;
         const price = qty ? Math.round((lineTotal / qty) * 100) / 100 : lineTotal;
         return [{
+          product_id: (safe as any).product_id || undefined,
           name: String(safe.product_name || "Product"),
           price,
           image_url: safe.product_image_url || undefined,
@@ -316,7 +318,14 @@ export default function VendorOrders() {
                 </View>
                 <View style={styles.divider} />
                 {safeItems.map((it, idx) => (
-                  <View key={idx} style={styles.itemRow}>
+                  <TouchableOpacity
+                    key={idx}
+                    style={styles.itemRow}
+                    activeOpacity={it?.product_id ? 0.6 : 1}
+                    disabled={!it?.product_id}
+                    onPress={() => it?.product_id && router.push(`/product/${it.product_id}` as any)}
+                    testID={`vendor-order-item-${idx}`}
+                  >
                     {it && it.image_url ? (
                       <Image source={{ uri: it.image_url }} style={styles.itemImage} />
                     ) : (
@@ -329,7 +338,10 @@ export default function VendorOrders() {
                       <Text style={styles.itemQty}>{formatINR(it?.price || 0)} × {it?.qty || 1}</Text>
                     </View>
                     <Text style={styles.lineTotal}>{formatINR((it?.price || 0) * (it?.qty || 1))}</Text>
-                  </View>
+                    {it?.product_id ? (
+                      <Feather name="chevron-right" size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
+                    ) : null}
+                  </TouchableOpacity>
                 ))}
                 <View style={styles.divider} />
                 <View style={styles.totalRow}>

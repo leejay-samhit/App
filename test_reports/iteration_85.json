@@ -1,0 +1,38 @@
+{
+  "summary": "Full E2E verification of the 7-phase feature drop. Backend money-correctness and RBAC are ALL GREEN: verify_phase1_money.py 56/56, verify_sep2026_money.py 42/42, verify_delivery_partner.py 40/40, verify_wallet_topup.py 23/23, test_self_account_reset.py PASS. GST/compute correctly requires auth (401 anon, 403 buyer, 200 admin/vendor). Admin-only DP endpoints 401/403 for anon/buyer/vendor and 200 for admin; DP endpoints 403 for non-DP users. bank_ledger tally + vendor wallet==net-worth + DP COD zeroing all verified. CGST/SGST shown in cart gst_summary (cgst 90 / sgst 90 on ₹1180 inclusive 18%). Frontend loads at 390x844, buyer login works, shop and wallet render with correct +/- signs and readable wallet chip. ONE stale check in verify_phase2_returns.py (uses days_left instead of the new 10-minute window) — the retiming itself is validated separately in verify_sep2026_money.py (customer window 10 min, vendor 24h, seconds_left ≤ 599).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/orders/{oid}/return-state", "issue": "verify_phase2_returns.py line 279 asserts days_left >= 4, but the return window was retimed to 10 minutes so days_left is no longer meaningful. Test is stale, not a real bug — verify_sep2026_money.py already covers the new window correctly (seconds_left/minutes). Recommend updating that legacy script."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/verify_phase1_money.py (56/56)",
+    "/app/backend/tests/verify_sep2026_money.py (42/42)",
+    "/app/backend/tests/verify_delivery_partner.py (40/40)",
+    "/app/backend/tests/verify_wallet_topup.py (23/23)",
+    "/app/backend/tests/verify_phase2_returns.py (92/93 — 1 stale assertion)",
+    "/app/backend/tests/test_self_account_reset.py (PASS)"
+  ],
+  "action_items": [
+    "Update verify_phase2_returns.py line 275-281 to test the new 10-MINUTE window (use minutes_left / seconds_left) instead of days_left. This is the ONLY stale test in the suite.",
+    "Consider deleting the WebSocket message endpoint or fixing the /message 502 — preview logs show wss://.../message failing (does not affect app functionality but noisy in console)."
+  ],
+  "critical_code_review_comments": [
+    "delivery_partner.py, bank.py, returns.py, order_payments.py, finance.py all pass their targeted verify scripts. Money flow invariants (bank_ledger tally, vendor wallet == net worth, GST on delivery inclusive) all hold with zero drift.",
+    "RBAC properly enforced: 401 for anon, 403 for wrong role, 200 for correct role across every DP + admin-DP endpoint I probed."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "99.4% (253/254 assertions across 6 verify suites)", "frontend": "100% for the smoke-tested paths (shop + wallet render, login, testIDs present)"},
+  "seed_data_creation": "Delivery-partner rider created + cleaned up in verify_delivery_partner.py (throwaway rider-{uuid}@test.com, deleted after the run — no persistent DP account was left behind, so credentials do NOT need to be recorded in test_credentials.md).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All 7 phases are green. If you re-verify, run the four verify_*.py scripts in /app/backend/tests/ — they cover the whole ledger + DP + wallet-topup surface. Backend uses http://localhost:8001/api directly for phase1 & sep2026 scripts, and EXPO_BACKEND_URL for the delivery-partner script. Login response field is `token`, send User-Agent: curl/8.5.0. The one FAIL in verify_phase2_returns.py is a stale test (days_left → the return window is now 10 minutes) — not a product bug.",
+  "rca_of_issue": "N/A — no product bugs found in this verification pass."
+}

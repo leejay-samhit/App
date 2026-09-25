@@ -43,7 +43,13 @@ from core.utils import get_settings, now_utc
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WINDOW_DAYS = 7
+# Sep-2026 owner's rule — the return clock is MINUTES, not days:
+#   * the CUSTOMER has 10 minutes after delivery to raise a return
+#   * the VENDOR then has 24 hours to accept / collect it
+# Both are settings-overridable but these are the shipped defaults.
+DEFAULT_CUSTOMER_WINDOW_MINUTES = 10
+DEFAULT_VENDOR_WINDOW_HOURS = 24
+DEFAULT_WINDOW_DAYS = 7          # legacy fallback for pre-Sep-2026 settings
 
 STAGES = (
     "delivered",
@@ -97,15 +103,31 @@ def _line_key(item: Dict[str, Any]) -> str:
     return f"{item.get('product_id')}|{item.get('variant_id') or ''}"
 
 
-async def _window_days() -> int:
+async def _window_minutes() -> int:
+    """How long the CUSTOMER has, after delivery, to raise a return."""
     s = await get_settings()
-    try:
-        return max(0, int(s.get("return_window_days") or DEFAULT_WINDOW_DAYS))
-    except (TypeError, ValueError):
-        return DEFAULT_WINDOW_DAYS
+    raw = s.get("return_window_minutes")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_CUSTOMER_WINDOW_MINUTES
 
 
-def _deadline(delivered_at: Optional[str], days: int) -> Optional[str]:
+async def _vendor_window_hours() -> int:
+    """How long the VENDOR has, after delivery, to accept/collect a return."""
+    s = await get_settings()
+    raw = s.get("return_vendor_window_hours")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_VENDOR_WINDOW_HOURS
+
+
+def _shift(delivered_at: Optional[str], *, minutes: int = 0, hours: int = 0) -> Optional[str]:
     if not delivered_at:
         return None
     from datetime import datetime, timedelta, timezone
@@ -115,7 +137,22 @@ def _deadline(delivered_at: Optional[str], days: int) -> Optional[str]:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return (dt + timedelta(days=days)).isoformat()
+    return (dt + timedelta(minutes=minutes, hours=hours)).isoformat()
+
+
+def _still_open(deadline: Optional[str]) -> Tuple[bool, int]:
+    """(within window, whole seconds left) for an ISO deadline."""
+    if not deadline:
+        return False, 0
+    from datetime import datetime, timezone
+    try:
+        dl = datetime.fromisoformat(deadline)
+    except ValueError:
+        return False, 0
+    if dl.tzinfo is None:
+        dl = dl.replace(tzinfo=timezone.utc)
+    gap = (dl - now_utc()).total_seconds()
+    return (gap > 0), max(0, int(gap))
 
 
 async def returned_qty_map(order_id: str) -> Dict[str, int]:
@@ -136,29 +173,22 @@ async def returned_qty_map(order_id: str) -> Dict[str, int]:
 async def order_return_state(order: Dict[str, Any]) -> Dict[str, Any]:
     """Everything the UI needs to decide between Cancel / Return / nothing.
 
-    A DELIVERED order inside the window shows **Return** (never Cancel).
-    Past the window it is simply **Completed**.
+    Sep-2026 two-clock model:
+      * customer clock — 10 minutes from delivery to RAISE a return
+      * vendor clock   — 24 hours from delivery to ACCEPT / collect it
+    A DELIVERED order inside the customer clock shows **Return** (never
+    Cancel). Past it, it is simply **Completed** for the customer, while the
+    vendor can still act on anything already raised until their 24 h is up.
     """
-    days = await _window_days()
+    minutes = await _window_minutes()
+    vendor_hours = await _vendor_window_hours()
     status = (order.get("status") or "").lower()
     delivered = status == "delivered"
     delivered_at = order.get("delivered_at")
-    deadline = _deadline(delivered_at, days)
-    from datetime import datetime, timezone
-    within = False
-    days_left = 0
-    if deadline:
-        try:
-            dl = datetime.fromisoformat(deadline)
-            if dl.tzinfo is None:
-                dl = dl.replace(tzinfo=timezone.utc)
-            now = now_utc()
-            within = now <= dl
-            if within:
-                gap = dl - now
-                days_left = gap.days + (1 if gap.seconds > 0 else 0)
-        except ValueError:
-            within = False
+    deadline = _shift(delivered_at, minutes=minutes)
+    vendor_deadline = _shift(delivered_at, hours=vendor_hours)
+    within, seconds_left = _still_open(deadline)
+    vendor_within, vendor_seconds_left = _still_open(vendor_deadline)
     done = await returned_qty_map(order.get("id") or "")
     items: List[Dict[str, Any]] = []
     for it in order.get("items") or []:
@@ -180,12 +210,21 @@ async def order_return_state(order: Dict[str, Any]) -> Dict[str, Any]:
     any_returnable = any(i["returnable_qty"] > 0 for i in items)
     eligible = bool(delivered and within and any_returnable)
     return {
-        "return_window_days": days,
+        # Customer clock
+        "return_window_minutes": minutes,
         "delivered_at": delivered_at,
         "return_deadline": deadline,
-        "days_left": days_left if delivered else 0,
+        "seconds_left": seconds_left if delivered else 0,
+        "minutes_left": (seconds_left + 59) // 60 if delivered else 0,
         "return_eligible": eligible,
         "window_expired": bool(delivered and deadline and not within),
+        # Vendor clock
+        "vendor_window_hours": vendor_hours,
+        "vendor_return_deadline": vendor_deadline,
+        "vendor_seconds_left": vendor_seconds_left if delivered else 0,
+        "vendor_hours_left": (vendor_seconds_left + 3599) // 3600 if delivered else 0,
+        "vendor_can_act": bool(delivered and vendor_within),
+        "vendor_window_expired": bool(delivered and vendor_deadline and not vendor_within),
         "can_cancel": status == "placed" and not order.get("delivery_info_updated_at"),
         "display_status": (
             "completed" if (delivered and (not within or not any_returnable)) else status
@@ -228,7 +267,7 @@ async def create_return(
         raise ReturnError("Only delivered orders can be returned.")
     if state["window_expired"]:
         raise ReturnError(
-            f"The {state['return_window_days']}-day return window for this order has closed."
+            f"The {state['return_window_minutes']}-minute return window for this order has closed."
         )
     by_key = {f"{i['product_id']}|{i.get('variant_id') or ''}": i for i in state["items"]}
 
@@ -441,6 +480,7 @@ async def restore_inventory(ret: Dict[str, Any], *, txn_id: Optional[str] = None
 
 async def process_refund(
     ret: Dict[str, Any], *, credit_admin_bucket, notify=None, actor: Optional[Dict[str, Any]] = None,
+    company_funded: bool = False,
 ) -> Dict[str, Any]:
     """Vendor wallet → customer wallet, exactly once, never negative.
 
@@ -452,6 +492,11 @@ async def process_refund(
          return in `refund_pending` with nothing deducted.
       3. Credit the customer.
       4. Restore stock, referencing the refund transaction.
+
+    `company_funded=True` (admin only) covers a short seller out of the
+    company treasury so the customer is never left waiting. The rupees are
+    NOT forgiven: the same amount is booked as a vendor outstanding, which
+    admin recovers from the seller's future sales.
     """
     return_id = ret["id"]
     if ret.get("refund_status") == "paid":
@@ -511,6 +556,7 @@ async def process_refund(
 
     # 2 ── vendor debit (balance-safe)
     debit_row = None
+    funded_by_company = 0.0
     if payout > 0.009 and vendor_id:
         try:
             debit_row = await shop_money.debit(
@@ -526,23 +572,92 @@ async def process_refund(
                 **{**common, "extra": {**common["extra"], "wallet_impact": "vendor_earnings_only"}},
             )
         except shop_money.InsufficientFunds as err:
-            await db.returns.update_one(
-                {"id": return_id},
-                {"$set": {"status": "refund_pending", "refund_status": "pending",
-                          "refund_blocked_reason": "vendor_balance_short",
-                          "refund_needed": payout, "updated_at": ts}},
+            if not company_funded:
+                await db.returns.update_one(
+                    {"id": return_id},
+                    {"$set": {"status": "refund_pending", "refund_status": "pending",
+                              "refund_blocked_reason": "vendor_balance_short",
+                              "refund_needed": payout, "updated_at": ts}},
+                )
+                await _push_stage(
+                    return_id,
+                    _stage("refund_pending", "Slangcart", "system",
+                           f"Seller balance short — ₹{payout:.2f} refund awaiting admin"),
+                )
+                await db.vendor_outstanding.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "vendor_id": vendor_id,
+                    "vendor_name": ret.get("vendor_name"),
+                    "kind": "return_refund",
+                    "amount": payout,
+                    "recovered": 0.0,
+                    "status": "open",
+                    "order_id": ret.get("order_id"),
+                    "order_number": ret.get("order_number"),
+                    "return_id": return_id,
+                    "created_at": ts,
+                })
+                await shop_money.record_financial_error(
+                    "return_refund_unfunded", str(err),
+                    return_id=return_id, order_id=ret.get("order_id"), vendor_id=vendor_id,
+                    expected_amount=payout, actual_amount=round(err.available, 2),
+                    difference=round(payout - err.available, 2),
+                )
+                await db.orders.update_one(
+                    {"id": ret["order_id"]}, {"$set": {"return_status": "refund_pending"}},
+                )
+                if notify:
+                    await notify(
+                        vendor_id, "vendor", "Refund blocked — add money",
+                        f"₹{payout:.0f} refund for return {ret.get('return_number')} could not be "
+                        f"paid because your balance is short. Add money to clear it.",
+                    )
+                return {"ok": False, "reason": "vendor_balance_short", "needed": payout}
+
+            # ── Company covers the shortfall (admin decision) ───────────
+            # Take whatever the seller DOES have, then top up from the
+            # treasury and book the top-up as a recoverable outstanding.
+            from_vendor = round(min(payout, max(0.0, err.available)), 2)
+            if from_vendor > 0.009:
+                debit_row = await shop_money.debit(
+                    vendor_id, shop_money.VENDOR_WALLET, from_vendor,
+                    idempotency_key=f"RETURNDEBIT:{return_id}",
+                    txn_type="return_refund_debit",
+                    destination_wallet=shop_money.CUSTOMER_WALLET,
+                    settlement_status="refunded",
+                    description=(
+                        f"Partial refund from seller balance for return "
+                        f"{ret.get('return_number')} (order {ret.get('order_number')})"
+                    ),
+                    **{**common, "extra": {**common["extra"], "wallet_impact": "vendor_earnings_only"}},
+                )
+            funded_by_company = round(payout - from_vendor, 2)
+            await shop_money.post(
+                group="returns",
+                txn_type="refund_company_funded",
+                amount=funded_by_company,
+                debit=funded_by_company,
+                idempotency_key=f"RETURNCOMPANY:{return_id}",
+                user_id=(actor or {}).get("id"),
+                vendor_id=vendor_id,
+                order_id=ret.get("order_id"),
+                order_number=ret.get("order_number"),
+                source_wallet="system_treasury",
+                destination_wallet=shop_money.CUSTOMER_WALLET,
+                settlement_status="company_funded",
+                description=(
+                    f"Company funded ₹{funded_by_company:.2f} of return "
+                    f"{ret.get('return_number')} — recoverable from seller"
+                ),
+                extra={"return_id": return_id, "recoverable": True},
             )
-            await _push_stage(
-                return_id,
-                _stage("refund_pending", "Slangcart", "system",
-                       f"Seller balance short — ₹{payout:.2f} refund awaiting admin"),
-            )
+            await credit_admin_bucket("shopping_margin", -funded_by_company, also_total_earned=False)
             await db.vendor_outstanding.insert_one({
                 "id": str(uuid.uuid4()),
                 "vendor_id": vendor_id,
                 "vendor_name": ret.get("vendor_name"),
-                "kind": "return_refund",
-                "amount": payout,
+                "kind": "return_refund_company_funded",
+                "amount": funded_by_company,
                 "recovered": 0.0,
                 "status": "open",
                 "order_id": ret.get("order_id"),
@@ -550,22 +665,13 @@ async def process_refund(
                 "return_id": return_id,
                 "created_at": ts,
             })
-            await shop_money.record_financial_error(
-                "return_refund_unfunded", str(err),
-                return_id=return_id, order_id=ret.get("order_id"), vendor_id=vendor_id,
-                expected_amount=payout, actual_amount=round(err.available, 2),
-                difference=round(payout - err.available, 2),
-            )
-            await db.orders.update_one(
-                {"id": ret["order_id"]}, {"$set": {"return_status": "refund_pending"}},
-            )
             if notify:
                 await notify(
-                    vendor_id, "vendor", "Refund blocked — add money",
-                    f"₹{payout:.0f} refund for return {ret.get('return_number')} could not be "
-                    f"paid because your balance is short. Add money to clear it.",
+                    vendor_id, "vendor", "Slangcart paid your refund",
+                    f"₹{funded_by_company:.0f} of return {ret.get('return_number')} was paid by "
+                    f"Slangcart because your balance was short. It will be recovered from your "
+                    f"next sales.",
                 )
-            return {"ok": False, "reason": "vendor_balance_short", "needed": payout}
 
     # 3 ── customer credit
     credit_row = None
@@ -597,6 +703,7 @@ async def process_refund(
             "customer_credit_txn_id": (credit_row or {}).get("id"),
             "refunded_at": ts,
             "refund_blocked_reason": None,
+            "refund_company_funded": funded_by_company,
             "updated_at": ts,
         }},
     )

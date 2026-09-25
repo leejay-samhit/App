@@ -262,7 +262,7 @@ async def main():
         o = await buy(c, bh, [(pexp["id"], 1)], "wallet")
         oid = o["orders"][0]["id"] if o.get("orders") else o["order_id"]
         await deliver(c, ah, oid)
-        old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
         await db.orders.update_one({"id": oid}, {"$set": {"delivered_at": old}})
         st = (await c.get(f"{BASE}/orders/{oid}/return-state", headers=bh)).json()
         check("expired order is not return-eligible", st.get("return_eligible") is False, str(st)[:160])
@@ -274,10 +274,10 @@ async def main():
         check("return refused after the window", r.status_code == 400, r.text[:160])
         # inside the window it IS eligible and Cancel is not offered
         await db.orders.update_one({"id": oid}, {"$set": {
-            "delivered_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()}})
+            "delivered_at": (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()}})
         st = (await c.get(f"{BASE}/orders/{oid}/return-state", headers=bh)).json()
-        check("inside window: eligible with days_left", st.get("return_eligible") and st.get("days_left") >= 4,
-              str(st.get("days_left")))
+        check("inside window: eligible with minutes_left", st.get("return_eligible") and st.get("minutes_left") >= 7,
+              str(st.get("minutes_left")))
         check("delivered order cannot be cancelled", st.get("can_cancel") is False)
 
         # ── 7. CASHBACK REVERSAL ────────────────────────────────────────
