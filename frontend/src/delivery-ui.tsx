@@ -5,13 +5,27 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-nati
 import { Feather } from "@expo/vector-icons";
 import { useRouter, usePathname } from "expo-router";
 import { colors, radii, formatINR } from "./theme";
+import { TabBarIcon } from "./tab-bar-icon";
 
-// Riders get FOUR destinations only — no Shop, no Services (owner's rule).
+// Riders get THREE destinations only — no Shop, no Services (owner's rule).
+// Chat and Profile live at /delivery/* so the buyer bottom tab bar (Shop ·
+// Services · Dashboard · Chat · Profile) never flashes for a rider.
 export const DP_TABS = [
-  { key: "dashboard", label: "Dashboard", icon: "home", path: "/delivery/dashboard" },
-  { key: "vendors", label: "My Shops", icon: "shopping-bag", path: "/delivery/vendors" },
-  { key: "orders", label: "Orders", icon: "package", path: "/delivery/orders" },
-  { key: "net-worth", label: "Money", icon: "trending-up", path: "/delivery/net-worth" },
+  {
+    key: "dashboard", label: "Delivery", icon: "truck", path: "/delivery/dashboard",
+    // The "home" of the rider app — every delivery screen that isn't chat or
+    // profile (orders, my shops, money) keeps this tab lit.
+    isActive: (p: string) => p.startsWith("/delivery")
+      && !p.startsWith("/delivery/chat") && !p.startsWith("/delivery/profile"),
+  },
+  {
+    key: "chat", label: "Chat", icon: "message-circle", path: "/delivery/chat",
+    isActive: (p: string) => p.startsWith("/delivery/chat"),
+  },
+  {
+    key: "profile", label: "Profile", icon: "user", path: "/delivery/profile",
+    isActive: (p: string) => p.startsWith("/delivery/profile"),
+  },
 ] as const;
 
 export function DPHeader({ title, subtitle }: { title: string; subtitle?: string }) {
@@ -23,14 +37,14 @@ export function DPHeader({ title, subtitle }: { title: string; subtitle?: string
         {subtitle ? <Text style={s.headerSub}>{subtitle}</Text> : null}
       </View>
       <TouchableOpacity
-        onPress={() => router.push("/(tabs)/chat" as any)}
+        onPress={() => router.push("/delivery/chat" as any)}
         style={s.iconBtn}
         testID="dp-chat"
       >
         <Feather name="message-circle" size={20} color={colors.textMain} />
       </TouchableOpacity>
       <TouchableOpacity
-        onPress={() => router.push("/(tabs)/profile" as any)}
+        onPress={() => router.push("/delivery/profile" as any)}
         style={s.iconBtn}
         testID="dp-profile"
       >
@@ -46,7 +60,7 @@ export function DPTabBar() {
   return (
     <View style={s.tabBar}>
       {DP_TABS.map((t) => {
-        const active = path.startsWith(t.path);
+        const active = t.isActive(path);
         return (
           <TouchableOpacity
             key={t.key}
@@ -54,11 +68,8 @@ export function DPTabBar() {
             onPress={() => router.replace(t.path as any)}
             testID={`dp-tab-${t.key}`}
           >
-            <Feather
-              name={t.icon as any}
-              size={20}
-              color={active ? colors.primary : colors.textMuted}
-            />
+            <TabBarIcon name={t.icon as any} focused={active}
+              color={active ? colors.primary : colors.textMuted} />
             <Text style={[s.tabLabel, active && { color: colors.primary, fontWeight: "800" }]}>
               {t.label}
             </Text>

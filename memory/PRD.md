@@ -1983,3 +1983,24 @@ Verified: `tests/verify_oct2026_updates.py` 27/27, plus regressions
 verify_phase1_money 56/56, verify_phase2_returns 93/93,
 verify_delivery_partner 40/40, and testing-agent iteration 86 green on
 mobile 390x844 and desktop 1440x900.
+
+## Oct 2026 — Delivery Partner gets his own 3-tab app (owner's rule)
+
+A rider can no longer see or use Shop / Services anywhere:
+
+- `app/index.tsx` sends an approved DP straight to /delivery/dashboard.
+- `app/(tabs)/_layout.tsx` bounces any DP deep-link into the buyer tabs back
+  to /delivery/dashboard (early return AFTER all hooks — the first attempt
+  crashed with "Rendered fewer hooks than expected").
+- `src/delivery-ui.tsx` DP_TABS is now exactly **Delivery · Chat · Profile**
+  with the shared TabBarIcon pill. Orders / My Shops / Money remain reachable
+  from the dashboard cards; the Delivery tab stays lit on all of them.
+- New wrappers `app/delivery/chat.tsx` and `app/delivery/profile.tsx` render
+  the buyer Chat/Profile screens inside the rider shell, so the buyer tab bar
+  never appears. DPHeader's chat/profile icons retargeted to /delivery/*.
+- API door closed too: `_block_dp_shopping` in routes/cart.py → 403 on
+  /cart/add, /orders/checkout and /services/{id}/book for approved DPs.
+
+Verified: rider_test@test.com lands on Delivery with 3 tabs, deep link to
+/(tabs)/shop bounces cleanly, chat/profile render with the rider bar, buyer
+tabs unchanged; verify_delivery_partner 40/40, verify_phase1_money 56/56.

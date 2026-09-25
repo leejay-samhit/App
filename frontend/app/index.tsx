@@ -18,6 +18,10 @@ export default function Index() {
       // have their own section — the full admin tabs are hidden and the API
       // 403s them, so send them straight to it.
       router.replace(adminLanding(user));
+    } else if ((user as any).is_delivery_partner_approved) {
+      // Approved delivery partners get their OWN app: Delivery · Chat ·
+      // Profile. No Shop, no Services — they are riders, not customers.
+      router.replace("/delivery/dashboard" as any);
     } else if (!user.registration_paid && !(user as any).subscription_skipped) {
       // Subscription upsell first (Aug-2026). Once the user chooses
       // "Continue without subscription" we never wall them again — they

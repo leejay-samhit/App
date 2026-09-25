@@ -3255,6 +3255,9 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     this call, so those orders are fully prepaid like wallet orders.
     """
     payment_method = str((payload or {}).get("payment_method") or "wallet").strip().lower()
+    # Oct 2026 — delivery partners are riders, never customers.
+    from routes.cart import _block_dp_shopping
+    _block_dp_shopping(user)
     if payment_method not in ("wallet", "cod", "wallet_cod", "online", "wallet_online"):
         raise HTTPException(
             status_code=400,
@@ -9714,6 +9717,9 @@ async def post_service_review(
 async def book_service(provider_id: str, payload: ServiceBookRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if provider_id == user["id"]:
         raise HTTPException(status_code=400, detail="You can't book your own service")
+    # Oct 2026 — delivery partners are riders, never customers.
+    from routes.cart import _block_dp_shopping
+    _block_dp_shopping(user)
     provider = await db.users.find_one({"id": provider_id, "is_service_provider": True})
     if not provider:
         raise HTTPException(status_code=404, detail="Service provider not found")

@@ -67,10 +67,22 @@ async def _resolve_variant(product: dict, variant_id, qty_wanted: int):
     return v
 
 
+def _block_dp_shopping(user: Dict[str, Any]) -> None:
+    """Oct 2026 — an approved delivery partner is a rider, never a customer:
+    no Shop, no Services (owner's rule). The rider UI never exposes the cart,
+    and this guard closes the API door too."""
+    if user.get("is_delivery_partner_approved"):
+        raise HTTPException(
+            status_code=403,
+            detail="Delivery partner accounts can't shop — your app has Delivery, Chat and Profile only.",
+        )
+
+
 @router.post("/cart/add")
 async def cart_add(payload: CartItem, user: Dict[str, Any] = Depends(get_current_user)):
     """Add a product to the user's cart (or bump qty if already there).
     Uses $inc so concurrent adds are safe at the Mongo level — no races."""
+    _block_dp_shopping(user)
     product = await db.products.find_one({"id": payload.product_id}, {"_id": 0})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")

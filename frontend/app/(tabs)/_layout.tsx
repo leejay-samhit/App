@@ -1,9 +1,10 @@
 import { Tabs, useRouter, useSegments } from "expo-router";
 import { Platform, View } from "react-native";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 import { useBranding } from "../../src/branding";
+import { useAuth } from "../../src/auth";
 import { DesktopShell, useIsDesktop } from "../../src/desktop-shell";
 import { useSwipePager } from "../../src/use-swipe-pager";
 import { tabIcon, TAB_LABEL_STYLE } from "../../src/tab-bar-icon";
@@ -16,7 +17,17 @@ const HARDCODED_ORDER = ["shop", "services", "dashboard", "chat", "profile"];
 
 export default function TabsLayout() {
   const { tabs } = useBranding();
+  const { user } = useAuth();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const segments = useSegments() as string[];
+  // Oct 2026 — approved delivery partners must NEVER see the buyer tabs
+  // (Shop / Services). Any deep link that lands them here bounces straight
+  // back to their own app.
+  const isApprovedDP = !!(user as any)?.is_delivery_partner_approved;
+  useEffect(() => {
+    if (isApprovedDP) router.replace("/delivery/dashboard" as any);
+  }, [isApprovedDP, router]);
   // Desktop web (≥ 1024 px) uses a permanent left sidebar instead of the
   // bottom tab bar. The tab bar itself is hidden by `tabBarStyle.display`.
   const isDesktop = useIsDesktop();
@@ -45,8 +56,6 @@ export default function TabsLayout() {
   // routes that live inside this group (shop-category/[name], wallet,
   // network) keep their own gestures, so a swipe there never yanks the user
   // out of the screen they're browsing.
-  const router = useRouter();
-  const segments = useSegments() as string[];
   const currentTab = segments[segments.length - 1] || "";
   const tabIndex = HARDCODED_ORDER.indexOf(currentTab);
 
@@ -61,6 +70,13 @@ export default function TabsLayout() {
     onPrev: () => goToTab(-1),
     enabled: !isDesktop && tabIndex >= 0,
   });
+
+  if (isApprovedDP) {
+    // One plain frame while the redirect above runs — the buyer tab bar must
+    // never paint for a rider. (After ALL hooks: an earlier return here made
+    // React throw "Rendered fewer hooks than expected".)
+    return <View style={{ flex: 1, backgroundColor: colors.background }} />;
+  }
 
   // Every screen file under (tabs)/ must still be registered as a route, even
   // hidden ones. Build the full registration list = visible (in our order) +
