@@ -83,6 +83,15 @@ export default function DeliveryDashboard() {
         <View style={s.statRow}>
           <TouchableOpacity
             style={s.stat}
+            onPress={() => router.push("/delivery/wallet" as any)}
+            testID="dp-stat-wallet"
+          >
+            <Feather name="credit-card" size={17} color={colors.success} />
+            <Text style={s.statValue}>{formatINR(Number(nw?.personal_wallet || 0))}</Text>
+            <Text style={s.statLabel}>MY WALLET</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={s.stat}
             onPress={() => router.push("/delivery/orders" as any)}
             testID="dp-stat-live"
           >
@@ -154,13 +163,13 @@ export default function DeliveryDashboard() {
 
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
-  statRow: { flexDirection: "row", gap: 10, paddingHorizontal: spacing.screen },
+  statRow: { flexDirection: "row", flexWrap: "wrap", gap: 10, paddingHorizontal: spacing.screen },
   stat: {
-    flex: 1, backgroundColor: colors.surface, borderRadius: radii.card,
+    flexBasis: "47%", flexGrow: 1, backgroundColor: colors.surface, borderRadius: radii.card,
     borderWidth: 1, borderColor: colors.border, padding: 12, gap: 3, minHeight: 84,
     justifyContent: "center",
   },
-  statValue: { fontSize: 20, fontWeight: "900", color: colors.textMain, letterSpacing: -0.5 },
+  statValue: { fontSize: 19, fontWeight: "900", color: colors.textMain, letterSpacing: -0.5 },
   statLabel: { fontSize: 9, letterSpacing: 0.8, fontWeight: "900", color: colors.textMuted },
   section: {
     fontSize: 10, letterSpacing: 1.4, fontWeight: "900", color: colors.textMuted,

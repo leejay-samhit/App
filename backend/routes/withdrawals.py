@@ -29,6 +29,10 @@ router = APIRouter()
 # at the API layer with a friendly message.
 # Phase 1 (Jun-2026) — sellers settle in ₹5,000 slabs.
 MIN_WITHDRAWAL_AMOUNT = 5000.0
+# Oct 2026 — riders settle from ₹1,000 (the owner's rule). The floor is now
+# role-based so the delivery-partner wallet screen and this endpoint can
+# never disagree: routes/delivery_partner.MIN_WITHDRAWAL is the same number.
+MIN_WITHDRAWAL_DP = 1000.0
 
 
 @router.post("/withdrawals")
@@ -38,21 +42,19 @@ async def request_withdrawal(
     payload: WithdrawalRequest,
     user: Dict[str, Any] = Depends(require_clean_device),
 ):
-    if float(payload.amount) < MIN_WITHDRAWAL_AMOUNT:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Minimum withdrawal amount is ₹{int(MIN_WITHDRAWAL_AMOUNT)}. "
-                f"Please enter an amount of ₹{int(MIN_WITHDRAWAL_AMOUNT)} or more."
-            ),
-        )
     # ── SELLER SETTLEMENT ONLY (MLM cutover, Jun-2026) ──────────────────
     # A Slangcart wallet is a marketplace wallet: customers SPEND it inside
     # the app, they do not cash it out. Only approved vendors (and admins)
     # may withdraw, because that is their genuine sales settlement.
     is_seller = bool(user.get("is_vendor") and user.get("is_vendor_approved"))
     is_admin = user.get("role") == "admin" or (user.get("email") or "").lower() == ADMIN_EMAIL.lower()
-    if not (is_seller or is_admin):
+    # Oct 2026 — an approved DELIVERY PARTNER settles his delivery earnings
+    # (personal wallet). His COD cash-in-hand is a separate pot he owes US,
+    # and it is deliberately not withdrawable.
+    is_rider = bool(
+        user.get("is_delivery_partner") and user.get("is_delivery_partner_approved"),
+    )
+    if not (is_seller or is_admin or is_rider):
         raise HTTPException(
             status_code=403,
             detail=(
@@ -63,6 +65,17 @@ async def request_withdrawal(
         )
     if user.get("wallet_frozen"):
         raise HTTPException(status_code=403, detail="Wallet is frozen. Contact support.")
+
+    # ── Minimum settlement floor (Oct 2026) ─────────────────────────────
+    # Enforced at the API layer so a client can never slip below the number
+    # its wallet screen shows. Riders settle from ₹1,000; sellers/admins
+    # settle in ₹5,000 slabs.
+    floor = MIN_WITHDRAWAL_DP if (is_rider and not is_seller and not is_admin) else MIN_WITHDRAWAL_AMOUNT
+    if payload.amount < floor:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The minimum settlement is ₹{int(floor):,}. Please raise a settlement of at least ₹{int(floor):,}.",
+        )
 
     if not (user.get("upi_id") or user.get("bank_account")):
         raise HTTPException(status_code=400, detail="Add UPI or bank details first")

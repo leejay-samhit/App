@@ -329,6 +329,9 @@ class SettingsUpdate(BaseModel):
     delivery_charge_flat: Optional[float] = Field(default=None, ge=0, le=10000)
     delivery_free_threshold: Optional[float] = Field(default=None, ge=0)
     delivery_cart_max: Optional[float] = Field(default=None, ge=0, le=10000)
+    # ── Delivery partner pay (Oct 2026) — % of GST-exclusive delivery
+    # revenue credited to the rider's personal wallet on delivery. ──
+    dp_commission_pct: Optional[float] = Field(default=None, ge=0, le=100)
     # ── Service Provider — "Get phone number" reveal fee (June 2026) ──
     # Both optional — admins toggle these from the web admin panel without
     # affecting other settings. Defaults remain those in DEFAULT_SETTINGS

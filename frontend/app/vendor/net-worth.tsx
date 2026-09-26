@@ -2,7 +2,7 @@
 // Every figure comes from the backend ledger — nothing is added up here.
 import React, { useCallback, useState } from "react";
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -11,6 +11,7 @@ import { Stack, useFocusEffect, useRouter } from "expo-router";
 import { api } from "../../src/api";
 import { colors, spacing, formatINR } from "../../src/theme";
 import { downloadServerFile } from "../../src/download";
+import { DateRangeFilter } from "../../src/date-range-picker";
 
 type NetWorth = {
   shop_name?: string;
@@ -199,11 +200,11 @@ export default function VendorNetWorthScreen() {
 
           {tab !== "summary" ? (
             <View style={styles.filters}>
-              <TextInput value={from} onChangeText={setFrom} placeholder="From YYYY-MM-DD" placeholderTextColor={colors.textMuted} style={styles.filterInput} testID="networth-from" />
-              <TextInput value={to} onChangeText={setTo} placeholder="To YYYY-MM-DD" placeholderTextColor={colors.textMuted} style={styles.filterInput} testID="networth-to" />
-              <TouchableOpacity onPress={() => { setLoading(true); load(); }} style={styles.applyBtn} testID="networth-apply">
-                <Feather name="filter" size={14} color="#fff" />
-              </TouchableOpacity>
+              <DateRangeFilter
+                value={{ from, to }}
+                onChange={(r) => { setFrom(r.from); setTo(r.to); setLoading(true); }}
+                testID="networth-date"
+              />
             </View>
           ) : null}
 
@@ -423,15 +424,7 @@ const styles = StyleSheet.create({
   reconBad: { backgroundColor: "#FEF3C7" },
   reconTitle: { fontSize: 13, fontWeight: "900" },
   reconBody: { fontSize: 11, color: colors.textMain, marginTop: 3, lineHeight: 16 },
-  filters: { flexDirection: "row", gap: 8, marginBottom: 12 },
-  filterInput: {
-    flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 10,
-    minHeight: 44, color: colors.textMain, backgroundColor: colors.surface, fontSize: 12,
-  },
-  applyBtn: {
-    backgroundColor: colors.primary, width: 48, minHeight: 44, borderRadius: 10,
-    alignItems: "center", justifyContent: "center",
-  },
+  filters: { marginBottom: 12, marginHorizontal: -spacing.screen },
   totals: {
     backgroundColor: colors.brand100, borderRadius: 12, padding: 14, marginBottom: 12,
   },

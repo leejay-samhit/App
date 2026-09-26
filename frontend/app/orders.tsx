@@ -14,6 +14,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useSwipePager } from "../src/use-swipe-pager";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
 import { colors, radii, spacing, formatINR } from "../src/theme";
+import { OrderTimeline } from "../src/order-timeline";
 import { notify } from "../src/notify";
 import { FadeSlideIn, ListRowSkeleton } from "../src/anim";
 
@@ -288,7 +289,6 @@ export default function OrdersScreen() {
             const codDue = Number(item.cod_due || 0);
             const walletPaid = Number(item.wallet_paid || 0);
             const onlinePaid = Number(item.online_paid || 0);
-            const stepIdx = STEPS.indexOf((item.status || "placed") as any);
             const cancelled = (item.status || "") === "cancelled";
             // Jun 2026 — GROUP HEADER. Sibling orders from one checkout are
             // adjacent in this newest-first list, so we stamp a summary row
@@ -341,29 +341,15 @@ export default function OrdersScreen() {
                   </View>
                 </View>
 
-                {/* Step tracker */}
+                {/* Step tracker — shared with the seller card (Oct 2026) so
+                    the two views can never look different. */}
                 {!cancelled ? (
                   <>
                     <View style={styles.trackRow}>
-                      {STEPS.map((s, i) => {
-                        const done = i <= stepIdx;
-                        const m = STATUS_META[s];
-                        return (
-                          <View key={s} style={styles.trackSeg}>
-                            <View style={styles.trackDotRow}>
-                              <View style={[styles.trackDot, done && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
-                                {done ? <Feather name="check" size={8} color="#fff" /> : null}
-                              </View>
-                              {i < STEPS.length - 1 ? (
-                                <View style={[styles.trackLine, i < stepIdx && { backgroundColor: colors.primary }]} />
-                              ) : null}
-                            </View>
-                            <Text style={[styles.trackLabel, done && { color: colors.textMain, fontWeight: "800" }]} numberOfLines={1}>
-                              {m.label}
-                            </Text>
-                          </View>
-                        );
-                      })}
+                      <OrderTimeline
+                        status={String(item.status || "placed")}
+                        testID={`order-track-${item.id}`}
+                      />
                     </View>
                     {/* Jun 2026 — live status line: what happened last, when,
                         and who moved it. Full timeline lives in the modal. */}
@@ -784,7 +770,7 @@ const styles = StyleSheet.create({
   sellerAvatar: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
   sellerName: { fontSize: 14, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
   orderRef: { fontSize: 10, color: colors.textMuted, fontWeight: "700", marginTop: 2, letterSpacing: 0.4 },
-  trackRow: { flexDirection: "row", marginTop: 14, marginBottom: 4 },
+  trackRow: { marginTop: 14, marginBottom: 4 },
   trackSeg: { flex: 1 },
   trackDotRow: { flexDirection: "row", alignItems: "center" },
   trackDot: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },

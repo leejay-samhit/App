@@ -51,6 +51,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # Phase 2 — product returns after successful delivery.
     "return_window_minutes": 10,
     "return_vendor_window_hours": 24,
+    # ── Delivery partner pay (Oct-2026) ─────────────────────────────────
+    # The rider's only earning: this % of the GST-EXCLUSIVE delivery
+    # revenue, credited to his personal wallet on a successful delivery so
+    # he can raise a withdrawal request. 0 = riders earn nothing.
+    "dp_commission_pct": 0.0,
     # Delivery charge is NOT refunded by default (owner's policy). When
     # switched on it is refunded as its own ledger component, never mixed
     # into the item refund.

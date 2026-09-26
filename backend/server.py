@@ -3184,6 +3184,20 @@ async def admin_wipe_all(
         "wallet_frozen": False,
         "is_blocked": False,
         "block_reason": None,
+        # Oct 2026 — zero EVERY money pot and role the admin account may have
+        # picked up while testing, so "reset to zero" really is zero. Any
+        # future wallet field should be added here too.
+        "vendor_earnings": 0.0,
+        "dp_cash_in_hand": 0.0,
+        "pending_balance": 0.0,
+        "is_vendor": False,
+        "is_vendor_approved": False,
+        "vendor_status": None,
+        "is_service_provider": False,
+        "is_delivery_partner": False,
+        "is_delivery_partner_approved": False,
+        "dp_status": None,
+        "dp_pincodes": [],
     }})
 
     try:
@@ -5647,6 +5661,21 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
     if payload.status == "delivered" and prev_status != "delivered":
         fresh_for_fee = await db.orders.find_one({"id": order_id}, {"_id": 0}) or order
         admin_for_del = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
+        # Oct 2026 — COD collected by a DELIVERY PARTNER is the company's
+        # cash, not the seller's, so the seller is credited the full cash
+        # here and `settle_delivery_fee` (next) takes the delivery charge
+        # back as revenue + GST. Net: seller keeps exactly the item value
+        # and can withdraw it. Sellers who collect their own cash (no rider
+        # mapped) are untouched — nothing enters a wallet for them.
+        if paid_via in ("cod", "wallet_cod") and fresh_for_fee.get("dp_id"):
+            try:
+                await shop_money.credit_vendor_cod_on_delivery(fresh_for_fee)
+            except Exception as _cod_err:
+                logger.warning(f"COD vendor credit failed for {order_id}: {str(_cod_err)[:200]}")
+                await shop_money.record_financial_error(
+                    "cod_vendor_credit_failed", str(_cod_err),
+                    order_id=order_id, vendor_id=order.get("vendor_id"),
+                )
         try:
             await shop_money.settle_delivery_fee(
                 fresh_for_fee,
@@ -5659,6 +5688,20 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                 "delivery_fee_settlement_failed", str(_df_err),
                 order_id=order_id, vendor_id=order.get("vendor_id"),
             )
+        # ── Rider's pay: % of the delivery charge, admin-configurable ────
+        # Credited to his PERSONAL wallet (a liability), never to the COD
+        # cash pot, so it is withdrawable and can never blur with our cash.
+        if fresh_for_fee.get("dp_id"):
+            try:
+                _st = await get_settings()
+                await shop_money.settle_dp_commission(
+                    fresh_for_fee, float(_st.get("dp_commission_pct") or 0),
+                )
+            except Exception as _dpc_err:
+                logger.warning(f"DP commission failed for {order_id}: {str(_dpc_err)[:200]}")
+                await shop_money.record_financial_error(
+                    "dp_commission_failed", str(_dpc_err), order_id=order_id,
+                )
         # COD money never enters a wallet — the seller collected the cash in
         # person. We only stamp the order as paid/settled.
         if paid_via in ("cod", "wallet_cod") and not order.get("commission_settled"):

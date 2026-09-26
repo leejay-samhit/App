@@ -20,7 +20,7 @@
 import { useCallback, useState } from "react";
 import { useSwipePager } from "../../src/use-swipe-pager";
 import {
-  View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl,
+  View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl, ScrollView,
   TouchableOpacity, Image, Alert, Modal, TextInput, Linking, Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -28,6 +28,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { OrderTimeline } from "../../src/order-timeline";
 import { FadeSlideIn, ListRowSkeleton } from "../../src/anim";
 import { downloadOrdersCsv, ExportOrderLike } from "../../src/exportOrdersCsv";
 
@@ -169,6 +170,11 @@ export default function VendorOrders() {
   // every stage after "Confirm order". The seller can still accept or cancel.
   const [dpPartners, setDpPartners] = useState<{ id: string; name: string; phone: string }[]>([]);
   const dpManaged = dpPartners.length > 0;
+  // Oct 2026 — tapping a line used to push /product/{id}. For a historical
+  // order whose product was edited or deleted that dead-ends (and on a real
+  // device the native screen closed the app), so the line detail is now a
+  // sheet built from the ORDER ROW itself — it can never 404.
+  const [itemSheet, setItemSheet] = useState<{ item: any; order: any } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -239,25 +245,9 @@ export default function VendorOrders() {
     } finally { setExporting(false); }
   };
 
-  const renderStage = (o: VendorSale) => {
-    const activeIdx = STATUSES.indexOf(o.status as any);
-    return (
-      <View style={styles.stageTracker} testID={`stage-${o.id}`}>
-        {STATUSES.map((s, i) => {
-          const isCancel = o.status === "cancelled" && s === "cancelled";
-          const done = activeIdx >= 0 && i <= activeIdx && o.status !== "cancelled";
-          return (
-            <View key={s} style={styles.stageStep}>
-              <View style={[styles.stageDot, (done || isCancel) && { backgroundColor: STATUS_COLORS[s], borderColor: STATUS_COLORS[s] }]}>
-                {(done || isCancel) ? <Feather name={s === "cancelled" ? "x" : "check"} size={9} color="#fff" /> : null}
-              </View>
-              <Text style={[styles.stageLabel, (done || isCancel) && { color: STATUS_COLORS[s], fontWeight: "800" }]} numberOfLines={1}>{STATUS_LABEL[s] || s}</Text>
-            </View>
-          );
-        })}
-      </View>
-    );
-  };
+  const renderStage = (o: VendorSale) => (
+    <OrderTimeline status={String(o.status || "placed")} testID={`stage-${o.id}`} />
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -273,13 +263,21 @@ export default function VendorOrders() {
         </TouchableOpacity>
       </View>
 
-      <View style={styles.tabs}>
+      {/* Oct 2026 — the 7 status labels no longer fight for room in a fixed
+          row (they used to run together as "PLACEDCONFIRMEDSHIPPED"). Each
+          is a properly padded chip on a horizontal rail. */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.tabsWrap}
+        contentContainerStyle={styles.tabs}
+      >
         {VORDER_TABS.map((t) => (
           <TouchableOpacity key={t} onPress={() => setFilter(t)} style={[styles.tab, filter === t && styles.tabActive]} testID={`vorder-tab-${t}`}>
-            <Text style={[styles.tabText, filter === t && styles.tabTextActive]}>{(STATUS_LABEL[t] || t).toUpperCase()}</Text>
+            <Text style={[styles.tabText, filter === t && styles.tabTextActive]}>{STATUS_LABEL[t] || t}</Text>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
 
       {/* Jun 2026 — Same left/right swipe as everywhere else in the app:
           flick the list body to move through the status tabs. */}
@@ -328,9 +326,8 @@ export default function VendorOrders() {
                   <TouchableOpacity
                     key={idx}
                     style={styles.itemRow}
-                    activeOpacity={it?.product_id ? 0.6 : 1}
-                    disabled={!it?.product_id}
-                    onPress={() => it?.product_id && router.push(`/product/${it.product_id}` as any)}
+                    activeOpacity={0.6}
+                    onPress={() => setItemSheet({ item: it || {}, order: item })}
                     testID={`vendor-order-item-${idx}`}
                   >
                     {it && it.image_url ? (
@@ -345,9 +342,7 @@ export default function VendorOrders() {
                       <Text style={styles.itemQty}>{formatINR(it?.price || 0)} × {it?.qty || 1}</Text>
                     </View>
                     <Text style={styles.lineTotal}>{formatINR((it?.price || 0) * (it?.qty || 1))}</Text>
-                    {it?.product_id ? (
-                      <Feather name="chevron-right" size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
-                    ) : null}
+                    <Feather name="chevron-right" size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
                   </TouchableOpacity>
                 ))}
                 <View style={styles.divider} />
@@ -531,6 +526,64 @@ export default function VendorOrders() {
       )}
       </View>
 
+      {/* Oct 2026 — order-line detail. Built from the order row, so it works
+          for deleted / unpublished products and POS lines too. */}
+      <Modal visible={!!itemSheet} transparent animationType="slide" onRequestClose={() => setItemSheet(null)}>
+        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setItemSheet(null)}>
+          <TouchableOpacity activeOpacity={1} style={styles.modalSheet} onPress={() => { /* keep open */ }}>
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetTop}>
+              {itemSheet?.item?.image_url ? (
+                <Image source={{ uri: itemSheet.item.image_url }} style={styles.sheetImage} />
+              ) : (
+                <View style={[styles.sheetImage, { alignItems: "center", justifyContent: "center" }]}>
+                  <Feather name="image" size={20} color={colors.textMuted} />
+                </View>
+              )}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetName}>{itemSheet?.item?.name || "Product"}</Text>
+                <Text style={styles.sheetMeta}>
+                  {`${formatINR(itemSheet?.item?.price || 0)} × ${itemSheet?.item?.qty || 1}`}
+                </Text>
+                <Text style={styles.sheetTotal}>
+                  {formatINR((itemSheet?.item?.price || 0) * (itemSheet?.item?.qty || 1))}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.divider} />
+            <SheetRow label="Order" value={itemSheet?.order?.order_number || "—"} />
+            <SheetRow label="Status" value={(STATUS_LABEL[itemSheet?.order?.status] || itemSheet?.order?.status || "—")} />
+            <SheetRow label="Customer" value={itemSheet?.order?.buyer_name || "—"} />
+            {itemSheet?.item?.variant_label ? (
+              <SheetRow label="Variant" value={itemSheet.item.variant_label} />
+            ) : null}
+            <SheetRow label="Order total" value={formatINR(itemSheet?.order?.total || 0)} />
+            {itemSheet?.item?.product_id ? (
+              <TouchableOpacity
+                style={styles.sheetLink}
+                onPress={() => {
+                  const pid = itemSheet.item.product_id;
+                  setItemSheet(null);
+                  router.push(`/vendor/dashboard?product=${pid}` as any);
+                }}
+                testID="vorder-item-open-catalogue"
+              >
+                <Feather name="package" size={14} color={colors.primary} />
+                <Text style={styles.sheetLinkText}>Open in my catalogue</Text>
+              </TouchableOpacity>
+            ) : null}
+            <TouchableOpacity
+              style={[styles.modalBtn, { backgroundColor: colors.primary, marginTop: 10 }]}
+              onPress={() => setItemSheet(null)}
+              testID="vorder-item-close"
+            >
+              <Text style={{ color: colors.primaryFg, fontWeight: "800" }}>Close</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+
+
       {/* Jul 2026 — Delivery info modal.  Vendor sets ETA + delivery
           person contact.  Both fields are optional; blank fields
           preserve the existing value on save. */}
@@ -620,7 +673,38 @@ export default function VendorOrders() {
   );
 }
 
+function SheetRow({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.sheetRow}>
+      <Text style={styles.sheetRowLabel}>{label}</Text>
+      <Text style={styles.sheetRowValue} numberOfLines={2}>{value}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  sheetHandle: {
+    width: 42, height: 4, borderRadius: 2, backgroundColor: colors.border,
+    alignSelf: "center", marginBottom: 14,
+  },
+  sheetTop: { flexDirection: "row", gap: 12, alignItems: "center" },
+  sheetImage: {
+    width: 64, height: 64, borderRadius: 12, backgroundColor: colors.surfaceMuted,
+  },
+  sheetName: { fontSize: 15.5, fontWeight: "900", color: colors.textMain },
+  sheetMeta: { fontSize: 12, color: colors.textMuted, fontWeight: "700", marginTop: 3 },
+  sheetTotal: { fontSize: 17, fontWeight: "900", color: colors.textMain, marginTop: 4 },
+  sheetRow: {
+    flexDirection: "row", justifyContent: "space-between", gap: 14, paddingVertical: 7,
+  },
+  sheetRowLabel: { fontSize: 12.5, color: colors.textMuted, fontWeight: "700" },
+  sheetRowValue: { flex: 1, fontSize: 12.5, color: colors.textMain, fontWeight: "800", textAlign: "right" },
+  sheetLink: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7,
+    marginTop: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 999,
+    paddingVertical: 12, minHeight: 46,
+  },
+  sheetLinkText: { color: colors.primary, fontWeight: "800", fontSize: 13 },
   safe: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.screen, paddingBottom: 8 },
@@ -628,10 +712,16 @@ const styles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: "800", color: colors.textMain, letterSpacing: -0.5 },
   exportBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 99, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.surface, minHeight: 34 },
   exportBtnText: { fontSize: 11, fontWeight: "800", color: colors.primary, letterSpacing: 0.4 },
-  tabs: { flexDirection: "row", marginHorizontal: spacing.screen, backgroundColor: colors.surfaceMuted, borderRadius: 99, padding: 4, gap: 2, marginBottom: 8 },
-  tab: { flex: 1, paddingVertical: 6, alignItems: "center", borderRadius: 99 },
-  tabActive: { backgroundColor: colors.primary },
-  tabText: { fontSize: 9, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.5 },
+  // flexGrow:0 — without it the rail stretches to fill the screen.
+  tabsWrap: { flexGrow: 0, flexShrink: 0, maxHeight: 48 },
+  tabs: { paddingHorizontal: spacing.screen, gap: 8, alignItems: "center" },
+  tab: {
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 99, minHeight: 36,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+  },
+  tabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  tabText: { fontSize: 12.5, fontWeight: "700", color: colors.textMain },
   tabTextActive: { color: colors.primaryFg },
   card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.card, padding: 14, marginBottom: 10 },
   cardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 8 },
@@ -653,10 +743,6 @@ const styles = StyleSheet.create({
   totalLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600" },
   totalValue: { fontSize: 16, fontWeight: "800", color: colors.primary },
   actionsBlock: { marginTop: 12, gap: 10 },
-  stageTracker: { flexDirection: "row", justifyContent: "space-between", gap: 4 },
-  stageStep: { flex: 1, alignItems: "center", gap: 4 },
-  stageDot: { width: 18, height: 18, borderRadius: 9, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
-  stageLabel: { fontSize: 8, color: colors.textMuted, letterSpacing: 0, textTransform: "uppercase", fontWeight: "700", textAlign: "center" },
   btnRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, alignItems: "center" },
   primaryBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 99, backgroundColor: colors.primary },
   primaryBtnText: { fontSize: 12, fontWeight: "800", color: colors.primaryFg },

@@ -2004,3 +2004,7 @@ A rider can no longer see or use Shop / Services anywhere:
 Verified: rider_test@test.com lands on Delivery with 3 tabs, deep link to
 /(tabs)/shop bounces cleanly, chat/profile render with the rider bar, buyer
 tabs unchanged; verify_delivery_partner 40/40, verify_phase1_money 56/56.
+
+## 2026-10 — Withdrawal floor enforcement (DONE)
+- POST /api/withdrawals now enforces role-based minimums server-side: Vendor/Admin ₹5,000, Delivery Partner ₹1,000.
+- Verified via curl: vendor ₹100 → 400; DP ₹500 → 400; DP wallet view returns min_withdrawal=1000 (frontend reads it from API).

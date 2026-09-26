@@ -633,6 +633,38 @@ async def dp_wallet(dp: Dict[str, Any] = Depends(require_dp)):
     }
 
 
+@router.get("/delivery-partner/me/wallet-transactions")
+async def dp_wallet_transactions(
+    limit: int = 200, dp: Dict[str, Any] = Depends(require_dp),
+):
+    """Oct 2026 — the rider's EARNINGS ledger (personal wallet only).
+
+    Delivery commissions in, withdrawals out. COD cash never appears here:
+    that pot is Slangcart's money and lives in /me/cash-transactions.
+    """
+    rows = await db.transactions.find(
+        {"user_id": dp["id"], "type": {"$in": [
+            "dp_delivery_commission", "dp_delivery_commission_reversal",
+            "withdrawal_hold", "withdrawal", "withdrawal_reversal",
+            "admin_credit", "admin_debit",
+        ]}},
+        {"_id": 0},
+    ).sort("created_at", -1).limit(max(1, min(int(limit or 200), 500))).to_list(500)
+    earned = _r(sum(
+        float(r.get("credit") or 0) for r in rows if r.get("type") == "dp_delivery_commission"
+    ))
+    withdrawn = _r(sum(
+        float(r.get("debit") or 0) for r in rows
+        if r.get("type") in ("withdrawal_hold", "withdrawal")
+    ))
+    return {
+        "items": rows,
+        "total": len(rows),
+        "total_earned": earned,
+        "total_withdrawn": withdrawn,
+    }
+
+
 @router.get("/delivery-partner/me/net-worth")
 async def dp_net_worth(dp: Dict[str, Any] = Depends(require_dp)):
     """Where the money came from, what is still owed, and per-shop split."""

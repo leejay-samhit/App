@@ -20,6 +20,7 @@ type Settings = {
   delivery_charge_flat: number;
   delivery_free_threshold: number;
   delivery_cart_max: number;
+  dp_commission_pct: number;
 };
 
 type NumField = {
@@ -58,6 +59,12 @@ const DELIVERY_FIELDS: NumField[] = [
     help: "Hard cap on the delivery charged for the WHOLE cart, however many sellers it contains.",
     suffix: "₹",
   },
+  {
+    key: "dp_commission_pct",
+    label: "Delivery partner earning",
+    help: "Percentage of the delivery revenue (after GST) credited to the rider's wallet when he marks an order delivered. 0 means riders earn nothing.",
+    suffix: "%",
+  },
 ];
 
 const TOGGLES: { key: keyof Settings; label: string; help: string }[] = [
@@ -89,6 +96,7 @@ const NUM_KEYS: (keyof Settings)[] = [
   "delivery_charge_flat",
   "delivery_free_threshold",
   "delivery_cart_max",
+  "dp_commission_pct",
 ];
 
 export default function AdminSettings() {

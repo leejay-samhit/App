@@ -289,6 +289,116 @@ async def credit_vendor_for_order(order: Dict[str, Any], *, payment_id: Optional
     return amount if row else 0.0
 
 
+async def credit_vendor_cod_on_delivery(order: Dict[str, Any]) -> float:
+    """Oct 2026 — COD delivered by a DELIVERY PARTNER.
+
+    The rider (not the seller) took the customer's cash, so the seller has
+    received nothing physically: the company is holding his money. On the
+    `delivered` transition we therefore credit the seller the FULL cash
+    collected — exactly the same as the prepaid path — and the caller then
+    lets `settle_delivery_fee` take the delivery charge back as revenue.
+    Net result: the seller keeps precisely the item value and can withdraw
+    it, while the rider's cash-in-hand stays a liability until he remits.
+
+    Exactly once per order (`VENDORCOD:<order_id>`). Returns the amount.
+    """
+    order_id = order.get("id")
+    vendor_id = order.get("vendor_id")
+    cash = round(float(order.get("cod_due") or 0), 2)
+    if not vendor_id or cash <= 0.009:
+        return 0.0
+    row = await credit(
+        vendor_id, VENDOR_WALLET, cash,
+        idempotency_key=f"VENDORCOD:{order_id}",
+        group="vendor_payable",
+        txn_type="vendor_sale",
+        order_id=order_id,
+        order_number=order.get("order_number"),
+        vendor_id=vendor_id,
+        shop_name=order.get("vendor_name"),
+        payment_method=order.get("paid_via"),
+        delivery_charge=float(order.get("delivery_charge") or 0),
+        settlement_status="credited",
+        description=(
+            f"Cash-on-delivery collected by delivery partner — credited for "
+            f"order {order.get('order_number') or order_id}"
+        ),
+        extra={"wallet_impact": "vendor_earnings_only", "cod_credit": True},
+    )
+    return cash if row else 0.0
+
+
+async def settle_dp_commission(order: Dict[str, Any], pct: float) -> Dict[str, Any]:
+    """Oct 2026 — the rider's pay: a % of the delivery charge, admin-set.
+
+    Computed on the GST-EXCLUSIVE delivery revenue so the company can never
+    pay out the GST it owes the government. The money is credited to the
+    rider's PERSONAL wallet (`wallet_balance`) — never his cash-in-hand pot —
+    so it lands in the customer/partner liability group and he can raise a
+    withdrawal request on it. Exactly once per order (`DPCOMM:<order_id>`).
+    """
+    order_id = order.get("id")
+    dp_id = order.get("dp_id")
+    fee = round(float(order.get("delivery_charge") or 0), 2)
+    pct = max(0.0, min(float(pct or 0), 100.0))
+    if not dp_id or fee <= 0.009 or pct <= 0:
+        return {"credited": 0.0, "pct": pct}
+    base = round(float(gst_engine.split_inclusive(fee, DELIVERY_GST_PCT)["base_amount"]), 2)
+    amount = round(base * pct / 100.0, 2)
+    if amount <= 0.009:
+        return {"credited": 0.0, "pct": pct}
+    row = await credit(
+        dp_id, CUSTOMER_WALLET, amount,
+        idempotency_key=f"DPCOMM:{order_id}",
+        group="dp_payable",
+        txn_type="dp_delivery_commission",
+        order_id=order_id,
+        order_number=order.get("order_number"),
+        vendor_id=order.get("vendor_id"),
+        shop_name=order.get("vendor_name"),
+        source_wallet="system_treasury",
+        delivery_charge=fee,
+        settlement_status="credited",
+        description=(
+            f"Delivery earning — {pct:g}% of ₹{base:.2f} delivery revenue "
+            f"· order {order.get('order_number') or order_id}"
+        ),
+        extra={"dp_commission_pct": pct, "delivery_revenue_base": base},
+    )
+    return {"credited": amount if row else 0.0, "pct": pct, "base": base}
+
+
+async def reverse_dp_commission(order: Dict[str, Any], reason: str) -> float:
+    """Undo the rider's earning when a delivered order is cancelled/returned."""
+    order_id = order.get("id")
+    dp_id = order.get("dp_id")
+    paid = await db.transactions.find_one(
+        {"idempotency_key": f"DPCOMM:{order_id}"}, {"_id": 0, "amount": 1},
+    )
+    amount = round(float((paid or {}).get("amount") or 0), 2)
+    if not dp_id or amount <= 0.009:
+        return 0.0
+    try:
+        row = await debit(
+            dp_id, CUSTOMER_WALLET, amount,
+            idempotency_key=f"DPCOMM_REV:{order_id}",
+            group="dp_payable",
+            txn_type="dp_delivery_commission_reversal",
+            order_id=order_id,
+            order_number=order.get("order_number"),
+            destination_wallet="system_treasury",
+            settlement_status="reversed",
+            description=f"Delivery earning reversed — {reason}",
+        )
+        return amount if row else 0.0
+    except InsufficientFunds as err:
+        await record_financial_error(
+            "dp_commission_reversal_unfunded", str(err),
+            order_id=order_id, amount=amount,
+        )
+        return 0.0
+
+
 async def settle_delivery_fee(
     order: Dict[str, Any], *, credit_admin_bucket, admin_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -429,6 +539,13 @@ async def reverse_order_money(
         {"idempotency_key": f"VENDORSALE:{order_id}"}, {"_id": 0, "amount": 1},
     )
     amount = round(float((credited or {}).get("amount") or 0), 2)
+    # Oct 2026 — a COD order delivered by a rider was ALSO credited to the
+    # seller (VENDORCOD). Reverse whatever the ledger actually posted.
+    cod_credited = await db.transactions.find_one(
+        {"idempotency_key": f"VENDORCOD:{order_id}"}, {"_id": 0, "amount": 1},
+    )
+    amount = round(amount + float((cod_credited or {}).get("amount") or 0), 2)
+    out["dp_commission_reversed"] = await reverse_dp_commission(order, reason)
     if vendor_id and amount > 0.009:
         try:
             row = await debit(

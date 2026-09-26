@@ -10,6 +10,7 @@ import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { notify } from "../../src/notify";
 import { downloadServerFile } from "../../src/download";
+import { DateRangeFilter } from "../../src/date-range-picker";
 
 type PendingRow = {
   order_id: string;
@@ -216,28 +217,11 @@ export default function AdminCashbackScreen() {
           <>
             <Text style={styles.sectionLabel}>FILTERS</Text>
             <View style={styles.filterRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>Date from</Text>
-                <TextInput
-                  value={dateFrom}
-                  onChangeText={setDateFrom}
-                  placeholder="YYYY-MM-DD"
-                  placeholderTextColor={colors.textMuted}
-                  style={styles.input}
-                  testID="export-date-from"
-                />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>Date to</Text>
-                <TextInput
-                  value={dateTo}
-                  onChangeText={setDateTo}
-                  placeholder="YYYY-MM-DD"
-                  placeholderTextColor={colors.textMuted}
-                  style={styles.input}
-                  testID="export-date-to"
-                />
-              </View>
+              <DateRangeFilter
+                value={{ from: dateFrom, to: dateTo }}
+                onChange={(r) => { setDateFrom(r.from); setDateTo(r.to); }}
+                testID="export-date"
+              />
             </View>
 
             <Text style={styles.sectionLabel}>TRANSACTION GROUP</Text>
@@ -339,7 +323,7 @@ const styles = StyleSheet.create({
   actionBtn: { backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, minWidth: 76, alignItems: "center" },
   actionBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 12 },
   empty: { fontSize: 13, color: colors.textMuted, textAlign: "center", paddingVertical: 24 },
-  filterRow: { flexDirection: "row", gap: 10 },
+  filterRow: { marginHorizontal: -spacing.screen },
   fieldLabel: { fontSize: 12, fontWeight: "700", color: colors.textMain, marginBottom: 6 },
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.input, paddingHorizontal: 12, paddingVertical: 12, fontSize: 14, color: colors.textMain },
   chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
