@@ -1,0 +1,41 @@
+{
+  "summary": "Iter87 — Oct-2026 chat/broadcast + branding.support_whatsapp + Dashboard/Profile role gating + no-vendors hero. ALL GREEN. Backend: 8/8 pytest passes in test_iter87_chat_broadcast_branding.py — GET/PUT /branding.support_whatsapp normalises '98765 43210'→'919876543210', keeps '+91 91547 35888'→'919154735888', rejects '12345' with 400, non-super-admin 403, restored to '919154735888' at teardown. Broadcast bug fix verified for BOTH buyer and vendor: admin POST /admin/broadcasts (201) → user GET /chat/threads has separate is_announcement thread; posting into it → 403; POST /chat/contact-support returns a NON-announcement thread; POST /chat/{tid}/messages returns 200 in <100ms; GET /chat/{tid}/messages persists it; SECOND broadcast does NOT re-promote the DM thread (is_announcement stays false); recipient still receives an async chat notification. Frontend (390x844, testbuyer/testvendor/admin): Buyer dashboard has NO 'RECENT ACTIVITY' section and NO 'Update bank / UPI details' row; notification bell in header renders (9+ badge). Buyer profile has NO 'PAYOUT DETAILS' section, PRIVACY + Logout still render. Vendor dashboard STILL shows 'Update bank / UPI details' row; Vendor profile STILL shows 'PAYOUT DETAILS' with UPI/IFSC/Bank inputs + 'Save details' button. WhatsApp gating: testbuyer/testvendor both have registration_paid=false in preview DB (confirmed via /auth/login), so 'Chat with us on WhatsApp' card correctly hidden on Dashboard + Profile — matches spec for unpaid accounts. Chat tab header + bottom tab label read 'Friends' (not 'Slang-Connect'). Floating fab reads 'Support & Help' and navigates to /tickets (not to admin DM). Chat list shows separate 'ANNOUNCEMENTS' section with 'Slangcart Announcements' card and read-only note; announcement threads NOT in YOUR CHATS. Instant chat send: 3 messages sent in a burst, send-to-bubble latencies 28/28/43 ms, no duplicates, correct order. Admin branding: 'SUPPORT WHATSAPP' section renders under App Text; typed '98765 43210', tapped Save branding, reloaded — value persists as '919876543210' both in UI and public GET /api/branding; restored to '919154735888' before finishing. No-vendors hero (pincode 110001): shows 'WE'RE NOT LIVE HERE YET' eyebrow + 'No stores serving 110001 yet' + 'Become a vendor here' + 'Contact us' CTAs AND the new 'EARN WITH US' badge + 'Refer any retailer and earn with us' block + 'Refer a retailer now' button (testID no-vendors-refer-retailer) positioned BEFORE the 'For more information, write to us at' line. No React-Native deprecated packages detected (expo-camera already replaces expo-barcode-scanner).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter87_chat_broadcast_branding.py (8/8 PASS)",
+    "/app/test_reports/pytest/iter87_chat_broadcast_branding.xml",
+    "/app/test_reports/iter87_buyer_dashboard.png",
+    "/app/test_reports/iter87_buyer_profile.png",
+    "/app/test_reports/iter87_buyer_chat.png",
+    "/app/test_reports/iter87_vendor_dashboard.png",
+    "/app/test_reports/iter87_vendor_profile.png",
+    "/app/test_reports/iter87_admin_branding_saved.png",
+    "/app/test_reports/iter87_chat_after_sends.png",
+    "/app/test_reports/iter87_no_vendors_top.png"
+  ],
+  "action_items": [
+    "None — every item in the review request is verified working. support_whatsapp restored to '919154735888' as requested."
+  ],
+  "critical_code_review_comments": [
+    "routes/branding.support_whatsapp normalisation is correct: bare 10 digits get '91' prefix, full country-coded number preserved, invalid short numbers 400.",
+    "routes/broadcast now keys the announcement thread on is_announcement so it can no longer hijack the DM; verified by round-tripping two consecutive broadcasts.",
+    "chat/[id].tsx uses an optimistic bubble with a client_id echo match — send-to-visible latency measured 28-43 ms and no duplicate bubbles after the websocket echo.",
+    "no-vendors-hero.tsx places the 'EARN WITH US' block above the 'For more information' line as spec'd; testID no-vendors-refer-retailer present."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter87_chat_broadcast_branding.py (new pytest suite, 8 tests, all pass)",
+    "/app/test_reports/pytest/iter87_chat_broadcast_branding.xml (JUnit)"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% across buyer dashboard/profile/chat, vendor dashboard/profile, admin branding save+persist, chat instant send + no dup, no-vendors hero"},
+  "seed_data_creation": "None. Branding.support_whatsapp restored to '919154735888' at end. Test buyer/vendor DM history contains extra 'iter87 buyer -> admin' + 'iter87-instant-*' messages (harmless).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Every one of the six owner-requested items is verified working in preview. testbuyer@test.com and testvendor@test.com are BOTH registration_paid=false in this preview DB, so the WhatsApp card is correctly hidden for them — the paid-user branch was inferred from code review (role==admin or registration_paid==true). If you need to observe the paid branch on-screen, use freetier1@test.com / Just@4me (marked paid) or promote a test account with POST /api/admin/users/{id}/mark-paid. Chat send is now WebSocket-optimistic; if a bubble appears twice, check chat/[id].tsx's client_id echo-drop logic (server must echo the same client_id back).",
+  "rca_of_issue": "Not applicable — this iteration is a verification pass. Prior RCA: routes/broadcast._get_or_create_announcement_thread was promoting the existing DM thread to is_announcement=true, and routes/chat._find_or_create_thread was reusing that same thread, so non-admin sends 403'd. Both now key on is_announcement, migration ran with 0 hijacked threads found; two-broadcast test confirms the DM thread stays is_announcement=false permanently."
+}

@@ -20,6 +20,7 @@ Collections:
                     edited, created_at, updated_at}
 """
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import uuid
@@ -197,12 +198,20 @@ async def _participants_canonical(a: str, b: str) -> List[str]:
 
 async def _find_or_create_thread(a: str, b: str) -> Dict[str, Any]:
     parts = await _participants_canonical(a, b)
-    existing = await db.chat_threads.find_one({"participants": parts})
+    # Oct-2026 — NEVER return the one-way announcement thread here. The admin
+    # broadcast channel shares the same participant pair, and reusing it made
+    # every user/vendor unable to write to the admin (post_message rejects
+    # sends on announcement threads). Real conversations always live in the
+    # non-announcement thread.
+    existing = await db.chat_threads.find_one(
+        {"participants": parts, "is_announcement": {"$ne": True}},
+    )
     if existing:
         return existing
     doc = {
         "id": str(uuid.uuid4()),
         "participants": parts,
+        "is_announcement": False,
         "created_at": _now(),
         "last_message_at": _now(),
     }
@@ -278,7 +287,9 @@ async def search_by_refcode(code: str = Query(..., min_length=2, max_length=20),
 
     # relationship
     parts = await _participants_canonical(user["id"], target["id"])
-    existing_thread = await db.chat_threads.find_one({"participants": parts})
+    existing_thread = await db.chat_threads.find_one(
+        {"participants": parts, "is_announcement": {"$ne": True}},
+    )
     pending = await db.chat_requests.find_one({
         "$or": [
             {"from_user_id": user["id"], "to_user_id": target["id"], "status": "pending"},
@@ -344,7 +355,9 @@ async def start_thread(body: Dict[str, Any], user: Dict[str, Any] = Depends(get_
         # For non-provider chats keep the existing safety net — must already
         # have an accepted thread or an approved request.
         parts = await _participants_canonical(user["id"], other_user_id)
-        existing = await db.chat_threads.find_one({"participants": parts})
+        existing = await db.chat_threads.find_one(
+            {"participants": parts, "is_announcement": {"$ne": True}},
+        )
         if not existing:
             raise HTTPException(
                 status_code=403,
@@ -693,9 +706,6 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
     }
     await db.chat_messages.insert_one(doc.copy())
     await db.chat_threads.update_one({"id": thread_id}, {"$set": {"last_message_at": _now()}})
-    # Scam / abuse wording → admin review queue (never blocks the send;
-    # scam phrasing is deliberately delivered so the evidence survives).
-    await flag_message(doc)
 
     # If the other party is currently connected via WS, mark delivered now.
     other = other_id or ""
@@ -713,18 +723,32 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
         "message": _serialize(dict(doc)),
     })
 
-    # ── Sep 2026 — in-app notification for EVERY message ────────────────
-    # Only a phone push existed, and it was skipped whenever the recipient
-    # had a socket open — so a user who wasn't looking at the chat screen
-    # got no bell entry at all and thought chat was broken. The bell row is
-    # always written; the push still only fires when they're offline.
-    if other_id:
+    # ── Oct-2026 SEND LATENCY FIX ───────────────────────────────────────
+    # Abuse flagging, the in-app bell row and the phone push used to be
+    # awaited inline, so a send waited on the Emergent push relay (often
+    # 1-3 s) before the API responded and the bubble appeared. They are all
+    # fire-and-forget side effects, so they now run in the background and
+    # the endpoint returns as soon as the message is durable.
+    sender_name = user.get("name") or user.get("email") or "Someone"
+    preview = (text if text else "📷 Photo")[:240]
+    msg_snapshot = dict(doc)
+
+    async def _side_effects() -> None:
+        # Scam / abuse wording → admin review queue (never blocks the send;
+        # scam phrasing is deliberately delivered so the evidence survives).
+        try:
+            await flag_message(msg_snapshot)
+        except Exception as e:
+            logger.warning(f"chat flag failed (non-blocking): {e}")
+        if not other_id:
+            return
+        # In-app bell row for EVERY message — a user who isn't looking at
+        # the chat screen still gets an entry in their notification tray.
         try:
             from core.notifications import create_notification
-            sender = user.get("name") or user.get("email") or "Someone"
             await create_notification(
-                other_id, "chat", f"New message from {sender}",
-                (text if text else "📷 Photo")[:180],
+                other_id, "chat", f"New message from {sender_name}",
+                preview[:180],
                 extra={"thread_id": thread_id, "action_url": f"/chat/{thread_id}"},
                 # The tray push is fired below with the "is the user reading
                 # this thread right now?" check — don't double-send here.
@@ -732,30 +756,30 @@ async def post_message(thread_id: str, body: MessageInExt, user: Dict[str, Any] 
             )
         except Exception as e:
             logger.warning(f"chat notification failed (non-blocking): {e}")
-
-    # ── Push notification to the recipient (best-effort, never blocks).
-    # Only skipped when they literally have THIS thread open on screen —
-    # a merely-connected socket (backgrounded app) still gets the push.
-    if other_id and not manager.is_viewing(other_id, thread_id):
+        # Push to the recipient. Only skipped when they literally have THIS
+        # thread open on screen — a merely-connected socket (backgrounded
+        # app) still gets the push.
+        if manager.is_viewing(other_id, thread_id):
+            return
         try:
-            sender_name = user.get("name") or "Someone"
-            preview = text if text else "📷 Photo"
             await send_push(
                 recipients=[other_id],
                 data={
                     "title":      f"💬 {sender_name}",
-                    "message":    preview[:240],
+                    "message":    preview,
                     "action_url": f"/chat/{thread_id}",
                     # Jun 2026 — chats ride their own Android channel so the
                     # owner can give messages a different sound/vibration
                     # than order updates, right from phone settings.
                     "channel_id": "chat",
                 },
-                idempotency_key=f"chat-{doc['id']}",
+                idempotency_key=f"chat-{msg_snapshot['id']}",
                 category="chats",
             )
         except Exception as e:
             logger.warning(f"chat push failed (non-blocking): {e}")
+
+    asyncio.create_task(_side_effects())
 
     return _serialize(dict(doc))
 

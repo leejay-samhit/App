@@ -105,6 +105,10 @@ DEFAULT_BRANDING: Dict[str, Any] = {
         "border": "#E5E4E0",
     },
     "font": "system",
+    # ─── Support contact (Oct-2026) ───
+    # Number used by the in-app "Chat with us on WhatsApp" cards.
+    # Stored as digits with country code (E.164 without "+").
+    "support_whatsapp": "919154735888",
     # ─── Premium theme controls (June 2026) ───
     # Lets admin set a hero gradient, button shape and home-screen banner
     # so the app's onboarding/payment screens can be themed without code.

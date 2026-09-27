@@ -145,6 +145,16 @@ export default function ProfileScreen() {
   // Sep-2026 — an approved delivery partner is a rider, never a seller, so
   // the vendor / service-provider entries are hidden for him.
   const isApprovedDP = !!(user as any)?.is_delivery_partner_approved;
+  // Oct-2026 — only people we actually pay out to see PAYOUT DETAILS:
+  // approved sellers, delivery partners and admins. A shopper's wallet is
+  // spent inside the app, so bank/UPI fields only confuse them.
+  const canPayout = !!(
+    ((user as any)?.is_vendor && (user as any)?.is_vendor_approved)
+    || (user as any)?.is_delivery_partner
+    || (user as any)?.role === "admin"
+  );
+  // WhatsApp support is a subscribed-member perk (owner's rule, Oct-2026).
+  const showWhatsApp = !!user && ((user as any)?.role === "admin" || !!(user as any)?.registration_paid);
   const [privacySaving, setPrivacySaving] = useState<string | null>(null);
   useEffect(() => {
     (async () => {
@@ -554,6 +564,8 @@ export default function ProfileScreen() {
             )}
           </View>
 
+          {canPayout ? (
+          <>
           <Text style={styles.groupLabel}>PAYOUT DETAILS</Text>
           <View style={styles.payoutCard}>
             <Text style={styles.helperText}>Add UPI or bank details to enable withdrawals.</Text>
@@ -581,6 +593,8 @@ export default function ProfileScreen() {
               {saving ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={styles.saveBtnText}>Save details</Text>}
             </TouchableOpacity>
           </View>
+          </>
+          ) : null}
 
           {/* Fingerprint / Biometric login card — only on supported devices */}
           {biometricAvailable ? (
@@ -619,7 +633,9 @@ export default function ProfileScreen() {
 
           {/* WhatsApp chat button — always-on contact channel for the user.
               Tapping opens WhatsApp with a pre-filled welcome message
-              going to the admin support number. */}
+              going to the admin support number.
+              Oct-2026 — subscribed members only. */}
+          {showWhatsApp ? (
           <TouchableOpacity
             onPress={() => openWhatsApp(
               buildWelcomeMessage({
@@ -636,6 +652,7 @@ export default function ProfileScreen() {
             <Feather name="message-circle" size={16} color="#FFFFFF" />
             <Text style={styles.waButtonText}>Chat with us on WhatsApp</Text>
           </TouchableOpacity>
+          ) : null}
 
           <TouchableOpacity onPress={onLogout} style={styles.logoutBtn} testID="profile-logout">
             <Feather name="log-out" size={16} color="#B3261E" />

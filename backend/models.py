@@ -202,6 +202,10 @@ class BrandingPayload(BaseModel):
     splash_bg: Optional[str] = None         # hex colour
     # ─── Payment methods config (Feb-2026) ───
     payment_methods: Optional[Dict[str, Any]] = None
+    # ─── Support contact (Oct-2026) ───
+    # The WhatsApp number behind the "Chat with us on WhatsApp" cards.
+    # Admin-editable so it never has to be changed in code again.
+    support_whatsapp: Optional[str] = None
     # ─── Premium theme extensions (June 2026) ───
     gradient: Optional[Dict[str, str]] = None     # {start, middle, end, glow}
     button_style: Optional[str] = None            # rounded | pill | square

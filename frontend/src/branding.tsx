@@ -45,6 +45,8 @@ export type Branding = {
   business_gst?: string;
   support_email?: string;
   support_phone?: string;
+  /** Admin-editable WhatsApp support number (digits, country code, no "+"). */
+  support_whatsapp?: string;
   // ─── Premium theme extensions (June 2026) ───
   gradient?: {
     start?: string;
@@ -79,6 +81,7 @@ const DEFAULT_BRANDING: Branding = {
   business_gst: "",
   support_email: "support@slangcart.com",
   support_phone: "+91 91547 35888",
+  support_whatsapp: "919154735888",
 };
 
 // System font everywhere — no custom family to resolve.

@@ -58,7 +58,7 @@ export function DesktopShell({ children }: { children: React.ReactNode }) {
     { key: "dashboard", label: "Dashboard", icon: "home", path: "/(tabs)/dashboard", match: /\/dashboard/ },
     { key: "shop",      label: "Shop",      icon: "shopping-bag", path: "/(tabs)/shop", match: /\/shop|\/shop-category/ },
     { key: "services",  label: "Services",  icon: "briefcase", path: "/(tabs)/services", match: /\/services/ },
-    { key: "chat",      label: "Slang-Connect", icon: "message-circle", path: "/(tabs)/chat", match: /\/chat/ },
+    { key: "chat",      label: "Friends", icon: "message-circle", path: "/(tabs)/chat", match: /\/chat/ },
     { key: "wallet",    label: "Wallet",    icon: "credit-card", path: "/(tabs)/wallet", match: /\/wallet/ },
     { key: "orders",    label: "My orders", icon: "package", path: "/orders", match: /\/orders/ },
     { key: "profile",   label: "Profile",   icon: "user", path: "/(tabs)/profile", match: /\/profile/ },

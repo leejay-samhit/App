@@ -91,25 +91,23 @@ async def _audience_user_ids(audience: str) -> List[str]:
 
 
 async def _get_or_create_announcement_thread(admin_id: str, user_id: str) -> Dict[str, Any]:
-    """Per-user announcement thread between the super admin and the user.
+    """Dedicated per-user announcement thread between the super admin and the user.
 
     Marked with `is_announcement=true` so non-admins cannot reply (enforced
-    in routes/chat.post_message). Reuses the existing `chat_threads` schema
-    so the user's chat list picks it up automatically — no separate UI.
+    in routes/chat.post_message).
+
+    Oct-2026 BUGFIX — this used to reuse (and silently promote) whatever
+    thread already existed for the participant pair. That turned the user's
+    real conversation with the admin into a read-only channel, so after a
+    single broadcast no user or vendor could message the admin again. We now
+    keep the broadcast channel strictly separate: it is looked up by
+    `is_announcement: True` and a normal DM thread is never touched.
     """
     parts = sorted([admin_id, user_id])
-    existing = await db.chat_threads.find_one({"participants": parts})
+    existing = await db.chat_threads.find_one(
+        {"participants": parts, "is_announcement": True},
+    )
     if existing:
-        # Promote any pre-existing thread to announcement mode so future
-        # broadcasts can also use it. (Harmless if it's the super admin's
-        # own support thread — they can still post.)
-        if not existing.get("is_announcement"):
-            await db.chat_threads.update_one(
-                {"id": existing["id"]},
-                {"$set": {"is_announcement": True, "announcement_by": admin_id}},
-            )
-            existing["is_announcement"] = True
-            existing["announcement_by"] = admin_id
         return existing
     doc = {
         "id": str(uuid.uuid4()),

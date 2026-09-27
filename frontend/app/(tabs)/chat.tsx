@@ -1,6 +1,6 @@
 // Chat home — thread list (downline pinned on top), search by referral code,
 // pending requests inbox. Real-time updates via WebSocket.
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl,
   ActivityIndicator, TextInput, Alert, Image, Modal,
@@ -17,7 +17,7 @@ import { ChatLockGate } from "../../src/chat-lock-gate";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
 type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; is_vendor?: boolean; is_service_provider?: boolean };
-type Thread = { id: string; other: UserBrief; is_downline: boolean; unread_count: number; last_message: any; last_message_at?: string };
+type Thread = { id: string; other: UserBrief; is_downline: boolean; is_announcement?: boolean; unread_count: number; last_message: any; last_message_at?: string };
 type Request = { id: string; from_user_id: string; to_user_id: string; status: string; message: string; created_at: string; from?: UserBrief; to?: UserBrief };
 
 type Tab = "all" | "downline" | "vendors" | "services" | "unread";
@@ -46,7 +46,6 @@ export default function ChatListScreen() {
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestMessage, setRequestMessage] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("all");
-  const [supportBusy, setSupportBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -70,33 +69,30 @@ export default function ChatListScreen() {
   });
 
   // ─── Filter threads by active tab ──────────────────────────────────
+  // Oct-2026 — admin broadcasts live in their own read-only channel and
+  // are listed in a separate "Announcements" block, so they never sit in
+  // the middle of real conversations (and never look like a chat the user
+  // failed to reply to).
+  const announcementThreads = threads.filter((t) => t.is_announcement);
+  const chatThreads = threads.filter((t) => !t.is_announcement);
   const filteredThreads = (() => {
     switch (activeTab) {
-      case "downline": return threads.filter((t) => t.is_downline);
-      case "vendors":  return threads.filter((t) => t.other?.is_vendor);
-      case "services": return threads.filter((t) => t.other?.is_service_provider);
-      case "unread":   return threads.filter((t) => t.unread_count > 0);
-      default:         return threads;
+      case "downline": return chatThreads.filter((t) => t.is_downline);
+      case "vendors":  return chatThreads.filter((t) => t.other?.is_vendor);
+      case "services": return chatThreads.filter((t) => t.other?.is_service_provider);
+      case "unread":   return chatThreads.filter((t) => t.unread_count > 0);
+      default:         return chatThreads;
     }
   })();
-  const totalUnread = threads.reduce((s, t) => s + (t.unread_count || 0), 0);
+  const totalUnread = chatThreads.reduce((s, t) => s + (t.unread_count || 0), 0);
 
-  // ─── Contact Support Team ────────────────────────────────────────
-  // Opens chat threads with EVERY super_admin AND every support admin so
-  // both teams see the same conversation. Navigates to the first thread.
-  const onContactSupport = async () => {
-    setSupportBusy(true);
-    try {
-      const { data } = await api.post("/chat/contact-support", { message: "" });
-      const firstThread = (data?.threads || [])[0];
-      if (firstThread?.thread_id) {
-        router.push(`/chat/${firstThread.thread_id}` as any);
-      } else {
-        Alert.alert("No support team available", "Please try again later.");
-      }
-      load();
-    } catch (e) { Alert.alert("Failed", formatApiError(e)); }
-    finally { setSupportBusy(false); }
+  // ─── Support & Help ──────────────────────────────────────────────────
+  // Oct-2026 — this used to open a live chat thread with the admin, which
+  // meant every support query landed in the admin's personal inbox with no
+  // tracking. Support now goes through the ticket desk (Profile → Support
+  // & Help) so every request gets a ticket number and a reply history.
+  const onContactSupport = () => {
+    router.push("/tickets" as any);
   };
 
   const onSearch = async () => {
@@ -138,7 +134,7 @@ export default function ChatListScreen() {
     <ChatTabGate>
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>Slang-Connect</Text>
+          <Text style={styles.title}>Friends</Text>
           {requests.incoming.length > 0 ? (
             <View style={styles.badge}><Text style={styles.badgeText}>{requests.incoming.length} new</Text></View>
           ) : null}
@@ -243,6 +239,43 @@ export default function ChatListScreen() {
             </View>
           ) : null}
 
+          {/* ─── Admin announcements (read-only broadcast channel) ─── */}
+          {announcementThreads.length > 0 ? (
+            <View style={{ marginBottom: 16 }}>
+              <Text style={styles.sectionLabel}>ANNOUNCEMENTS</Text>
+              {announcementThreads.map((t) => (
+                <TouchableOpacity
+                  key={t.id}
+                  style={styles.announceCard}
+                  activeOpacity={0.85}
+                  onPress={() => router.push(`/chat/${t.id}` as any)}
+                  testID={`announcement-${t.id}`}
+                >
+                  <View style={styles.announceIcon}>
+                    <Feather name="radio" size={18} color={colors.primaryFg} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.announceTitle} numberOfLines={1}>
+                      Slangcart Announcements
+                    </Text>
+                    <Text style={styles.lastMessage} numberOfLines={1}>
+                      {t.last_message?.broadcast_title
+                        ? `📣 ${t.last_message.broadcast_title}`
+                        : (t.last_message?.text || "No announcements yet")}
+                    </Text>
+                  </View>
+                  {t.unread_count > 0 ? (
+                    <View style={styles.unreadBadge}><Text style={styles.unreadText}>{t.unread_count}</Text></View>
+                  ) : null}
+                </TouchableOpacity>
+              ))}
+              <Text style={styles.announceNote}>
+                Official updates from the Slangcart team. This channel is read-only —
+                use Support &amp; Help below to raise a query.
+              </Text>
+            </View>
+          ) : null}
+
           {/* ─── Category tabs ─── */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsRow}>
             {TABS.map((t) => {
@@ -313,16 +346,15 @@ export default function ChatListScreen() {
         </ScrollView>
       )}
 
-      {/* ─── Floating Support Team button (bottom) ─── */}
+      {/* ─── Floating Support & Help button (bottom) ─── */}
       <TouchableOpacity
         onPress={onContactSupport}
-        disabled={supportBusy}
-        style={[styles.supportFab, supportBusy && { opacity: 0.6 }]}
+        style={styles.supportFab}
         testID="support-fab"
         activeOpacity={0.8}
       >
         <Feather name="life-buoy" size={16} color="#fff" />
-        <Text style={styles.supportFabText}>{supportBusy ? "Connecting…" : "Support Team"}</Text>
+        <Text style={styles.supportFabText}>Support &amp; Help</Text>
       </TouchableOpacity>
 
       {/* Send request modal */}
@@ -426,6 +458,11 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 14, fontWeight: "800", color: colors.textMain, marginTop: 6 },
   emptySub: { fontSize: 12, color: colors.textMuted, textAlign: "center" },
   threadCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  // Admin announcement channel (read-only broadcast)
+  announceCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.brand100, borderRadius: 14, borderWidth: 1, borderColor: colors.primary, marginBottom: 8 },
+  announceIcon: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.primary },
+  announceTitle: { fontSize: 14, fontWeight: "900", color: colors.primary },
+  announceNote: { fontSize: 11, color: colors.textMuted, lineHeight: 16, marginTop: 2 },
   lastMessage: { fontSize: 12, color: colors.textMuted, marginTop: 3 },
   unreadBadge: { backgroundColor: colors.primary, minWidth: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center", paddingHorizontal: 6 },
   unreadText: { fontSize: 11, fontWeight: "900", color: colors.primaryFg },
@@ -443,7 +480,6 @@ const styles = StyleSheet.create({
   chatTabLabel: { fontSize: 11, fontWeight: "800", color: colors.textMain },
   chatTabBadge: { backgroundColor: colors.primary + "22", paddingHorizontal: 6, minWidth: 18, alignItems: "center", borderRadius: 999, paddingVertical: 1 },
   chatTabBadgeText: { fontSize: 9, fontWeight: "900", color: colors.primary },
-  // Support FAB (bottom)
-  supportFab: { position: "absolute", bottom: 18, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#0F766E", paddingHorizontal: 18, paddingVertical: 12, borderRadius: 999, shadowColor: "#000", shadowOpacity: 0.2, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 6 },
+  // Support FAB (bottom)  supportFab: { position: "absolute", bottom: 18, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#0F766E", paddingHorizontal: 18, paddingVertical: 12, borderRadius: 999, shadowColor: "#000", shadowOpacity: 0.2, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 6 },
   supportFabText: { color: "#fff", fontWeight: "900", fontSize: 13, letterSpacing: 0.3 },
 });

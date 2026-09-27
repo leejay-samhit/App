@@ -93,11 +93,49 @@ export function NoVendorsHero({ location, onBecomeVendor, compact }: Props) {
           <Text style={styles.ghostBtnText}>Contact us · {SUPPORT_EMAIL}</Text>
         </TouchableOpacity>
 
+        {/* ─── Oct-2026: Refer-a-Retailer earning pitch ───
+            Sits under the "become a vendor" CTA so a customer who can't
+            shop here yet still has something valuable to do: introduce any
+            shop owner they know and earn from it. */}
+        <View style={styles.referBlock}>
+          <View style={styles.referBadge}>
+            <Feather name="gift" size={12} color={colors.accentFg} />
+            <Text style={styles.referBadgeText}>EARN WITH US</Text>
+          </View>
+          <Text style={styles.referTitle}>Refer any retailer{"\n"}and earn with us</Text>
+          <Text style={styles.referBody}>
+            Know a shop owner? Invite them to sell on Slangcart. When their
+            store goes live, you keep earning a share of what they sell —
+            month after month.
+          </Text>
+          <View style={styles.referSteps}>
+            <ReferStep n="1" text="Share your invite with any shop owner" />
+            <ReferStep n="2" text="They list their products and go live" />
+            <ReferStep n="3" text="You earn as their store keeps selling" />
+          </View>
+          <TouchableOpacity onPress={goToVendorApply} style={styles.referBtn} testID="no-vendors-refer-retailer">
+            <Feather name="user-plus" size={16} color={colors.accentFg} />
+            <Text style={styles.referBtnText}>Refer a retailer now</Text>
+            <Feather name="arrow-right" size={16} color={colors.accentFg} />
+          </TouchableOpacity>
+        </View>
+
         <Text style={styles.smallPrint}>
           For more information, write to us at
           {" "}<Text style={styles.smallPrintEmail}>{SUPPORT_EMAIL}</Text>
         </Text>
       </View>
+    </View>
+  );
+}
+
+function ReferStep({ n, text }: { n: string; text: string }) {
+  return (
+    <View style={styles.referStep}>
+      <View style={styles.referStepDot}>
+        <Text style={styles.referStepNum}>{n}</Text>
+      </View>
+      <Text style={styles.referStepText}>{text}</Text>
     </View>
   );
 }
@@ -179,4 +217,47 @@ const styles = StyleSheet.create({
     textAlign: "center", maxWidth: 320, lineHeight: 16,
   },
   smallPrintEmail: { color: colors.primary, fontWeight: "800" },
+  // ─── Refer-a-Retailer earning pitch (Oct-2026) ───
+  referBlock: {
+    width: "100%", marginTop: 18, padding: 18,
+    borderRadius: radii.card,
+    backgroundColor: colors.brand100,
+    borderWidth: 1, borderColor: colors.primary,
+    alignItems: "center",
+  },
+  referBadge: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    backgroundColor: colors.accent,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: 999, marginBottom: 10,
+  },
+  referBadgeText: {
+    fontSize: 10, fontWeight: "900", letterSpacing: 1.2,
+    color: colors.accentFg,
+  },
+  referTitle: {
+    fontSize: 24, lineHeight: 30, fontWeight: "900",
+    color: colors.primary, textAlign: "center",
+    letterSpacing: -0.6, marginBottom: 8,
+  },
+  referBody: {
+    fontSize: 13, lineHeight: 20, color: colors.textMain,
+    textAlign: "center", marginBottom: 14, maxWidth: 320,
+  },
+  referSteps: { width: "100%", gap: 10, marginBottom: 16 },
+  referStep: { flexDirection: "row", alignItems: "center", gap: 10 },
+  referStepDot: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: colors.primary,
+    alignItems: "center", justifyContent: "center",
+  },
+  referStepNum: { fontSize: 12, fontWeight: "900", color: colors.primaryFg },
+  referStepText: { flex: 1, fontSize: 13, fontWeight: "700", color: colors.textMain, lineHeight: 18 },
+  referBtn: {
+    width: "100%", flexDirection: "row",
+    alignItems: "center", justifyContent: "center", gap: 8,
+    backgroundColor: colors.accent,
+    paddingVertical: 15, borderRadius: 12,
+  },
+  referBtnText: { color: colors.accentFg, fontWeight: "900", fontSize: 15, letterSpacing: -0.2 },
 });

@@ -67,6 +67,7 @@ export default function AdminBranding() {
         login_subtitle: draft.login_subtitle,
         payment_hero: draft.payment_hero,
         pending_hero: draft.pending_hero,
+        support_whatsapp: draft.support_whatsapp,
         colors: draft.colors,
         font: draft.font,
         tabs: draft.tabs,
@@ -137,6 +138,21 @@ export default function AdminBranding() {
           <Field label="Login subtitle (large heading)" value={draft.login_subtitle} onChangeText={(v) => setText("login_subtitle", v)} testID="branding-login-sub" />
           <Field label="Payment hero" value={draft.payment_hero} onChangeText={(v) => setText("payment_hero", v)} testID="branding-payment-hero" />
           <Field label="Pending-approval hero" value={draft.pending_hero} onChangeText={(v) => setText("pending_hero", v)} testID="branding-pending-hero" />
+
+          {/* Support contact (Oct-2026) — powers the in-app
+              "Chat with us on WhatsApp" cards. */}
+          <SectionHeader icon="message-circle" label="Support WhatsApp" />
+          <Text style={styles.helper}>
+            The number behind every &quot;Chat with us on WhatsApp&quot; button. Enter a
+            10-digit Indian mobile number, or a full number with country code.
+          </Text>
+          <Field
+            label="WhatsApp number"
+            value={draft.support_whatsapp || ""}
+            onChangeText={(v) => setText("support_whatsapp", v.replace(/[^0-9+\s-]/g, ""))}
+            placeholder="9154735888"
+            testID="branding-support-whatsapp"
+          />
 
           {/* Colors */}
           <SectionHeader icon="droplet" label="Colors" />

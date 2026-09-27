@@ -58,6 +58,19 @@ async def admin_update_branding(
             existing = (await get_branding_doc()).get("colors") or {}
             existing.update(clean)
             update["colors"] = existing
+    # ─── Support WhatsApp number (Oct-2026) ───
+    # Admin types it in any format; we normalise to digits and assume +91
+    # when a bare 10-digit Indian number is entered.
+    if payload.support_whatsapp is not None:
+        digits = re.sub(r"\D+", "", payload.support_whatsapp or "")
+        if digits and len(digits) == 10:
+            digits = f"91{digits}"
+        if digits and not (10 <= len(digits) <= 15):
+            raise HTTPException(
+                status_code=400,
+                detail="WhatsApp number must be 10 digits, or a full number with country code.",
+            )
+        update["support_whatsapp"] = digits or DEFAULT_BRANDING["support_whatsapp"]
     if payload.font is not None:
         if payload.font not in ALLOWED_FONTS:
             raise HTTPException(status_code=400, detail=f"Font must be one of: {sorted(ALLOWED_FONTS)}")

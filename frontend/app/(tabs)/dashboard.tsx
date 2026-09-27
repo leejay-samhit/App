@@ -43,15 +43,6 @@ type Dashboard = {
   day_labels?: string[];
 };
 
-type Notif = {
-  id: string;
-  kind: string;
-  title: string;
-  body: string;
-  read: boolean;
-  created_at: string;
-};
-
 export default function DashboardScreen() {
   useBackToInitialTab();
   const { user } = useAuth();
@@ -63,7 +54,6 @@ export default function DashboardScreen() {
   const appName = branding?.app_name || "Slangcart";
   const router = useRouter();
   const [data, setData] = useState<Dashboard | null>(null);
-  const [recentNotifs, setRecentNotifs] = useState<Notif[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -133,12 +123,8 @@ export default function DashboardScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [d, n] = await Promise.all([
-        api.get<Dashboard>("/users/me/dashboard"),
-        api.get<Notif[]>("/notifications/me"),
-      ]);
+      const d = await api.get<Dashboard>("/users/me/dashboard");
       setData(d.data);
-      setRecentNotifs(n.data.slice(0, 3));
     } catch {}
     finally {
       setLoading(false);
@@ -215,6 +201,14 @@ export default function DashboardScreen() {
   // Bank withdrawals are a SELLER settlement feature only — a customer's
   // Slangcart wallet is spent inside the app.
   const isSeller = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
+  // Oct-2026 — payout details are only meaningful for people who actually
+  // get PAID by us: sellers and delivery partners. Shoppers spend their
+  // wallet inside the app, so the bank/UPI row is hidden for them.
+  const isRider = !!(user as any)?.is_delivery_partner;
+  const canPayout = isSeller || isRider || (user as any)?.role === "admin";
+  // WhatsApp support is a paid-member perk — hidden until the user
+  // subscribes (owner's rule, Oct-2026).
+  const showWhatsApp = !isFreeTier;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -288,7 +282,9 @@ export default function DashboardScreen() {
             Lets the user tap once to open WhatsApp with a pre-filled
             "Hi Slangcart, I just registered as <name>" message going to
             the admin support number. Free (uses wa.me URL scheme), works
-            on every device with WhatsApp installed. */}
+            on every device with WhatsApp installed.
+            Oct-2026 — only subscribed members see it. */}
+        {showWhatsApp ? (
         <TouchableOpacity
           onPress={() => openWhatsApp(
             buildWelcomeMessage({
@@ -313,6 +309,7 @@ export default function DashboardScreen() {
           </View>
           <Feather name="chevron-right" size={20} color="#FFFFFF" />
         </TouchableOpacity>
+        ) : null}
 
         {/* === Slangcart wallet + cashback card ===
             Shown to every shopper: the wallet holds cashback from delivered
@@ -523,11 +520,15 @@ export default function DashboardScreen() {
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity style={styles.quickRow} onPress={() => router.push("/(tabs)/profile")} testID="dashboard-update-upi">
-            <View style={styles.quickIcon}><Feather name="credit-card" size={16} color={colors.primary} /></View>
-            <Text style={styles.quickText}>Update bank / UPI details</Text>
-            <Feather name="chevron-right" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
+          {/* Oct-2026 — bank / UPI details only matter for people we pay
+              out to (sellers, riders). Shoppers never see this row. */}
+          {canPayout ? (
+            <TouchableOpacity style={styles.quickRow} onPress={() => router.push("/(tabs)/profile")} testID="dashboard-update-upi">
+              <View style={styles.quickIcon}><Feather name="credit-card" size={16} color={colors.primary} /></View>
+              <Text style={styles.quickText}>Update bank / UPI details</Text>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+          ) : null}
 
           <TouchableOpacity style={styles.quickRow} onPress={() => router.push("/orders")} testID="dashboard-orders">
             <View style={styles.quickIcon}><Feather name="package" size={16} color={colors.primary} /></View>
@@ -598,25 +599,9 @@ export default function DashboardScreen() {
           </TouchableOpacity>
         </Animated.View>
 
-        {recentNotifs.length > 0 && (
-          <Animated.View entering={FadeInDown.duration(450).delay(360)}>
-            <View style={styles.feedHeader}>
-              <Text style={styles.sectionLabel}>RECENT ACTIVITY</Text>
-              <TouchableOpacity onPress={() => router.push("/notifications")} testID="dashboard-view-all-notifs">
-                <Text style={styles.viewAll}>View all</Text>
-              </TouchableOpacity>
-            </View>
-            {recentNotifs.map((n) => (
-              <View key={n.id} style={styles.feedItem}>
-                <View style={[styles.feedDot, { backgroundColor: n.kind === "payout" ? colors.success : n.kind === "withdrawal" ? colors.accent : colors.primary }]} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.feedTitle}>{n.title}</Text>
-                  <Text style={styles.feedBody} numberOfLines={2}>{n.body}</Text>
-                </View>
-              </View>
-            ))}
-          </Animated.View>
-        )}
+        {/* Oct-2026 — the RECENT ACTIVITY feed lived here and duplicated
+            the notification bell. Every activity row is now reachable from
+            the bell icon in the header, so the dashboard stays focused. */}
       </ScrollView>
     </SafeAreaView>
   );

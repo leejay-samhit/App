@@ -28,6 +28,12 @@ type Message = {
   edited: boolean;
   created_at: string;
   updated_at: string;
+  /** Echoed back by the server — used to match an optimistic bubble. */
+  client_dedupe_key?: string | null;
+  /** Local-only: true while the send is still in flight. */
+  pending?: boolean;
+  read_by?: string[];
+  reply_to?: { id: string; sender_id: string; text: string; has_image: boolean } | null;
 };
 
 type Thread = { id: string; other: { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; profile_image_hidden?: boolean }; is_downline: boolean; is_announcement?: boolean };
@@ -43,7 +49,6 @@ export default function ChatThreadScreen() {
   const [thread, setThread] = useState<Thread | null>(null);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
   const [picking, setPicking] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<Message | null>(null);
@@ -177,7 +182,16 @@ export default function ChatThreadScreen() {
   const { setViewingThread } = useChatSocket((ev) => {
     if (!threadId) return;
     if (ev.type === "message.new" && ev.thread_id === threadId) {
-      setMessages((prev) => [...prev.filter((m) => m.id !== ev.message.id), ev.message]);
+      setMessages((prev) => {
+        // Drop my own optimistic placeholder for this exact send so the
+        // bubble is replaced rather than duplicated.
+        const key = ev.message?.client_dedupe_key;
+        const cleaned = prev.filter((m) =>
+          m.id !== ev.message.id
+          && !(key && m.pending && m.id === `pending-${key}`),
+        );
+        return [...cleaned, ev.message];
+      });
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
       // Mark as read silently
       api.get(`/chat/${threadId}/messages`, { params: { limit: 1 } }).catch(() => {});
@@ -225,26 +239,74 @@ export default function ChatThreadScreen() {
     return true;
   };
 
-  const onSend = async () => {
+  // ── Oct-2026 INSTANT SEND ────────────────────────────────────────────
+  // The bubble used to appear only after the POST resolved AND the socket
+  // echoed the message back, which felt like a 1-3 s freeze with a spinner
+  // on the send arrow. We now paint the bubble the moment you tap send and
+  // reconcile with the server copy when it lands (matched on the dedupe
+  // key), so sending feels instant even on a slow connection.
+  const onSend = () => {
     const text = draft.trim();
-    if (!text || sending) return;
-    setSending(true);
-    try {
-      if (editingId) {
-        await api.patch(`/chat/messages/${editingId}`, { text });
-        setEditingId(null);
-      } else {
-        await api.post(`/chat/${threadId}/messages`, {
-          text,
-          reply_to_id: replyTo?.id,
-          client_dedupe_key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        });
-        setReplyTo(null);
-      }
+    if (!text) return;
+    if (editingId) {
+      const id = editingId;
+      setEditingId(null);
       setDraft("");
-      // Optimistic local update will happen via WS event
-    } catch (e) { Alert.alert("Send failed", formatApiError(e)); }
-    finally { setSending(false); }
+      setMessages((prev) => prev.map((m) => m.id === id ? { ...m, text, edited: true } : m));
+      api.patch(`/chat/messages/${id}`, { text }).catch((e) => {
+        Alert.alert("Edit failed", formatApiError(e));
+        load();
+      });
+      return;
+    }
+    const dedupeKey = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const quoted = replyTo;
+    const temp: Message = {
+      id: `pending-${dedupeKey}`,
+      thread_id: String(threadId),
+      sender_id: myId,
+      text,
+      image_data_url: "",
+      deleted: false,
+      edited: false,
+      read_by: [myId],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ...(quoted ? {
+        reply_to: {
+          id: quoted.id,
+          sender_id: quoted.sender_id,
+          text: (quoted.text || "").slice(0, 160),
+          has_image: !!quoted.image_data_url,
+        },
+      } : {}),
+      pending: true,
+    } as any;
+    setDraft("");
+    setReplyTo(null);
+    setMessages((prev) => [...prev, temp]);
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 30);
+    api.post<Message>(`/chat/${threadId}/messages`, {
+      text,
+      reply_to_id: quoted?.id,
+      client_dedupe_key: dedupeKey,
+    })
+      .then((r) => {
+        const saved = r.data;
+        if (!saved?.id) return;
+        // Swap the placeholder for the server copy — and drop the copy the
+        // socket may already have inserted so the bubble never duplicates.
+        setMessages((prev) => {
+          const withoutDupes = prev.filter((m) => m.id !== temp.id && m.id !== saved.id);
+          return [...withoutDupes, saved];
+        });
+      })
+      .catch((e) => {
+        setMessages((prev) => prev.filter((m) => m.id !== temp.id));
+        setDraft(text);
+        setReplyTo(quoted);
+        Alert.alert("Send failed", formatApiError(e));
+      });
   };
 
   const onPickImage = async () => {
@@ -517,8 +579,8 @@ export default function ChatThreadScreen() {
               maxLength={4000}
               onSubmitEditing={onSend}
             />
-            <TouchableOpacity onPress={onSend} disabled={!draft.trim() || sending} style={[styles.sendBtn, (!draft.trim() || sending) && { opacity: 0.4 }]} testID="composer-send">
-              {sending ? <ActivityIndicator size="small" color={colors.primaryFg} /> : <Feather name={editingId ? "check" : "send"} size={18} color={colors.primaryFg} />}
+            <TouchableOpacity onPress={onSend} disabled={!draft.trim()} style={[styles.sendBtn, !draft.trim() && { opacity: 0.4 }]} testID="composer-send">
+              <Feather name={editingId ? "check" : "send"} size={18} color={colors.primaryFg} />
             </TouchableOpacity>
           </View>
         )}

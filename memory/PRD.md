@@ -2008,3 +2008,42 @@ tabs unchanged; verify_delivery_partner 40/40, verify_phase1_money 56/56.
 ## 2026-10 — Withdrawal floor enforcement (DONE)
 - POST /api/withdrawals now enforces role-based minimums server-side: Vendor/Admin ₹5,000, Delivery Partner ₹1,000.
 - Verified via curl: vendor ₹100 → 400; DP ₹500 → 400; DP wallet view returns min_withdrawal=1000 (frontend reads it from API).
+
+## 2026-10 Iter87 — Visibility gating, admin WhatsApp, chat speed & broadcast fix (DONE)
+1. **Payout gating** — `PAYOUT DETAILS` (Profile) and `Update bank / UPI details` (Dashboard)
+   now render only for approved vendors, delivery partners and admins.
+2. **Dashboard cleanup** — the `RECENT ACTIVITY` feed was removed entirely (it duplicated the
+   notification bell). The `/notifications/me` fetch and `Notif` type were deleted with it.
+3. **WhatsApp card gating** — "Chat with us on WhatsApp" on Dashboard + Profile is now a
+   subscribed-member perk (hidden when `registration_paid` is false).
+4. **Admin-editable WhatsApp number** — new `support_whatsapp` branding field
+   (`core/config.DEFAULT_BRANDING`, `models.BrandingPayload`, `PUT /api/admin/branding`).
+   Admin edits it in Admin → More → Branding & theme → "Support WhatsApp". A bare 10-digit
+   Indian number is auto-prefixed with 91; anything outside 10-15 digits is rejected (400).
+5. **Rename** — "Slang-Connect" → **Friends** (chat header, bottom tab label, desktop sidebar).
+6. **Instant chat send** — two root causes fixed:
+   - Backend: `post_message` awaited `flag_message`, `create_notification` and the Emergent
+     push relay inline (1-3 s). They now run in an `asyncio.create_task` side-effect coroutine;
+     the endpoint returns as soon as the message is durable (**47 ms** measured, was seconds).
+   - Frontend: the bubble only painted after the POST *and* the socket echo. `onSend` is now
+     optimistic — it paints a `pending` bubble instantly and reconciles with the server copy,
+     deduping on `client_dedupe_key` so the socket echo never duplicates it.
+     Measured send→bubble: 28 / 28 / 43 ms.
+7. **Support routing** — the chat-list FAB read "Support Team" and opened a live DM with the
+   admin. It now reads **Support & Help** and routes to `/tickets` (ticket desk).
+8. **BUG FIX — broadcast killed user→admin chat.** `broadcast._get_or_create_announcement_thread`
+   used to *promote* the existing DM thread to `is_announcement=true`, and `post_message`
+   rejects non-admin sends on announcement threads — so after one broadcast no user or vendor
+   could message the admin again. Broadcast channels are now separate documents keyed on
+   `is_announcement: True`, and `chat._find_or_create_thread` / `/chat/search` / `/chat/threads`
+   (POST) all exclude announcement threads. Migration:
+   `tests/migrate_oct2026_split_announcement_threads.py` (ran clean, 0 hijacked threads).
+   The chat list renders a dedicated **ANNOUNCEMENTS** section so broadcasts never sit among
+   real conversations.
+9. **No-vendors hero** — kept the original "WE'RE NOT LIVE HERE YET" copy and added a large
+   "Refer any retailer and earn with us" block (EARN WITH US badge, 3 numbered steps,
+   "Refer a retailer now" CTA) above the "For more information, write to us at" line.
+
+Verification: `backend/tests/verify_oct2026_chat_updates.py` 8/8 PASS,
+`backend/tests/test_iter87_chat_broadcast_branding.py` 8/8 PASS,
+full frontend pass in `test_reports/iteration_87.json` — all green.

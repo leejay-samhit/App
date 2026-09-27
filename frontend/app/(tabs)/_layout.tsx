@@ -133,7 +133,7 @@ export default function TabsLayout() {
       {order.map((key) => {
         const t = byKey[key];
         const iconName: any = t?.icon || (key === "dashboard" ? "home" : key === "wallet" ? "credit-card" : key === "shop" ? "shopping-bag" : key === "services" ? "briefcase" : key === "chat" ? "message-circle" : "user");
-        const label = t?.label || (key === "services" ? "Services" : key === "shop" ? "Shop" : key === "dashboard" ? "Dashboard" : key === "profile" ? "Profile" : key === "chat" ? "Chat" : key === "wallet" ? "Wallet" : key);
+        const label = t?.label || (key === "services" ? "Services" : key === "shop" ? "Shop" : key === "dashboard" ? "Dashboard" : key === "profile" ? "Profile" : key === "chat" ? "Friends" : key === "wallet" ? "Wallet" : key);
         const isHidden = HARD_HIDDEN.has(key) || t?.visible === false;
         return (
           <Tabs.Screen
