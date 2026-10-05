@@ -3095,6 +3095,13 @@ async def admin_account_reset(
         await db.users.delete_one({"id": target["id"]})
         summary["account_deleted"] = 1
     else:
+        # Oct-2026 FIX — this only zeroed `wallet_balance`, so a vendor's
+        # `vendor_earnings` (and a rider's COD cash-in-hand) survived a
+        # "Clear data". That leftover vendor payable is subtracted from
+        # company net worth, which is exactly why a freshly reset app still
+        # showed a small negative figure. Every money pot and every role
+        # flag is now zeroed — if a new wallet field is ever added it MUST
+        # be added here too.
         await db.users.update_one({"id": target["id"]}, {"$set": {
             "wallet_balance": 0.0,
             "wallet_buckets": {b: 0.0 for b in SYSTEM_WALLET_BUCKETS},
@@ -3102,6 +3109,14 @@ async def admin_account_reset(
             "direct_referrals_count": 0,
             "payouts_received": 0,
             "wallet_frozen": False,
+            # Shop / rider / legacy money pots
+            "vendor_earnings": 0.0,
+            "dp_cash_in_hand": 0.0,
+            "pending_balance": 0.0,
+            "refund_debt": 0.0,
+            "total_spent": 0.0,
+            "cashback_earned": 0.0,
+            "pending_cashback": 0.0,
         }})
         summary["account_cleared"] = 1
 
@@ -3405,6 +3420,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     )
 
     zone_conflicts: List[str] = []
+    cod_blocked: List[str] = []
     _vendor_name_cache: Dict[str, str] = {}
 
     async def _vendor_name(vid: str) -> str:
@@ -3420,13 +3436,20 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     for it in items:
         prod = await db.products.find_one(
             {"id": it["product_id"]},
-            {"_id": 0, "name": 1, "vendor_id": 1, "delivery_available": 1},
+            {"_id": 0, "name": 1, "vendor_id": 1, "delivery_available": 1, "cod_available": 1},
         )
         if not prod:
             continue
         if prod.get("delivery_available") is False:
             zone_conflicts.append(f"{prod.get('name', 'A product')} is not available for delivery.")
             continue
+        # Oct-2026 — per-product Cash-on-Delivery switch. The seller decides
+        # which of his items he is willing to hand over against cash; if even
+        # one item in the bag is prepaid-only the whole COD checkout is
+        # refused with the item names, so the app can show exactly what to
+        # remove (or tell the buyer to pay online).
+        if payment_method in ("cod", "wallet_cod") and prod.get("cod_available") is False:
+            cod_blocked.append(prod.get("name") or "A product")
         vid = prod.get("vendor_id")
         if not vid:
             # Legacy product with no vendor — allow through (matches
@@ -3447,6 +3470,20 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                 "code": "out_of_delivery_zone",
                 "message": "Some cart items are outside the delivery zone for your shipping pincode.",
                 "conflicts": zone_conflicts,
+            },
+        )
+    if cod_blocked:
+        names = ", ".join(cod_blocked[:4]) + ("…" if len(cod_blocked) > 4 else "")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "cod_not_available",
+                "message": (
+                    f"This item can't be delivered as Cash on Delivery. "
+                    f"Please make the payment for the item and delivery to continue."
+                ),
+                "items": cod_blocked,
+                "names": names,
             },
         )
     enriched = []
@@ -5676,6 +5713,14 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
                     "cod_vendor_credit_failed", str(_cod_err),
                     order_id=order_id, vendor_id=order.get("vendor_id"),
                 )
+        elif paid_via in ("cod", "wallet_cod"):
+            # Oct-2026 — the SELLER delivered and took the cash himself. No
+            # money moves (it is already in his pocket); we only write the
+            # informational row so the ₹ is traceable in his Net Worth.
+            try:
+                await shop_money.record_vendor_cod_self_collected(fresh_for_fee)
+            except Exception as _self_err:
+                logger.warning(f"COD self-collect record failed for {order_id}: {str(_self_err)[:200]}")
         try:
             await shop_money.settle_delivery_fee(
                 fresh_for_fee,

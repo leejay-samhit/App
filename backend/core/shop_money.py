@@ -211,7 +211,8 @@ async def post_opening_balance(
     rows = await db.transactions.find(
         {"user_id": owner_id, "wallet_impact": "vendor_earnings_only"}
         if wallet == VENDOR_WALLET else
-        {"user_id": owner_id, "wallet_impact": {"$ne": "vendor_earnings_only"}},
+        {"user_id": owner_id,
+         "wallet_impact": {"$nin": ["vendor_earnings_only", "informational"]}},
         {"_id": 0, "credit": 1, "debit": 1, "amount": 1},
     ).to_list(50000)
     net = 0.0
@@ -328,6 +329,52 @@ async def credit_vendor_cod_on_delivery(order: Dict[str, Any]) -> float:
     return cash if row else 0.0
 
 
+async def record_vendor_cod_self_collected(order: Dict[str, Any]) -> float:
+    """Oct-2026 — COD delivered by the SELLER himself (no rider mapped).
+
+    The seller physically took the customer's cash, so there is no money for
+    us to move: crediting his withdrawable wallet would create the same
+    rupee twice (once in his pocket, once as a company liability). We write
+    ONE informational ledger row instead, so the cash is fully traceable in
+    his Net Worth without ever touching a balance.
+
+    Tagged `wallet_impact="informational"`, which every wallet
+    reconciliation deliberately ignores. Exactly once per order.
+    """
+    order_id = order.get("id")
+    vendor_id = order.get("vendor_id")
+    cash = round(float(order.get("cod_due") or 0), 2)
+    if not vendor_id or cash <= 0.009:
+        return 0.0
+    fee = round(float(order.get("delivery_charge") or 0), 2)
+    row = await post(
+        group="vendor_self_collected",
+        txn_type="vendor_cod_self_collected",
+        amount=cash,
+        idempotency_key=f"VENDORCODSELF:{order_id}",
+        user_id=vendor_id,
+        vendor_id=vendor_id,
+        shop_name=order.get("vendor_name"),
+        order_id=order_id,
+        order_number=order.get("order_number"),
+        payment_method=order.get("paid_via"),
+        delivery_charge=fee,
+        settlement_status="collected_by_seller",
+        description=(
+            f"Cash collected by the seller on his own delivery — ₹{cash:,.2f} "
+            f"(incl. ₹{fee:,.2f} delivery) · order "
+            f"{order.get('order_number') or order_id}. Slangcart takes nothing."
+        ),
+        extra={
+            "wallet_impact": "informational",
+            "self_delivered": True,
+            "delivery_charge_kept_by_vendor": fee,
+            "company_share": 0.0,
+        },
+    )
+    return cash if row else 0.0
+
+
 async def settle_dp_commission(order: Dict[str, Any], pct: float) -> Dict[str, Any]:
     """Oct 2026 — the rider's pay: a % of the delivery charge, admin-set.
 
@@ -416,6 +463,28 @@ async def settle_delivery_fee(
         return {"settled": True, "amount": 0.0, "reason": "free_delivery"}
     if order.get("delivery_settled"):
         return {"settled": True, "amount": 0.0, "reason": "already_settled"}
+
+    # ── Oct-2026 OWNER RULE — no rider, no delivery charge ──────────────
+    # Slangcart only earns the delivery charge when SLANGCART delivered,
+    # i.e. when a mapped delivery partner carried the parcel. A seller who
+    # is not mapped to a rider takes the whole job (and the whole risk) on
+    # himself, so the company collects ₹0: nothing leaves his wallet, no
+    # delivery-revenue row and no GST row is written. Previously this ran
+    # for every order, which silently pulled the fee out of a
+    # self-delivering seller's wallet (or raised a bogus outstanding
+    # against him) and booked revenue the company never earned.
+    if not order.get("dp_id"):
+        await db.orders.update_one(
+            {"id": order_id},
+            {"$set": {
+                "delivery_settled": True,
+                "delivery_settled_at": now_utc().isoformat(),
+                "delivery_settlement_status": "vendor_self_delivery",
+                "delivery_charge_kept_by_vendor": fee,
+            }},
+        )
+        return {"settled": True, "amount": 0.0, "reason": "vendor_self_delivery",
+                "kept_by_vendor": fee}
 
     ts = now_utc().isoformat()
     try:

@@ -224,6 +224,10 @@ export function RichProductEditor({
   // both. A percentage wins if somehow both are filled.
   const [cashbackFlat, setCashbackFlat] = useState("");
   const [freeDelivery, setFreeDelivery] = useState(false);
+  // Oct-2026 — per-product Cash-on-Delivery switch. Defaults to ON so an
+  // existing listing behaves exactly as before; turning it off makes the
+  // item prepaid-only and checkout refuses COD for it.
+  const [codAvailable, setCodAvailable] = useState(true);
   // ── Pricing & GST (Phase 2) — purchase side is PRIVATE to the seller.
   // CGST/SGST/profit are never computed here: `/api/gst/compute` is the one
   // engine, shared with the invoice, the ledger and the Excel export.
@@ -624,6 +628,7 @@ export function RichProductEditor({
     setStock(existing?.stock != null ? String(existing.stock) : "100");
     setCashbackPct(existing?.cashback_pct != null ? String(existing.cashback_pct) : "");
     setFreeDelivery(!!existing?.free_delivery);
+    setCodAvailable(existing?.cod_available !== false);
     setPurchasePrice((existing as any)?.purchase_price != null ? String((existing as any).purchase_price) : "");
     setPurchaseGst((existing as any)?.purchase_gst_pct != null ? String((existing as any).purchase_gst_pct) : "");
     setSellingGst((existing as any)?.selling_gst_pct != null ? String((existing as any).selling_gst_pct) : "");
@@ -1492,6 +1497,7 @@ export function RichProductEditor({
           ? 0
           : Math.max(0, Number(cashbackFlat) || 0),
         free_delivery: freeDelivery,
+        cod_available: codAvailable,
         // Pricing & GST (Phase 2). Purchase figures stay vendor-private.
         purchase_price: purchasePrice.trim() ? Number(purchasePrice) : undefined,
         purchase_gst_pct: purchaseGst.trim() ? Number(purchaseGst) : undefined,
@@ -1880,6 +1886,32 @@ export function RichProductEditor({
                   <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }}>
                     Free delivery on this product
                   </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => setCodAvailable((v) => !v)}
+                style={sectionStyles.chipRow}
+                testID="product-cod-available"
+              >
+                <View style={[modalStyles.input, {
+                  flexDirection: "row", alignItems: "center", gap: 8, flex: 1,
+                }]}>
+                  <Feather
+                    name={codAvailable ? "check-square" : "square"}
+                    size={16}
+                    color={codAvailable ? colors.primary : colors.textMuted}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, fontWeight: "700", color: colors.textMain }}>
+                      Cash on Delivery available
+                    </Text>
+                    <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                      {codAvailable
+                        ? "Customers can order this item and pay cash on delivery."
+                        : "Prepaid only \u2014 customers must pay online before delivery."}
+                    </Text>
+                  </View>
                 </View>
               </TouchableOpacity>
 

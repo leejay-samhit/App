@@ -121,6 +121,10 @@ class ProductCreate(BaseModel):
     # and core/cashback.py clamps again when the money is calculated.
     cashback_pct: Optional[float] = Field(default=None, ge=0, le=10)
     free_delivery: Optional[bool] = False
+    # Oct-2026 — per-product Cash-on-Delivery switch. Defaults to True so
+    # every existing listing keeps today's behaviour; a seller turns it off
+    # for items he will only ship against a prepaid order.
+    cod_available: Optional[bool] = True
     # ── Pricing & GST (Phase 2, Jun-2026) ─────────────────────────────
     # `price` IS the selling base (GST-exclusive). `purchase_price` and
     # `purchase_gst_pct` are VENDOR-PRIVATE and stripped from every
@@ -177,6 +181,7 @@ class ProductUpdate(BaseModel):
     # Purchase cashback + delivery (Jun-2026). 0–10% hard ceiling.
     cashback_pct: Optional[float] = Field(default=None, ge=0, le=10)
     free_delivery: Optional[bool] = None
+    cod_available: Optional[bool] = None
     # Pricing & GST (Phase 2). Purchase side is vendor-private.
     purchase_price: Optional[float] = Field(default=None, ge=0)
     purchase_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)

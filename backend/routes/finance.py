@@ -32,9 +32,19 @@ from fastapi.responses import StreamingResponse
 from core.db import db
 from core.security import require_admin, require_admin_role
 from core.utils import now_utc, audit_log as _audit_log
+from core import shop_money
+from core.config import ADMIN_EMAIL
 
 
 router = APIRouter()
+
+# System-wallet buckets an adjustment may be attributed to. Mirrors
+# server.SYSTEM_WALLET_BUCKETS (imported lazily would create a cycle).
+SYSTEM_WALLET_BUCKETS = (
+    "referral_commission", "direct_signup", "fee_residual", "direct_added",
+    "service_margin", "shopping_margin", "gst_collected", "platform_fee_collected",
+    "delivery_collected", "cashback_funded",
+)
 
 # Entry-GST percentage on customer-facing joining fees (GST-inclusive math:
 # ₹118 gross → ₹18 GST). Mirrors server.REFERRAL_GST_PCT.
@@ -332,9 +342,21 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     reversals_count  = int((rev_agg or [{}])[0].get("count") or 0)
     reversals_amount = float((rev_agg or [{}])[0].get("sum") or 0)  # negative net
 
+    # Oct-2026 — adjustments now move real money via shop_money, which always
+    # stores `amount` positive and puts the direction in credit/debit. Sum the
+    # signed net so a debit correction shows as an outflow, not an inflow.
     adj_agg = await db.transactions.aggregate([
-        {"$match": {"type": {"$in": ["adjustment", "manual_adjustment"]}, "status": "success"}},
-        {"$group": {"_id": None, "sum": {"$sum": "$amount"}, "count": {"$sum": 1}}},
+        {"$match": {"type": {"$in": [
+            "adjustment", "manual_adjustment",
+            "manual_adjustment_credit", "manual_adjustment_debit",
+        ]}, "status": "success"}},
+        {"$group": {"_id": None, "count": {"$sum": 1}, "sum": {"$sum": {
+            "$cond": [
+                {"$or": [{"$gt": ["$credit", 0]}, {"$gt": ["$debit", 0]}]},
+                {"$subtract": [{"$ifNull": ["$credit", 0]}, {"$ifNull": ["$debit", 0]}]},
+                "$amount",
+            ],
+        }}}},
     ]).to_list(1)
     adjustments_count  = int((adj_agg or [{}])[0].get("count") or 0)
     adjustments_amount = float((adj_agg or [{}])[0].get("sum") or 0)  # signed
@@ -391,13 +413,31 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     cash_registration = round(float((cash_reg_agg or [{}])[0].get("sum") or 0), 2)
     cash_registration_count = int((cash_reg_agg or [{}])[0].get("count") or 0)
 
-    # COD cash physically held by sellers / delivery partners, not yet remitted.
+    # COD cash physically held by a Slangcart DELIVERY PARTNER, not yet
+    # remitted. Oct-2026 FIX — this used to count EVERY delivered COD order,
+    # including the ones a seller delivered himself. That seller's cash is
+    # his own money (he keeps item + delivery, we take nothing), so counting
+    # it as company cash inflated both cash-on-hand and net worth and left
+    # the owner staring at a number that had no bank entry behind it.
     cod_agg = await db.orders.aggregate([
-        {"$match": {"status": "delivered", "cod_due": {"$gt": 0}, "cod_remitted": {"$ne": True}}},
+        {"$match": {"status": "delivered", "cod_due": {"$gt": 0},
+                    "dp_id": {"$nin": [None, ""]},
+                    "cod_remitted": {"$ne": True},
+                    "dp_cash_remitted": {"$ne": True}}},
         {"$group": {"_id": None, "sum": {"$sum": "$cod_due"}, "count": {"$sum": 1}}},
     ]).to_list(1)
     cod_in_field = round(float((cod_agg or [{}])[0].get("sum") or 0), 2)
     cod_in_field_count = int((cod_agg or [{}])[0].get("count") or 0)
+
+    # Seller-collected COD — reported for visibility ONLY. It never enters
+    # cash_on_hand or net worth because it is not our money.
+    self_cod_agg = await db.orders.aggregate([
+        {"$match": {"status": "delivered", "cod_due": {"$gt": 0},
+                    "$or": [{"dp_id": None}, {"dp_id": ""}, {"dp_id": {"$exists": False}}]}},
+        {"$group": {"_id": None, "sum": {"$sum": "$cod_due"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    cod_with_sellers = round(float((self_cod_agg or [{}])[0].get("sum") or 0), 2)
+    cod_with_sellers_count = int((self_cod_agg or [{}])[0].get("count") or 0)
     cash_on_hand = round(cash_registration + cod_in_field, 2)
 
     # Bug-3 fix · 2026-05-30: Use the reconciliation-aware Bank Tally Net
@@ -508,7 +548,10 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "registration_count":   cash_registration_count,
             "cod_with_collectors":  cod_in_field,
             "cod_orders":           cod_in_field_count,
-            "note": "Physical cash the company holds — offline/UPI-manual joinings plus COD not yet remitted. Kept out of the bank balance.",
+            # Informational — the seller's own money, never ours.
+            "cod_with_sellers":     cod_with_sellers,
+            "cod_with_sellers_orders": cod_with_sellers_count,
+            "note": "Physical cash the company holds — offline/UPI-manual joinings plus COD a delivery partner still owes us. Seller-collected COD (own delivery) is shown separately and is NOT company money.",
         },
         "master": {
             "pending_collections": round(pending_collections, 2),
@@ -940,44 +983,85 @@ async def adjust_transaction(
     payload: Dict[str, Any],
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
-    """Create a manual ADJUSTMENT entry without referencing a prior txn.
+    """Create a manual ADJUSTMENT that actually MOVES money.
+
+    Oct-2026 FIX — this used to insert a `transactions` row and nothing else:
+    no wallet was touched, so "adjustment money" was a number on a screen
+    that no refund and no cashback could ever spend, while still shifting the
+    reconciliation display. It now posts through the real ledger
+    (`shop_money.credit` / `shop_money.debit`), so the balance it claims to
+    create genuinely exists, is spendable, and is traceable row-by-row.
 
     Body:
-        user_id: str            (target wallet — usually admin's own id)
+        user_id: str            (target wallet owner)
         amount: float           (positive = credit, negative = debit)
+        wallet: str (optional)  "wallet_balance" (default) | "vendor_earnings"
         category: str           (e.g. "correction", "writeoff", "topup")
         description: str
-        bucket: str (optional)  (which admin bucket to touch if user is admin)
+        bucket: str (optional)  admin system-wallet bucket to attribute it to
     """
     user_id    = (payload.get("user_id") or "").strip()
-    amount     = float(payload.get("amount") or 0)
+    amount     = round(float(payload.get("amount") or 0), 2)
     category   = (payload.get("category") or "correction").strip()
     description = (payload.get("description") or "").strip()
+    wallet     = (payload.get("wallet") or shop_money.CUSTOMER_WALLET).strip()
     if not user_id or amount == 0 or not description:
         raise HTTPException(status_code=400, detail="user_id, amount, description are all required")
-    if not await db.users.find_one({"id": user_id}):
+    if wallet not in (shop_money.CUSTOMER_WALLET, shop_money.VENDOR_WALLET):
+        raise HTTPException(status_code=400, detail="wallet must be wallet_balance or vendor_earnings")
+    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not target:
         raise HTTPException(status_code=404, detail="User not found")
     audit = await extract_client_audit(request)
-    display = await next_txn_display_id()
-    doc = {
-        "id": str(uuid.uuid4()),
-        "display_id": display,
-        "user_id": user_id,
-        "type": "adjustment",
-        "category": category,
-        "amount": amount,
-        "status": "success",
-        "description": f"ADJUST · {description}",
-        "created_at": now_utc().isoformat(),
-        "created_by_admin": admin["id"],
-        **audit,
-    }
-    await db.transactions.insert_one(doc)
-    await _audit_log(admin, "transaction.adjust", "transaction", doc["id"], {
+    key = f"ADJUST:{uuid.uuid4().hex}"
+    common = dict(
+        group="adjustment",
+        settlement_status="adjusted",
+        description=f"ADJUST · {description}",
+        extra={
+            "category": category,
+            "created_by_admin": admin["id"],
+            "created_by_email": admin.get("email"),
+            **({"wallet_impact": "vendor_earnings_only"} if wallet == shop_money.VENDOR_WALLET else {}),
+            **audit,
+        },
+    )
+    try:
+        if amount > 0:
+            row = await shop_money.credit(
+                user_id, wallet, amount,
+                idempotency_key=key, txn_type="manual_adjustment_credit", **common,
+            )
+        else:
+            row = await shop_money.debit(
+                user_id, wallet, abs(amount),
+                idempotency_key=key, txn_type="manual_adjustment_debit", **common,
+            )
+    except shop_money.InsufficientFunds as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    if row is None:
+        raise HTTPException(status_code=409, detail="This adjustment was already posted.")
+
+    # When the money lands on the company account, attribute it to a
+    # system-wallet bucket so the Treasury breakdown stays explainable.
+    # `shop_money.credit` already moved `wallet_balance`, so we only touch
+    # the bucket counter here — never the balance again (no double entry).
+    is_company = (target.get("role") == "admin") or (
+        (target.get("email") or "").lower() == ADMIN_EMAIL.lower()
+    )
+    if is_company and wallet == shop_money.CUSTOMER_WALLET:
+        bucket = (payload.get("bucket") or "direct_added").strip()
+        if bucket in SYSTEM_WALLET_BUCKETS:
+            await db.users.update_one(
+                {"id": user_id}, {"$inc": {f"wallet_buckets.{bucket}": amount}},
+            )
+
+    await _audit_log(admin, "transaction.adjust", "transaction", row["id"], {
         "amount": amount, "category": category, "description": description,
+        "wallet": wallet, "target": target.get("email"),
+        "new_balance": row.get("new_balance"),
     })
-    doc.pop("_id", None)
-    return {"ok": True, "adjustment": doc}
+    return {"ok": True, "adjustment": row}
 
 
 # ────────────────────────────────────────────────────────────────────

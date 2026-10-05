@@ -218,8 +218,15 @@ async def main():
         v3 = await vendor_wallet(vid)
         check("self-delivery seller is NOT credited the cash he already holds",
               not await db.transactions.find_one({"idempotency_key": f"VENDORCOD:{oid2}"}))
-        check("self-delivery seller still pays the delivery charge",
-              round(v2 - v3, 2) == fee2, f"{v2} → {v3}, expected −{fee2}")
+        # Oct-2026 OWNER RULE — no rider mapped means the seller delivered,
+        # so Slangcart collects nothing: he keeps item value + delivery.
+        check("self-delivery seller keeps the delivery charge",
+              round(v2 - v3, 2) == 0.0, f"{v2} → {v3}, expected no movement")
+        check("self-delivery writes no delivery revenue",
+              not await db.transactions.find_one({"idempotency_key": f"DELREV:{oid2}"}))
+        check("self-collected cash is traceable",
+              bool(await db.transactions.find_one({"idempotency_key": f"VENDORCODSELF:{oid2}"})),
+              f"fee={fee2}")
         check("no rider earning on a self-delivered order",
               not await db.transactions.find_one({"idempotency_key": f"DPCOMM:{oid2}"}))
 

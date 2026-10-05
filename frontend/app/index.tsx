@@ -22,6 +22,10 @@ export default function Index() {
       // Approved delivery partners get their OWN app: Delivery · Chat ·
       // Profile. No Shop, no Services — they are riders, not customers.
       router.replace("/delivery/dashboard" as any);
+    } else if ((user as any).is_vendor && (user as any).is_vendor_approved) {
+      // Oct-2026 — Shop and Services are hidden for approved sellers, so
+      // their home is the Vendor panel, not the buyer-side shop.
+      router.replace("/vendor/dashboard" as any);
     } else if (!user.registration_paid && !(user as any).subscription_skipped) {
       // Subscription upsell first (Aug-2026). Once the user chooses
       // "Continue without subscription" we never wall them again — they

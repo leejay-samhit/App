@@ -45,6 +45,15 @@ export default function TabsLayout() {
   // The screen route still exists so other in-app navigation (e.g. the
   // Wallet card on Dashboard pushes to /(tabs)/wallet) keeps working.
   const HARD_HIDDEN: Set<string> = new Set(["wallet", "shop-category/[name]"]);
+  // Oct-2026 — once a user becomes a seller, the buyer-side Shop and
+  // Services tabs are removed: his workspace is the Vendor panel, and a
+  // seller browsing his own marketplace was pure clutter. The routes stay
+  // registered so any deep link still resolves.
+  const isApprovedVendor = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
+  if (isApprovedVendor) {
+    HARD_HIDDEN.add("shop");
+    HARD_HIDDEN.add("services");
+  }
 
 
   // ── Jun 2026 — WhatsApp-style swipe between the bottom tabs ───────────
@@ -56,13 +65,17 @@ export default function TabsLayout() {
   // routes that live inside this group (shop-category/[name], wallet,
   // network) keep their own gestures, so a swipe there never yanks the user
   // out of the screen they're browsing.
+  // Swipe only walks the tabs that are actually on screen, so a seller can
+  // never be flicked into the hidden Shop / Services routes.
+  const swipeOrder = HARDCODED_ORDER.filter((k) => !HARD_HIDDEN.has(k));
   const currentTab = segments[segments.length - 1] || "";
-  const tabIndex = HARDCODED_ORDER.indexOf(currentTab);
+  const tabIndex = swipeOrder.indexOf(currentTab);
 
   const goToTab = useCallback((dir: 1 | -1) => {
     if (tabIndex < 0) return;
-    const next = HARDCODED_ORDER[tabIndex + dir];
+    const next = swipeOrder[tabIndex + dir];
     if (next) router.navigate(`/(tabs)/${next}` as any);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabIndex, router]);
 
   const swipeHandlers = useSwipePager({
@@ -101,7 +114,7 @@ export default function TabsLayout() {
     <DesktopShell>
       <View style={{ flex: 1 }} {...swipeHandlers}>
       <Tabs
-        initialRouteName="shop"
+        initialRouteName={isApprovedVendor ? "dashboard" : "shop"}
         screenOptions={{
           headerShown: false,
           // Horizontal slide so a swipe (or a tab tap) reads as moving

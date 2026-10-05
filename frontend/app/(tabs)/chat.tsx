@@ -140,7 +140,7 @@ export default function ChatListScreen() {
           ) : null}
           <View style={{ flex: 1 }} />
           <TouchableOpacity onPress={() => router.push("/chat/settings" as any)} style={styles.gearBtn} testID="chat-settings-open">
-            <Feather name="settings" size={20} color={colors.text} />
+            <Feather name="settings" size={20} color={colors.textMain} />
           </TouchableOpacity>
         </View>
 
@@ -480,6 +480,7 @@ const styles = StyleSheet.create({
   chatTabLabel: { fontSize: 11, fontWeight: "800", color: colors.textMain },
   chatTabBadge: { backgroundColor: colors.primary + "22", paddingHorizontal: 6, minWidth: 18, alignItems: "center", borderRadius: 999, paddingVertical: 1 },
   chatTabBadgeText: { fontSize: 9, fontWeight: "900", color: colors.primary },
-  // Support FAB (bottom)  supportFab: { position: "absolute", bottom: 18, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#0F766E", paddingHorizontal: 18, paddingVertical: 12, borderRadius: 999, shadowColor: "#000", shadowOpacity: 0.2, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 6 },
+  // Support FAB (bottom)
+  supportFab: { position: "absolute", bottom: 18, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#0F766E", paddingHorizontal: 18, paddingVertical: 12, borderRadius: 999, shadowColor: "#000", shadowOpacity: 0.2, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 6 },
   supportFabText: { color: "#fff", fontWeight: "900", fontSize: 13, letterSpacing: 0.3 },
 });

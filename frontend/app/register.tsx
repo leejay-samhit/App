@@ -17,6 +17,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, useResponsiveContainer } from "../src/theme";
 import { formatApiError } from "../src/api";
+import { GoogleSignInButton } from "../src/google-signin-button";
 
 export default function Register() {
   const { register } = useAuth();
@@ -107,6 +108,10 @@ export default function Register() {
           <TouchableOpacity testID="register-submit-button" style={[styles.primaryBtn, loading && { opacity: 0.7 }]} onPress={onSubmit} disabled={loading}>
             {loading ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={styles.primaryBtnText}>Continue to payment</Text>}
           </TouchableOpacity>
+
+          {/* Emergent-managed Google sign-up — the invite code typed above
+              is carried through the redirect so attribution still works. */}
+          <GoogleSignInButton referralCode={referral} onError={setError} label="Sign up with Google" />
 
           <View style={styles.footerRow}>
             <Text style={styles.muted}>Already have an account?</Text>

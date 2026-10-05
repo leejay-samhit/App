@@ -38,6 +38,12 @@ type AuthState = {
   user: User | null | undefined; // undefined = checking, null = not auth
   loading: boolean;
   login: (email: string, password: string) => Promise<User>;
+  /**
+   * Exchange a one-time Emergent `session_id` (captured from the Google
+   * redirect) for our own JWT session. The backend is the only party that
+   * talks to Emergent — see src/google-auth.ts for the capture side.
+   */
+  loginWithGoogle: (sessionId: string, referralCode?: string) => Promise<User>;
   register: (data: { name: string; email: string; password: string; phone?: string; referral_code?: string }) => Promise<User>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -279,8 +285,21 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  const register = async (payload: any) => {
+  const loginWithGoogle = async (sessionId: string, referralCode?: string) => {
     setLoading(true);
+    try {
+      const { data } = await api.post("/auth/google/exchange", {
+        session_id: sessionId,
+        referral_code: referralCode,
+      });
+      await _persistLogin(data);
+      return data.user as User;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const register = async (payload: any) => {    setLoading(true);
     try {
       const { data } = await api.post("/auth/register", payload);
       await _persistLogin(data);
@@ -339,6 +358,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       value={{
         user, loading,
         login, register, logout, refresh, setSession,
+        loginWithGoogle,
         sessionEndReason, clearSessionEnd,
         integrity, recheckIntegrity,
         biometricAvailable, biometricReady, biometricEmailHint,

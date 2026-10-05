@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="2" time="6.706" timestamp="2026-10-05T15:06:33.009552+00:00" hostname="agent-env-57c39a9c-cb19-400f-91cf-18478588c9e6"><testcase classname="tests.test_iter88_money_and_cod.TestCodSwitch" name="test_cod_blocked_wallet_cod_allowed_online" time="6.453"><failure message="AssertionError: {&quot;detail&quot;:&quot;Method Not Allowed&quot;}&#10;assert 405 in (200, 201)&#10; +  where 405 = &lt;Response [405]&gt;.status_code">tests/test_iter88_money_and_cod.py:179: in test_cod_blocked_wallet_cod_allowed_online
+    assert r.status_code in (200, 201), r.text
+E   AssertionError: {"detail":"Method Not Allowed"}
+E   assert 405 in (200, 201)
+E    +  where 405 = &lt;Response [405]&gt;.status_code</failure></testcase><testcase classname="tests.test_iter88_money_and_cod.TestCodSwitch" name="test_default_products_permit_cod" time="0.189" /></testsuite></testsuites>

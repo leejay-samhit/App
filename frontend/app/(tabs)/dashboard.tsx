@@ -500,8 +500,8 @@ export default function DashboardScreen() {
           <View style={styles.bento}>
             <StatCard icon="package" label="Total orders" value={String(data.orders_count)} testID="stat-orders" onPress={() => router.push("/orders")} />
             <StatCard icon="check-circle" label="Delivered" value={String(data.delivered_count)} testID="stat-delivered" onPress={() => router.push("/orders")} />
-            <StatCard icon="gift" label="Cashback earned" value={formatINR(data.cashback_earned)} testID="stat-cashback" onPress={() => router.push("/(tabs)/wallet")} />
-            <StatCard icon="clock" label="Cashback pending" value={formatINR(data.pending_cashback)} testID="stat-cashback-pending" onPress={() => router.push("/(tabs)/wallet")} />
+            <StatCard icon="gift" label="Cashback earned" value={formatINR(data.cashback_earned)} testID="stat-cashback" onPress={() => router.push("/(tabs)/wallet?filter=cashback" as any)} />
+            <StatCard icon="clock" label="CashBack Pending & Transaction" value={formatINR(data.pending_cashback)} testID="stat-cashback-pending" onPress={() => router.push("/(tabs)/wallet")} />
           </View>
         </Animated.View>
 

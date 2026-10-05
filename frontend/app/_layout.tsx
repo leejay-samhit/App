@@ -16,6 +16,7 @@ import { ChatSettingsProvider } from "../src/chat-settings";
 import { LocationGate } from "../src/location-gate";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
 import { registerForPush } from "../src/push";
+import { GoogleRedirectHandler } from "../src/google-redirect-handler";
 import { ContentWidthProvider, TABLET_MAX_WIDTH } from "../src/content-width";
 import { colors } from "../src/theme";
 
@@ -280,6 +281,7 @@ function RootLayoutInner() {
         <BrandingProvider>
           <AuthProvider>
             <ChatSettingsProvider>
+            <GoogleRedirectHandler />
             <PushReRegister />
             <GlobalFont>
               {/* Standard status bar — Android reserves space for it automatically

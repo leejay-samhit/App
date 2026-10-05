@@ -15,7 +15,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { WebView } from "react-native-webview";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
@@ -55,7 +55,13 @@ export default function WalletScreen() {
   const [amount, setAmount] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const [txFilter, setTxFilter] = useState<"all" | "credits" | "debits">("all");
+  // Oct-2026 — "cashback" is a first-class filter so the Dashboard's
+  // "Cashback earned" tile can deep-link straight to a list that contains
+  // ONLY cashback actually received (no orders, no refunds, no withdrawals).
+  const txParams = useLocalSearchParams<{ filter?: string }>();
+  const [txFilter, setTxFilter] = useState<"all" | "credits" | "debits" | "cashback">(
+    txParams?.filter === "cashback" ? "cashback" : "all",
+  );
   // Transaction detail modal
   const [txDetail, setTxDetail] = useState<any | null>(null);
   const [txDetailLoading, setTxDetailLoading] = useState(false);
@@ -110,8 +116,13 @@ export default function WalletScreen() {
       "phone_reveal_fee", "dp_cash_remitted",
     ].includes(t.type);
   };
+  // Cashback RECEIVED only — the credit side of the cashback engine.
+  // Pending, reversed and seller-funding rows are deliberately excluded.
+  const isCashbackReceived = (t: Txn) =>
+    ["cashback_credit", "cashback", "purchase_cashback"].includes(t.type) && !isDebit(t);
   const filteredTxns = txns.filter((t) => {
     if (txFilter === "all") return true;
+    if (txFilter === "cashback") return isCashbackReceived(t);
     if (txFilter === "credits") return !isDebit(t);
     return isDebit(t);
   });
@@ -352,20 +363,20 @@ export default function WalletScreen() {
         <View style={styles.txHeader}>
           <Text style={styles.sectionLabel}>TRANSACTIONS</Text>
           <View style={styles.txFilters}>
-            {(["all", "credits", "debits"] as const).map((f) => (
+            {(["all", "cashback", "credits", "debits"] as const).map((f) => (
               <TouchableOpacity
                 key={f}
                 onPress={() => setTxFilter(f)}
                 style={[styles.txFilterChip, txFilter === f && styles.txFilterChipActive]}
                 testID={`wallet-filter-${f}`}
               >
-                <Text style={[styles.txFilterText, txFilter === f && { color: colors.primaryFg }]}>{f === "all" ? "All" : f === "credits" ? "Credits" : "Debits"}</Text>
+                <Text style={[styles.txFilterText, txFilter === f && { color: colors.primaryFg }]}>{f === "all" ? "All" : f === "cashback" ? "Cashback" : f === "credits" ? "Credits" : "Debits"}</Text>
               </TouchableOpacity>
             ))}
           </View>
         </View>
         {filteredTxns.length === 0 ? (
-          <Text style={styles.empty}>{txFilter === "all" ? "No transactions yet." : `No ${txFilter} yet.`}</Text>
+          <Text style={styles.empty}>{txFilter === "all" ? "No transactions yet." : txFilter === "cashback" ? "No cashback received yet." : `No ${txFilter} yet.`}</Text>
         ) : (
           filteredTxns.map((t) => {
             // Decide if this row is a DEBIT (money leaving the wallet) or a

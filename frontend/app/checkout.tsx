@@ -19,6 +19,7 @@ import { colors, radii, spacing, formatINR } from "../src/theme";
 import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../src/cashback";
 import { notify } from "../src/notify";
 import OutOfZoneModal from "../src/OutOfZoneModal";
+import CodUnavailableModal from "../src/cod-unavailable-modal";
 import { useDeliveryLocation } from "../src/use-delivery-location";
 import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
 
@@ -44,6 +45,10 @@ export default function CheckoutScreen() {
   // Nov 2026 — Out-of-delivery-zone modal state (replaces plain Alert).
   const [oozOpen, setOozOpen] = useState(false);
   const [oozConflicts, setOozConflicts] = useState<string[]>([]);
+  // Oct-2026 — a seller can mark a product prepaid-only. The server refuses
+  // the COD checkout with detail.code="cod_not_available" and the item names.
+  const [codBlockOpen, setCodBlockOpen] = useState(false);
+  const [codBlockedItems, setCodBlockedItems] = useState<string[]>([]);
   // Address fields
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -501,6 +506,9 @@ export default function CheckoutScreen() {
         const list = Array.isArray(detail.conflicts) ? detail.conflicts : [];
         setOozConflicts(list);
         setOozOpen(true);
+      } else if (detail && typeof detail === "object" && detail.code === "cod_not_available") {
+        setCodBlockedItems(Array.isArray(detail.items) ? detail.items : []);
+        setCodBlockOpen(true);
       } else {
         notify("Checkout failed", formatApiError(e));
       }
@@ -972,6 +980,16 @@ export default function CheckoutScreen() {
         </SafeAreaView>
       </Modal>
       {/* Nov 2026 — Out-of-delivery-zone bottom sheet */}
+      {/* Oct 2026 — COD refused for a prepaid-only item */}
+      <CodUnavailableModal
+        visible={codBlockOpen}
+        items={codBlockedItems}
+        onClose={() => setCodBlockOpen(false)}
+        onPayOnline={() => {
+          setCodBlockOpen(false);
+          setPaymentMethod("online");
+        }}
+      />
       <OutOfZoneModal
         visible={oozOpen}
         conflicts={oozConflicts}

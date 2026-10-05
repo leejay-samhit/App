@@ -2047,3 +2047,78 @@ tabs unchanged; verify_delivery_partner 40/40, verify_phase1_money 56/56.
 Verification: `backend/tests/verify_oct2026_chat_updates.py` 8/8 PASS,
 `backend/tests/test_iter87_chat_broadcast_branding.py` 8/8 PASS,
 full frontend pass in `test_reports/iteration_87.json` — all green.
+
+## 2026-10 Iter88 — Google sign-in + money-chain corrections
+
+### A. Emergent-managed Google sign-in (frontend wired)
+`POST /api/auth/google/exchange` already existed; the entire app side was missing.
+- `src/google-auth.ts` — platform-correct redirect (`Linking.createURL("")` native /
+  `window.location.origin + "/"` web), `openAuthSessionAsync` on native vs a plain
+  `window.location.href` on web, raw-string `session_id` extraction (it arrives in the
+  HASH, so `Linking.parse().queryParams` can never see it), three co-equal capture
+  sources for Android Custom Tabs (`result.url` → `url` listener → `getInitialURL`),
+  and a synchronous consumed-id guard.
+- `src/google-signin-button.tsx` — "Continue with Google" / "Sign up with Google" with
+  the official 4-colour G, carries the typed invite code through the redirect.
+- `src/google-redirect-handler.tsx` — mounted in the root layout; finishes web
+  redirects and native cold starts, cleans the URL only AFTER the exchange succeeds.
+- `auth.loginWithGoogle()` reuses `_persistLogin`, so Google sessions get the same
+  JWT pair, biometric cache and push registration as a password login.
+- The frontend never contacts `demobackend.emergentagent.com` (verified by grep).
+
+### B. Money-chain bugs (owner-reported) — ROOT CAUSES + FIXES
+1. **A self-delivering seller was being charged.** `shop_money.settle_delivery_fee`
+   ran on EVERY delivered order regardless of `dp_id`, so it pulled the delivery
+   charge out of a seller who delivered himself (or raised a bogus
+   `vendor_outstanding` against him) and booked delivery revenue + GST the company
+   never earned. **OWNER RULE now enforced: no rider mapped ⇒ Slangcart collects ₹0.**
+   The order is stamped `delivery_settlement_status="vendor_self_delivery"`.
+2. **COD + self-delivery** now writes ONE informational row
+   (`vendor_cod_self_collected`, credit=0/debit=0, `wallet_impact="informational"`)
+   so the cash is traceable in Net Worth without crediting the withdrawable wallet —
+   crediting it would have created the same rupee twice. Prepaid (wallet/Razorpay)
+   self-delivery credits item + delivery to the wallet in full and takes nothing back.
+3. **Company Net Worth was wrong.** `cash_on_hand.cod_with_collectors` counted EVERY
+   delivered COD order as company cash, including seller-collected cash. It now counts
+   only COD held by a mapped rider; seller-collected COD is reported separately as
+   `cod_with_sellers` and never enters `cash_on_hand.total` or net worth.
+4. **Admin adjustments were phantom money.** `POST /admin/transactions/adjust` inserted
+   a `transactions` row and nothing else — no wallet moved, so no refund or cashback
+   could ever spend it. It now posts through `shop_money.credit`/`debit`
+   (`manual_adjustment_credit` / `manual_adjustment_debit`), carries
+   previous/new balance + a TXN reference, refuses an overdraft with 400 and deducts
+   nothing, and the money is genuinely spendable. The reconciliation aggregate sums the
+   signed credit−debit so a debit correction reads as an outflow.
+5. **Reset Center leftover.** Per-account "Clear data" zeroed only `wallet_balance`, so
+   `vendor_earnings` / `dp_cash_in_hand` / `pending_balance` / `refund_debt` survived —
+   that leftover vendor payable is what showed as the persistent −₹1.6 net worth. Every
+   money pot is now zeroed, and `dp_id` / `delivery_partner_id` / `linked_user_id` /
+   `joiner_id` / `original_user_id` / `deposited_by` were added to `backup.SCOPE_ID_FIELDS`
+   so rider maps and remittances are swept too.
+6. **Per-product COD switch** (`products.cod_available`, default True so all 220
+   existing listings are unchanged). Vendor toggles it in the product editor; checkout
+   refuses `cod` / `wallet_cod` with `detail.code="cod_not_available"` + the item names,
+   and `src/cod-unavailable-modal.tsx` shows a bottom sheet that never dead-ends
+   ("Pay online & place order" switches the method).
+
+### C. UI
+- Dashboard tile renamed to **"CashBack Pending & Transaction"**; the "Cashback earned"
+  tile deep-links to `/wallet?filter=cashback`, a new filter chip that lists ONLY
+  `cashback_credit` rows.
+- Approved sellers no longer see the Shop / Services tabs (routes stay registered for
+  deep links); the swipe pager walks visible tabs only, and sellers now LAND on
+  `/vendor/dashboard` after login / cold start instead of a hidden `/shop`.
+
+### Verification
+- `tests/verify_oct2026_money_audit.py` **20/20 PASS** — R1 self-delivery collects ₹0,
+  R2 COD self-delivery is wallet-neutral + traceable, R3 prepaid credits in full,
+  R4 seller COD excluded from company cash, R5 rider delivery revenue splits
+  ₹118 = ₹100 + ₹18 exactly, R6 replay posts nothing, R7 vendor wallet reconciles,
+  R8 adjustment money is spendable, R9 clear-data zeroes every pot, plus
+  "every row has idempotency_key + short_id + description" and "no duplicate keys".
+- `verify_phase1_money` **56/56**, `verify_oct2026_cod_money` **34/34** after updating
+  10 STALE assertions that still expected the old rule (vendor −30 / treasury +30 on a
+  self-delivered order). Those were test bugs, not product bugs.
+- testing_agent iter-88: 11/12 backend + all frontend flows green. Its one finding
+  (sellers landing on the hidden /shop) is fixed above. It reset the Danger PIN to
+  `741852` — recorded in `memory/test_credentials.md`.

@@ -303,6 +303,11 @@ SCOPE_ID_FIELDS = [
     "user_id", "vendor_id", "buyer_id", "customer_id", "seller_id", "owner_id",
     "provider_id", "referrer_id", "from_user_id", "to_user_id", "actor_id",
     "created_by", "assigned_to", "target_user_id", "sender_id", "recipient_id",
+    # Oct-2026 — rider-owned rows (dp_vendor_map, dp_remittances) were left
+    # behind by a per-account clear, so a reset rider stayed mapped to shops
+    # and his remittance history survived.
+    "dp_id", "delivery_partner_id", "linked_user_id", "joiner_id",
+    "original_user_id", "deposited_by",
 ]
 SCOPE_EMAIL_FIELDS = ["user_email", "vendor_email", "email", "customer_email", "actor_email"]
 

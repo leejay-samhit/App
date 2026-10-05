@@ -128,10 +128,15 @@ async def main():
         check("no delivery revenue before delivery", round(await treasury() - t0, 2) == 0.0)
         await deliver(c, ah, oid)
         v2, t2 = await vendor_wallet(), await treasury()
-        check("vendor -30 on delivery", round(v1 - v2, 2) == 30.0, f"{v1} -> {v2}")
-        check("treasury +30", round(t2 - t0, 2) == 30.0, f"{t0} -> {t2}")
-        check("delivery revenue row",
-              await db.transactions.count_documents({"order_id": oid, "type": "delivery_charge_collected"}) == 1)
+        # Oct-2026 OWNER RULE — no delivery partner is mapped to this seller,
+        # so HE delivered and Slangcart collects ₹0: nothing leaves his wallet,
+        # no delivery-revenue row. The rider-delivered case (where the charge
+        # IS revenue) is covered by verify_oct2026_money_audit R5.
+        check("self-delivery: vendor keeps the delivery charge",
+              round(v1 - v2, 2) == 0.0, f"{v1} -> {v2}")
+        check("self-delivery: treasury unchanged", round(t2 - t0, 2) == 0.0, f"{t0} -> {t2}")
+        check("self-delivery: no delivery revenue row",
+              await db.transactions.count_documents({"order_id": oid, "type": "delivery_charge_collected"}) == 0)
         # idempotent re-delivery
         await c.patch(f"{BASE}/admin/orders/{oid}/status", json={"status": "shipped"}, headers=ah)
         await deliver(c, ah, oid)
@@ -148,8 +153,9 @@ async def main():
         check("vendor +500", round(await vendor_wallet() - v0, 2) == 500.0)
         v1 = await vendor_wallet()
         await deliver(c, ah, oid)
-        check("vendor -30 after delivery", round(v1 - await vendor_wallet(), 2) == 30.0)
-        check("treasury +30", round(await treasury() - t0, 2) == 30.0)
+        check("self-delivery: vendor keeps delivery charge",
+              round(v1 - await vendor_wallet(), 2) == 0.0)
+        check("self-delivery: treasury unchanged", round(await treasury() - t0, 2) == 0.0)
 
         # ── TEST C — COD ₹500 ───────────────────────────────────────────
         print("\n[C] COD ₹500")
@@ -160,8 +166,9 @@ async def main():
         check("no vendor credit for cash order", await vendor_wallet() == v0, await vendor_wallet())
         await deliver(c, ah, oid)
         check("no fake customer credit after delivery", await cust_wallet() == c0, await cust_wallet())
-        check("vendor -30 (delivery fee)", round(v0 - await vendor_wallet(), 2) == 30.0)
-        check("treasury +30", round(await treasury() - t0, 2) == 30.0)
+        check("COD self-delivery: no wallet movement at all",
+              round(v0 - await vendor_wallet(), 2) == 0.0)
+        check("COD self-delivery: treasury unchanged", round(await treasury() - t0, 2) == 0.0)
         o = await db.orders.find_one({"id": oid}, {"_id": 0, "cod_due": 1, "paid_via": 1})
         check("order flagged cash on delivery", o["paid_via"] == "cod" and o["cod_due"] == 500.0, o)
 
@@ -194,7 +201,7 @@ async def main():
         v1 = await vendor_wallet()
         await deliver(c, ah, oid)
         check("no duplicate 300 vendor credit after delivery",
-              round(await vendor_wallet() - v1, 2) == -30.0, await vendor_wallet() - v1)
+              round(await vendor_wallet() - v1, 2) == 0.0, await vendor_wallet() - v1)
 
         # ── TEST F — WALLET + ONLINE ────────────────────────────────────
         print("\n[F] Wallet ₹200 + online ₹300")
@@ -284,7 +291,9 @@ async def main():
         else:
             print(f"  SKIP  /vendor/me/wallet {vw.status_code}")
         low = await c.post(f"{BASE}/withdrawals", json={"amount": 1000}, headers=vh)
-        check("below ₹5,000 rejected", low.status_code == 400 and "5000" in low.text, low.text[:150])
+        check("below ₹5,000 rejected",
+              low.status_code == 400 and ("5000" in low.text or "5,000" in low.text),
+              low.text[:150])
         await db.users.update_one({"email": VENDOR[0]}, {"$set": {"vendor_earnings": 4000.0}})
         short = await c.post(f"{BASE}/withdrawals", json={"amount": 5000}, headers=vh)
         check("insufficient available balance refused",

@@ -20,6 +20,7 @@ import { useBranding } from "../src/branding";
 import { colors, radii, spacing, useResponsiveContainer } from "../src/theme";
 import { formatApiError } from "../src/api";
 import { GradientCard } from "../src/gradient-card";
+import { GoogleSignInButton } from "../src/google-signin-button";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
 /** Failed fingerprint scans allowed before the password form opens itself. */
@@ -87,6 +88,10 @@ export default function Login() {
 
   const navigateAfter = (u: any) => {
     if (u.role === "admin") router.replace(isScopedAdmin(u) ? "/admin/manager-home" : "/admin/home");
+    else if (u.is_delivery_partner_approved) router.replace("/delivery/dashboard" as any);
+    // Oct-2026 — a seller's Shop/Services tabs are hidden, so his home is
+    // the Vendor panel rather than the buyer-side shop.
+    else if (u.is_vendor && u.is_vendor_approved) router.replace("/vendor/dashboard" as any);
     else if (!u.registration_paid && !u.subscription_skipped) router.replace("/payment");
     // Approved customers land directly on the Shop tab so they can start
     // browsing immediately. Dashboard is one tap away via the bottom nav.
@@ -244,6 +249,13 @@ export default function Login() {
                 )}
               </TouchableOpacity>
             </>
+          ) : null}
+
+          {/* Emergent-managed Google sign-in. Hidden while the fingerprint
+              card is the primary login — the user is already identified
+              there and "Use a different account" reveals this again. */}
+          {showPasswordForm ? (
+            <GoogleSignInButton onError={setError} />
           ) : null}
 
           {/* Biometric login — when enabled, this is the PRIMARY login. The
