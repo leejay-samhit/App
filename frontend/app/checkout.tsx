@@ -19,7 +19,7 @@ import { colors, radii, spacing, formatINR } from "../src/theme";
 import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../src/cashback";
 import { notify } from "../src/notify";
 import OutOfZoneModal from "../src/OutOfZoneModal";
-import CodUnavailableModal from "../src/cod-unavailable-modal";
+import CodUnavailableNote from "../src/cod-unavailable-note";
 import { useDeliveryLocation } from "../src/use-delivery-location";
 import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
 
@@ -47,7 +47,6 @@ export default function CheckoutScreen() {
   const [oozConflicts, setOozConflicts] = useState<string[]>([]);
   // Oct-2026 — a seller can mark a product prepaid-only. The server refuses
   // the COD checkout with detail.code="cod_not_available" and the item names.
-  const [codBlockOpen, setCodBlockOpen] = useState(false);
   const [codBlockedItems, setCodBlockedItems] = useState<string[]>([]);
   // Address fields
   const [name, setName] = useState("");
@@ -507,8 +506,8 @@ export default function CheckoutScreen() {
         setOozConflicts(list);
         setOozOpen(true);
       } else if (detail && typeof detail === "object" && detail.code === "cod_not_available") {
+        // Small inline note above Place Order — no screen-stealing sheet.
         setCodBlockedItems(Array.isArray(detail.items) ? detail.items : []);
-        setCodBlockOpen(true);
       } else {
         notify("Checkout failed", formatApiError(e));
       }
@@ -908,6 +907,14 @@ export default function CheckoutScreen() {
           ) : null}
         </ScrollView>
 
+        {/* Oct-2026 — prepaid-only item: slim note, not a full sheet */}
+        {codBlockedItems.length > 0 && (paymentMethod === "cod" || paymentMethod === "wallet_cod") ? (
+          <CodUnavailableNote
+            items={codBlockedItems}
+            onPayOnline={() => { setPaymentMethod("online"); setCodBlockedItems([]); }}
+          />
+        ) : null}
+
         {/* Sticky Place Order */}
         <View style={styles.stickyCta}>
           <View style={{ flex: 1 }}>
@@ -980,16 +987,6 @@ export default function CheckoutScreen() {
         </SafeAreaView>
       </Modal>
       {/* Nov 2026 — Out-of-delivery-zone bottom sheet */}
-      {/* Oct 2026 — COD refused for a prepaid-only item */}
-      <CodUnavailableModal
-        visible={codBlockOpen}
-        items={codBlockedItems}
-        onClose={() => setCodBlockOpen(false)}
-        onPayOnline={() => {
-          setCodBlockOpen(false);
-          setPaymentMethod("online");
-        }}
-      />
       <OutOfZoneModal
         visible={oozOpen}
         conflicts={oozConflicts}

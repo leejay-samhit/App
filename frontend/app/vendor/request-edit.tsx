@@ -37,6 +37,11 @@ export default function VendorRequestEdit() {
     district: "", city: "", address: "",
   });
   const [deliveryRadiusKm, setDeliveryRadiusKm] = useState<number | null>(null);
+  // Jun 2026 — "Everyone" zone. Vendor asks admin for permission to ship
+  // anywhere in India; once approved every customer sees the shop's
+  // published products regardless of pincode (far-away orders are
+  // online / wallet payment only — no cash to collect).
+  const [deliverEverywhere, setDeliverEverywhere] = useState<boolean>(false);
   // Nov 2026 — Union model.  Vendor can enable a km-radius, an
   // "entire pincode" catch-all, and extra pincodes — all together.
   const [coverEntirePincode, setCoverEntirePincode] = useState<boolean>(false);
@@ -67,7 +72,8 @@ export default function VendorRequestEdit() {
       const r = await api.get<any>("/vendor/me/delivery-zone/check", { params: { pincode: testPin } });
       const d = r.data || {};
       const why =
-        d.reason === "pincode" ? "matches your pincode list"
+        d.reason === "everywhere" ? "you deliver to everyone in India"
+        : d.reason === "pincode" ? "matches your pincode list"
         : d.reason === "radius" || d.reason === "radius_pincode_centre" ? `inside your ${zone?.radius_km ?? ""} km radius (${d.distance_km} km away)`
         : d.reason === "delivery_off" ? "your delivery is switched off"
         : "outside your delivery zone";
@@ -105,6 +111,7 @@ export default function VendorRequestEdit() {
         setDeliveryRadiusKm(typeof km === "number" && km > 0 ? km : null);
         // Legacy "delivery_radius_mode=pincode" == "cover entire pincode" ON.
         const mode = u.delivery_radius_mode ?? a.delivery_radius_mode ?? "pincode";
+        setDeliverEverywhere(mode === "everywhere");
         setCoverEntirePincode(mode === "pincode" || mode === "both");
         const pins = u.delivery_pincodes ?? a.delivery_pincodes ?? [];
         setDeliveryPincodes(Array.isArray(pins) ? pins.map(String) : []);
@@ -152,6 +159,7 @@ export default function VendorRequestEdit() {
         //   "none"    = neither (only explicit extra pincodes)
         delivery_radius_mode: (() => {
           const hasKm = typeof deliveryRadiusKm === "number" && deliveryRadiusKm > 0;
+          if (deliverEverywhere) return "everywhere";
           if (hasKm && coverEntirePincode) return "both";
           if (hasKm) return "radius";
           if (coverEntirePincode) return "pincode";
@@ -217,10 +225,11 @@ export default function VendorRequestEdit() {
                 <Text style={styles.zoneTitle}>My live delivery zone</Text>
               </View>
               <Text style={styles.zoneLine}>
+                {zone.explains?.everywhere ? "• Everyone — all of India\n" : ""}
                 {zone.explains?.radius ? `• ${zone.radius_km} km around the shop\n` : ""}
                 {zone.explains?.pincode ? `• All of pincode ${zone.store_pincode}\n` : ""}
                 {zone.explains?.extra_pincodes ? `• Extra pincodes: ${(zone.pincodes || []).join(", ")}\n` : ""}
-                {!zone.explains?.radius && !zone.explains?.pincode && !zone.explains?.extra_pincodes
+                {!zone.explains?.everywhere && !zone.explains?.radius && !zone.explains?.pincode && !zone.explains?.extra_pincodes
                   ? "• Nothing set — customers can't see your products yet."
                   : ""}
               </Text>
@@ -282,15 +291,31 @@ export default function VendorRequestEdit() {
                 <Text style={styles.label}>Delivery radius (km)</Text>
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
                   {([null, 2, 5, 10, 20, 50] as const).map((r) => {
-                    const active = deliveryRadiusKm === r;
+                    const active = deliveryRadiusKm === r && !deliverEverywhere;
                     const label = r === null ? "None" : `${r} km`;
                     return (
-                      <TouchableOpacity key={String(r)} disabled={!!pendingReq} onPress={() => setDeliveryRadiusKm(r as any)} style={[styles.radiusChip, active && styles.radiusChipActive]}>
+                      <TouchableOpacity key={String(r)} disabled={!!pendingReq} onPress={() => { setDeliverEverywhere(false); setDeliveryRadiusKm(r as any); }} style={[styles.radiusChip, active && styles.radiusChipActive]}>
                         <Text style={[styles.radiusChipText, active && styles.radiusChipTextActive]}>{label}</Text>
                       </TouchableOpacity>
                     );
                   })}
+                  {/* Jun 2026 — ship anywhere in India (admin approval). */}
+                  <TouchableOpacity
+                    disabled={!!pendingReq}
+                    onPress={() => setDeliverEverywhere((v) => !v)}
+                    style={[styles.radiusChip, deliverEverywhere && styles.radiusChipActive]}
+                    testID="vendor-edit-radius-everyone"
+                  >
+                    <Feather name="globe" size={12} color={deliverEverywhere ? colors.primaryFg : colors.textMain} />
+                    <Text style={[styles.radiusChipText, deliverEverywhere && styles.radiusChipTextActive, { marginLeft: 5 }]}>Everyone</Text>
+                  </TouchableOpacity>
                 </View>
+                {deliverEverywhere ? (
+                  <Text style={{ fontSize: 11, lineHeight: 16, color: colors.textMuted }} testID="vendor-edit-everyone-note">
+                    Everyone: once admin approves, customers anywhere in India see your published products.
+                    Orders from outside your own pincode / km radius must be paid online or by wallet (no cash on delivery).
+                  </Text>
+                ) : null}
 
                 {/* Nov 2026 — "Also cover entire shop pincode" checkbox.
                     Independent of the km-radius above so vendors can

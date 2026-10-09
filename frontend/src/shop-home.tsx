@@ -772,6 +772,13 @@ export function ShopHome({
                   // category_name / category, so it Just Works™ — same
                   // as the "More → tap" path that the user already
                   // confirmed shows products correctly.
+                  // Oct-2026 — Recharge is not a browsable product grid.
+                  // It has its own Service → State → Network → number flow,
+                  // so it bypasses the generic category screen entirely.
+                  if (/recharge/i.test(c.name)) {
+                    router.push("/recharge" as any);
+                    return;
+                  }
                   router.push(
                     `${categoryRoutePrefix}/shop-category/${encodeURIComponent(c.name)}` as any,
                   );
@@ -898,6 +905,7 @@ export function ShopHome({
               onProductPress={(id) => router.push(`/product/${id}` as any)}
               onCategoryPress={(c) => {
                 if (!c) router.push(`${categoryRoutePrefix}/shop` as any);
+                else if (/recharge/i.test(c)) router.push("/recharge" as any);
                 else router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c)}` as any);
               }}
               // Jun 2026 BUGFIX: this used to POST /cart {quantity} — an
@@ -1089,6 +1097,7 @@ export function ShopHome({
                     onPress={() => {
                       setActiveCategory(c.name);
                       setAllCatModalOpen(false);
+                      if (/recharge/i.test(c.name)) { router.push("/recharge" as any); return; }
                       router.push(`${categoryRoutePrefix}/shop-category/${encodeURIComponent(c.name)}` as any);
                     }}
                     activeOpacity={0.75}

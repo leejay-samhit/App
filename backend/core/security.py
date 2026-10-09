@@ -259,6 +259,25 @@ def decode_refresh_token(token: str) -> Dict[str, Any]:
     return payload
 
 
+async def get_current_user_optional(
+    request: Request,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Optional[Dict[str, Any]]:
+    """Same as `get_current_user` but returns None instead of raising.
+
+    For endpoints that work for guests AND get better when they know who is
+    asking — e.g. the personalised product rails. A bad or expired token is
+    treated as "no user" rather than a hard 401, so a stale token on a public
+    screen can never blank the page.
+    """
+    if not creds or not creds.credentials:
+        return None
+    try:
+        return await get_current_user(request, creds)
+    except HTTPException:
+        return None
+
+
 async def get_current_user(
     request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(security),

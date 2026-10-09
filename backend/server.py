@@ -1950,6 +1950,7 @@ _TXN_REF_PREFIX: Dict[str, str] = {
     "withdrawal":             "WDL",
     "system_deposit":         "DEP",
     "order_payment":          "ORD",
+    "order_payment_upi":      "UPI",
     "service_booking":        "SRV",
     "service_margin":         "SRM",
     "shopping_margin":        "SHM",
@@ -2058,6 +2059,7 @@ async def admin_transactions(
             "platform_fee_collected":"Platform fee collected on commission",
             "direct_signup_credit":  "Direct signup credit to sponsor (Level 1)",
             "order_payment":         "Shop order payment",
+            "order_payment_upi":     "Shop order paid by UPI / card",
             "service_booking":       "Service booking payment",
             "system_deposit":        "Admin direct UTR deposit to system wallet",
             "wallet_transfer":       "Peer-to-peer wallet transfer",
@@ -3422,6 +3424,25 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     zone_conflicts: List[str] = []
     cod_blocked: List[str] = []
     _vendor_name_cache: Dict[str, str] = {}
+    # Jun-2026 — "Everyone" vendors (admin-approved ship-anywhere sellers)
+    # keep normal COD inside their own pincode / km radius, but a far-away
+    # order has to be paid online or from the wallet: there is nobody near
+    # the buyer to collect cash. Resolved once per vendor, lazily.
+    _far_away_cache: Dict[str, bool] = {}
+
+    async def _is_far_away(vid: str) -> bool:
+        if vid in _far_away_cache:
+            return _far_away_cache[vid]
+        from core.delivery import vendor_covers_locally
+        v = await db.users.find_one({"id": vid}, {"_id": 0})
+        far = not await vendor_covers_locally(
+            v or {},
+            pincode=customer_pin or None,
+            lat=float(cust_lat) if isinstance(cust_lat, (int, float)) else None,
+            lng=float(cust_lng) if isinstance(cust_lng, (int, float)) else None,
+        )
+        _far_away_cache[vid] = far
+        return far
 
     async def _vendor_name(vid: str) -> str:
         if vid in _vendor_name_cache:
@@ -3455,6 +3476,12 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             # Legacy product with no vendor — allow through (matches
             # /products behaviour where legacy items surface too).
             continue
+        if (
+            payment_method in ("cod", "wallet_cod")
+            and prod.get("cod_available") is not False
+            and await _is_far_away(vid)
+        ):
+            cod_blocked.append(prod.get("name") or "A product")
         if vid in eligible_vids:
             continue  # ✅ Shop said "yes", checkout says "yes".
         vn = await _vendor_name(vid)
@@ -3886,7 +3913,13 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         await db.orders.insert_one(dict(order))
         created_orders.append(order)
 
-        # Buyer ledger entry (only wallet money actually moved).
+        # ── Buyer ledger entries ────────────────────────────────────────
+        # Oct-2026 FIX — only the wallet slice was ever written, so a
+        # "wallet + UPI" order showed ONE row for part of the money and the
+        # UPI amount appeared nowhere in the customer's transaction list.
+        # Both legs are now recorded: the wallet leg really moves a balance,
+        # and the UPI leg is marked `informational` so it is visible without
+        # being counted twice in any balance reconciliation.
         if wallet_paid > 0:
             try:
                 await db.transactions.insert_one({
@@ -3895,8 +3928,37 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                     "type": "order",
                     "amount": -wallet_paid,
                     "status": "success",
-                    "description": f"Order {order_number} ({len(vitems)} items)",
+                    "description": (
+                        f"Order {order_number} ({len(vitems)} items) — "
+                        f"₹{wallet_paid:,.2f} paid from Slangcart wallet"
+                        + (f" of ₹{round(wallet_paid + online_paid, 2):,.2f}" if online_paid > 0.009 else "")
+                    ),
+                    "payment_leg": "wallet",
                     "order_id": order_id,
+                    "created_at": ts_now,
+                })
+            except DuplicateKeyError:
+                pass
+        if online_paid > 0.009:
+            try:
+                await db.transactions.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": user["id"],
+                    "type": "order_payment_upi",
+                    "amount": -online_paid,
+                    "status": "success",
+                    "description": (
+                        f"Order {order_number} ({len(vitems)} items) — "
+                        f"₹{online_paid:,.2f} paid by UPI / card"
+                        + (f", ₹{wallet_paid:,.2f} from wallet" if wallet_paid > 0.009 else "")
+                    ),
+                    "payment_leg": "online",
+                    "payment_method": "razorpay",
+                    "razorpay_payment_id": (online_attempt or {}).get("razorpay_payment_id"),
+                    "order_id": order_id,
+                    # Never touched the wallet balance — money went straight
+                    # from the buyer's bank to ours.
+                    "wallet_impact": "informational",
                     "created_at": ts_now,
                 })
             except DuplicateKeyError:
@@ -4007,11 +4069,25 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
                        "wallet_impact": "none"},
             )
         try:
-            await shop_money.credit_vendor_for_order(
-                fresh_sub or {"id": order_id, "vendor_id": vendor_id,
-                              "order_number": order_number,
-                              "total": sub_total, "cod_due": cod_due},
-            )
+            _sub_for_credit = fresh_sub or {"id": order_id, "vendor_id": vendor_id,
+                                            "order_number": order_number,
+                                            "total": sub_total, "cod_due": cod_due}
+            _credited = await shop_money.credit_vendor_for_order(_sub_for_credit)
+            # Oct-2026 OWNER RULE — before this money becomes withdrawable,
+            # claw back any cashback Slangcart fronted to buyers on this
+            # seller's behalf. Only the remainder stays in his wallet, and
+            # both the gross sale and the recovery stay visible as separate
+            # ledger rows.
+            if vendor_id and _credited > 0.009:
+                from core.cashback import auto_recover_from_vendor_credit
+                _rec = await auto_recover_from_vendor_credit(
+                    vendor_id, _sub_for_credit, credit_admin_bucket=credit_admin_bucket,
+                )
+                if _rec.get("recovered", 0) > 0.009:
+                    logger.info(
+                        f"cashback auto-recovered ₹{_rec['recovered']} from vendor "
+                        f"{vendor_id} on order {order_number}"
+                    )
         except Exception as _vc_err:
             logger.warning(f"vendor credit failed for {order_id}: {str(_vc_err)[:200]}")
             await shop_money.record_financial_error(
@@ -5402,9 +5478,34 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # ── Oct-2026 — pick the right pot ───────────────────────────────────
+    # This endpoint only ever looked at `wallet_balance`, so debiting a
+    # seller (money in `vendor_earnings`) or a rider (money in
+    # `dp_cash_in_hand`) always failed with "Cannot debit beyond available
+    # balance" even though they were in credit — and the admin screen never
+    # showed those pots, so there was no way to tell why.
+    POT_LABELS = {
+        "wallet_balance":  "customer wallet",
+        "vendor_earnings": "shop earnings",
+        "dp_cash_in_hand": "rider cash in hand",
+    }
+    pot = (payload.wallet or "wallet_balance").strip()
+    if pot not in POT_LABELS:
+        raise HTTPException(
+            status_code=400,
+            detail="wallet must be wallet_balance, vendor_earnings or dp_cash_in_hand",
+        )
+    available = round(float(target.get(pot) or 0), 2)
     delta = payload.amount if payload.type == "credit" else -payload.amount
-    if delta < 0 and target.get("wallet_balance", 0) + delta < 0:
-        raise HTTPException(status_code=400, detail="Cannot debit beyond available balance")
+    if delta < 0 and round(available + delta, 2) < -0.009:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot debit ₹{payload.amount:,.2f} — {target.get('name') or 'this member'} "
+                f"has ₹{available:,.2f} in their {POT_LABELS[pot]}."
+            ),
+        )
 
     # ── FUNDING SOURCE: COMPANY NET WORTH (Jun-2026) ─────────────────────
     # It used to require a balance in the system wallet's `direct_added`
@@ -5424,8 +5525,8 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
     if payload.type == "debit":
         await credit_admin_bucket("direct_added", payload.amount, also_total_earned=False)
 
-    inc = {"wallet_balance": delta}
-    if payload.type == "credit":
+    inc = {pot: delta}
+    if payload.type == "credit" and pot == "wallet_balance":
         inc["total_earned"] = payload.amount
     await db.users.update_one({"id": user_id}, {"$inc": inc})
     txn_id = str(uuid.uuid4())
@@ -5442,6 +5543,11 @@ async def admin_wallet_adjust(user_id: str, payload: WalletAdjust, admin: Dict[s
         "from_admin_id": admin["id"],
         "from_admin_email": admin.get("email"),
         "remarks": payload.reason.strip(),
+        "wallet_target": pot,
+        # Keep seller/rider pot movements out of the CUSTOMER wallet
+        # reconciliation — they belong to a different balance.
+        **({"wallet_impact": "vendor_earnings_only"} if pot == "vendor_earnings"
+           else {"wallet_impact": "informational"} if pot == "dp_cash_in_hand" else {}),
         "created_at": now_utc().isoformat(),
     })
     # Mirror txn on ADMIN's record so the system-wallet reconcile (which
@@ -10302,6 +10408,12 @@ app.include_router(payment_recon_router.router, prefix="/api")
 app.include_router(withdrawals_router.router, prefix="/api")
 from routes import cashback as cashback_router  # noqa: E402
 app.include_router(cashback_router.router, prefix="/api")
+from routes import signup_gate as signup_gate_router  # noqa: E402
+app.include_router(signup_gate_router.router, prefix="/api")
+from routes import recharge as recharge_router  # noqa: E402
+app.include_router(recharge_router.router, prefix="/api")
+from routes import product_rails as product_rails_router  # noqa: E402
+app.include_router(product_rails_router.router, prefix="/api")
 from routes import wallet_export as wallet_export_router  # noqa: E402
 app.include_router(wallet_export_router.router, prefix="/api")
 app.include_router(cart_router.router, prefix="/api")

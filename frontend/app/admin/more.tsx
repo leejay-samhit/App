@@ -27,6 +27,7 @@ const ITEMS = [
   { icon: "briefcase", label: "System Wallet · Treasury (7-Group)", route: "/admin/system-wallet" },
   { icon: "users", label: "All vendors", route: "/admin/vendors" },
   { icon: "edit-3", label: "Branding & theme", route: "/admin/branding" },
+  { icon: "smartphone", label: "Recharge options", route: "/admin/recharge-options" },
   { icon: "hard-drive", label: "Data backups", route: "/admin/backups" },
   { icon: "gift", label: "Cashback & Excel reports", route: "/admin/cashback" },
   { icon: "map", label: "Product roadmap", route: "/admin/roadmap" },

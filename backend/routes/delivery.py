@@ -27,6 +27,7 @@ async def my_delivery_zone(user: Dict[str, Any] = Depends(get_current_user)):
     return {
         **zone,
         "explains": {
+            "everywhere": zone["mode"] == "everywhere",
             "pincode": zone["mode"] in ("pincode", "both") and bool(zone["store_pincode"]),
             "radius": zone["mode"] in ("radius", "both") and zone["radius_km"] > 0 and zone["lat"] is not None,
             "extra_pincodes": len(zone["pincodes"]),

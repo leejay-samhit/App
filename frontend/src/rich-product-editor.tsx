@@ -366,6 +366,11 @@ export function RichProductEditor({
     return out;
   }, [adminCategories]);
   // Nov 2026 — Subcategory chips derived from the picked parent.
+  // Jun 2026 — also includes GRANDchildren, flattened. The Recharge tree is
+  // three deep (Recharge → Mobile Recharge → Airtel) because the operator
+  // list is admin-managed, and the vendor has to be able to file a plan
+  // directly under "Airtel" — that tag is what puts it on the Recharge
+  // screen for customers.
   const subcategoryChips: string[] = React.useMemo(() => {
     if (!category || customCategory) return [];
     const target = category.trim().toLowerCase();
@@ -380,7 +385,15 @@ export function RichProductEditor({
       return null;
     };
     const found = walk(categoryTree);
-    return (found?.children || []).map((c) => c.name);
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const child of found?.children || []) {
+      for (const n of [child, ...(child.children || [])]) {
+        const nm = (n.name || "").trim();
+        if (nm && !seen.has(nm.toLowerCase())) { out.push(nm); seen.add(nm.toLowerCase()); }
+      }
+    }
+    return out;
   }, [category, categoryTree, customCategory]);
 
   // ── UPDATE 2 (June 2026) — Smart product-master autocomplete ──

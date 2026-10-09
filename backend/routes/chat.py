@@ -944,6 +944,61 @@ async def thread_details(thread_id: str, user: Dict[str, Any] = Depends(get_curr
         "is_announcement": bool(t.get("is_announcement")),
         "media_count": media_count,
         "starred_count": starred_count,
+        "shop": await _vendor_shop_card(other_doc),
+    }
+
+
+async def _vendor_shop_card(other_doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Oct-2026 — when the other party is an approved SELLER, the chat gets a
+    shop card at the top: shop name, shop photo and a tap-to-navigate map
+    link. A buyer who taps "Ask the Seller" landed in a bare chat with no
+    idea which shop they were talking to.
+
+    `map_url` is a plain geo/Maps URL so it opens whatever the user has
+    installed — no API key and no SDK needed.
+    """
+    if not other_doc or not other_doc.get("is_vendor_approved"):
+        return None
+    lat, lng = other_doc.get("lat"), other_doc.get("lng")
+    city = other_doc.get("city") or ""
+    state = other_doc.get("state") or ""
+    pincode = other_doc.get("store_pincode") or other_doc.get("pincode") or ""
+    where = ", ".join([p for p in (city, state, pincode) if p])
+    map_url = None
+    if lat is not None and lng is not None:
+        map_url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lng}"
+    elif where:
+        from urllib.parse import quote_plus
+        map_url = f"https://www.google.com/maps/search/?api=1&query={quote_plus(where)}"
+
+    # The shop's own storefront image, falling back to its newest product
+    # photo so the card is never a blank grey box.
+    image = other_doc.get("shop_image_url") or other_doc.get("profile_image")
+    if not image:
+        newest = await db.products.find_one(
+            {"vendor_id": other_doc["id"], "image_url": {"$nin": [None, ""]}},
+            {"_id": 0, "image_url": 1},
+            sort=[("created_at", -1)],
+        )
+        image = (newest or {}).get("image_url")
+
+    product_count = await db.products.count_documents(
+        {"vendor_id": other_doc["id"], "active": {"$ne": False}},
+    )
+    return {
+        "vendor_id": other_doc["id"],
+        "shop_name": other_doc.get("shop_name") or other_doc.get("name") or "Shop",
+        "owner_name": other_doc.get("name") or "",
+        "image_url": image or "",
+        "city": city,
+        "state": state,
+        "pincode": pincode,
+        "location_label": where or "Location not shared",
+        "lat": lat,
+        "lng": lng,
+        "map_url": map_url,
+        "product_count": product_count,
+        "delivery_radius_km": other_doc.get("delivery_radius_km"),
     }
 
 

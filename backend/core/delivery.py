@@ -40,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 EARTH_RADIUS_KM = 6371.0088
 
+# Jun-2026 owner request — a vendor can ask the admin for "Everyone", i.e.
+# ship anywhere in India. Approved vendors in this mode clear the zone test
+# for every customer, regardless of pincode or distance. Cash on Delivery is
+# refused for those far-away orders (checkout pays online / by wallet) because
+# nobody is physically near enough to collect cash.
+EVERYWHERE = "everywhere"
+LOCAL_MODES = ("pincode", "radius", "both")
+
 NOMINATIM_BASE = "https://nominatim.openstreetmap.org"
 USER_AGENT = "Slangcart/1.0 (contact: support@slangcart.com)"
 _last_geocode_ts: float = 0.0
@@ -143,6 +151,8 @@ async def pincode_centroid(pincode: str) -> Optional[Tuple[float, float]]:
 
 def zone_covers_pincode(zone: Dict[str, Any], pincode: Optional[str]) -> bool:
     """Rules 1 + 2 — the pure, coordinate-free part of the test."""
+    if zone["mode"] == EVERYWHERE:
+        return True
     if not pincode:
         return False
     pin = str(pincode).strip()
@@ -174,6 +184,8 @@ async def vendor_covers(
     zone = vendor_zone(vendor)
     if zone["delivery_available"] is False:
         return {"covered": False, "reason": "delivery_off", "distance_km": None}
+    if zone["mode"] == EVERYWHERE:
+        return {"covered": True, "reason": EVERYWHERE, "distance_km": None}
     if zone_covers_pincode(zone, pincode):
         return {"covered": True, "reason": "pincode", "distance_km": None}
     if zone_covers_point(zone, lat, lng):
@@ -188,6 +200,27 @@ async def vendor_covers(
             d = haversine_km(centre[0], centre[1], zone["lat"], zone["lng"])  # type: ignore[arg-type]
             return {"covered": True, "reason": "radius_pincode_centre", "distance_km": round(d, 2)}
     return {"covered": False, "reason": "out_of_zone", "distance_km": None}
+
+
+async def vendor_covers_locally(
+    vendor: Dict[str, Any],
+    pincode: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> bool:
+    """Would this vendor reach the customer WITHOUT the "Everyone" flag?
+
+    Checkout uses this to tell a nearby order from a ship-anywhere one:
+    an "Everyone" vendor still does normal Cash on Delivery inside his own
+    pincode / km radius, and online-only beyond it.
+    """
+    zone = vendor_zone(vendor)
+    if zone["mode"] != EVERYWHERE:
+        return True
+    local = dict(vendor)
+    local["delivery_radius_mode"] = "both"
+    res = await vendor_covers(local, pincode=pincode, lat=lat, lng=lng)
+    return bool(res.get("covered"))
 
 
 async def eligible_vendor_ids(

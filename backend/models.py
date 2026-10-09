@@ -442,6 +442,11 @@ class WalletAdjust(BaseModel):
     amount: float = Field(gt=0)
     type: str
     reason: str  # required remarks for audit trail
+    # Oct-2026 — which pot to move. A seller's money lives in
+    # `vendor_earnings` and a rider's in `dp_cash_in_hand`, so defaulting
+    # everything to the customer wallet made every debit on them fail with
+    # "Cannot debit beyond available balance" even when they were in credit.
+    wallet: str = "wallet_balance"
 
 
 class SystemWalletDeposit(BaseModel):
@@ -625,7 +630,7 @@ class VendorApplyRequest(BaseModel):
     city: Optional[str] = None
     store_address: Optional[str] = None
     delivery_radius_km: Optional[float] = None
-    delivery_radius_mode: Optional[str] = None  # "pincode" | "radius" | "both" | "none"
+    delivery_radius_mode: Optional[str] = None  # "pincode" | "radius" | "both" | "none" | "everywhere"
     delivery_available: Optional[bool] = None
     # Dec 2026 — Explicit pincodes the vendor delivers to (in ADDITION to
     # km-radius or entire-store-pincode).  Matches the /vendor/edit-requests

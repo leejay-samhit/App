@@ -465,6 +465,21 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
         2,
     )
 
+    # ── Oct-2026 — what the owner can actually SPEND ────────────────────
+    # Rider cash-in-hand is money a delivery partner is still holding for
+    # us; it is NOT in the bank, so it is reported for completeness but is
+    # not subtracted from the bank balance.
+    dp_cash_agg = await db.users.aggregate([
+        {"$match": {"dp_cash_in_hand": {"$gt": 0}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$dp_cash_in_hand"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    dp_cash_held = round(float((dp_cash_agg or [{}])[0].get("sum") or 0), 2)
+    dp_cash_count = int((dp_cash_agg or [{}])[0].get("count") or 0)
+    earmarked_total = round(
+        vendor_payable + user_wallet_balance + pending_withdrawals + gst_payable, 2,
+    )
+    free_to_spend = round(bank_balance - earmarked_total, 2)
+
     return {
         "group_1_revenue": {
             "registration": round(registration_revenue, 2),
@@ -540,6 +555,27 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             "reversals_amount": round(abs_reversals, 2),
             "adjustments_count":  adjustments_count,
             "adjustments_amount": round(adjustments_amount, 2),
+            # ── Oct-2026 — how much of the bank balance is actually SPENDABLE.
+            # The tally only showed inflow/outflow, so the owner could see a
+            # healthy bank balance without knowing that most of it is money
+            # we owe sellers, riders and customers. Everything below is
+            # already inside `net`; this just splits it.
+            "earmarked": {
+                "vendor_wallets":   vendor_payable,
+                "vendor_count":     vendor_payable_count,
+                "rider_cash":       dp_cash_held,
+                "rider_count":      dp_cash_count,
+                "customer_wallets": round(user_wallet_balance, 2),
+                "pending_withdrawals": round(pending_withdrawals, 2),
+                "gst_payable":      round(gst_payable, 2),
+                "total":            earmarked_total,
+            },
+            "free_to_spend": free_to_spend,
+            "free_note": (
+                "Bank balance minus everything we owe sellers, riders, customers, "
+                "pending withdrawals and GST. This is the only part safe to use for "
+                "development or expenses."
+            ),
             "formula": "Inflow (bank ledger credits) − Outflow (bank ledger debits) = bank statement balance",
         },
         "cash_on_hand": {

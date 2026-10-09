@@ -1,0 +1,34 @@
+{
+  "summary": "Iter-90 — Razorpay MOCK-mode regression re-run. Re-executed /app/backend/tests/test_razorpay_mock_flows.py against preview backend → 12/12 PASS (was 11 pass + 1 skip in iter-89; this round the recharge test now passes too). All four Razorpay-fronted money paths verified end-to-end in mock mode: (1) Registration-fee — GET /api/payment/config returns is_mock=true + registration_paid=false; POST /payment/create-order → order_id starts with 'order_MOCK_'; POST /payment/verify with pay_MOCK_* / sig_MOCK_* flips registration_paid=true; repeat create-order 400s with 'already paid'. (2) Wallet top-up — /wallet/topup/config returns is_mock=true + presets + min/max; /topup/start → /topup/verify (mock sig) credits wallet by EXACTLY the requested amount; replaying the same razorpay_payment_id is idempotent (no double credit); below-min and above-max both 400. (3) Shop checkout online — empty-cart 400; with a published 517644 in-stock product, /orders/payment/start returns is_mock=true + mock order id + amount_paise=round(amount*100); /orders/payment/verify with pay_MOCK_* 200s; /orders/payment/pending surfaces the paid-unconsumed attempt. (4) Recharge — /recharge/payment/{start,verify} both 200 with pay_MOCK_* in mock mode. Frontend code review (unchanged since iter-89): wallet-topup.tsx:160-165, checkout.tsx:329-331, payment.tsx:238-239, recharge.tsx:138-140 all correctly branch on start.is_mock and synthesise pay_MOCK_/sig_MOCK_ before /verify — matches backend contract. NO issues found; the preview intentionally runs in mock mode because RAZORPAY_KEY_ID/SECRET are not configured, and the mock pipeline works end-to-end.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_razorpay_mock_flows.py (12/12 pass)",
+    "/app/test_reports/pytest/iter90_razorpay_mock.xml"
+  ],
+  "action_items": [
+    "No code changes required. Preview is intentionally in mock mode. When the owner adds RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET (via Admin → Payment Gateway OR backend/.env), is_mock flips to false and the client stops synthesising pay_MOCK_* — the same /verify endpoints then run real HMAC + api.razorpay.com cross-check paths (already implemented in core/razorpay.verify_signature + fetch_payment)."
+  ],
+  "critical_code_review_comments": [
+    "core/razorpay.get_creds precedence (db → env → mock) is correct; is_mock=true only when BOTH key sources are empty.",
+    "routes/order_payments.verify_online_payment and routes/wallet_topup.verify_topup both short-circuit HMAC + api.razorpay.com checks when creds.is_mock — this is what lets pay_MOCK_/sig_MOCK_ land in /verify successfully.",
+    "wallet_topup verify is idempotent via a `created|abandoned → paid` status claim; replaying the same razorpay_payment_id does NOT credit twice (confirmed via before/after balance diff).",
+    "/orders/payment/pending surfaces paid-but-unconsumed attempts so a double-tap on checkout cannot charge twice.",
+    "server.py:/payment/create-order dedups 'created' transactions per user, preventing wallet-history inflation."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "verified via code review (unchanged from iter-89)"},
+  "seed_data_creation": "Disposable paid user rzp_mock_<hex>@test.com created inside TestRegistrationFee (ephemeral). testbuyer wallet credited by test amounts (~₹11 + ₹10) with idempotent replay verified to NOT double-credit. No other persistent seeding.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Preview is intentionally in mock mode (RAZORPAY_KEY_ID/SECRET empty in /app/backend/.env, no admin DB override). To force live-mode for a one-off test: PUT /api/admin/payment-gateway with {key_id, key_secret} (super-admin only), run tests, then DELETE /api/admin/payment-gateway. All four Razorpay endpoints follow the same shape: client sends pay_MOCK_<12hex> + sig_MOCK_<18hex> + razorpay_order_id echoed back from /start → server trusts them when creds.is_mock. Reusable pytest: /app/backend/tests/test_razorpay_mock_flows.py (12 tests, ~4s).",
+  "rca_of_issue": "Not a bug — this iteration is a verification pass. All four money paths (registration, wallet top-up, shop checkout, recharge) complete cleanly end-to-end in mock mode with correct amount math, correct is_mock flag, correct idempotency, and correct guards (empty-cart, below-min, above-max, already-paid). The owner's 'payment is confusing' concern on preview is explained by the intentional mock mode."
+}

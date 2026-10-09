@@ -2122,3 +2122,157 @@ full frontend pass in `test_reports/iteration_87.json` — all green.
 - testing_agent iter-88: 11/12 backend + all frontend flows green. Its one finding
   (sellers landing on the hidden /shop) is fixed above. It reset the Danger PIN to
   `741852` — recorded in `memory/test_credentials.md`.
+
+## 2026-10 Iter89/90 — Signup gate, cashback recovery, rails, recharge
+
+### A. Signup gate — mandatory mobile + optional invite code
+`routes/signup_gate.py` (new) + `src/signup-gate-card.tsx` on `app/payment.tsx`.
+BOTH payment options ("Pay ₹118" / "Continue without subscription") are now LOCKED
+until the gate passes — the skip button is replaced by a dashed locked strip.
+- mobile MANDATORY, validated 10-digit + 6/7/8/9 prefix
+- invite code OPTIONAL; blank or unknown falls back to the admin code **EARN**
+  (`resolve_sponsor`), so every member always has a sponsor
+- duplicate mobile checked TWICE (exact normalised + `regex $` for legacy
+  "+91…" rows). On collision we NEVER merge/overwrite — we return the owning
+  account's name + MASKED email and the app shows "sign in with that same
+  email id, or use a different mobile and email", plus a Contact button that
+  routes to `/ticket-new`
+- `referred_by` is never rewritten for an existing member (would silently
+  reassign someone else's upline commission)
+- runs once for EXISTING users too, keyed on `signup_gate_confirmed_at`
+
+### B. Vendor cashback outstanding — netted off at source
+`core/cashback.auto_recover_from_vendor_credit`, called from the prepaid
+vendor-credit path in `server.py`. Owner's choice: recover IN FULL from the one
+order. Deliberately TWO rows (gross `vendor_sale` + `cashback_recovery` debit),
+never one reduced credit, so the sale value still matches the invoice.
+Idempotent on `CBRECOVER:{order_id}`. Shared row-walker `_settle_outstanding_rows`
+is now used by both auto and manual recovery (the old duplicated walker was deleted).
+- **Manual recovery** now takes `method`: `cash` stays in cash-on-hand;
+  `upi`/`bank` REQUIRES a UTR and writes a real `bank_ledger` credit so the Bank
+  Balance Tally still reconciles line-by-line with the statement.
+- **Excel/CSV export** `GET /admin/cashback/outstanding/export?status=all|open|settled`
+  with per-seller fronted / recovered / still-owed / auto-recovered / manually-recovered.
+
+### C. Bank Balance Tally — earmarked vs free_to_spend
+`bank_tally.earmarked` (vendor wallets, rider cash, customer wallets, pending
+withdrawals, GST) and `free_to_spend = bank_balance − earmarked`. Everything is
+already inside `net`; this only splits it, so the owner can see how much of the
+bank balance is actually safe to spend on development.
+
+### D. Admin wallet adjust — all three pots (BUG)
+`admin_wallet_adjust` only ever read `wallet_balance`, so debiting a seller
+(money in `vendor_earnings`) or a rider (`dp_cash_in_hand`) ALWAYS failed with
+"Cannot debit beyond available balance" — and the admin screen never showed
+those pots, so there was no way to see why. `WalletAdjust.wallet` now selects
+the pot; the error names the real balance ("…has ₹300.00 in their shop
+earnings"); `app/admin/users.tsx` shows all three balances as selectable tiles.
+Seller/rider movements are tagged so they stay out of CUSTOMER wallet reconciliation.
+
+### E. Wallet + UPI order showed only ONE entry (BUG)
+Only the wallet slice was written to the buyer's list; the UPI amount appeared
+nowhere. Now TWO rows: `order` (real wallet debit) + `order_payment_upi`
+(`wallet_impact: "informational"`, so visible but never double-counted).
+Verified: ₹50 wallet + ₹479 UPI on a ₹529 order, wallet ledger drift **0.00**.
+
+### F. Product page — exactly TWO suggestion rails
+`routes/product_rails.py` + `src/product-rail.tsx`.
+1. "More in <subcategory>" — siblings, in-stock first then closest in price
+2. "Picked for you" — scored from the user's OWN history, never admin-curated:
+   purchased ×3, in cart ×2, searched ×1 (`POST /products/search-log`, capped at
+   60 searches/user). Already-bought and in-cart items are excluded; guests and
+   zero-history users fall back to same-category bestsellers so a rail is never empty.
+Cards are FIXED size (CARD_W 148, fixed image box, fixed 2-line name box, fixed
+meta strip) so a long and a short title produce identical cards — the owner's
+"always the same size" requirement. 5-10 per rail, `snapToInterval` swipe.
+
+### G. Recharge category rebuilt
+`routes/recharge.py` + `app/recharge.tsx` + `app/admin/recharge-options.tsx`.
+Service LIST view (Mobile / DTH) → ONE LINE, TWO BOXES (State then Network) →
+enter mobile number / subscriber ID → plans grouped by subcategory → Pay online.
+States/networks are DATA with admin add + soft-delete (products keep their tag so
+re-adding restores the list). Seeded exactly as specified: AP&TG; Airtel, Jio, Vi,
+BSNL; DTH = Tata Play, Airtel Digital TV, Dish TV, d2h, Sun Direct.
+Razorpay: `POST /recharge/payment/{start,verify}` — own attempt collection, same
+HMAC + amount verification, guarded status update so a double tap cannot
+double-book. `tests/seed_recharge_plans.py` seeds 48 demo plans (cod_available=False
+— a recharge is digital and instant).
+
+### H. UI rev-2 from owner feedback
+- `src/chat-shop-card.tsx` — v1 squeezed shop name + owner + location into one
+  flex row and clipped mid-word ("Seller Name - Xys…"). Details now sit in
+  full-width labelled rows under the photo+name header; nothing truncates.
+- `src/cod-unavailable-note.tsx` — replaced the full bottom sheet with a slim
+  one-line note above Place Order ("Cash on Delivery not available on this
+  item." + inline "Pay online"). `cod-unavailable-modal.tsx` deleted.
+
+### I. BUG — product page blanked with "Rendered more hooks than during the previous render"
+Latent since before this batch: `useShopMoneyConfig()` was called at line ~152,
+AFTER the `if (loading && !product) return` and `if (!product) return` early
+returns, so the loading render ran fewer hooks than the loaded render. Moved up
+with the other hooks. This is why the product detail screen crashed on open.
+
+### Verification
+- `tests/verify_oct2026_iter90.py` **30/30 PASS** (cashback auto-recovery incl.
+  no-double-clawback, earmarked maths, all three wallet pots + overdraft message,
+  2 rails + personalisation + guest fallback, recharge taxonomy + admin
+  add/delete/duplicate, per-product COD refusal with item names)
+- testing_agent iter-89/90: Razorpay mock pipeline **12/12 PASS** across
+  registration fee, wallet top-up, shop checkout and recharge
+- Wallet+UPI split verified manually: 2 rows, ledger drift 0.00
+- Screenshots confirm: recharge 2-box flow, both product rails with Add buttons,
+  chat shop card with all details fully visible
+
+## Jun-2026 batch — Recharge operator sync + "Everyone" delivery zone
+
+### J. Networks/Operators ARE the Recharge sub-categories
+`routes/recharge.py` gained `sync_shop_categories()` — an idempotent,
+write-light mirror that keeps the admin's operator list and the shop
+category tree as ONE list:
+
+    Recharge  (root, recharge_root=True)
+      ├─ Mobile Recharge     (recharge_group="kind", recharge_kind="mobile")
+      │    └─ Airtel / Jio / Vi / BSNL …   (recharge_option_id → option)
+      └─ DTH TV Recharge
+           └─ Tata Play / Dish TV / d2h …
+
+Runs on every `GET /recharge/options`, on option add/restore/delete, and on
+`POST /admin/recharge/options/sync`. It ADOPTS hand-made categories with the
+same name (the owner's manual "Airtel" under Recharge was re-parented, not
+duplicated). Hiding an option deactivates its mirrored category.
+
+Deleting an operator is now **blocked (409)** while products are listed under
+it — owner's explicit choice over a silent hide. `option_product_count()`
+counts both shapes: plans tagged `recharge_network=<slug>` AND vendor products
+that merely picked the sub-category by name (`subcategory`/`sub_category`).
+
+`GET /recharge/products` is the other half of the bug: a vendor plan filed
+under "Airtel" carried no `recharge_*` tags, so it never showed. The query now
+matches tag OR sub-category name, treats a missing `recharge_state` as "every
+circle", and respects `is_published` (vendor plan appears only after the admin
+publishes). `src/rich-product-editor.tsx` flattens GRANDchildren into the
+sub-category chip row so the vendor can tap "Airtel" directly.
+
+### K. "Everyone" delivery zone (ship anywhere in India)
+`core/delivery.py` — new mode `everywhere` (`EVERYWHERE`): the zone test passes
+for every customer, so published products from that shop are visible at any
+pincode and checkout accepts them. `vendor_covers_locally()` answers "would
+this vendor reach the buyer WITHOUT the flag?" and the checkout guard
+(`server.py` `_is_far_away`) uses it to refuse Cash on Delivery for far-away
+orders (`code=cod_not_available`) while keeping normal COD inside the shop's own
+pincode / km radius — the owner's "online + wallet only" rule.
+
+Vendor picks it from Update Delivery Zone & Profile only (NOT the first-time
+apply screen, per owner): a new "Everyone" chip next to None/2/5/10/20/50 km;
+existing chips and "Also cover entire shop pincode" untouched. Mode is encoded
+at submit (`everywhere` wins) and goes through the normal admin edit-request
+approval. `/vendor/me/delivery-zone` now returns `explains.everywhere`.
+
+### Verification
+- `tests/verify_jun2026_recharge_sync_everyone.py` **21/21 PASS**
+- testing_agent iteration 91 — `tests/test_iter91_everyone_and_recharge_e2e.py`
+  **22/22 PASS**: edit-request → admin approve → far-pincode visibility →
+  COD far = 400, COD local = 200, wallet/online far = 200, normal-vendor
+  regression (out_of_delivery_zone), recharge publish + 409 delete guard.
+- Screenshot: vendor Update Delivery Zone shows the Everyone chip + its
+  online-payment note.

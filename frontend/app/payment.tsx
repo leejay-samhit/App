@@ -10,6 +10,7 @@ import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
 import { SubscriptionHero, SubscriptionBenefits, SkipSubscriptionButton } from "../src/subscription";
+import { SignupGateCard } from "../src/signup-gate-card";
 
 type PayMethod = "upi" | "card" | "netbanking";
 
@@ -45,6 +46,9 @@ export default function Payment() {
   const [processing, setProcessing] = useState(false);
   const [stage, setStage] = useState<"idle" | "creating-order" | "processing-payment" | "verifying" | "success" | "failure">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Oct-2026 owner rule — BOTH payment options stay locked until the mobile
+  // number (mandatory) and invite code (optional) are confirmed.
+  const [gatePassed, setGatePassed] = useState(false);
 
   // Native WebView Razorpay checkout state
   const [rzpVisible, setRzpVisible] = useState(false);
@@ -311,6 +315,9 @@ export default function Payment() {
         <SubscriptionHero amount={config.amount} appName={app_name} />
         <SubscriptionBenefits />
 
+        {/* Mandatory mobile + optional invite code — gates both options */}
+        <SignupGateCard onPassed={() => setGatePassed(true)} />
+
         <View style={styles.amountCard}>
           <Text style={styles.amountLabel}>AMOUNT TO PAY</Text>
           <Text style={styles.amount}>{formatINR(config.amount)}</Text>
@@ -346,15 +353,25 @@ export default function Payment() {
         <TouchableOpacity
           testID="payment-pay-button"
           onPress={onStartCheckout}
-          disabled={attemptsLeft <= 0}
-          style={[styles.payBtn, attemptsLeft <= 0 && { opacity: 0.5 }]}
+          disabled={attemptsLeft <= 0 || !gatePassed}
+          style={[styles.payBtn, (attemptsLeft <= 0 || !gatePassed) && { opacity: 0.5 }]}
         >
-          <Feather name="zap" size={18} color={colors.accentFg} />
+          <Feather name={gatePassed ? "zap" : "lock"} size={18} color={colors.accentFg} />
           <Text style={styles.payBtnText}> Pay {formatINR(config.amount)}</Text>
         </TouchableOpacity>
 
-        {/* Free entry — the ₹118 is a subscription, not a wall. */}
-        <SkipSubscriptionButton amount={config.amount} />
+        {/* Free entry — the ₹118 is a subscription, not a wall. Locked until
+            the mobile number is confirmed, same as the paid option. */}
+        {gatePassed ? (
+          <SkipSubscriptionButton amount={config.amount} />
+        ) : (
+          <View style={styles.lockedSkip} testID="payment-skip-locked">
+            <Feather name="lock" size={13} color={colors.textMuted} />
+            <Text style={styles.lockedSkipText}>
+              Confirm your mobile number above to unlock both options
+            </Text>
+          </View>
+        )}
 
         <Text style={styles.note}>
           🔒 Secured by Razorpay. {config.is_mock ? "Sandbox mode — no real charge." : "Your payment is processed securely."}
@@ -538,6 +555,15 @@ const styles = StyleSheet.create({
   warnText: { color: "#7A4A0E", fontSize: 12, fontWeight: "600", flex: 1 },
   payBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.accent, borderRadius: radii.button, paddingVertical: 16, marginTop: 4 },
   payBtnText: { color: colors.accentFg, fontWeight: "800", fontSize: 16 },
+  // Locked stand-in for the "continue without subscription" button, shown
+  // until the signup gate passes.
+  lockedSkip: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7,
+    minHeight: 48, paddingVertical: 13, paddingHorizontal: 14, marginTop: 10,
+    borderRadius: radii.input, borderWidth: 1, borderColor: colors.border,
+    borderStyle: "dashed", backgroundColor: colors.surfaceMuted,
+  },
+  lockedSkipText: { flex: 1, fontSize: 12, color: colors.textMuted, fontWeight: "700" },
   note: { textAlign: "center", color: colors.textMuted, fontSize: 12, marginTop: 16 },
 
   // Razorpay-style modal

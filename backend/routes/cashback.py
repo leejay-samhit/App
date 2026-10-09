@@ -4,9 +4,12 @@ the admin pending-cashback queue.
 All money maths lives in `core/cashback.py`; these endpoints only read it or
 trigger it. Nothing here ever trusts a client-supplied amount.
 """
+import csv
+import io
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from core.cashback import (
     MAX_CASHBACK_PCT,
@@ -216,10 +219,99 @@ async def admin_recover_outstanding(
         raise HTTPException(status_code=400, detail="Amount must be greater than zero")
 
     note = str(payload.get("note") or "Seller settled outstanding cashback").strip()
+    method = str(payload.get("method") or "cash").strip().lower()
+    if method not in ("cash", "upi", "bank"):
+        raise HTTPException(status_code=400, detail="method must be cash, upi or bank")
+    reference = (str(payload.get("reference") or "").strip() or None)
+    if method in ("upi", "bank") and not reference:
+        raise HTTPException(
+            status_code=400,
+            detail="A UTR / reference number is required for a UPI or bank deposit.",
+        )
     result = await recover_vendor_outstanding(
-        vendor_id, amount, credit_admin_bucket=credit_admin_bucket, note=note,
+        vendor_id, amount,
+        credit_admin_bucket=credit_admin_bucket,
+        note=note, method=method, reference=reference,
+        recorded_by=admin.get("email") or admin.get("id"),
     )
     await _audit_log(admin, "cashback.recover_outstanding", "user", vendor_id, {
-        "amount": amount, "note": note, **result,
+        "amount": amount, "note": note, "method": method, "reference": reference, **result,
     })
     return {"ok": True, "at": now_utc().isoformat(), **result}
+
+
+@router.get("/admin/cashback/outstanding/export")
+async def admin_cashback_outstanding_export(
+    _: Dict[str, Any] = Depends(require_admin),
+    status: str = "all",
+):
+    """Excel-friendly CSV of seller cashback outstanding, so the owner can
+    track who is pending and who has cleared without reading the app.
+
+    `status`: all | open | settled
+    """
+    q: Dict[str, Any] = {"kind": "cashback"}
+    if status in ("open", "settled"):
+        q["status"] = status
+    rows = await db.vendor_outstanding.find(q, {"_id": 0}).sort("created_at", 1).to_list(20000)
+
+    vendor_ids = sorted({r.get("vendor_id") for r in rows if r.get("vendor_id")})
+    vendors = {
+        v["id"]: v for v in await db.users.find(
+            {"id": {"$in": vendor_ids}},
+            {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1,
+             "shop_name": 1, "cashback_outstanding": 1, "vendor_earnings": 1},
+        ).to_list(len(vendor_ids) or 1)
+    }
+    # How much each seller has had clawed back automatically out of sales.
+    auto_agg = await db.transactions.aggregate([
+        {"$match": {"type": "cashback_recovery", "vendor_id": {"$in": vendor_ids}}},
+        {"$group": {"_id": "$vendor_id", "sum": {"$sum": "$amount"}}},
+    ]).to_list(len(vendor_ids) or 1)
+    auto_by_vendor = {a["_id"]: round(float(a["sum"] or 0), 2) for a in auto_agg}
+    manual_agg = await db.transactions.aggregate([
+        {"$match": {"type": "cashback_vendor_recovery", "vendor_id": {"$in": vendor_ids}}},
+        {"$group": {"_id": "$vendor_id", "sum": {"$sum": "$amount"}}},
+    ]).to_list(len(vendor_ids) or 1)
+    manual_by_vendor = {a["_id"]: round(float(a["sum"] or 0), 2) for a in manual_agg}
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "Seller", "Shop", "Email", "Phone", "Order #", "Order ID",
+        "Cashback fronted (Rs)", "Recovered (Rs)", "Still owed (Rs)", "Row status",
+        "Raised on", "Settled on",
+        "Seller total outstanding (Rs)", "Auto-recovered from sales (Rs)",
+        "Manually recovered (Rs)", "Seller shop wallet (Rs)",
+    ])
+    for r in rows:
+        v = vendors.get(r.get("vendor_id")) or {}
+        fronted = round(float(r.get("amount") or 0), 2)
+        recovered = round(float(r.get("recovered") or 0), 2)
+        w.writerow([
+            v.get("name") or r.get("vendor_name") or "",
+            v.get("shop_name") or "",
+            v.get("email") or "",
+            v.get("phone") or "",
+            r.get("order_number") or "",
+            r.get("order_id") or "",
+            f"{fronted:.2f}",
+            f"{recovered:.2f}",
+            f"{max(0.0, round(fronted - recovered, 2)):.2f}",
+            "CLEARED" if r.get("status") == "settled" else "PENDING",
+            str(r.get("created_at") or "")[:19],
+            str(r.get("settled_at") or "")[:19],
+            f"{round(float(v.get('cashback_outstanding') or 0), 2):.2f}",
+            f"{auto_by_vendor.get(r.get('vendor_id'), 0.0):.2f}",
+            f"{manual_by_vendor.get(r.get('vendor_id'), 0.0):.2f}",
+            f"{round(float(v.get('vendor_earnings') or 0), 2):.2f}",
+        ])
+    stamp = now_utc().strftime("%Y%m%d-%H%M")
+    return StreamingResponse(
+        io.BytesIO(buf.getvalue().encode("utf-8-sig")),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="seller-cashback-outstanding-{status}-{stamp}.csv"',
+        },
+    )

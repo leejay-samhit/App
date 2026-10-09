@@ -522,6 +522,7 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
   const [holder, setHolder] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustPot, setAdjustPot] = useState<"wallet_balance" | "vendor_earnings" | "dp_cash_in_hand">("wallet_balance");
   const [adjustReason, setAdjustReason] = useState("");
   // ─── Placement realignment state ───
   const [realignCode, setRealignCode] = useState("");
@@ -978,6 +979,40 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
             </View>
 
             <Text style={modalStyles.section}>WALLET ADJUST</Text>
+            {/* Oct-2026 — a seller's money lives in shop earnings and a
+                rider's in cash-in-hand. Neither was shown here, so every
+                debit on them failed with "Cannot debit beyond available
+                balance". All three pots are now visible and selectable. */}
+            <View style={{ flexDirection: "row", gap: 6, marginBottom: 10 }}>
+              {([
+                { key: "wallet_balance",  label: "Wallet",         value: Number((user as any).wallet_balance || 0) },
+                { key: "vendor_earnings", label: "Shop earnings",  value: Number((user as any).vendor_earnings || 0) },
+                { key: "dp_cash_in_hand", label: "Rider cash",    value: Number((user as any).dp_cash_in_hand || 0) },
+              ] as const).map((p) => {
+                const on = adjustPot === p.key;
+                return (
+                  <TouchableOpacity
+                    key={p.key}
+                    onPress={() => setAdjustPot(p.key)}
+                    style={{
+                      flex: 1, paddingVertical: 9, paddingHorizontal: 8, borderRadius: 10,
+                      borderWidth: 1,
+                      borderColor: on ? colors.primary : colors.border,
+                      backgroundColor: on ? colors.brand100 : colors.surface,
+                      alignItems: "center",
+                    }}
+                    testID={`adjust-pot-${p.key}`}
+                  >
+                    <Text style={{ fontSize: 9.5, fontWeight: "900", letterSpacing: 0.3, color: on ? colors.primary : colors.textMuted }}>
+                      {p.label.toUpperCase()}
+                    </Text>
+                    <Text style={{ fontSize: 13, fontWeight: "900", color: on ? colors.textMain : colors.textMuted, marginTop: 2 }}>
+                      ₹{p.value.toLocaleString("en-IN")}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
             <View style={{ backgroundColor: colors.surfaceMuted, borderRadius: 12, padding: 10, marginBottom: 10, flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Feather name="briefcase" size={13} color={colors.primary} />
               <Text style={{ fontSize: 11.5, color: colors.textMuted, fontWeight: "600", flex: 1, lineHeight: 16 }} testID="adjust-networth-note">
@@ -1005,7 +1040,7 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
                   if (!adjustAmount || !adjustReason) { setMsg("Enter amount and reason"); return; }
                   setBusy("credit");
                   try {
-                    await api.post(`/admin/users/${user.id}/wallet`, { amount: parseFloat(adjustAmount), type: "credit", reason: adjustReason });
+                    await api.post(`/admin/users/${user.id}/wallet`, { amount: parseFloat(adjustAmount), type: "credit", reason: adjustReason, wallet: adjustPot });
                     setAdjustAmount(""); setAdjustReason("");
                     onSaved();
                   } catch (e) { setMsg(formatApiError(e)); setBusy(null); }
@@ -1022,7 +1057,7 @@ function UserEditModal({ user, currentAdminId, onClose, onSaved, onRequestDelete
                   if (!adjustAmount || !adjustReason) { setMsg("Enter amount and reason"); return; }
                   setBusy("debit");
                   try {
-                    await api.post(`/admin/users/${user.id}/wallet`, { amount: parseFloat(adjustAmount), type: "debit", reason: adjustReason });
+                    await api.post(`/admin/users/${user.id}/wallet`, { amount: parseFloat(adjustAmount), type: "debit", reason: adjustReason, wallet: adjustPot });
                     setAdjustAmount(""); setAdjustReason("");
                     onSaved();
                   } catch (e) { setMsg(formatApiError(e)); setBusy(null); }

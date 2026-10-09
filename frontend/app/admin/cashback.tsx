@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
-  RefreshControl, TextInput,
+  RefreshControl, TextInput, Modal, Pressable,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -35,6 +35,14 @@ export default function AdminCashbackScreen() {
   const [pendingTotal, setPendingTotal] = useState(0);
   const [outstanding, setOutstanding] = useState<any[]>([]);
   const [outstandingTotal, setOutstandingTotal] = useState(0);
+  // Oct-2026 — Excel download + manual recovery (cash / UPI deposit).
+  const [dlBusy, setDlBusy] = useState<string | null>(null);
+  const [recoverFor, setRecoverFor] = useState<any | null>(null);
+  const [recoverAmount, setRecoverAmount] = useState("");
+  const [recoverMethod, setRecoverMethod] = useState<"cash" | "upi">("cash");
+  const [recoverRef, setRecoverRef] = useState("");
+  const [recoverMsg, setRecoverMsg] = useState("");
+  const [recoverBusy, setRecoverBusy] = useState(false);
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [summaryTotal, setSummaryTotal] = useState<any>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -105,6 +113,55 @@ export default function AdminCashbackScreen() {
       notify("Export failed", formatApiError(e));
     } finally {
       setBusy(null);
+    }
+  };
+
+  const onDownloadOutstanding = async (status: "all" | "open" | "settled") => {
+    setDlBusy(status);
+    try {
+      const r = await downloadServerFile({
+        path: `/admin/cashback/outstanding/export?status=${status}`,
+        filename: `seller-cashback-${status}.csv`,
+        mimeType: "text/csv",
+      });
+      if (r.ok) notify("Downloaded", "Open it in Excel or Google Sheets.");
+    } catch (e) {
+      notify("Download failed", formatApiError(e));
+    } finally {
+      setDlBusy(null);
+    }
+  };
+
+  const onRecover = async () => {
+    if (!recoverFor) return;
+    const amt = parseFloat(recoverAmount);
+    if (!amt || amt <= 0) { setRecoverMsg("Enter the amount the seller paid."); return; }
+    if (recoverMethod === "upi" && !recoverRef.trim()) {
+      setRecoverMsg("A UTR / reference number is required for a UPI deposit.");
+      return;
+    }
+    setRecoverBusy(true);
+    setRecoverMsg("");
+    try {
+      const { data } = await api.post(
+        `/admin/cashback/outstanding/${recoverFor.vendor_id}/recover`,
+        {
+          amount: amt,
+          method: recoverMethod,
+          reference: recoverRef.trim() || undefined,
+          note: recoverMethod === "upi" ? "Seller UPI deposit" : "Cash received from seller",
+        },
+      );
+      setRecoverFor(null);
+      notify(
+        "Recovery recorded",
+        `${formatINR(data.applied)} settled${data.unapplied > 0 ? ` · ${formatINR(data.unapplied)} was more than owed and not applied` : ""}.`,
+      );
+      load();
+    } catch (e) {
+      setRecoverMsg(formatApiError(e));
+    } finally {
+      setRecoverBusy(false);
     }
   };
 
@@ -199,16 +256,44 @@ export default function AdminCashbackScreen() {
                 when the seller adds money or from their next sales settlement.
               </Text>
             </View>
+            {/* Oct-2026 — Excel download so the owner can track who is
+                pending and who has cleared outside the app. */}
+            <View style={styles.dlRow}>
+              {(["all", "open", "settled"] as const).map((st) => (
+                <TouchableOpacity
+                  key={st}
+                  onPress={() => onDownloadOutstanding(st)}
+                  disabled={dlBusy !== null}
+                  style={[styles.dlBtn, dlBusy === st && { opacity: 0.55 }]}
+                  testID={`cashback-outstanding-export-${st}`}
+                >
+                  {dlBusy === st
+                    ? <ActivityIndicator size="small" color={colors.primary} />
+                    : <Feather name="download" size={13} color={colors.primary} />}
+                  <Text style={styles.dlBtnText}>
+                    {st === "all" ? "All" : st === "open" ? "Pending" : "Cleared"}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
             {outstanding.length === 0 ? (
               <Text style={styles.empty}>No seller owes Slangcart any cashback.</Text>
             ) : outstanding.map((v) => (
-              <View key={v.vendor_id} style={styles.row}>
+              <TouchableOpacity
+                key={v.vendor_id}
+                style={styles.row}
+                onPress={() => { setRecoverFor(v); setRecoverAmount(String(v.outstanding)); setRecoverMethod("cash"); setRecoverRef(""); setRecoverMsg(""); }}
+                testID={`cashback-recover-open-${v.vendor_id}`}
+                activeOpacity={0.8}
+              >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle}>{v.vendor_name || v.vendor_id.slice(0, 8)}</Text>
-                  <Text style={styles.rowSub}>{v.orders} order{v.orders === 1 ? "" : "s"} fronted</Text>
+                  <Text style={styles.rowSub}>{v.orders} order{v.orders === 1 ? "" : "s"} fronted · tap to record a recovery</Text>
                 </View>
                 <Text style={styles.rowAmount}>{formatINR(v.outstanding)}</Text>
-              </View>
+                <Feather name="chevron-right" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
             ))}
           </>
         ) : null}
@@ -295,6 +380,92 @@ export default function AdminCashbackScreen() {
           </>
         ) : null}
       </ScrollView>
+
+      {/* Oct-2026 — record a manual recovery: cash in hand or a UPI deposit.
+          A UPI deposit writes a real bank row so the Bank Balance Tally
+          still reconciles against the statement; cash stays in cash-on-hand. */}
+      <Modal visible={!!recoverFor} transparent animationType="slide" onRequestClose={() => setRecoverFor(null)}>
+        <Pressable style={styles.recBackdrop} onPress={() => setRecoverFor(null)} />
+        <View style={styles.recSheet} testID="cashback-recover-sheet">
+          <View style={styles.recGrab} />
+          <Text style={styles.recTitle}>Record recovery</Text>
+          <Text style={styles.recSub}>
+            {recoverFor?.vendor_name || "Seller"} owes {formatINR(Number(recoverFor?.outstanding || 0))}
+          </Text>
+
+          <Text style={styles.fieldLabel}>How did the money arrive?</Text>
+          <View style={styles.recMethodRow}>
+            {([
+              { key: "cash", label: "Cash received", icon: "dollar-sign" },
+              { key: "upi", label: "UPI / bank deposit", icon: "smartphone" },
+            ] as const).map((m) => {
+              const on = recoverMethod === m.key;
+              return (
+                <TouchableOpacity
+                  key={m.key}
+                  onPress={() => setRecoverMethod(m.key)}
+                  style={[styles.recMethod, on && styles.recMethodOn]}
+                  testID={`recover-method-${m.key}`}
+                >
+                  <Feather name={m.icon} size={15} color={on ? colors.primaryFg : colors.primary} />
+                  <Text style={[styles.recMethodText, on && { color: colors.primaryFg }]}>{m.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <Text style={styles.fieldLabel}>Amount received (₹)</Text>
+          <TextInput
+            value={recoverAmount}
+            onChangeText={setRecoverAmount}
+            keyboardType="decimal-pad"
+            style={styles.input}
+            placeholderTextColor={colors.textMuted}
+            testID="recover-amount"
+          />
+
+          {recoverMethod === "upi" ? (
+            <>
+              <Text style={[styles.fieldLabel, { marginTop: 12 }]}>UTR / reference number</Text>
+              <TextInput
+                value={recoverRef}
+                onChangeText={setRecoverRef}
+                placeholder="e.g. 431290771234"
+                placeholderTextColor={colors.textMuted}
+                style={styles.input}
+                autoCapitalize="characters"
+                testID="recover-reference"
+              />
+              <Text style={styles.recNote}>
+                This creates a bank-ledger credit, so the Bank Balance Tally keeps
+                matching your statement line-by-line.
+              </Text>
+            </>
+          ) : (
+            <Text style={styles.recNote}>
+              Cash never reaches the bank account, so this is counted in Cash on
+              Hand — not in the bank balance.
+            </Text>
+          )}
+
+          {recoverMsg ? <Text style={styles.recError}>{recoverMsg}</Text> : null}
+
+          <TouchableOpacity
+            onPress={onRecover}
+            disabled={recoverBusy}
+            style={[styles.primaryBtn, recoverBusy && { opacity: 0.6 }]}
+            testID="recover-submit"
+          >
+            {recoverBusy
+              ? <ActivityIndicator color={colors.primaryFg} />
+              : <><Feather name="check-circle" size={16} color={colors.primaryFg} />
+                  <Text style={styles.primaryBtnText}>Record recovery</Text></>}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setRecoverFor(null)} style={styles.recCancel} testID="recover-cancel">
+            <Text style={styles.recCancelText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -338,4 +509,34 @@ const styles = StyleSheet.create({
   totalValue: { fontSize: 18, fontWeight: "800", color: colors.textMain, marginTop: 4 },
   primaryBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 16, borderRadius: radii.button, marginTop: 16 },
   primaryBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
+  // Excel download row on the Outstanding tab
+  dlRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
+  dlBtn: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, minHeight: 42, borderRadius: 10,
+    borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.surface,
+  },
+  dlBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
+  // Manual-recovery bottom sheet
+  recBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)" },
+  recSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 20, paddingTop: 10, paddingBottom: 28,
+  },
+  recGrab: { alignSelf: "center", width: 44, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 16 },
+  recTitle: { fontSize: 18, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
+  recSub: { fontSize: 13, color: colors.textMuted, marginTop: 3, marginBottom: 16, fontWeight: "600" },
+  recMethodRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
+  recMethod: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, minHeight: 46, borderRadius: 11,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface,
+  },
+  recMethodOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  recMethodText: { fontSize: 12, fontWeight: "800", color: colors.primary },
+  recNote: { fontSize: 11, lineHeight: 16, color: colors.textMuted, marginTop: 8 },
+  recError: { fontSize: 12.5, color: "#B3261E", fontWeight: "700", marginTop: 10 },
+  recCancel: { alignItems: "center", paddingVertical: 14, marginTop: 4 },
+  recCancelText: { fontSize: 13, fontWeight: "700", color: colors.textMuted },
 });

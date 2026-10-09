@@ -9279,3 +9279,22 @@ agent_communication:
       back-date + minutes_left >= 7 for in-window). Re-run: 93/93 PASS.
       Razorpay exercised via the server-side mock token path (pay_MOCK_*) —
       no real charges. Push cannot deliver in preview.
+
+  - agent: "main"
+    message: |
+      Jun 2026 fork — (A) Admin Recharge "Networks / Operators" now SYNCS into
+      Shop Categories → Recharge → Mobile Recharge / DTH TV Recharge, adopting
+      the owner's hand-made "Airtel" instead of duplicating it; vendor plans
+      filed under an operator sub-category now list on the Recharge screen once
+      the admin publishes them; deleting an operator with products is refused
+      with a 409 naming the count. (B) New vendor delivery zone option
+      "Everyone" (ship anywhere in India, admin-approved) — existing km chips
+      and cover-entire-pincode untouched; far-away orders are online/wallet only
+      (COD refused with code=cod_not_available), local COD unchanged.
+      verify_jun2026_recharge_sync_everyone.py 21/21 PASS; testing_agent
+      iteration 91 (test_iter91_everyone_and_recharge_e2e.py) 22/22 PASS,
+      including the normal-vendor out_of_delivery_zone regression. Razorpay
+      exercised through the pay_MOCK_* path only.
+      Noted for later: models.ProductCreate accepts `sub_category` only —
+      clients POSTing `subcategory` get it dropped (recharge queries already
+      tolerate both shapes).

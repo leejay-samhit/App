@@ -13,6 +13,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
+import { ChatShopCard, type ShopCard } from "../../src/chat-shop-card";
 import { useChatSocket } from "../../src/use-chat-socket";
 import { useChatSettings, wallpaperStyle } from "../../src/chat-settings";
 import { ChatLockGate } from "../../src/chat-lock-gate";
@@ -62,6 +63,8 @@ export default function ChatThreadScreen() {
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   // Confirm sheet for destructive clear-chat operations.
   const [clearConfirm, setClearConfirm] = useState<null | "me" | "everyone">(null);
+  // Seller storefront card shown at the top of the thread.
+  const [shopCard, setShopCard] = useState<ShopCard | null>(null);
   // Profile pic full-screen viewer (tap avatar inside profile modal).
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   // Media-gallery + Starred drawer toggles. The body of the profile modal
@@ -81,6 +84,9 @@ export default function ChatThreadScreen() {
     try {
       const r = await api.get(`/chat/${threadId}/details`);
       setProfileDetail({ media_count: r.data?.media_count || 0, starred_count: r.data?.starred_count || 0 });
+      // Oct-2026 — when the other party is an approved seller, pin their
+      // shop card above the conversation (name, photo, map directions).
+      setShopCard(r.data?.shop || null);
     } catch {}
   }, [threadId]);
 
@@ -177,6 +183,9 @@ export default function ChatThreadScreen() {
   }, [threadId]);
 
   useEffect(() => { load(); }, [load]);
+  // Fetch the seller shop card once per thread — it also warms the
+  // media/starred counts the header modal needs.
+  useEffect(() => { loadProfileDetail(); }, [loadProfileDetail]);
 
   // Realtime updates
   const { setViewingThread } = useChatSocket((ev) => {
@@ -421,6 +430,9 @@ export default function ChatThreadScreen() {
           <Feather name="more-vertical" size={18} color={colors.textMain} />
         </TouchableOpacity>
       </View>
+
+      {/* Oct-2026 — seller storefront: name, photo, tap-to-navigate map */}
+      {shopCard ? <ChatShopCard shop={shopCard} /> : null}
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={20}>
         {loading ? (

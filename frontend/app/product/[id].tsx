@@ -22,6 +22,7 @@ import { useContentWidth } from "../../src/content-width";
 import { getProductPreview } from "../../src/product-preview";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../../src/cashback";
+import { ProductRail, type Rail } from "../../src/product-rail";
 
 /* ─── Types ─── */
 type StyledText = { text?: string; bold?: boolean; font_size?: number | null; align?: "left" | "center" | "right" };
@@ -74,6 +75,16 @@ export default function ProductDetailScreen() {
   );
   const [vendor, setVendor] = useState<{ id: string; name: string; referral_code?: string } | null>(null);
   const [reviews, setReviews] = useState<Review[]>([]);
+  // Oct-2026 — exactly TWO suggestion rails: same-subcategory siblings and a
+  // "picked for you" rail built from this shopper's own search / cart /
+  // purchase history. Never admin-curated.
+  const [rails, setRails] = useState<Rail[]>([]);
+  // Oct-2026 BUGFIX — this used to be called AFTER the "loading" and
+  // "not found" early returns, so the hook count changed between the
+  // loading render and the loaded render and React threw "Rendered more
+  // hooks than during the previous render", blanking the whole screen.
+  // Hooks must run unconditionally, so it lives up here with the rest.
+  const moneyCfg = useShopMoneyConfig();
   const [reviewStats, setReviewStats] = useState({ average: 0, total: 0, breakdown: {} as Record<string, number> });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -111,6 +122,10 @@ export default function ProductDetailScreen() {
       const p: Product | null = (pRes.data && pRes.data.id) ? (pRes.data as Product) : null;
       setProduct(p);
       setReviews(rRes.data?.reviews || []);
+      // Best-effort — a rail failure must never blank the product page.
+      api.get<{ rails: Rail[] }>(`/products/${id}/rails`)
+        .then((rr) => setRails(rr.data?.rails || []))
+        .catch(() => setRails([]));
       setReviewStats(rRes.data?.stats || { average: 0, total: 0, breakdown: {} });
       setSaved(!!(wRes.data?.items || []).some((x: any) => x.id === id));
       // Try to load vendor info (admin-only endpoint; ignore if non-admin user)
@@ -140,7 +155,6 @@ export default function ProductDetailScreen() {
   // True while the full document is still in flight but we're already
   // showing the preview (name / price / cover image).
   const hydrating = loading;
-  const moneyCfg = useShopMoneyConfig();
 
   // ── Jun 2026 — Variants (size / RAM-ROM) ───────────────────────────────
   // Products with options are unbuyable until the customer picks one, and
@@ -665,6 +679,12 @@ export default function ProductDetailScreen() {
             </View>
           ))}
         </View>
+
+        {/* Oct-2026 — the only two suggestion rails on this screen */}
+        {rails.map((r) => (
+          <ProductRail key={r.key} rail={r} />
+        ))}
+        <View style={{ height: 8 }} />
       </ScrollView>
 
       {/* Sticky bottom CTA */}

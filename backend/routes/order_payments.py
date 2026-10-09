@@ -17,6 +17,7 @@ If step 4 ever fails after money was captured, the attempt stays `paid` and
 un-consumed: GET /orders/payment/pending lets the app resume it instead of
 charging the customer twice.
 """
+import re
 import uuid
 from typing import Any, Dict, Optional
 
@@ -177,6 +178,222 @@ async def start_online_payment(
     out["delivery_total"] = priced["delivery"]
     out["description"] = f"Slangcart order · ₹{online_amount:.0f}"
     return out
+
+
+class RechargeStart(BaseModel):
+    kind: str                       # "mobile" | "dth"
+    product_id: str
+    account: str                    # mobile number, or DTH subscriber id
+    state: Optional[str] = None
+    network: Optional[str] = None
+
+
+class RechargeVerify(BaseModel):
+    payment_id: str
+    razorpay_order_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+    razorpay_signature: Optional[str] = None
+
+
+@router.post("/recharge/payment/start")
+async def start_recharge_payment(
+    payload: RechargeStart,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Oct-2026 — pay-online for a recharge plan.
+
+    A recharge is not a shop order: nothing ships, there is no cart and no
+    delivery charge, so it gets its own attempt row and its own verify step.
+    The money path is identical to the shop flow (same Razorpay creds, same
+    signature + amount verification, same mock-mode behaviour in preview),
+    which is exactly why it reuses these helpers instead of inventing a
+    second payment pipeline.
+    """
+    if payload.kind not in ("mobile", "dth"):
+        raise HTTPException(status_code=400, detail="kind must be mobile or dth")
+    account = re.sub(r"\s+", "", payload.account or "")
+    if payload.kind == "mobile":
+        digits = re.sub(r"\D+", "", account)[-10:]
+        if len(digits) != 10 or digits[0] not in "6789":
+            raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number.")
+        account = digits
+    elif len(account) < 6:
+        raise HTTPException(status_code=400, detail="Enter a valid subscriber / customer ID.")
+
+    plan = await db.products.find_one(
+        {"id": payload.product_id, "active": {"$ne": False}},
+        {"_id": 0, "id": 1, "name": 1, "price": 1, "recharge_kind": 1,
+         "recharge_network": 1, "recharge_state": 1, "vendor_id": 1, "subcategory": 1},
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="That recharge plan is no longer available.")
+    amount = round(float(plan.get("price") or 0), 2)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="This plan has no price set.")
+
+    creds = await get_creds()
+    await db.recharge_payments.delete_many({"user_id": user["id"], "status": "created"})
+    try:
+        rzp_order_id = await create_order(
+            int(round(amount * 100)),
+            f"rchg_{user['id'][:12]}_{uuid.uuid4().hex[:6]}",
+            notes={"user_id": user["id"], "kind": "recharge",
+                   "account": account, "plan": plan["id"]},
+            creds=creds,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    attempt = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "kind": payload.kind,
+        "product_id": plan["id"],
+        "plan_name": plan.get("name") or "Recharge",
+        "account": account,
+        "state": payload.state or plan.get("recharge_state"),
+        "network": payload.network or plan.get("recharge_network"),
+        "amount": amount,
+        "online_amount": amount,
+        "razorpay_order_id": rzp_order_id,
+        "razorpay_payment_id": None,
+        "status": "created",
+        "is_mock": creds["is_mock"],
+        "created_at": now_utc().isoformat(),
+    }
+    await db.recharge_payments.insert_one(dict(attempt))
+    # NOTE: deliberately NOT using `_public` — that helper shapes a SHOP
+    # order attempt (cart_total, wallet_amount, delivery_total), none of
+    # which exist on a recharge. Building the payload here keeps the two
+    # flows from leaking each other's fields.
+    return {
+        "payment_id": attempt["id"],
+        "razorpay_order_id": rzp_order_id,
+        "amount_paise": int(round(amount * 100)),
+        "amount": amount,
+        "key_id": creds["key_id"],
+        "is_mock": creds["is_mock"],
+        "account": account,
+        "plan_name": attempt["plan_name"],
+        "network": attempt.get("network"),
+        "state": attempt.get("state"),
+        "description": f"{attempt['plan_name']} · {account}",
+        "prefill": {
+            "name": user.get("name") or "",
+            "email": user.get("email") or "",
+            "contact": user.get("phone") or account,
+        },
+    }
+
+
+@router.post("/recharge/payment/verify")
+async def verify_recharge_payment(
+    payload: RechargeVerify,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Confirm the Razorpay payment and book the recharge.
+
+    Idempotent: a repeated call on an already-paid attempt returns the same
+    recharge instead of charging or booking twice.
+    """
+    attempt = await db.recharge_payments.find_one(
+        {"id": payload.payment_id, "user_id": user["id"]}, {"_id": 0},
+    )
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Payment attempt not found")
+    if attempt["status"] == "paid":
+        return {"ok": True, "already_verified": True,
+                "recharge_id": attempt.get("recharge_id"),
+                "account": attempt["account"], "amount": attempt["amount"]}
+    if attempt["status"] != "created":
+        raise HTTPException(status_code=400, detail=f"Payment attempt is {attempt['status']}")
+    if payload.razorpay_order_id and payload.razorpay_order_id != attempt["razorpay_order_id"]:
+        raise HTTPException(status_code=400, detail="Payment order mismatch")
+    if not payload.razorpay_payment_id:
+        raise HTTPException(status_code=400, detail="Missing Razorpay payment id")
+
+    creds = await get_creds()
+    if not creds["is_mock"]:
+        if not verify_signature(
+            attempt["razorpay_order_id"], payload.razorpay_payment_id,
+            payload.razorpay_signature, creds["key_secret"],
+        ):
+            await db.recharge_payments.update_one(
+                {"id": attempt["id"]},
+                {"$set": {"status": "failed", "failed_reason": "bad_signature"}},
+            )
+            raise HTTPException(status_code=401, detail="Invalid payment signature")
+        rzp = await fetch_payment(payload.razorpay_payment_id, creds)
+        if rzp:
+            status = (rzp.get("status") or "").lower()
+            if status not in ("captured", "authorized"):
+                raise HTTPException(status_code=400, detail=f"Payment is not captured (status: {status})")
+            expected_paise = int(round(attempt["amount"] * 100))
+            if int(rzp.get("amount") or 0) not in (0, expected_paise):
+                raise HTTPException(status_code=400, detail="Payment amount does not match the plan")
+
+    # Claim the attempt first — the guarded update is what makes a double
+    # tap (or a webhook racing the client) impossible to double-book.
+    recharge_id = str(uuid.uuid4())
+    claimed = await db.recharge_payments.update_one(
+        {"id": attempt["id"], "status": "created"},
+        {"$set": {
+            "status": "paid",
+            "razorpay_payment_id": payload.razorpay_payment_id,
+            "razorpay_signature": payload.razorpay_signature,
+            "recharge_id": recharge_id,
+            "paid_at": now_utc().isoformat(),
+        }},
+    )
+    if claimed.modified_count == 0:
+        fresh = await db.recharge_payments.find_one({"id": attempt["id"]}, {"_id": 0})
+        return {"ok": True, "already_verified": True,
+                "recharge_id": (fresh or {}).get("recharge_id"),
+                "account": attempt["account"], "amount": attempt["amount"]}
+
+    doc = {
+        "id": recharge_id,
+        "user_id": user["id"],
+        "kind": attempt["kind"],
+        "product_id": attempt["product_id"],
+        "plan_name": attempt["plan_name"],
+        "account": attempt["account"],
+        "state": attempt.get("state"),
+        "network": attempt.get("network"),
+        "amount": attempt["amount"],
+        "status": "processing",
+        "payment_id": attempt["id"],
+        "razorpay_payment_id": payload.razorpay_payment_id,
+        "created_at": now_utc().isoformat(),
+    }
+    await db.recharges.insert_one(dict(doc))
+    await db.transactions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "type": "recharge",
+        "amount": -attempt["amount"],
+        "status": "success",
+        "description": (
+            f"{attempt['plan_name']} — {attempt['network'] or ''} "
+            f"{attempt['account']}".replace("  ", " ").strip()
+        ),
+        "recharge_id": recharge_id,
+        "razorpay_payment_id": payload.razorpay_payment_id,
+        # Paid straight from the bank to us — never touched the wallet.
+        "wallet_impact": "informational",
+        "created_at": now_utc().isoformat(),
+    })
+    return {"ok": True, "recharge_id": recharge_id,
+            "account": attempt["account"], "amount": attempt["amount"],
+            "plan_name": attempt["plan_name"], "status": "processing"}
+
+
+@router.get("/recharge/history")
+async def recharge_history(user: Dict[str, Any] = Depends(get_current_user)):
+    rows = await db.recharges.find(
+        {"user_id": user["id"]}, {"_id": 0},
+    ).sort("created_at", -1).limit(50).to_list(50)
+    return {"items": rows}
 
 
 @router.post("/orders/payment/verify")
