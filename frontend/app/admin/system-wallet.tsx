@@ -139,9 +139,32 @@ type NetWorth = {
       bank_tally_net: number;
       pending_collections: number;
       user_wallet_balance: number;
+      vendor_payable?: number;
+      vendor_payable_sellers?: number;
+      rider_cash_held?: number;
+      rider_count?: number;
+      rider_wallets?: number;
+      rider_wallet_count?: number;
       pending_withdrawals: number;
       gst_payable: number;
     };
+  };
+  // Jun 2026 — physical cash + the seller / rider pots, shown for clarity.
+  cash_on_hand?: {
+    total: number;
+    registration_cash: number;
+    registration_count: number;
+    cod_with_collectors: number;
+    cod_orders: number;
+    cod_with_sellers: number;
+    cod_with_sellers_orders: number;
+    rider_cash_held?: number;
+    rider_count?: number;
+    rider_wallets?: number;
+    rider_wallet_count?: number;
+    vendor_wallets?: number;
+    vendor_wallet_count?: number;
+    note?: string;
   };
 };
 
@@ -533,6 +556,10 @@ export default function AdminSystemWallet() {
                     <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.user_wallet_balance)}</Text>
                   </View>
                   <View style={styles.nwCompCol}>
+                    <Text style={[styles.nwCompLabel, { color: "#FECACA" }]}>− Vendor shop wallets</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.vendor_payable || 0)}</Text>
+                  </View>
+                  <View style={styles.nwCompCol}>
                     <Text style={[styles.nwCompLabel, { color: "#FECACA" }]}>− Pending withdrawals</Text>
                     <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.pending_withdrawals)}</Text>
                   </View>
@@ -540,10 +567,66 @@ export default function AdminSystemWallet() {
                     <Text style={[styles.nwCompLabel, { color: "#FECACA" }]}>− GST payable</Text>
                     <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.gst_payable)}</Text>
                   </View>
+                  {/* Jun 2026 — rider money, shown ONLY for clarity. It is
+                      never added to the net worth: the cash is the same
+                      rupee as "COD with collectors" and the wallet is
+                      already inside "User wallets". */}
+                  <View style={styles.nwCompCol}>
+                    <Text style={[styles.nwCompLabel, { color: "#C7D2FE" }]}>ⓘ Rider cash in hand</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.rider_cash_held || 0)}</Text>
+                  </View>
+                  <View style={styles.nwCompCol}>
+                    <Text style={[styles.nwCompLabel, { color: "#C7D2FE" }]}>ⓘ Rider wallets</Text>
+                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.rider_wallets || 0)}</Text>
+                  </View>
                 </View>
               ) : null}
               <Text style={styles.nwHeroFormula}>{netWorth.master.formula}</Text>
             </View>
+
+            {/* ── Jun 2026 · Cash on hand + who is holding what ──────────
+                Owner's report: the Treasury showed cash-on-hand ₹11 and
+                user wallets ₹10.20 but never the SELLER and RIDER pots, so
+                the figures could not be tied together. These rows are for
+                clarity only — the net worth above is unchanged. */}
+            {netWorth.cash_on_hand ? (
+              <View style={styles.cohCard} testID="sw-cash-on-hand">
+                <View style={styles.cohHead}>
+                  <Feather name="briefcase" size={14} color={colors.primary} />
+                  <Text style={styles.cohTitle}>Cash on hand</Text>
+                  <Text style={styles.cohTotal}>{formatINR(netWorth.cash_on_hand.total)}</Text>
+                </View>
+                <NwRow label="Offline / UPI-manual joinings" value={netWorth.cash_on_hand.registration_cash} />
+                <NwRow
+                  label={`COD with delivery partners (${netWorth.cash_on_hand.cod_orders} orders)`}
+                  value={netWorth.cash_on_hand.cod_with_collectors}
+                />
+                <View style={styles.cohDivider} />
+                <Text style={styles.cohSubHead}>Held by others — shown for clarity, not counted above</Text>
+                <NwRow
+                  label={`Vendor shop wallets (${netWorth.cash_on_hand.vendor_wallet_count || 0} sellers)`}
+                  value={netWorth.cash_on_hand.vendor_wallets || 0}
+                />
+                <NwRow
+                  label={`Rider cash in hand (${netWorth.cash_on_hand.rider_count || 0} riders)`}
+                  value={netWorth.cash_on_hand.rider_cash_held || 0}
+                />
+                <NwRow
+                  label={`Rider wallets (${netWorth.cash_on_hand.rider_wallet_count || 0} riders)`}
+                  value={netWorth.cash_on_hand.rider_wallets || 0}
+                />
+                <NwRow
+                  label={`COD kept by sellers who delivered themselves (${netWorth.cash_on_hand.cod_with_sellers_orders} orders)`}
+                  value={netWorth.cash_on_hand.cod_with_sellers}
+                />
+                <Text style={styles.nwNote}>
+                  Vendor shop wallets are already subtracted inside the net worth as money we owe
+                  sellers. Rider cash is the same money as “COD with delivery partners”, seen from
+                  the rider’s side, and rider wallets sit inside “User wallets”. Nothing here is
+                  added twice.
+                </Text>
+              </View>
+            ) : null}
 
             <NwGroup icon="trending-up" title="Group 1 · Revenue Ledger" color="#10B981" onPress={() => openGroup("group_1_revenue")}>
               <NwRow label="Registration revenue"   value={netWorth.group_1_revenue.registration} />
@@ -1725,6 +1808,20 @@ const styles = StyleSheet.create({
   nwHeroValue: { fontSize: 32, fontWeight: "800", color: colors.primaryFg, marginTop: 6, letterSpacing: -0.5 },
   nwHeroFormula: { fontSize: 11, color: "rgba(255,255,255,0.78)", marginTop: 6, lineHeight: 16 },
   nwNote: { fontSize: 10.5, color: colors.textMuted, lineHeight: 15, marginTop: 8 },
+  // Jun 2026 — cash-on-hand clarity card (vendor + rider pots).
+  cohCard: {
+    backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1,
+    borderColor: colors.border, padding: 14, marginBottom: 10,
+  },
+  cohHead: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
+  cohTitle: { flex: 1, fontSize: 13.5, fontWeight: "900", color: colors.textMain },
+  cohTotal: { fontSize: 15, fontWeight: "900", color: colors.textMain, fontVariant: ["tabular-nums"] },
+  cohDivider: { height: 1, backgroundColor: colors.border, marginVertical: 10 },
+  cohSubHead: {
+    fontSize: 10, letterSpacing: 0.6, fontWeight: "900", color: colors.textMuted,
+    marginBottom: 6, textTransform: "uppercase",
+  },
+
   // Components grid showing how Net Worth is computed
   nwComponentsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 14 },
   nwCompCol:    { flexBasis: "31%", flexGrow: 1, backgroundColor: "rgba(255,255,255,0.13)", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6 },

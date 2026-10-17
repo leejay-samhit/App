@@ -475,6 +475,19 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     ]).to_list(1)
     dp_cash_held = round(float((dp_cash_agg or [{}])[0].get("sum") or 0), 2)
     dp_cash_count = int((dp_cash_agg or [{}])[0].get("count") or 0)
+
+    # Jun-2026 owner request — the Treasury showed cash-on-hand and the
+    # customer wallet total but never said how much of the wallet liability
+    # belongs to SELLERS vs RIDERS, so the owner could not tie the numbers
+    # together. Both are reported below for clarity; neither changes the net
+    # worth maths (vendor wallets were already subtracted as a liability and
+    # rider cash was never an asset of ours).
+    dp_wallet_agg = await db.users.aggregate([
+        {"$match": {"is_delivery_partner": True, "wallet_balance": {"$gt": 0}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$wallet_balance"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    dp_wallet_balance = round(float((dp_wallet_agg or [{}])[0].get("sum") or 0), 2)
+    dp_wallet_count = int((dp_wallet_agg or [{}])[0].get("count") or 0)
     earmarked_total = round(
         vendor_payable + user_wallet_balance + pending_withdrawals + gst_payable, 2,
     )
@@ -587,6 +600,15 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
             # Informational — the seller's own money, never ours.
             "cod_with_sellers":     cod_with_sellers,
             "cod_with_sellers_orders": cod_with_sellers_count,
+            # Jun-2026 — shown for clarity, NOT added to `total`: the rider's
+            # cash pot is the same money as `cod_with_collectors`, seen from
+            # the rider's ledger instead of the order's.
+            "rider_cash_held":      dp_cash_held,
+            "rider_count":          dp_cash_count,
+            "rider_wallets":        dp_wallet_balance,
+            "rider_wallet_count":   dp_wallet_count,
+            "vendor_wallets":       vendor_payable,
+            "vendor_wallet_count":  vendor_payable_count,
             "note": "Physical cash the company holds — offline/UPI-manual joinings plus COD a delivery partner still owes us. Seller-collected COD (own delivery) is shown separately and is NOT company money.",
         },
         "master": {
@@ -600,6 +622,13 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
                 "pending_collections": round(pending_collections, 2),
                 "user_wallet_balance": round(user_wallet_balance, 2),
                 "vendor_payable":      vendor_payable,
+                "vendor_payable_sellers": vendor_payable_count,
+                # Clarity rows — already inside the figures above, never
+                # added on top of them.
+                "rider_cash_held":     dp_cash_held,
+                "rider_count":         dp_cash_count,
+                "rider_wallets":       dp_wallet_balance,
+                "rider_wallet_count":  dp_wallet_count,
                 "total_liability":     total_liability,
                 "pending_withdrawals": round(pending_withdrawals, 2),
                 "gst_payable":         gst_payable,

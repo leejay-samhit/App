@@ -2276,3 +2276,59 @@ approval. `/vendor/me/delivery-zone` now returns `explains.everywhere`.
   regression (out_of_delivery_zone), recharge publish + 409 delete guard.
 - Screenshot: vendor Update Delivery Zone shows the Everyone chip + its
   online-payment note.
+
+## Jun-2026 batch 2 — Treasury clarity, bag shipping maths, rider doorstep flow
+
+### L. System Wallet shows the seller + rider pots
+`routes/finance.py` now reports `cash_on_hand.{vendor_wallets, rider_cash_held,
+rider_wallets, …}` and the same three inside `master.components`. The admin
+screen grew a "Cash on hand" card (offline joinings, COD with riders) and a
+"HELD BY OTHERS — shown for clarity, not counted above" block, plus two ⓘ rows
+in the Net Worth hero. Deliberately DISPLAY-ONLY: vendor wallets were already
+subtracted as a liability, rider cash is the same rupee as "COD with
+collectors" seen from the rider's ledger, and rider wallets already sit inside
+"User wallets". `master.net_worth` is byte-identical to before.
+
+### M. Bag summary prices delivery with the checkout engine
+`GET /cart` used to return goods only while the screen hard-coded
+"Shipping: FREE"; checkout then charged delivery. It now runs
+`core.delivery_charges.compute_cart_delivery` (the SAME engine as
+`/orders/checkout` and `/orders/payment/start`) and returns
+`delivery{enabled,total,free,capped,per_seller[],add_more_for_free,hint}` plus
+`payable_total`. `app/cart.tsx` shows the real amount or FREE, totals
+items + delivery everywhere (summary, wallet-short warning, CTA), and prints
+ONE whole-bag line: "Add ₹X more to your bag to get free delivery" (owner's
+choice over a per-shop hint).
+
+### N. Rider delivers CUSTOMER-wise, not just shop-wise
+One customer buying from three shops used to mean three shop-wise updates for
+the same doorstep. New `GET /delivery-partner/me/customers` groups the rider's
+open orders by customer (address, phone, items, order value, cash to collect,
+`next_status`), and `POST /delivery-partner/customers/{user_id}/advance` moves
+them together — empty body steps each order to its own next stage, or
+`{"status":"delivered"}` for "Mark all delivered". The per-order engine was
+extracted into `_dp_move_order()` so single and bulk updates share ONE money
+path; `DPCASH:{order_id}` idempotency means a double tap can't double-credit.
+The shop-wise "My shops" list reads the same orders, so it stays in sync.
+New screen `app/delivery/customers.tsx` + a CUSTOMERS tile on the dashboard and
+a "Deliver customer-wise instead" switch on the shop-wise list.
+
+### O. "Cash to pay Slangcart" nets off the rider's own wallet
+`_dp_cash_view()` now returns `payable_from_wallet = min(cash_in_hand, wallet)`
+and `remaining_after_wallet`, and the card spells the sum out:
+"₹7,650.50 − ₹316.66 from your wallet = ₹7,333.84 to pay online".
+`POST /delivery-partner/remit/wallet` performs the set-off: debit his
+`wallet_balance`, debit `dp_cash_in_hand` by the same rupee, settle the oldest
+COD orders via the shared `_settle_cod_orders()`, and **no bank_ledger row** —
+nothing reaches the bank, so writing one would double-count it in the Treasury.
+Net worth is untouched because an asset and a liability fall together. The
+Razorpay path is unchanged and still posts its bank CREDIT.
+
+### Verification
+- testing_agent iteration 92 — `tests/test_iter92_jan2026_nice_treasury_cart_dp.py`
+  **16/16 PASS**: net-worth unchanged by the new rows, cart ↔ checkout ↔
+  payment-start delivery agreement (free + paid + multi-seller cap), customer
+  grouping + RBAC 403s, idempotent bulk delivery, wallet set-off with ZERO bank
+  drift, guards, and the Razorpay remit regression.
+- Screenshots: admin Cash-on-hand card, rider Money card with the new maths
+  line and "Use wallet" button, rider Customers screen.

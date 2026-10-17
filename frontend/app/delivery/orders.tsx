@@ -221,6 +221,15 @@ export default function DeliveryOrders() {
           <Text style={s.clearFilterText}>Show all shops</Text>
         </TouchableOpacity>
       ) : null}
+      <TouchableOpacity
+        style={s.customerSwitch}
+        onPress={() => router.push("/delivery/customers" as any)}
+        testID="dp-orders-customer-view"
+      >
+        <Feather name="users" size={13} color={colors.primary} />
+        <Text style={s.customerSwitchText}>Deliver customer-wise instead</Text>
+        <Feather name="chevron-right" size={15} color={colors.primary} />
+      </TouchableOpacity>
       <DPStatusFilter value={status} counts={counts} onChange={setStatus} />
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
@@ -354,6 +363,14 @@ const s = StyleSheet.create({
     backgroundColor: colors.surfaceMuted, minHeight: 36,
   },
   clearFilterText: { color: colors.primary, fontSize: 12, fontWeight: "800" },
+  customerSwitch: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    marginHorizontal: spacing.screen, marginBottom: 8, paddingHorizontal: 12,
+    minHeight: 44, borderRadius: radii.card, backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  customerSwitchText: { flex: 1, color: colors.primary, fontSize: 12.5, fontWeight: "800" },
+
   overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
   sheet: {
     backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22,

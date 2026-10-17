@@ -18,8 +18,9 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException
 
 from core.db import db
+from core.delivery_charges import compute_cart_delivery
 from core.security import get_current_user
-from core.utils import now_utc
+from core.utils import now_utc, get_settings
 from core.variants import effective_line_price, find_variant
 from core import gst as _gst
 from models import CartItem, CartAdjust, CartRemove
@@ -255,7 +256,9 @@ async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
     """
     items = await db.cart_items.find({"user_id": user["id"]}, {"_id": 0}).to_list(1000)
     if not items:
-        return {"items": [], "total": 0.0, "count": 0}
+        return {"items": [], "total": 0.0, "count": 0, "payable_total": 0.0,
+                "delivery": {"enabled": True, "total": 0.0, "free": True,
+                             "per_seller": [], "add_more_for_free": 0.0, "hint": ""}}
 
     pids = list({it.get("product_id") for it in items if it.get("product_id")})
     # Slim projection — drop the heavy fields that a cart row never needs.
@@ -339,10 +342,78 @@ async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
         slot["cgst_amount"] = round(slot["cgst_amount"] + float(e.get("cgst_amount") or 0), 2)
         slot["sgst_amount"] = round(slot["sgst_amount"] + float(e.get("sgst_amount") or 0), 2)
         slot["gst_amount"] = round(slot["gst_amount"] + float(e.get("gst_amount") or 0), 2)
+    # Jun-2026 owner report — the bag used to print "Shipping: FREE" and then
+    # checkout added a delivery charge. The SAME engine checkout uses now
+    # prices the bag here, so the two screens can never disagree, and when
+    # delivery isn't free we tell the customer how much more to add.
+    vendor_docs: Dict[str, Dict[str, Any]] = {}
+    if vendor_ids:
+        async for v in db.users.find(
+            {"id": {"$in": vendor_ids}},
+            {"_id": 0, "id": 1, "delivery_charge_flat": 1, "delivery_free_threshold": 1},
+        ):
+            vendor_docs[v["id"]] = v
+    slices: Dict[str, Dict[str, Any]] = {}
+    for e in enriched:
+        p = e.get("product") or {}
+        vkey = p.get("vendor_id") or "__no_vendor__"
+        g = slices.setdefault(vkey, {
+            "vendor_key": vkey,
+            "vendor_id": p.get("vendor_id"),
+            "vendor_name": p.get("vendor_name") or "Slangcart Store",
+            "subtotal": 0.0,
+            "free_delivery": True,
+        })
+        g["subtotal"] = round(g["subtotal"] + float(e.get("line_total") or 0), 2)
+        g["free_delivery"] = g["free_delivery"] and bool(p.get("free_delivery"))
+    settings = await get_settings()
+    quote = compute_cart_delivery(
+        [{k: v for k, v in s.items() if k != "vendor_name"} for s in slices.values()],
+        settings, vendor_docs,
+    )
+    delivery_total = round(float(quote.get("total") or 0), 2)
+    per_seller = []
+    gap_total = 0.0
+    for key, s in slices.items():
+        q = (quote.get("per_vendor") or {}).get(key) or {}
+        free_above = float(q.get("free_above") or 0)
+        gap = 0.0
+        if not q.get("free") and free_above > 0:
+            gap = max(0.0, round(free_above - float(s["subtotal"]), 2))
+            gap_total = round(gap_total + gap, 2)
+        per_seller.append({
+            "vendor_key": key,
+            "vendor_id": s["vendor_id"],
+            "vendor_name": s["vendor_name"],
+            "subtotal": s["subtotal"],
+            "charge": round(float(q.get("charge") or 0), 2),
+            "free": bool(q.get("free")),
+            "reason": q.get("reason"),
+            "free_above": free_above,
+            "add_more_for_free": gap,
+        })
+    if delivery_total <= 0.009:
+        hint = "Shipping is free on this bag."
+    elif gap_total > 0:
+        hint = f"Add ₹{gap_total:,.0f} more to your bag to get free delivery."
+    else:
+        hint = "Delivery is charged on this bag."
     return {
         "items": enriched,
         "total": total,
         "count": sum(int(i.get("qty", 0)) for i in items),
+        "delivery": {
+            "enabled":      bool(quote.get("enabled")),
+            "total":        delivery_total,
+            "free":         delivery_total <= 0.009,
+            "capped":       bool(quote.get("capped")),
+            "cart_max":     round(float(quote.get("cart_max") or 0), 2),
+            "per_seller":   per_seller,
+            "add_more_for_free": gap_total,
+            "hint":         hint,
+        },
+        "items_total":   round(total, 2),
+        "payable_total": round(total + delivery_total, 2),
         "gst_summary": {
             "inclusive": True,
             "items_total": round(total, 2),

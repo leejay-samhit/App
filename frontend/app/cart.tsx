@@ -30,11 +30,23 @@ type CartLine = {
   variant_stock?: number | null;
 };
 
+// Jun 2026 — the bag now prices delivery with the SAME engine checkout uses,
+// so "Shipping: FREE" can never contradict the amount charged a tap later.
+type DeliveryQuote = {
+  enabled: boolean;
+  total: number;
+  free: boolean;
+  add_more_for_free: number;
+  hint: string;
+  per_seller?: { vendor_name: string; charge: number; free: boolean }[];
+};
+
 export default function CartScreen() {
   const router = useRouter();
   const { user, refresh } = useAuth();
   const [items, setItems] = useState<CartLine[]>([]);
   const [total, setTotal] = useState(0);
+  const [delivery, setDelivery] = useState<DeliveryQuote | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -42,7 +54,7 @@ export default function CartScreen() {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get<{ items: CartLine[]; total: number }>("/cart");
+      const { data } = await api.get<{ items: CartLine[]; total: number; delivery?: DeliveryQuote; payable_total?: number }>("/cart");
       const safeItems = Array.isArray(data.items) ? data.items : [];
       setItems(safeItems);
       // Defensive: if backend total comes back as 0/undefined for any reason, compute it
@@ -52,6 +64,7 @@ export default function CartScreen() {
         return sum + (lt || 0);
       }, 0);
       setTotal(Number(data.total) > 0 ? Number(data.total) : localTotal);
+      setDelivery(data.delivery || null);
     } catch {}
     finally { setLoading(false); setRefreshing(false); }
   }, []);
@@ -95,7 +108,11 @@ export default function CartScreen() {
   if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
 
   const balance = user?.wallet_balance || 0;
-  const canPay = balance >= total && total > 0;
+  // Delivery is priced per seller by the server; the bag shows the same
+  // number checkout will charge.
+  const shipping = Number(delivery?.total || 0);
+  const payable = Math.round((total + shipping) * 100) / 100;
+  const canPay = balance >= payable && payable > 0;
 
   // Jun 2026 — checkout splits into ONE order per seller, so the bag shows
   // the same grouping up-front: no surprise "why did I get 2 orders?".
@@ -225,11 +242,20 @@ export default function CartScreen() {
               </View>
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>Shipping</Text>
-                <Text style={[styles.summaryValue, { color: colors.primary }]}>FREE</Text>
+                {shipping > 0 ? (
+                  <Text style={styles.summaryValue} testID="cart-shipping-value">{formatINR(shipping)}</Text>
+                ) : (
+                  <Text style={[styles.summaryValue, { color: colors.primary }]} testID="cart-shipping-value">FREE</Text>
+                )}
               </View>
+              {shipping > 0 && (delivery?.add_more_for_free || 0) > 0 ? (
+                <Text style={styles.freeHint} testID="cart-free-delivery-hint">
+                  Add {formatINR(delivery!.add_more_for_free)} more to your bag to get free delivery.
+                </Text>
+              ) : null}
               <View style={[styles.summaryRow, { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, marginTop: 6 }]}>
                 <Text style={styles.totalLabel}>Total</Text>
-                <Text style={styles.totalValue}>{formatINR(total)}</Text>
+                <Text style={styles.totalValue} testID="cart-total-value">{formatINR(payable)}</Text>
               </View>
             </View>
           </ScrollView>
@@ -240,9 +266,9 @@ export default function CartScreen() {
               <Text style={styles.walletLabel}>Wallet balance</Text>
               <Text style={styles.walletValue}>{formatINR(balance)}</Text>
             </View>
-            {!canPay && total > 0 && (
+            {!canPay && payable > 0 && (
               <Text style={styles.warning}>
-                Wallet short by {formatINR(total - balance)} — you can still pay Cash on Delivery at checkout.
+                Wallet short by {formatINR(payable - balance)} — you can still pay Cash on Delivery at checkout.
               </Text>
             )}
             <TouchableOpacity
@@ -256,7 +282,7 @@ export default function CartScreen() {
               ) : (
                 <>
                   <Feather name="arrow-right-circle" size={18} color={colors.primaryFg} />
-                  <Text style={styles.payBtnText}>Proceed to Checkout · {formatINR(total)}</Text>
+                  <Text style={styles.payBtnText}>Proceed to Checkout · {formatINR(payable)}</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -334,6 +360,8 @@ const styles = StyleSheet.create({
   walletLabel: { flex: 1, fontSize: 12, color: colors.textMain, fontWeight: "700" },
   walletValue: { fontSize: 13, color: colors.primary, fontWeight: "800" },
   warning: { color: "#B3261E", fontSize: 11, marginTop: 4, marginBottom: 6, fontWeight: "600" },
+  freeHint: { fontSize: 11.5, color: colors.primary, fontWeight: "700", marginTop: 2, lineHeight: 16 },
+
   payBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.primary, paddingVertical: 16, borderRadius: radii.button, marginTop: 6 },
   payBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14, letterSpacing: -0.2 },
 });

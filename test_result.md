@@ -9298,3 +9298,22 @@ agent_communication:
       Noted for later: models.ProductCreate accepts `sub_category` only —
       clients POSTing `subcategory` get it dropped (recharge queries already
       tolerate both shapes).
+
+  - agent: "main"
+    message: |
+      Jun 2026 batch 2 — (1) System Wallet now shows vendor shop wallets +
+      rider cash + rider wallets in both the Net Worth hero and a new
+      Cash-on-hand card, display-only (net_worth unchanged). (2) GET /cart
+      runs the checkout delivery engine, so Bag summary shows the real
+      shipping (or FREE) and one whole-bag "add ₹X for free delivery" line.
+      (3) New customer-wise delivery for riders: GET
+      /delivery-partner/me/customers + POST /customers/{id}/advance (next-step
+      bulk AND mark-all-delivered), sharing the refactored _dp_move_order so
+      money moves once; shop-wise list stays in sync. (4) POST
+      /delivery-partner/remit/wallet lets the rider settle COD dues from his
+      own wallet as an internal set-off — no bank_ledger row, no double entry,
+      net worth unchanged; card shows "cash − wallet = left to pay online".
+      testing_agent iteration 92: 16/16 PASS.
+      NOTE for next agent: iter92 left ~2 seeded delivered COD orders for
+      testbuyer (shipping name "Iter92 Tester") and ~₹100-150 residual rider
+      cash_in_hand — there is no DELETE /admin/orders/{id} endpoint.

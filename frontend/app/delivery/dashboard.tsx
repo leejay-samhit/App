@@ -16,20 +16,24 @@ export default function DeliveryDashboard() {
   const [nw, setNw] = useState<any>(null);
   const [shops, setShops] = useState<any[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  // Jun 2026 — customer-wise delivery run (all shops for one doorstep).
+  const [customers, setCustomers] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [denied, setDenied] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [n, v, o] = await Promise.all([
+      const [n, v, o, c] = await Promise.all([
         api.get("/delivery-partner/me/net-worth"),
         api.get("/delivery-partner/me/vendors"),
         api.get("/delivery-partner/me/orders?limit=1"),
+        api.get("/delivery-partner/me/customers?status=open"),
       ]);
       setNw(n.data);
       setShops((v.data as any)?.items || []);
       setCounts((o.data as any)?.counts || {});
+      setCustomers(((c.data as any)?.items || []).length);
       setDenied(false);
     } catch (e: any) {
       if (e?.response?.status === 403) setDenied(true);
@@ -77,7 +81,10 @@ export default function DeliveryDashboard() {
           cashInHand={Number(nw?.cash_in_hand || 0)}
           personalWallet={Number(nw?.personal_wallet || 0)}
           inSync={!!nw?.in_sync}
+          payableFromWallet={Number(nw?.payable_from_wallet || 0)}
+          remainingAfterWallet={Number(nw?.remaining_after_wallet ?? nw?.cash_in_hand ?? 0)}
           onPay={() => router.push("/delivery/net-worth" as any)}
+          onPayWallet={() => router.push("/delivery/net-worth" as any)}
         />
 
         <View style={s.statRow}>
@@ -107,6 +114,15 @@ export default function DeliveryDashboard() {
             <Feather name="check-circle" size={17} color={colors.success} />
             <Text style={s.statValue}>{nw?.deliveries_completed || 0}</Text>
             <Text style={s.statLabel}>DELIVERED</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={s.stat}
+            onPress={() => router.push("/delivery/customers" as any)}
+            testID="dp-stat-customers"
+          >
+            <Feather name="users" size={17} color="#7C3AED" />
+            <Text style={s.statValue}>{customers}</Text>
+            <Text style={s.statLabel}>CUSTOMERS</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={s.stat}

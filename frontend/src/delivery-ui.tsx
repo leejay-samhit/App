@@ -84,9 +84,18 @@ export function DPTabBar() {
  *  deliberately shown apart from his own wallet so the two never blur. */
 export function DPMoneyCard({
   cashInHand, personalWallet, inSync, onPay,
+  payableFromWallet = 0, remainingAfterWallet, onPayWallet,
 }: {
   cashInHand: number; personalWallet: number; inSync: boolean; onPay?: () => void;
+  // Jun 2026 — the rider can clear his dues straight out of his wallet, so
+  // the card spells out what the wallet covers and what is left to pay.
+  payableFromWallet?: number;
+  remainingAfterWallet?: number;
+  onPayWallet?: () => void;
 }) {
+  const left = typeof remainingAfterWallet === "number"
+    ? remainingAfterWallet
+    : Math.max(0, cashInHand - payableFromWallet);
   return (
     <View style={s.money}>
       <Text style={s.moneyLabel}>CASH TO PAY SLANGCART</Text>
@@ -96,6 +105,11 @@ export function DPMoneyCard({
           ? "Collected on COD deliveries · pay it in to clear your books"
           : "All clear — nothing pending"}
       </Text>
+      {cashInHand > 0 && payableFromWallet > 0 ? (
+        <Text style={s.moneyMath} testID="dp-wallet-offset-math">
+          {`${formatINR(cashInHand)} − ${formatINR(payableFromWallet)} from your wallet = ${formatINR(left)} to pay online`}
+        </Text>
+      ) : null}
       <View style={s.moneyRow}>
         <View style={s.moneyChip}>
           <Text style={s.moneyChipLabel}>MY WALLET</Text>
@@ -106,11 +120,25 @@ export function DPMoneyCard({
           <Text style={s.moneyChipValue}>{inSync ? "Balanced" : "Check"}</Text>
         </View>
       </View>
-      {onPay && cashInHand > 0 ? (
-        <TouchableOpacity style={s.payBtn} onPress={onPay} testID="dp-pay-admin">
-          <Feather name="arrow-up-right" size={15} color={colors.primary} />
-          <Text style={s.payBtnText}>Pay to Slangcart</Text>
-        </TouchableOpacity>
+      {cashInHand > 0 && (onPay || onPayWallet) ? (
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          {onPayWallet && payableFromWallet > 0 ? (
+            <TouchableOpacity
+              style={[s.payBtn, { flex: 1 }]}
+              onPress={onPayWallet}
+              testID="dp-pay-from-wallet"
+            >
+              <Feather name="credit-card" size={15} color={colors.primary} />
+              <Text style={s.payBtnText}>Use wallet {formatINR(payableFromWallet)}</Text>
+            </TouchableOpacity>
+          ) : null}
+          {onPay && left > 0 ? (
+            <TouchableOpacity style={[s.payBtn, { flex: 1 }]} onPress={onPay} testID="dp-pay-admin">
+              <Feather name="arrow-up-right" size={15} color={colors.primary} />
+              <Text style={s.payBtnText}>Pay {formatINR(left)}</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
       ) : null}
     </View>
   );
@@ -184,6 +212,11 @@ const s = StyleSheet.create({
   moneyLabel: { color: "rgba(255,255,255,0.9)", fontSize: 10, letterSpacing: 1.4, fontWeight: "900" },
   moneyValue: { color: "#fff", fontSize: 30, fontWeight: "900", marginTop: 4, letterSpacing: -1 },
   moneyHint: { color: "rgba(255,255,255,0.9)", fontSize: 11, fontWeight: "600", marginTop: 3 },
+  moneyMath: {
+    color: "#FFFFFF", fontSize: 11.5, fontWeight: "800", marginTop: 8,
+    lineHeight: 16, fontVariant: ["tabular-nums"],
+  },
+
   moneyRow: { flexDirection: "row", gap: 8, marginTop: 12 },
   moneyChip: {
     flex: 1, backgroundColor: "rgba(255,255,255,0.22)", borderRadius: 10,

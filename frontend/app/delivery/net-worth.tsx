@@ -28,6 +28,9 @@ export default function DeliveryNetWorth() {
   // Pay-to-admin
   const [payOpen, setPayOpen] = useState(false);
   const [payAmount, setPayAmount] = useState("");
+  // Jun 2026 — settle the dues straight out of the rider's own wallet.
+  const [walletOpen, setWalletOpen] = useState(false);
+  const [walletAmount, setWalletAmount] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [rzpHtml, setRzpHtml] = useState<string | null>(null);
@@ -120,6 +123,28 @@ export default function DeliveryNetWorth() {
     } finally { setBusy(false); }
   };
 
+  // Settle from the rider's own wallet — an internal set-off, no gateway.
+  const payFromWallet = async () => {
+    setErr("");
+    const max = Number(nw?.payable_from_wallet || 0);
+    const amt = Number(walletAmount || max);
+    if (!amt || amt <= 0) { setErr("Enter an amount"); return; }
+    if (amt > max + 0.009) { setErr(`Your wallet can only cover ${formatINR(max)}`); return; }
+    setBusy(true);
+    try {
+      const { data } = await api.post<any>("/delivery-partner/remit/wallet", { amount: amt });
+      setWalletOpen(false);
+      setWalletAmount("");
+      await load();
+      Alert.alert(
+        "Settled from wallet",
+        `${formatINR(Number(data.amount))} cleared. ${data.orders_cleared} cash order(s) closed.`,
+      );
+    } catch (e) {
+      setErr(formatApiError(e));
+    } finally { setBusy(false); }
+  };
+
   const exportExcel = async () => {
     const base = process.env.EXPO_PUBLIC_BACKEND_URL || "";
     const url = `${base}/api/delivery-partner/me/export.xlsx`;
@@ -166,7 +191,13 @@ export default function DeliveryNetWorth() {
           cashInHand={Number(nw?.cash_in_hand || 0)}
           personalWallet={Number(nw?.personal_wallet || 0)}
           inSync={!!nw?.in_sync}
-          onPay={() => { setPayAmount(String(Number(nw?.cash_in_hand || 0))); setPayOpen(true); }}
+          payableFromWallet={Number(nw?.payable_from_wallet || 0)}
+          remainingAfterWallet={Number(nw?.remaining_after_wallet ?? nw?.cash_in_hand ?? 0)}
+          onPayWallet={() => setWalletOpen(true)}
+          onPay={() => {
+            setPayAmount(String(Number(nw?.remaining_after_wallet ?? nw?.cash_in_hand ?? 0)));
+            setPayOpen(true);
+          }}
         />
 
         {tab === "summary" ? (
@@ -176,6 +207,12 @@ export default function DeliveryNetWorth() {
               <Line label="Paid to Slangcart" value={`− ${formatINR(nw?.cash_remitted || 0)}`} />
               <View style={s.hr} />
               <Line label="Still owed to Slangcart" value={formatINR(nw?.cash_in_hand || 0)} bold />
+              <Line label="Your wallet can settle" value={`− ${formatINR(nw?.payable_from_wallet || 0)}`} />
+              <Line
+                label="Left to pay online"
+                value={formatINR(nw?.remaining_after_wallet ?? nw?.cash_in_hand ?? 0)}
+                bold
+              />
               <Line
                 label="Books"
                 value={nw?.in_sync ? "Balanced" : `Off by ${formatINR(nw?.unledgered_difference || 0)}`}
@@ -288,6 +325,45 @@ export default function DeliveryNetWorth() {
               >
                 {busy ? <ActivityIndicator color={colors.primaryFg} />
                   : <Text style={{ color: colors.primaryFg, fontWeight: "700" }}>Pay now</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Settle from my wallet (internal set-off — no gateway, no bank entry) */}
+      <Modal visible={walletOpen} transparent animationType="slide" onRequestClose={() => setWalletOpen(false)}>
+        <View style={s.overlay}>
+          <View style={s.sheet}>
+            <View style={s.sheetHandle} />
+            <Text style={s.sheetTitle}>Settle from my wallet</Text>
+            <Text style={s.sheetSub}>
+              {`You owe ${formatINR(Number(nw?.cash_in_hand || 0))} and your wallet has ${formatINR(Number(nw?.personal_wallet || 0))}. `}
+              {`Up to ${formatINR(Number(nw?.payable_from_wallet || 0))} can be settled straight from your wallet — no online payment needed.`}
+            </Text>
+            <TextInput
+              style={s.input}
+              value={walletAmount}
+              onChangeText={setWalletAmount}
+              keyboardType="numeric"
+              placeholder={`Amount in ₹ (max ${Number(nw?.payable_from_wallet || 0)})`}
+              placeholderTextColor={colors.textMuted}
+              testID="dp-wallet-amount"
+            />
+            {err ? <Text style={s.err}>{err}</Text> : null}
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+              <TouchableOpacity style={[s.sheetBtn, { backgroundColor: colors.surfaceMuted }]}
+                onPress={() => setWalletOpen(false)}>
+                <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.sheetBtn, { backgroundColor: colors.primary }, busy && { opacity: 0.6 }]}
+                onPress={payFromWallet}
+                disabled={busy}
+                testID="dp-wallet-confirm"
+              >
+                {busy ? <ActivityIndicator color={colors.primaryFg} />
+                  : <Text style={{ color: colors.primaryFg, fontWeight: "700" }}>Settle now</Text>}
               </TouchableOpacity>
             </View>
           </View>

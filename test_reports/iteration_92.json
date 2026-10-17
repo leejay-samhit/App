@@ -1,0 +1,23 @@
+{
+  "summary": "Iter-92 (Jan 2026) backend tests — all 16 PASS. Validated: (1) admin System Wallet treasury clarity rows (cash_on_hand.rider_cash_held/rider_wallets/vendor_wallets + master.components.vendor_payable/rider_cash_held/rider_wallets) with net_worth formula invariance; (2) GET /api/cart delivery block (enabled/total/free/per_seller/add_more_for_free/hint) + payable_total + agreement with /orders/payment/start to the paisa; (3) NEW GET /api/delivery-partner/me/customers grouping with 403 for non-rider; (4) POST /customers/{uid}/advance (empty body → per-order next_status; status=delivered → bulk jump) with idempotent dp_cash_in_hand credits (DPCASH:{order_id} replay-safe); (5) POST /remit/wallet set-off — wallet_balance + dp_cash_in_hand both fall, NO bank_ledger row, admin bank balance byte-identical, admin net_worth unchanged; (6) guards: amount > cash_in_hand → 400, amount > wallet → 400; (7) payable_from_wallet/remaining_after_wallet math on /me/wallet and /me/net-worth; (8) regression: Razorpay /remit/start + /remit/verify with pay_MOCK_* still works and credits bank_ledger.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter92_jan2026_nice_treasury_cart_dp.py",
+    "/app/test_reports/pytest/iter92.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "cart.py (ln 395-400): 'free' is derived via delivery_total<=0.009 — correct, matches the engine. per_seller rows carry both charge and add_more_for_free so the FE can show one hint per shop.",
+    "finance.py (ln 606-612): new rider/vendor clarity rows are added OUTSIDE the `total` computation (`total = cash_registration + cod_in_field`), so the owner's 'do NOT add them into net worth' rule is honoured.",
+    "delivery_partner.py (ln 504-561 _dp_move_order + ln 1064-1099 _settle_cod_orders): both single and bulk advance paths now share the same helper and use idempotency key DPCASH:{order_id}, so replaying the bulk endpoint is a no-op — verified by test_bulk_delivered_cash_safety_idempotent.",
+    "delivery_partner.py (ln 1106-1198 /remit/wallet): deliberately posts two shop_money rows (dp_cash_paid_from_wallet + dp_cash_remitted) and NO bank entry; test_remit_wallet_setoff_no_bank_row confirms Σ bank_ledger balance is byte-identical before/after."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "not tested — owner opted out"},
+  "seed_data_creation": "Mapped rider a0bf6822-59fa-4b18-bc53-381229a1f30c → vendor 1115f762-… for the module and cleared the mapping on teardown. Created 2 real COD orders via /api/orders/checkout for the DP bulk tests (they end up at status=delivered, dp_cash_remitted=true via the wallet-setoff + Razorpay-mock remit flows exercised by the suite). Admin adjust was used to credit the rider's wallet by small amounts; each credit was reversed in-flight so wallet_balance ends ≈ initial. ~₹150 of residual COD remains in the rider's cash_in_hand after the suite (two closed deliveries whose remit was only partially walked through in the regression test).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Testbuyer wallet balance was briefly debited by the real COD checkout (COD doesn't debit wallet, so no change). Testvendor earnings were credited when orders moved to delivered — this is normal vendor settlement. The ADMIN DELETE /api/admin/orders/{id} endpoint does NOT exist, so seeded orders are left in the DB (delivered + partially remitted). If you need a pristine state, hard-delete orders whose shipping_address.name == 'Iter92 Tester'. The rider's vendor mapping was reset to empty on teardown — confirmed via the module-scoped fixture.",
+  "rca_of_issue": "N/A — all tested behaviours work. One self-fix during authoring: initial net_worth-invariance test misread the owner's intent ('unchanged by clarity surface additions') and instead credited rider wallet and expected zero drift. Rewrote as (a) formula-invariance assertion `net_worth == bank + cash_on_hand + pending - user_wallet - vendor_payable - pending_withdrawals - gst_payable` and (b) a real-money delta test (credit ₹1 → net_worth falls by ₹1, reverse → returns). Also fixed /remit/verify payload to include the mandatory `remit_id`."
+}

@@ -501,52 +501,39 @@ class DPStatusUpdate(BaseModel):
     note: Optional[str] = Field(default="", max_length=300)
 
 
-@router.patch("/delivery-partner/orders/{order_id}/status")
-async def dp_update_status(
-    order_id: str, body: DPStatusUpdate, dp: Dict[str, Any] = Depends(require_dp),
-):
-    """Advance an order. Delegates to the SAME status engine the vendor and
-    admin use, so delivery money (vendor credit, delivery fee, cashback)
-    moves exactly once and exactly the same way whoever taps the button.
-
-    On `delivered` with cash due, the COD cash is recorded into the rider's
-    cash-in-hand as a liability to Slangcart — he has our money until he
-    remits it. He is never credited a delivery fee: riders earn nothing here.
-    """
-    if body.status not in DP_STATUSES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Status must be one of: {', '.join(STATUS_LABELS[s] for s in DP_STATUSES)}",
-        )
-    vids = await _mapped_vendor_ids(dp["id"])
-    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order.get("vendor_id") not in vids:
-        raise HTTPException(status_code=403, detail="This order's shop is not mapped to you")
-
+async def _dp_move_order(
+    dp: Dict[str, Any],
+    order: Dict[str, Any],
+    status: str,
+    person_name: str = "",
+    person_phone: str = "",
+) -> Dict[str, Any]:
+    """Advance ONE order for this rider. Shared by the single-order endpoint
+    and the customer-wise bulk endpoint, so the money moves through exactly
+    one code path whichever button the rider taps."""
+    order_id = order["id"]
     # Claim the order for this rider (first rider to move it owns it).
     await db.orders.update_one({"id": order_id}, {"$set": {
         "dp_id": dp["id"],
         "dp_name": dp.get("name") or dp.get("email"),
         "dp_phone": dp.get("dp_phone") or dp.get("phone"),
     }})
-    if body.delivery_person_name or body.delivery_person_phone:
+    if person_name or person_phone:
         await db.orders.update_one({"id": order_id}, {"$set": {
-            "delivery_person_name": body.delivery_person_name or dp.get("name") or "",
-            "delivery_person_phone": body.delivery_person_phone or dp.get("dp_phone") or "",
+            "delivery_person_name": person_name or dp.get("name") or "",
+            "delivery_person_phone": person_phone or dp.get("dp_phone") or "",
             "delivery_info_updated_at": now_utc().isoformat(),
         }})
 
     from server import admin_update_order_status, OrderStatusUpdate
     out = await admin_update_order_status(
         order_id=order_id,
-        payload=OrderStatusUpdate(status=body.status),  # type: ignore
+        payload=OrderStatusUpdate(status=status),  # type: ignore
         admin=dp,   # user-shaped doc; downstream only reads id/email
     )
 
     # COD cash lands with the rider — a liability, never earnings.
-    if body.status == "delivered":
+    if status == "delivered":
         cash = _r(order.get("cod_due"))
         if cash > 0.009:
             row = await shop_money.credit(
@@ -571,7 +558,218 @@ async def dp_update_status(
                     {"id": order_id},
                     {"$set": {"dp_cash_collected": cash, "dp_cash_remitted": False}},
                 )
-    return {"ok": True, **(out if isinstance(out, dict) else {})}
+    return out if isinstance(out, dict) else {}
+
+
+@router.patch("/delivery-partner/orders/{order_id}/status")
+async def dp_update_status(
+    order_id: str, body: DPStatusUpdate, dp: Dict[str, Any] = Depends(require_dp),
+):
+    """Advance an order. Delegates to the SAME status engine the vendor and
+    admin use, so delivery money (vendor credit, delivery fee, cashback)
+    moves exactly once and exactly the same way whoever taps the button.
+
+    On `delivered` with cash due, the COD cash is recorded into the rider's
+    cash-in-hand as a liability to Slangcart — he has our money until he
+    remits it. He is never credited a delivery fee: riders earn nothing here.
+    """
+    if body.status not in DP_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Status must be one of: {', '.join(STATUS_LABELS[s] for s in DP_STATUSES)}",
+        )
+    vids = await _mapped_vendor_ids(dp["id"])
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("vendor_id") not in vids:
+        raise HTTPException(status_code=403, detail="This order's shop is not mapped to you")
+    out = await _dp_move_order(
+        dp, order, body.status, body.delivery_person_name or "", body.delivery_person_phone or "",
+    )
+    return {"ok": True, **out}
+
+
+# ── Rider: CUSTOMER-WISE delivery (Jun-2026 owner request) ─────────────
+#
+# One customer who buys from three shops creates three orders. The rider's
+# only view was shop-wise, so he had to hunt the same doorstep three times
+# and update each shop separately. These two endpoints group the same orders
+# by CUSTOMER and let him move all of them in one tap — the shop-wise list
+# updates automatically because both views read the same orders.
+OPEN_STATUSES = ["placed", "confirmed", "shipped", "out_for_delivery"]
+# What "next step" means for the rider, in order.
+NEXT_STATUS = {
+    "placed": "confirmed",
+    "confirmed": "shipped",
+    "shipped": "out_for_delivery",
+    "out_for_delivery": "delivered",
+}
+
+
+@router.get("/delivery-partner/me/customers")
+async def dp_my_customers(
+    status: str = "open",
+    limit: int = 200,
+    dp: Dict[str, Any] = Depends(require_dp),
+):
+    """Open orders grouped by CUSTOMER, across every shop mapped to me."""
+    vids = await _mapped_vendor_ids(dp["id"])
+    if not vids:
+        return {"items": [], "total": 0, "mapped_vendors": 0}
+    filt: Dict[str, Any] = {"vendor_id": {"$in": vids}}
+    if status == "open":
+        filt["status"] = {"$in": OPEN_STATUSES}
+    elif status and status != "all":
+        filt["status"] = status
+    rows = await db.orders.find(filt, {"_id": 0}).sort("created_at", -1).limit(
+        max(1, min(int(limit or 200), 500)),
+    ).to_list(500)
+
+    buyer_ids = list({r.get("user_id") for r in rows if r.get("user_id")})
+    buyers: Dict[str, Any] = {}
+    if buyer_ids:
+        async for u in db.users.find(
+            {"id": {"$in": buyer_ids}},
+            {"_id": 0, "id": 1, "name": 1, "phone": 1, "address": 1, "pincode": 1},
+        ):
+            buyers[u["id"]] = u
+    shops: Dict[str, str] = {}
+    async for v in db.users.find(
+        {"id": {"$in": vids}},
+        {"_id": 0, "id": 1, "name": 1, "vendor_business_name": 1, "shop_name": 1},
+    ):
+        shops[v["id"]] = (
+            v.get("vendor_business_name") or v.get("shop_name") or v.get("name") or "Shop"
+        )
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        uid = r.get("user_id") or "unknown"
+        b = buyers.get(uid) or {}
+        g = groups.setdefault(uid, {
+            "user_id": uid,
+            "name": r.get("customer_name") or b.get("name") or "Customer",
+            "phone": r.get("customer_phone") or b.get("phone"),
+            "address": r.get("delivery_address") or b.get("address") or "",
+            "pincode": r.get("delivery_pincode") or b.get("pincode") or "",
+            "orders": [],
+            "shops": [],
+            "order_count": 0,
+            "item_count": 0,
+            "order_value": 0.0,
+            "cash_to_collect": 0.0,
+        })
+        shop_name = shops.get(r.get("vendor_id") or "") or r.get("vendor_name") or "Shop"
+        g["orders"].append({
+            "id": r.get("id"),
+            "order_number": r.get("order_number"),
+            "vendor_id": r.get("vendor_id"),
+            "shop_name": shop_name,
+            "status": r.get("status"),
+            "status_label": STATUS_LABELS.get(r.get("status") or "", (r.get("status") or "").title()),
+            "total": _r(r.get("total_amount") or r.get("total")),
+            "cash_to_collect": _r(r.get("cod_due")),
+            "payment_method": r.get("payment_method"),
+            "items": [
+                {"name": i.get("name") or i.get("product_name"), "qty": int(i.get("qty") or 1)}
+                for i in (r.get("items") or [])
+            ],
+            "created_at": r.get("created_at"),
+            "is_mine": r.get("dp_id") == dp["id"],
+        })
+        if shop_name not in g["shops"]:
+            g["shops"].append(shop_name)
+        g["order_count"] += 1
+        g["item_count"] += sum(int(i.get("qty") or 1) for i in (r.get("items") or []))
+        g["order_value"] = _r(g["order_value"] + _f(r.get("total_amount") or r.get("total")))
+        g["cash_to_collect"] = _r(g["cash_to_collect"] + _f(r.get("cod_due")))
+
+    out = []
+    for g in groups.values():
+        open_orders = [o for o in g["orders"] if o["status"] in OPEN_STATUSES]
+        # The slowest order decides what the rider can do for this doorstep.
+        stages = [o["status"] for o in open_orders]
+        earliest = next((s for s in OPEN_STATUSES if s in stages), None)
+        g["open_count"] = len(open_orders)
+        g["next_status"] = NEXT_STATUS.get(earliest or "", "")
+        g["next_label"] = STATUS_LABELS.get(g["next_status"], "")
+        g["all_delivered"] = len(open_orders) == 0
+        out.append(g)
+    out.sort(key=lambda r: (-r["open_count"], -r["cash_to_collect"], r["name"]))
+    return {"items": out, "total": len(out), "mapped_vendors": len(vids)}
+
+
+class DPBulkStatus(BaseModel):
+    # Omit / leave blank to advance every order to ITS own next step.
+    status: Optional[str] = None
+    delivery_person_name: Optional[str] = Field(default="", max_length=120)
+    delivery_person_phone: Optional[str] = Field(default="", max_length=15)
+
+
+@router.post("/delivery-partner/customers/{user_id}/advance")
+async def dp_advance_customer(
+    user_id: str, body: DPBulkStatus, dp: Dict[str, Any] = Depends(require_dp),
+):
+    """Move EVERY open order of one customer (from my mapped shops).
+
+    `status` empty  → each order steps to its own next stage.
+    `status` given  → every order jumps straight to that stage
+                      (the rider's "Mark all delivered").
+    Orders already at or past the target are skipped, never re-posted, so
+    the cash ledger can't double-count.
+    """
+    if body.status and body.status not in DP_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Status must be one of: {', '.join(STATUS_LABELS[s] for s in DP_STATUSES)}",
+        )
+    vids = await _mapped_vendor_ids(dp["id"])
+    if not vids:
+        raise HTTPException(status_code=403, detail="No shops are mapped to you yet")
+    rows = await db.orders.find(
+        {"user_id": user_id, "vendor_id": {"$in": vids}, "status": {"$in": OPEN_STATUSES}},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(200)
+    if not rows:
+        raise HTTPException(status_code=404, detail="This customer has no open orders for your shops")
+
+    order_of = {s: i for i, s in enumerate(["placed", *DP_STATUSES])}
+    updated: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    cash_collected = 0.0
+    for o in rows:
+        target = body.status or NEXT_STATUS.get(o.get("status") or "", "")
+        if not target:
+            skipped.append({"order_number": o.get("order_number"), "reason": "nothing to do"})
+            continue
+        if order_of.get(target, 0) <= order_of.get(o.get("status") or "placed", 0):
+            skipped.append({"order_number": o.get("order_number"),
+                            "reason": f"already {STATUS_LABELS.get(o.get('status'), o.get('status'))}"})
+            continue
+        try:
+            await _dp_move_order(
+                dp, o, target,
+                body.delivery_person_name or "", body.delivery_person_phone or "",
+            )
+            if target == "delivered":
+                cash_collected = _r(cash_collected + _f(o.get("cod_due")))
+            updated.append({"order_id": o["id"], "order_number": o.get("order_number"),
+                            "shop_name": o.get("vendor_name"), "status": target})
+        except HTTPException as err:
+            failed.append({"order_number": o.get("order_number"), "reason": str(err.detail)[:160]})
+        except Exception as err:  # keep going — one bad order can't block the doorstep
+            logger.warning(f"dp bulk advance failed for {o.get('id')}: {err}")
+            failed.append({"order_number": o.get("order_number"), "reason": str(err)[:160]})
+    return {
+        "ok": True,
+        "updated": len(updated),
+        "orders": updated,
+        "skipped": skipped,
+        "failed": failed,
+        "cash_collected": cash_collected,
+    }
 
 
 # ── Rider: wallet + net worth ──────────────────────────────────────────
@@ -595,6 +793,11 @@ async def _dp_cash_view(dp_id: str) -> Dict[str, Any]:
     u = await db.users.find_one({"id": dp_id}, {"_id": 0, CASH_FIELD: 1, "wallet_balance": 1})
     stored = _r((u or {}).get(CASH_FIELD))
     ledger = _r(collected - remitted)
+    wallet = _r((u or {}).get("wallet_balance"))
+    # Jun-2026 — the rider can clear what he owes out of his own wallet, so
+    # the screen must show how much of the dues the wallet covers and what is
+    # genuinely left to pay online.
+    payable_from_wallet = _r(min(stored, wallet))
     return {
         "cash_collected": _r(collected),
         "cash_remitted": _r(remitted),
@@ -602,7 +805,10 @@ async def _dp_cash_view(dp_id: str) -> Dict[str, Any]:
         "ledger_balance": ledger,
         "unledgered_difference": _r(stored - ledger),
         "in_sync": abs(stored - ledger) < 0.02,
-        "personal_wallet": _r((u or {}).get("wallet_balance")),
+        "personal_wallet": wallet,
+        "payable_from_wallet": payable_from_wallet,
+        "remaining_after_wallet": _r(max(0.0, stored - payable_from_wallet)),
+        "wallet_covers_all": bool(stored > 0.009 and payable_from_wallet >= stored - 0.009),
     }
 
 
@@ -646,6 +852,7 @@ async def dp_wallet_transactions(
         {"user_id": dp["id"], "type": {"$in": [
             "dp_delivery_commission", "dp_delivery_commission_reversal",
             "withdrawal_hold", "withdrawal", "withdrawal_reversal",
+            "dp_cash_paid_from_wallet",
             "admin_credit", "admin_debit",
         ]}},
         {"_id": 0},
@@ -838,10 +1045,29 @@ async def dp_remit_verify(body: RemitVerify, dp: Dict[str, Any] = Depends(requir
 
     # Release the oldest unremitted COD orders up to the amount paid, and
     # record what each seller's share of this payment was.
-    remaining = amount
+    res = await _settle_cod_orders(dp["id"], amount, remit["id"])
+    settled, by_vendor_list, remaining = res["settled"], res["vendor_split"], res["unallocated"]
+    try:
+        from core.notifications import create_notification
+        await create_notification(
+            dp["id"], "wallet", f"₹{amount:.0f} paid to Slangcart",
+            f"{len(settled)} cash order(s) cleared. Thank you!",
+            extra={"action_url": "/delivery/net-worth"},
+        )
+    except Exception:
+        pass
+    view = await _dp_cash_view(dp["id"])
+    return {"ok": True, "amount": amount, "orders_cleared": len(settled),
+            "vendor_split": by_vendor_list, "unallocated": remaining, **view}
+
+
+async def _settle_cod_orders(dp_id: str, amount: float, remit_id: str) -> Dict[str, Any]:
+    """Release the oldest unremitted COD orders up to `amount` and record
+    each seller's share. Shared by the Razorpay and wallet set-off paths."""
+    remaining = _r(amount)
     settled: List[Dict[str, Any]] = []
     async for o in db.orders.find(
-        {"dp_id": dp["id"], "status": "delivered", "cod_due": {"$gt": 0},
+        {"dp_id": dp_id, "status": "delivered", "cod_due": {"$gt": 0},
          "dp_cash_remitted": {"$ne": True}},
         {"_id": 0, "id": 1, "cod_due": 1, "vendor_id": 1, "vendor_name": 1, "order_number": 1},
     ).sort("delivered_at", 1):
@@ -850,7 +1076,7 @@ async def dp_remit_verify(body: RemitVerify, dp: Dict[str, Any] = Depends(requir
             break
         await db.orders.update_one({"id": o["id"]}, {"$set": {
             "dp_cash_remitted": True,
-            "dp_remit_id": remit["id"],
+            "dp_remit_id": remit_id,
             "dp_remitted_at": now_utc().isoformat(),
         }})
         remaining = _r(remaining - due)
@@ -865,23 +1091,111 @@ async def dp_remit_verify(body: RemitVerify, dp: Dict[str, Any] = Depends(requir
         })
         slot["amount"] = _r(slot["amount"] + s["amount"])
         slot["orders"] += 1
-    await db.dp_remittances.update_one({"id": remit["id"]}, {"$set": {
+    await db.dp_remittances.update_one({"id": remit_id}, {"$set": {
         "settled_orders": settled,
         "vendor_split": list(by_vendor.values()),
         "unallocated": remaining,
     }})
+    return {"settled": settled, "vendor_split": list(by_vendor.values()), "unallocated": remaining}
+
+
+class RemitFromWallet(BaseModel):
+    amount: float = Field(..., gt=0)
+
+
+@router.post("/delivery-partner/remit/wallet")
+async def dp_remit_from_wallet(
+    body: RemitFromWallet, dp: Dict[str, Any] = Depends(require_dp),
+):
+    """Jun-2026 owner request — settle Slangcart's cash from the rider's OWN
+    wallet balance, so "Cash to pay" is always `cash in hand − what his
+    wallet can cover`.
+
+    This is a pure SET-OFF, not a payment: we owed the rider his wallet
+    balance, he owed us the COD cash, so both sides shrink by the same
+    rupee. Deliberately NO bank_ledger row — nothing arrives in the bank, and
+    writing one would double-count the money in the Treasury. The admin's
+    net worth is untouched: an asset (cash on hand) and a liability (rider
+    wallet) both fall by `amount`.
+    """
+    view = await _dp_cash_view(dp["id"])
+    amount = _r(body.amount)
+    if dp.get("wallet_frozen"):
+        raise HTTPException(status_code=400, detail="Your wallet is frozen — contact support.")
+    if amount > view["cash_in_hand"] + 0.009:
+        raise HTTPException(
+            status_code=400,
+            detail=f"You only owe Slangcart ₹{view['cash_in_hand']:,.2f}.",
+        )
+    if amount > view["personal_wallet"] + 0.009:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Your wallet has ₹{view['personal_wallet']:,.2f}. "
+                f"Pay the rest online."
+            ),
+        )
+    remit = {
+        "id": str(uuid.uuid4()),
+        "dp_id": dp["id"],
+        "dp_name": dp.get("name") or dp.get("email"),
+        "amount": amount,
+        "status": "paid",
+        "method": "wallet_setoff",
+        "is_mock": False,
+        "created_at": now_utc().isoformat(),
+        "paid_at": now_utc().isoformat(),
+    }
+    await db.dp_remittances.insert_one(dict(remit))
+
+    try:
+        # 1. the rider's earnings wallet pays it (Group 2 liability falls)
+        await shop_money.debit(
+            dp["id"], "wallet_balance", amount,
+            idempotency_key=f"DPWALLETREMIT:{remit['id']}",
+            group="dp_cash",
+            txn_type="dp_cash_paid_from_wallet",
+            destination_wallet="system_treasury",
+            settlement_status="remitted",
+            description=f"₹{amount:.0f} of Slangcart cash settled from your wallet",
+            extra={"remit_id": remit["id"], "dp_id": dp["id"], "method": "wallet_setoff"},
+        )
+        # 2. his cash-in-hand clears by the same rupee
+        await shop_money.debit(
+            dp["id"], CASH_FIELD, amount,
+            idempotency_key=f"DPREMIT:{remit['id']}",
+            group="dp_cash",
+            txn_type="dp_cash_remitted",
+            destination_wallet="system_treasury",
+            payment_method="wallet",
+            settlement_status="remitted",
+            description=f"Cash settled from wallet · ₹{amount:.0f}",
+            extra={"wallet_impact": "dp_cash_only", "remit_id": remit["id"],
+                   "dp_id": dp["id"], "method": "wallet_setoff"},
+        )
+    except shop_money.InsufficientFunds as err:
+        await db.dp_remittances.update_one(
+            {"id": remit["id"]}, {"$set": {"status": "failed", "failed_reason": str(err)[:200]}},
+        )
+        raise HTTPException(status_code=409, detail=str(err))
+
+    res = await _settle_cod_orders(dp["id"], amount, remit["id"])
     try:
         from core.notifications import create_notification
         await create_notification(
-            dp["id"], "wallet", f"₹{amount:.0f} paid to Slangcart",
-            f"{len(settled)} cash order(s) cleared. Thank you!",
+            dp["id"], "wallet", f"₹{amount:.0f} settled from your wallet",
+            f"{len(res['settled'])} cash order(s) cleared. No online payment needed.",
             extra={"action_url": "/delivery/net-worth"},
         )
     except Exception:
         pass
     view = await _dp_cash_view(dp["id"])
-    return {"ok": True, "amount": amount, "orders_cleared": len(settled),
-            "vendor_split": list(by_vendor.values()), "unallocated": remaining, **view}
+    return {
+        "ok": True, "method": "wallet_setoff", "amount": amount,
+        "orders_cleared": len(res["settled"]),
+        "vendor_split": res["vendor_split"], "unallocated": res["unallocated"],
+        **view,
+    }
 
 
 @router.get("/delivery-partner/me/remittances")
