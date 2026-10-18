@@ -748,6 +748,11 @@ async def get_product(product_id: str):
     # different route).
     if p.get("is_published") is False:
         raise HTTPException(status_code=404, detail="Product not available")
+    # Jun-2026 — a recharge plan carries its DATA · VALIDITY · CALLS tags so
+    # the hero card can show the same chips as the plan list.
+    if p.get("recharge_kind") or (p.get("category") or "").strip().lower() == "recharge":
+        from routes.recharge import plan_highlights
+        p["highlights"] = plan_highlights(p)
     # ── Back-fill safe defaults for legacy products ──
     p.setdefault("brand", "")
     p.setdefault("sub_features", [])

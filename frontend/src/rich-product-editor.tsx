@@ -275,6 +275,9 @@ export function RichProductEditor({
   // "" means every circle. The operator comes from the sub-category chip.
   const [rechargeState, setRechargeState] = useState<string>("");
   const [rechargeStates, setRechargeStates] = useState<{ slug: string; name: string }[]>([]);
+  const [rechargeData, setRechargeData] = useState<string>("");
+  const [rechargeValidity, setRechargeValidity] = useState<string>("");
+  const [rechargeCalls, setRechargeCalls] = useState<string>("");
   // ── Device identity (July 2026) — Serial + IMEI-1 + IMEI-2 ──
   // Optional across ALL products.  IMEIs are validated client-side with a
   // Luhn checksum (industry-standard 15-digit ID for phones).  Backend
@@ -676,6 +679,9 @@ export function RichProductEditor({
     setSubCategory(e.sub_category || "");
     setClothingSize(e.clothing_size || "");
     setRechargeState((e as any).recharge_state || "");
+    setRechargeData((e as any).recharge_data || "");
+    setRechargeValidity((e as any).recharge_validity || "");
+    setRechargeCalls((e as any).recharge_calls || "");
     setSerialNumber((e as any).serial_number || "");
     setImei1((e as any).imei_1 || "");
     setImei2((e as any).imei_2 || "");
@@ -1564,6 +1570,9 @@ export function RichProductEditor({
         // Recharge (Jun 2026) — circle only; kind + operator are derived from
         // the sub-category server-side (core/taxonomy.py).
         recharge_state: isRecharge ? (rechargeState || null) : undefined,
+        recharge_data: isRecharge ? (rechargeData.trim() || null) : undefined,
+        recharge_validity: isRecharge ? (rechargeValidity.trim() || null) : undefined,
+        recharge_calls: isRecharge ? (rechargeCalls.trim() || null) : undefined,
         // Device identity (July 2026) — trimmed, `undefined` when blank so
         // the backend keeps a null/empty value rather than a literal "".
         serial_number: (serialNumber.trim()
@@ -2075,6 +2084,42 @@ export function RichProductEditor({
                       );
                     })}
                   </View>
+
+                  {/* Jun 2026 — the three things a shopper compares. Leave
+                      them blank and we read them out of the plan name /
+                      description automatically. */}
+                  <Text style={modalStyles.fieldLabel}>Plan highlights (optional)</Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>
+                    Shown as tags on the plan card. Left blank, we pick them up from the plan name
+                    and description.
+                  </Text>
+                  <TextInput
+                    value={rechargeData}
+                    onChangeText={setRechargeData}
+                    placeholder="Data — e.g. 2GB/day"
+                    placeholderTextColor={colors.textMuted}
+                    style={modalStyles.input}
+                    maxLength={24}
+                    testID="product-recharge-data"
+                  />
+                  <TextInput
+                    value={rechargeValidity}
+                    onChangeText={setRechargeValidity}
+                    placeholder="Validity — e.g. 28 days"
+                    placeholderTextColor={colors.textMuted}
+                    style={[modalStyles.input, { marginTop: 6 }]}
+                    maxLength={24}
+                    testID="product-recharge-validity"
+                  />
+                  <TextInput
+                    value={rechargeCalls}
+                    onChangeText={setRechargeCalls}
+                    placeholder="Calls — e.g. Unlimited calls"
+                    placeholderTextColor={colors.textMuted}
+                    style={[modalStyles.input, { marginTop: 6 }]}
+                    maxLength={24}
+                    testID="product-recharge-calls"
+                  />
                 </>
               ) : null}
 

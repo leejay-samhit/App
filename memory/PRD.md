@@ -2388,3 +2388,57 @@ is ragged.
   ordinary products).
 - Screenshots: 6-tab admin bar, recharge plan list → hero card → pay sheet
   (prefilled number, "No delivery address needed"), rider Customers card.
+
+## Jun-2026 batch 4 — recharge history, plan tags, rider routing, operator logos
+
+### U. Recharge history + one-tap Repeat
+`GET /recharge/history` now enriches every past recharge with the operator
+name + logo, `can_repeat` (plan still live AND published), `current_price`,
+`price_changed` and its highlight tags. `src/recharge-history.tsx` owns the row
+and `useRepeatRecharge()`; Repeat confirms the amount (and warns when the plan
+has been re-priced) then pays the SAME plan for the SAME number through the
+shared `useRechargePay()` flow — no re-typing, no address. The Recharge screen
+shows the latest 4 under "RECENT RECHARGES" with See all → new
+`app/recharge-history.tsx` (full list, total spent, pull-to-refresh, empty
+state).
+
+### V. Plan highlights — DATA · VALIDITY · CALLS
+`routes/recharge.plan_highlights()` returns the three tags, preferring the new
+`recharge_data` / `recharge_validity` / `recharge_calls` product fields (added
+to the editor for Recharge plans) and otherwise PARSING the plan name +
+description — so all 48 seeded plans show correct tags with nothing re-typed
+("Unlimited 28 days · 2GB/day" → 2GB/day · 28 days · Unlimited calls).
+Surfaced on `/recharge/products`, `/products/{id}` and the history rows; drawn
+as chips on the plan rows and the hero card.
+
+### W. Rider routes nearest-first
+`GET /delivery-partner/me/customers` accepts `lat`/`lng`/`sort` and returns
+`distance_km` per doorstep (order coords, else pincode centroid), sorted
+nearest-first with unknown distances last; `sort=orders` restores the
+most-orders-first order. With no coords from the device it falls back to the
+rider's own `dp_pincodes` centroid. The screen has "Nearest first" /
+"Most orders" chips and a km chip per card; location is requested contextually
+(only when the rider taps "Use my location") via the shared
+`captureCurrentPlace()`.
+**Bug fixed on the way:** that endpoint read `customer_name` / `delivery_address`
+/ `delivery_pincode`, none of which exist on an order — name, phone, address
+and pincode now come from `shipping_address`, so the card is no longer blank.
+
+### X. Operator logos
+`PATCH /admin/recharge/options/{id}` sets `image_url` (256 px data URI, the
+same shape as shop-category icons), `name` (slug re-derived) or `sort_order`,
+and `sync_shop_categories()` mirrors the logo onto the Recharge sub-category.
+Admin → Recharge options has a tappable logo square per operator (contextual
+photo permission, Open-Settings fallback, ✕ to clear); the logo shows in the
+network dropdown, the selected-network box, the history rows and the shop
+tiles.
+
+### Verification
+- testing_agent iteration 94 — `tests/test_iter94_jan2026_history_logos_distance.py`
+  **16/16 PASS** (history enrichment + auth + per-user + unpublish/price flips,
+  repeat with state/network omitted + idempotent verify, tag derivation vs
+  explicit override, logo PATCH + tree mirror + clear + RBAC, distance sort /
+  toggle / pincode fallback / nulls last, shipping_address identity, bulk
+  advance regression).
+- Screenshots: recent recharges with Repeat, plan rows with tags, rider card
+  with "0.4 km" + sort chips.

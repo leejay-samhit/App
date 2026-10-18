@@ -12,8 +12,10 @@
 import React, { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
-  ActivityIndicator, Alert, RefreshControl,
+  ActivityIndicator, Alert, RefreshControl, Image, Linking,
 } from "react-native";
+import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -21,7 +23,10 @@ import { api, formatApiError } from "../../src/api";
 import { notify } from "../../src/notify";
 import { colors, radii, spacing } from "../../src/theme";
 
-type Option = { id: string; name: string; slug: string; kind: string; group: string };
+type Option = {
+  id: string; name: string; slug: string; kind: string; group: string;
+  image_url?: string | null;
+};
 
 const KINDS = [
   { key: "mobile", label: "Mobile Recharge" },
@@ -96,8 +101,51 @@ export default function AdminRechargeOptions() {
     );
   };
 
-  const section = (group: "state" | "network", title: string, hint: string) => {
-    const rows: Option[] = (data?.[kind]?.[group === "state" ? "states" : "networks"] || []);
+  // Jun 2026 — operator LOGO. Same shape as the shop-category icons: a small
+  // square data URI (256 px, ~20 KB), which the backend mirrors onto the
+  // Recharge sub-category so the shop tiles match the dropdown.
+  const saveLogo = async (o: Option, image_url: string | null) => {
+    setBusy(`logo-${o.id}`);
+    try {
+      await api.patch(`/admin/recharge/options/${o.id}`, { image_url });
+      notify(image_url ? "Logo updated" : "Logo removed", `“${o.name}” refreshed everywhere.`);
+      load();
+    } catch (e) {
+      notify("Couldn't save the logo", formatApiError(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const pickLogo = async (o: Option) => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert(
+        "Photo access needed",
+        "Allow photo access to upload an operator logo.",
+        perm.canAskAgain
+          ? [{ text: "Not now", style: "cancel" }]
+          : [
+              { text: "Not now", style: "cancel" },
+              { text: "Open settings", onPress: () => Linking.openSettings() },
+            ],
+      );
+      return;
+    }
+    const res = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.8, allowsEditing: true, aspect: [1, 1],
+    });
+    if (res.canceled || !res.assets?.[0]) return;
+    const out = await ImageManipulator.manipulateAsync(
+      res.assets[0].uri,
+      [{ resize: { width: 256, height: 256 } }],
+      { compress: 0.75, format: ImageManipulator.SaveFormat.JPEG, base64: true },
+    );
+    await saveLogo(o, `data:image/jpeg;base64,${out.base64}`);
+  };
+
+  const section = (group: "state" | "network", title: string, hint: string) => {    const rows: Option[] = (data?.[kind]?.[group === "state" ? "states" : "networks"] || []);
     return (
       <View style={styles.card}>
         <Text style={styles.cardTitle}>{title}</Text>
@@ -128,7 +176,34 @@ export default function AdminRechargeOptions() {
           <Text style={styles.empty}>Nothing added yet.</Text>
         ) : rows.map((o) => (
           <View key={o.id} style={styles.optRow} testID={`recharge-admin-opt-${o.slug}`}>
+            {group === "network" ? (
+              <TouchableOpacity
+                onPress={() => pickLogo(o)}
+                disabled={busy !== null}
+                style={styles.logoBtn}
+                testID={`recharge-admin-logo-${o.slug}`}
+              >
+                {busy === `logo-${o.id}` ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : o.image_url ? (
+                  <Image source={{ uri: o.image_url }} style={styles.logoImg} resizeMode="cover" />
+                ) : (
+                  <Feather name="image" size={14} color={colors.textMuted} />
+                )}
+              </TouchableOpacity>
+            ) : null}
             <Text style={styles.optName} numberOfLines={1}>{o.name}</Text>
+            {group === "network" && o.image_url ? (
+              <TouchableOpacity
+                onPress={() => saveLogo(o, null)}
+                disabled={busy !== null}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={styles.delBtn}
+                testID={`recharge-admin-logo-clear-${o.slug}`}
+              >
+                <Feather name="x-circle" size={14} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : null}
             <TouchableOpacity
               onPress={() => remove(o)}
               disabled={busy !== null}
@@ -194,7 +269,7 @@ export default function AdminRechargeOptions() {
           "network", "Networks / operators",
           "Shown in the second dropdown, and mirrored automatically into Shop Categories → Recharge → " +
           (kind === "mobile" ? "Mobile Recharge" : "DTH TV Recharge") +
-          ", so vendors can pick the operator when adding a plan.",
+          ", so vendors can pick the operator when adding a plan. Tap the square to upload a logo.",
         )}
       </ScrollView>
     </SafeAreaView>
@@ -241,6 +316,12 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", gap: 10,
     paddingVertical: 11, borderTopWidth: 1, borderTopColor: colors.border,
   },
+  logoBtn: {
+    width: 32, height: 32, borderRadius: 8, marginRight: 10, overflow: "hidden",
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border,
+  },
+  logoImg: { width: 32, height: 32 },
   optName: { flex: 1, fontSize: 13.5, fontWeight: "700", color: colors.textMain },
   delBtn: { padding: 5 },
   empty: { fontSize: 12.5, color: colors.textMuted, paddingVertical: 14, textAlign: "center" },

@@ -611,9 +611,19 @@ NEXT_STATUS = {
 async def dp_my_customers(
     status: str = "open",
     limit: int = 200,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    sort: str = "distance",
     dp: Dict[str, Any] = Depends(require_dp),
 ):
-    """Open orders grouped by CUSTOMER, across every shop mapped to me."""
+    """Open orders grouped by CUSTOMER, across every shop mapped to me.
+
+    Jun-2026 — pass the rider's own `lat`/`lng` and every doorstep comes back
+    with `distance_km`, nearest first, so he rides one loop instead of
+    criss-crossing the town. Falls back to the pincode centroid when an
+    address has no coordinates, and to the old most-orders-first order when
+    the rider hasn't shared his location.
+    """
     vids = await _mapped_vendor_ids(dp["id"])
     if not vids:
         return {"items": [], "total": 0, "mapped_vendors": 0}
@@ -647,12 +657,17 @@ async def dp_my_customers(
     for r in rows:
         uid = r.get("user_id") or "unknown"
         b = buyers.get(uid) or {}
+        addr = r.get("shipping_address") or {}
         g = groups.setdefault(uid, {
             "user_id": uid,
-            "name": r.get("customer_name") or b.get("name") or "Customer",
-            "phone": r.get("customer_phone") or b.get("phone"),
-            "address": r.get("delivery_address") or b.get("address") or "",
-            "pincode": r.get("delivery_pincode") or b.get("pincode") or "",
+            "name": addr.get("name") or b.get("name") or "Customer",
+            "phone": addr.get("phone") or b.get("phone"),
+            "address": ", ".join([x for x in [
+                addr.get("line1"), addr.get("line2"), addr.get("city"),
+            ] if x]) or b.get("address") or "",
+            "pincode": addr.get("pincode") or b.get("pincode") or "",
+            "lat": addr.get("latitude"),
+            "lng": addr.get("longitude"),
             "orders": [],
             "shops": [],
             "order_count": 0,
@@ -660,6 +675,11 @@ async def dp_my_customers(
             "order_value": 0.0,
             "cash_to_collect": 0.0,
         })
+        # A later order may carry the coordinates an earlier one lacked.
+        if g["lat"] is None and addr.get("latitude") is not None:
+            g["lat"], g["lng"] = addr.get("latitude"), addr.get("longitude")
+        if not g["pincode"] and addr.get("pincode"):
+            g["pincode"] = addr["pincode"]
         shop_name = shops.get(r.get("vendor_id") or "") or r.get("vendor_name") or "Shop"
         g["orders"].append({
             "id": r.get("id"),
@@ -685,6 +705,35 @@ async def dp_my_customers(
         g["order_value"] = _r(g["order_value"] + _f(r.get("total_amount") or r.get("total")))
         g["cash_to_collect"] = _r(g["cash_to_collect"] + _f(r.get("cod_due")))
 
+    # Distance from the rider to each doorstep.
+    from core.delivery import haversine_km, pincode_centroid
+    origin = (float(lat), float(lng)) if lat is not None and lng is not None else None
+    if origin is None:
+        me = await db.users.find_one(
+            {"id": dp["id"]},
+            {"_id": 0, "lat": 1, "lng": 1, "pincode": 1, "dp_pincodes": 1},
+        ) or {}
+        if me.get("lat") is not None and me.get("lng") is not None:
+            origin = (float(me["lat"]), float(me["lng"]))
+        else:
+            base = me.get("pincode") or next(iter(me.get("dp_pincodes") or []), None)
+            if base:
+                origin = await pincode_centroid(str(base))
+    pin_cache: Dict[str, Any] = {}
+    for g in groups.values():
+        point = None
+        if g.get("lat") is not None and g.get("lng") is not None:
+            point = (float(g["lat"]), float(g["lng"]))
+        elif g.get("pincode"):
+            pin = str(g["pincode"])
+            if pin not in pin_cache:
+                pin_cache[pin] = await pincode_centroid(pin)
+            point = pin_cache[pin]
+        g["distance_km"] = (
+            round(haversine_km(origin[0], origin[1], point[0], point[1]), 1)
+            if origin and point else None
+        )
+
     out = []
     for g in groups.values():
         open_orders = [o for o in g["orders"] if o["status"] in OPEN_STATUSES]
@@ -696,8 +745,20 @@ async def dp_my_customers(
         g["next_label"] = STATUS_LABELS.get(g["next_status"], "")
         g["all_delivered"] = len(open_orders) == 0
         out.append(g)
-    out.sort(key=lambda r: (-r["open_count"], -r["cash_to_collect"], r["name"]))
-    return {"items": out, "total": len(out), "mapped_vendors": len(vids)}
+    by_distance = sort != "orders" and any(g.get("distance_km") is not None for g in out)
+    if by_distance:
+        # Unknown distances go last — a rider can't plan around a blank.
+        out.sort(key=lambda r: (
+            r["distance_km"] if r.get("distance_km") is not None else 1e9,
+            -r["open_count"],
+        ))
+    else:
+        out.sort(key=lambda r: (-r["open_count"], -r["cash_to_collect"], r["name"]))
+    return {
+        "items": out, "total": len(out), "mapped_vendors": len(vids),
+        "sorted_by": "distance" if by_distance else "orders",
+        "has_origin": origin is not None,
+    }
 
 
 class DPBulkStatus(BaseModel):

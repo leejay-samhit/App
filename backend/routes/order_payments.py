@@ -390,10 +390,44 @@ async def verify_recharge_payment(
 
 @router.get("/recharge/history")
 async def recharge_history(user: Dict[str, Any] = Depends(get_current_user)):
+    """Past recharges, newest first, each one ready to REPEAT.
+
+    Jun-2026 — the row carries everything the pay flow needs (plan id, kind,
+    circle, operator, the number) plus whether the plan is still live and at
+    what price, so "Repeat" is one tap and never sends the shopper to a plan
+    that has since been pulled or re-priced.
+    """
     rows = await db.recharges.find(
         {"user_id": user["id"]}, {"_id": 0},
     ).sort("created_at", -1).limit(50).to_list(50)
-    return {"items": rows}
+    pids = [r.get("product_id") for r in rows if r.get("product_id")]
+    plans: Dict[str, Any] = {}
+    if pids:
+        async for p in db.products.find(
+            {"id": {"$in": pids}},
+            {"_id": 0, "id": 1, "name": 1, "price": 1, "active": 1, "is_published": 1,
+             "description": 1, "recharge_data": 1, "recharge_validity": 1, "recharge_calls": 1},
+        ):
+            plans[p["id"]] = p
+    from routes.recharge import plan_highlights
+    networks: Dict[str, Any] = {}
+    async for o in db.recharge_options.find({"group": "network"}, {"_id": 0}):
+        networks[o.get("slug")] = o
+    out = []
+    for r in rows:
+        plan = plans.get(r.get("product_id") or "") or {}
+        live = bool(plan) and plan.get("active") is not False and plan.get("is_published") is not False
+        net = networks.get(r.get("network") or "") or {}
+        out.append({
+            **r,
+            "network_name": net.get("name") or r.get("network") or "",
+            "network_logo": net.get("image_url") or None,
+            "can_repeat": live,
+            "current_price": round(float(plan.get("price") or 0), 2) if live else None,
+            "price_changed": bool(live and abs(float(plan.get("price") or 0) - float(r.get("amount") or 0)) > 0.009),
+            "highlights": plan_highlights(plan) if plan else {"data": "", "validity": "", "calls": ""},
+        })
+    return {"items": out}
 
 
 @router.post("/orders/payment/verify")

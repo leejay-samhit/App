@@ -9335,3 +9335,22 @@ agent_communication:
       guest fallback stays in the sub-category. (5) DP Customers screen
       re-laid-out (actions above the list, per-shop grouping, fixed-width
       right column). testing_agent iteration 93: 16/16 PASS.
+
+  - agent: "main"
+    message: |
+      Jun 2026 batch 4 — (1) /recharge/history enriched (logo, can_repeat,
+      current_price, price_changed, highlights) + new /recharge-history screen
+      and a RECENT RECHARGES block with one-tap Repeat (shared
+      src/recharge-history.tsx + useRepeatRecharge). (2) plan_highlights()
+      gives every plan DATA·VALIDITY·CALLS tags — explicit vendor fields win,
+      otherwise parsed from the name/description so the seeded catalogue
+      needed no edits; shown on plan rows, hero card and history.
+      (3) /delivery-partner/me/customers takes lat/lng/sort and returns
+      distance_km nearest-first (pincode-centroid fallback, unknowns last);
+      ALSO fixed blank customer name/address there — they now come from
+      shipping_address. (4) PATCH /admin/recharge/options/{id} uploads an
+      operator logo that mirrors into the Recharge sub-category tree.
+      testing_agent iteration 94: 16/16 PASS. Cleaned up the ITER93/ITER94
+      seed recharges from testbuyer's history.
+      Still open for a future agent: there is no DELETE /admin/recharges/{id},
+      so e2e recharge tests leave rows behind (I remove them via Mongo).

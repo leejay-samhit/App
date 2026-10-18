@@ -17,7 +17,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
-  ActivityIndicator, Modal, Pressable, RefreshControl, Platform,
+  ActivityIndicator, Modal, Pressable, RefreshControl, Platform, Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -26,13 +26,18 @@ import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
 import { notify } from "../src/notify";
 import { useRechargePay, RazorpayWebViewModal, accountIsValid } from "../src/recharge-pay";
+import { RechargeHistoryRow, useRepeatRecharge, type RechargeRow } from "../src/recharge-history";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
-type Option = { id: string; name: string; slug: string; kind: string; group: string };
+type Option = {
+  id: string; name: string; slug: string; kind: string; group: string;
+  image_url?: string | null;
+};
 type Service = { key: "mobile" | "dth"; label: string; icon: any; description: string };
 type Plan = {
   id: string; name: string; price: number; subcategory?: string;
   description?: string; validity?: string; data?: string;
+  highlights?: { data?: string; validity?: string; calls?: string };
 };
 type PlanGroup = { name: string; products: Plan[] };
 
@@ -66,6 +71,18 @@ export default function RechargeScreen() {
       setRefreshing(false);
     }
   }, []);
+
+  // Jun 2026 — last few recharges, each repeatable in one tap.
+  const [history, setHistory] = useState<RechargeRow[]>([]);
+  const loadHistory = useCallback(async () => {
+    try {
+      const { data } = await api.get<{ items: RechargeRow[] }>("/recharge/history");
+      setHistory(data.items || []);
+    } catch { setHistory([]); }
+  }, []);
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+  const { repeat, paying: repeating, rzpHtml: repeatHtml, handleMessage: repeatMsg, cancel: repeatCancel } =
+    useRepeatRecharge(loadHistory);
 
   useEffect(() => { loadOptions(); }, [loadOptions]);
 
@@ -189,6 +206,30 @@ export default function RechargeScreen() {
                 <Feather name="chevron-right" size={18} color={colors.textMuted} />
               </TouchableOpacity>
             ))}
+
+            {/* Recent recharges — repeat the same plan for the same number */}
+            {history.length ? (
+              <>
+                <View style={styles.histHead}>
+                  <Text style={[styles.stepLabel, { marginBottom: 0 }]}>RECENT RECHARGES</Text>
+                  <TouchableOpacity
+                    onPress={() => router.push("/recharge-history" as any)}
+                    testID="recharge-see-all-history"
+                    hitSlop={8}
+                  >
+                    <Text style={styles.histAll}>See all</Text>
+                  </TouchableOpacity>
+                </View>
+                {history.slice(0, 4).map((h) => (
+                  <RechargeHistoryRow
+                    key={h.id}
+                    row={h}
+                    onRepeat={repeat}
+                    busy={repeating === h.product_id}
+                  />
+                ))}
+              </>
+            ) : null}
           </>
         ) : (
           <>
@@ -218,6 +259,9 @@ export default function RechargeScreen() {
               >
                 <Text style={styles.selectLabel}>NETWORK</Text>
                 <View style={styles.selectValueRow}>
+                  {network?.image_url ? (
+                    <Image source={{ uri: network.image_url }} style={styles.netLogoSm} resizeMode="cover" />
+                  ) : null}
                   <Text style={[styles.selectValue, !network && styles.selectPlaceholder]} numberOfLines={1}>
                     {network?.name || "Select network"}
                   </Text>
@@ -284,6 +328,29 @@ export default function RechargeScreen() {
                       <View style={{ flex: 1 }}>
                         <Text style={styles.planAmount}>{formatINR(p.price)}</Text>
                         <Text style={styles.planName} numberOfLines={2}>{p.name}</Text>
+                        {/* What the shopper actually compares */}
+                        {(p.highlights?.data || p.highlights?.validity || p.highlights?.calls) ? (
+                          <View style={styles.tagRow}>
+                            {p.highlights?.data ? (
+                              <View style={styles.tag}>
+                                <Feather name="wifi" size={10} color={colors.primary} />
+                                <Text style={styles.tagText}>{p.highlights.data}</Text>
+                              </View>
+                            ) : null}
+                            {p.highlights?.validity ? (
+                              <View style={styles.tag}>
+                                <Feather name="calendar" size={10} color={colors.primary} />
+                                <Text style={styles.tagText}>{p.highlights.validity}</Text>
+                              </View>
+                            ) : null}
+                            {p.highlights?.calls ? (
+                              <View style={styles.tag}>
+                                <Feather name="phone-call" size={10} color={colors.primary} />
+                                <Text style={styles.tagText}>{p.highlights.calls}</Text>
+                              </View>
+                            ) : null}
+                          </View>
+                        ) : null}
                         <Text style={styles.planMore}>View details</Text>
                       </View>
                       <TouchableOpacity
@@ -333,6 +400,15 @@ export default function RechargeScreen() {
                   style={[styles.optRow, on && styles.optRowOn]}
                   testID={`recharge-opt-${o.slug}`}
                 >
+                  {picker === "network" ? (
+                    <View style={styles.optLogoWrap}>
+                      {o.image_url ? (
+                        <Image source={{ uri: o.image_url }} style={styles.optLogo} resizeMode="cover" />
+                      ) : (
+                        <Feather name={service === "dth" ? "tv" : "smartphone"} size={14} color={colors.textMuted} />
+                      )}
+                    </View>
+                  ) : null}
                   <Text style={[styles.optText, on && { color: colors.primary, fontWeight: "900" }]}>
                     {o.name}
                   </Text>
@@ -354,6 +430,7 @@ export default function RechargeScreen() {
 
       {/* Razorpay on native (WebView) — web opens the JS checkout directly */}
       <RazorpayWebViewModal html={rzpHtml} onMessage={handleMessage} onCancel={cancel} />
+      <RazorpayWebViewModal html={repeatHtml} onMessage={repeatMsg} onCancel={repeatCancel} />
     </SafeAreaView>
   );
 }
@@ -442,6 +519,24 @@ const styles = StyleSheet.create({
   planAmount: { fontSize: 16, fontWeight: "900", color: colors.textMain },
   planName: { fontSize: 11.5, lineHeight: 16, color: colors.textMuted, marginTop: 2, fontWeight: "600" },
   planMore: { fontSize: 10.5, color: colors.primary, fontWeight: "800", marginTop: 4 },
+  tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 5, marginTop: 6 },
+  tag: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6,
+    backgroundColor: colors.surfaceMuted,
+  },
+  tagText: { fontSize: 10, fontWeight: "800", color: colors.textMain },
+  netLogoSm: { width: 18, height: 18, borderRadius: 4 },
+  optLogoWrap: {
+    width: 26, height: 26, borderRadius: 6, marginRight: 8, overflow: "hidden",
+    backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center",
+  },
+  optLogo: { width: 26, height: 26 },
+  histHead: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    marginTop: 18, marginBottom: 8,
+  },
+  histAll: { fontSize: 12, fontWeight: "900", color: colors.primary },
   payBtn: {
     backgroundColor: colors.primary, paddingHorizontal: 16,
     minHeight: 40, minWidth: 96, borderRadius: 999,

@@ -16,6 +16,7 @@ import { Stack, useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, spacing, radii, formatINR } from "../../src/theme";
 import { DPHeader, DPTabBar, DPEmpty } from "../../src/delivery-ui";
+import { captureCurrentPlace } from "../../src/capture-location";
 
 const PILL: Record<string, string> = {
   placed: "#B45309", confirmed: "#1D4ED8", shipped: "#7C3AED",
@@ -44,15 +45,40 @@ export default function DeliveryCustomers() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState("");
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  // Jun 2026 — nearest-first routing. We ask for the rider's location once;
+  // without it the list falls back to most-orders-first.
+  const [origin, setOrigin] = useState<{ lat: number; lng: number } | null>(null);
+  const [sortBy, setSortBy] = useState<"distance" | "orders">("distance");
+  const [locating, setLocating] = useState(false);
+  const [sortedBy, setSortedBy] = useState<string>("orders");
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get("/delivery-partner/me/customers?status=open");
+      const { data } = await api.get("/delivery-partner/me/customers", {
+        params: {
+          status: "open",
+          sort: sortBy,
+          ...(origin ? { lat: origin.lat, lng: origin.lng } : {}),
+        },
+      });
       setItems((data as any)?.items || []);
+      setSortedBy((data as any)?.sorted_by || "orders");
     } catch { setItems([]); }
     finally { setLoading(false); setRefreshing(false); }
-  }, []);
+  }, [origin, sortBy]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Contextual permission: only when the rider asks for nearest-first.
+  const useMyLocation = async () => {
+    setLocating(true);
+    try {
+      const place = await captureCurrentPlace();
+      if (place) {
+        setOrigin({ lat: place.lat, lng: place.lng });
+        setSortBy("distance");
+      }
+    } finally { setLocating(false); }
+  };
 
   const run = async (c: any, status?: string) => {
     setBusy(c.user_id);
@@ -129,6 +155,36 @@ export default function DeliveryCustomers() {
             tintColor={colors.primary} />
         }
       >
+        {/* Routing: nearest doorstep first, or the busiest stop first. */}
+        {items.length ? (
+          <View style={s.sortRow}>
+            <TouchableOpacity
+              style={[s.sortChip, sortedBy === "distance" && s.sortChipOn]}
+              onPress={() => (origin ? setSortBy("distance") : useMyLocation())}
+              disabled={locating}
+              testID="dp-sort-distance"
+            >
+              {locating ? <ActivityIndicator size="small" color={colors.primary} /> : (
+                <Feather name="navigation" size={12}
+                  color={sortedBy === "distance" ? colors.primaryFg : colors.textMain} />
+              )}
+              <Text style={[s.sortText, sortedBy === "distance" && { color: colors.primaryFg }]}>
+                {origin || sortedBy === "distance" ? "Nearest first" : "Use my location"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.sortChip, sortedBy !== "distance" && s.sortChipOn]}
+              onPress={() => setSortBy("orders")}
+              testID="dp-sort-orders"
+            >
+              <Feather name="layers" size={12}
+                color={sortedBy !== "distance" ? colors.primaryFg : colors.textMain} />
+              <Text style={[s.sortText, sortedBy !== "distance" && { color: colors.primaryFg }]}>
+                Most orders
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
         {items.length === 0 ? (
           <DPEmpty
             icon="users"
@@ -167,6 +223,12 @@ export default function DeliveryCustomers() {
                     <Text style={s.lineText} numberOfLines={2}>
                       {c.address}{c.pincode ? ` · ${c.pincode}` : ""}
                     </Text>
+                    {typeof c.distance_km === "number" ? (
+                      <View style={s.distChip} testID={`dp-customer-distance-${c.user_id}`}>
+                        <Feather name="navigation" size={10} color={colors.primary} />
+                        <Text style={s.distText}>{`${c.distance_km} km`}</Text>
+                      </View>
+                    ) : null}
                   </View>
                 ) : null}
 
@@ -287,6 +349,20 @@ export default function DeliveryCustomers() {
 
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
+  sortRow: { flexDirection: "row", gap: 8, paddingHorizontal: spacing.screen, paddingBottom: 10 },
+  sortChip: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    paddingHorizontal: 12, minHeight: 36, borderRadius: 18,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+  },
+  sortChipOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  sortText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+  distChip: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10,
+    backgroundColor: colors.surfaceMuted,
+  },
+  distText: { fontSize: 10.5, fontWeight: "900", color: colors.primary, fontVariant: ["tabular-nums"] },
   switchRow: { flexDirection: "row", gap: 8, paddingHorizontal: spacing.screen, paddingBottom: 10 },
   switchChip: {
     flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12,

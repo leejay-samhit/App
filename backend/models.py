@@ -142,6 +142,11 @@ class ProductCreate(BaseModel):
     recharge_state: Optional[str] = None        # option slug · empty = all circles
     recharge_kind: Optional[str] = None         # mobile | dth
     recharge_network: Optional[str] = None      # option slug
+    # Plan highlights shown as tags on the card. Left blank, they are read
+    # out of the plan's name/description (routes/recharge.plan_highlights).
+    recharge_data: Optional[str] = None         # "2GB/day"
+    recharge_validity: Optional[str] = None     # "28 days"
+    recharge_calls: Optional[str] = None        # "Unlimited calls"
     # Accept either spelling of the sub-category from any client; the
     # normaliser mirrors them onto both keys (core/taxonomy.py).
     subcategory: Optional[str] = None
@@ -202,6 +207,9 @@ class ProductUpdate(BaseModel):
     recharge_state: Optional[str] = None
     recharge_kind: Optional[str] = None
     recharge_network: Optional[str] = None
+    recharge_data: Optional[str] = None
+    recharge_validity: Optional[str] = None
+    recharge_calls: Optional[str] = None
     subcategory: Optional[str] = None
 
 

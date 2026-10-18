@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.db import db
 from core.security import require_admin, require_admin_role
@@ -188,6 +188,7 @@ async def sync_shop_categories() -> Dict[str, Any]:
                 {"recharge_kind": kind, "recharge_network": o["slug"],
                  "recharge_option_id": o["id"], "recharge_synced": True,
                  "sort_order": int(o.get("sort_order") or i),
+                 "image_url": o.get("image_url") or None,
                  "icon_pack": "mci", "icon_name": KIND_ICON[kind]},
                 # Adopt by option id first, then by name anywhere under the
                 # Recharge tree (an operator the admin typed in by hand).
@@ -223,6 +224,46 @@ async def option_product_count(row: Dict[str, Any]) -> int:
         {"subcategory": rx},
         {"sub_category": rx},
     ]})
+
+
+def plan_highlights(p: Dict[str, Any]) -> Dict[str, str]:
+    """Jun-2026 — the three things a shopper actually compares on a recharge
+    card: DATA · VALIDITY · CALLS.
+
+    Explicit vendor/admin fields always win. When they're blank we read them
+    out of the plan's own name + description, so the plans already in the
+    catalogue (and anything typed in free-form) show their tags without
+    anybody re-entering data.
+    """
+    text = f"{p.get('name') or ''} · {p.get('description') or ''}"
+    low = text.lower()
+
+    data = (p.get("recharge_data") or "").strip()
+    if not data:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(gb|mb|tb)\s*(/\s*day|per day|a day)?", low)
+        if m:
+            per_day = bool(m.group(3))
+            data = f"{m.group(1)}{m.group(2).upper()}{'/day' if per_day else ''}"
+        elif "unlimited data" in low:
+            data = "Unlimited data"
+
+    validity = (p.get("recharge_validity") or "").strip()
+    if not validity:
+        m = re.search(r"(\d+)\s*(day|days|month|months|year|years)", low)
+        if m:
+            n, unit = int(m.group(1)), m.group(2).rstrip("s")
+            validity = f"{n} {unit}{'s' if n != 1 else ''}"
+
+    calls = (p.get("recharge_calls") or "").strip()
+    if not calls:
+        if "unlimited call" in low or "unlimited voice" in low:
+            calls = "Unlimited calls"
+        elif "talktime" in low:
+            calls = "Full talktime"
+        elif re.search(r"(\d+)\s*(mins?|minutes)", low):
+            calls = re.search(r"(\d+)\s*(mins?|minutes)", low).group(0)  # type: ignore[union-attr]
+
+    return {"data": data, "validity": validity, "calls": calls}
 
 
 @router.get("/recharge/options")
@@ -340,6 +381,42 @@ async def delete_option(
     return {"ok": True, "removed": row.get("name"), "products_tagged": in_use}
 
 
+class OptionPatch(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=60)
+    # Small square logo as a data URI (same shape as shop-category icons).
+    image_url: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+@router.patch("/admin/recharge/options/{option_id}")
+async def update_option(
+    option_id: str,
+    payload: OptionPatch,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "products_manager")),
+) -> Dict[str, Any]:
+    """Jun-2026 — rename an option or give an operator its LOGO.
+
+    The logo flows straight through to the mirrored Recharge sub-category, so
+    "Airtel" looks like Airtel on the shop tiles as well as in the dropdown.
+    """
+    row = await db.recharge_options.find_one({"id": option_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(status_code=404, detail="Option not found")
+    update: Dict[str, Any] = {"updated_at": now_utc().isoformat()}
+    if payload.name is not None and payload.name.strip():
+        update["name"] = payload.name.strip()
+        update["slug"] = slugify(payload.name)
+    if payload.image_url is not None:
+        update["image_url"] = payload.image_url or None
+    if payload.sort_order is not None:
+        update["sort_order"] = int(payload.sort_order)
+    await db.recharge_options.update_one({"id": option_id}, {"$set": update})
+    await sync_shop_categories()
+    await _audit_log(admin, "recharge.option_update", "recharge_option", option_id,
+                     {"fields": [k for k in update if k != "updated_at"]})
+    return {**row, **update}
+
+
 @router.post("/admin/recharge/options/sync")
 async def resync_categories(
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "products_manager")),
@@ -404,6 +481,7 @@ async def recharge_products(
         label = (p.get("subcategory") or p.get("sub_category") or "Plans").strip()
         if net_name and label.lower() == net_name.lower():
             label = "Plans"
+        p["highlights"] = plan_highlights(p)
         groups.setdefault(label or "Plans", []).append(p)
     return {
         "count": len(rows),

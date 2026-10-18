@@ -50,6 +50,7 @@ type Product = {
   subcategory?: string; sub_category?: string;
   recharge_kind?: "mobile" | "dth" | string;
   recharge_network?: string; recharge_state?: string;
+  highlights?: { data?: string; validity?: string; calls?: string };
 };
 type Review = { id: string; user_id: string; user_name: string; rating: number; title: string; body: string; images: string[]; verified_purchase: boolean; created_at: string; helpful_count?: number; voted_helpful?: boolean };
 
@@ -548,6 +549,20 @@ export default function ProductDetailScreen() {
 
           {/* Qty stepper — a recharge plan is bought once, never by the
               dozen, so the stepper is hidden for those. */}
+          {isRecharge && (product.highlights?.data || product.highlights?.validity || product.highlights?.calls) ? (
+            <View style={styles.rchTagRow} testID="recharge-highlights">
+              {([
+                ["wifi", product.highlights?.data],
+                ["calendar", product.highlights?.validity],
+                ["phone-call", product.highlights?.calls],
+              ] as [any, string | undefined][]).filter(([, v]) => !!v).map(([icon, v]) => (
+                <View key={String(v)} style={styles.rchTag}>
+                  <Feather name={icon} size={12} color={colors.primary} />
+                  <Text style={styles.rchTagText}>{v}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
           {inStock && !isRecharge ? (
             <View style={styles.qtyCard}>
               <Text style={styles.qtyLabel}>QUANTITY</Text>
@@ -1182,6 +1197,13 @@ const styles = StyleSheet.create({
     width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border,
     alignSelf: "center", marginBottom: 12,
   },
+  rchTagRow: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginTop: 10 },
+  rchTag: {
+    flexDirection: "row", alignItems: "center", gap: 5,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 9,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+  },
+  rchTagText: { fontSize: 11.5, fontWeight: "800", color: colors.textMain },
   rechargeSub: { fontSize: 12.5, color: colors.textMuted, fontWeight: "700", marginTop: 4 },
   rechargeInputRow: {
     flexDirection: "row", alignItems: "center", gap: 8, marginTop: 14,
