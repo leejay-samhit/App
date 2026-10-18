@@ -9317,3 +9317,21 @@ agent_communication:
       NOTE for next agent: iter92 left ~2 seeded delivered COD orders for
       testbuyer (shipping name "Iter92 Tester") and ~₹100-150 residual rider
       cash_in_hand — there is no DELETE /admin/orders/{id} endpoint.
+
+  - agent: "main"
+    message: |
+      Jun 2026 batch 3 — (1) admin bottom bar locked via a single HIDDEN list
+      in app/admin/_layout.tsx (Recharge options moved to More; screenshot
+      shows exactly 6 tabs). (2) New src/recharge-pay.tsx hosts Razorpay in a
+      WebView on native, fixing "On native, use buildRazorpayHtml()…" for
+      recharge; the same message-shape bug was fixed in wallet-topup.tsx.
+      Plan rows now open the product hero card (number + circle travel in the
+      route params) and a recharge hero card pays online from a number-only
+      sheet — no cart, no address, no qty stepper. (3) New core/taxonomy.py
+      mirrors sub_category ↔ subcategory on all four product write paths and
+      derives recharge_kind/network from the operator sub-category; the editor
+      asks for the circle (recharge_state) when category = Recharge.
+      (4) /products/{id}/rails matches either sub-category field shape and the
+      guest fallback stays in the sub-category. (5) DP Customers screen
+      re-laid-out (actions above the list, per-shop grouping, fixed-width
+      right column). testing_agent iteration 93: 16/16 PASS.

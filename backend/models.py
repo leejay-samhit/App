@@ -134,6 +134,17 @@ class ProductCreate(BaseModel):
     purchase_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)
     selling_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)
     cashback_flat: Optional[float] = Field(default=None, ge=0)
+    # ── Recharge catalogue (Jun-2026) ─────────────────────────────────
+    # A plan filed under Recharge needs its circle so the Recharge screen's
+    # State filter works. `recharge_kind` / `recharge_network` are DERIVED
+    # from the picked sub-category (= the operator) by core/taxonomy.py, so
+    # the vendor only ever chooses the circle.
+    recharge_state: Optional[str] = None        # option slug · empty = all circles
+    recharge_kind: Optional[str] = None         # mobile | dth
+    recharge_network: Optional[str] = None      # option slug
+    # Accept either spelling of the sub-category from any client; the
+    # normaliser mirrors them onto both keys (core/taxonomy.py).
+    subcategory: Optional[str] = None
 
 
 class ProductUpdate(BaseModel):
@@ -187,6 +198,11 @@ class ProductUpdate(BaseModel):
     purchase_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)
     selling_gst_pct: Optional[float] = Field(default=None, ge=0, le=100)
     cashback_flat: Optional[float] = Field(default=None, ge=0)
+    # Recharge catalogue (Jun-2026) — see ProductCreate.
+    recharge_state: Optional[str] = None
+    recharge_kind: Optional[str] = None
+    recharge_network: Optional[str] = None
+    subcategory: Optional[str] = None
 
 
 class BrandingPayload(BaseModel):

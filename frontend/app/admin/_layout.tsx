@@ -16,15 +16,32 @@ const SCOPED_ROLES = SCOPED_ADMIN_ROLES;
  * ║ The admin bottom navigation is permanently locked to exactly 6     ║
  * ║ tabs (Home · Users · Shop · Payouts · Wallet · More).              ║
  * ║                                                                    ║
- * ║ When you add a NEW screen under /app/admin/, you MUST register     ║
- * ║ it below with `options={{ href: null }}` — otherwise Expo Router   ║
- * ║ will auto-add it as a 7th tab and break the locked layout.         ║
- * ║                                                                    ║
- * ║ Surface new screens through /admin/more.tsx instead (or via the    ║
- * ║ relevant tab screen). NEVER add another <Tabs.Screen> without      ║
- * ║ href:null unless you are intentionally replacing one of the 6.    ║
+ * ║ Jun 2026 — every time a new /app/admin/ screen was added it        ║
+ * ║ auto-registered as a 7th tab (Recharge options was the latest).    ║
+ * ║ So the hidden screens are now ONE list: add the file name to       ║
+ * ║ HIDDEN below the moment you create the screen, and surface it      ║
+ * ║ from /admin/more.tsx. Nothing else may appear in the bottom bar.   ║
  * ╚════════════════════════════════════════════════════════════════════╝
  */
+// Reachable from /admin/more.tsx (or a direct link) — never in the tab bar.
+const HIDDEN = [
+  "transactions", "settings", "kyc", "orders", "audit", "roadmap", "admins",
+  "approvals", "backups", "cashback", "backup-file", "reset-center",
+  "products", "promo-banners", "shop-layout", "branding", "rejected",
+  "approved", "tickets", "ticket", "payment-gateway", "vendor-applications",
+  "vendor-edit-requests", "service-applications", "system-wallet", "vendors",
+  "service-management", "area-mapping", "shop-categories", "legal-pages",
+  "payments-pending", "shop-category/[name]", "chat", "my-wallet",
+  "ai-tools", "service-analytics", "subcategories/[parentId]",
+  // Finance Dashboard was merged into System Wallet (2026-05-30); the file
+  // survives only as a redirect for old bookmarks.
+  "finance-dashboard",
+  "broadcast", "returns", "push-diagnostics", "delivery-partners",
+  // Jun 2026 — owner's report: Recharge options was showing as a 7th tab.
+  // It belongs in More only.
+  "recharge-options",
+];
+
 export default function AdminLayout() {
   const insets = useSafeAreaInsets();
   // Lift the tab bar above the device's navigation buttons (Android 3-button
@@ -66,66 +83,14 @@ export default function AdminLayout() {
         name="manager-home"
         options={tab(scoped, { title: "My section", tabBarIcon: tabIcon("grid") })}
       />
-      <Tabs.Screen name="transactions" options={{ href: null }} />
-      <Tabs.Screen name="settings" options={{ href: null }} />
+      {/* Scoped managers get Profile in place of the 6 full-admin tabs. */}
       <Tabs.Screen
         name="profile"
         options={tab(scoped, { title: "Profile", tabBarIcon: tabIcon("user") })}
       />
-      <Tabs.Screen name="kyc" options={{ href: null }} />
-      <Tabs.Screen name="orders" options={{ href: null }} />
-      <Tabs.Screen name="audit" options={{ href: null }} />
-      <Tabs.Screen name="roadmap" options={{ href: null }} />
-      <Tabs.Screen name="admins" options={{ href: null }} />
-      <Tabs.Screen name="approvals" options={{ href: null }} />
-      <Tabs.Screen name="backups" options={{ href: null }} />
-      <Tabs.Screen name="cashback" options={{ href: null }} />
-      <Tabs.Screen name="backup-file" options={{ href: null }} />
-      <Tabs.Screen name="reset-center" options={{ href: null }} />
-      <Tabs.Screen name="products" options={{ href: null }} />
-      <Tabs.Screen name="promo-banners" options={{ href: null }} />
-      <Tabs.Screen name="shop-layout" options={{ href: null }} />
-      <Tabs.Screen name="branding" options={{ href: null }} />
-      <Tabs.Screen name="rejected" options={{ href: null }} />
-      <Tabs.Screen name="approved" options={{ href: null }} />
-      <Tabs.Screen name="tickets" options={{ href: null }} />
-      <Tabs.Screen name="ticket" options={{ href: null }} />
-      <Tabs.Screen name="payment-gateway" options={{ href: null }} />
-      <Tabs.Screen name="vendor-applications" options={{ href: null }} />
-      <Tabs.Screen name="vendor-edit-requests" options={{ href: null }} />
-      <Tabs.Screen name="service-applications" options={{ href: null }} />
-      <Tabs.Screen name="system-wallet" options={{ href: null }} />
-      <Tabs.Screen name="vendors" options={{ href: null }} />
-      <Tabs.Screen name="service-management" options={{ href: null }} />
-      <Tabs.Screen name="area-mapping" options={{ href: null }} />
-      <Tabs.Screen name="shop-categories" options={{ href: null }} />
-      <Tabs.Screen name="legal-pages" options={{ href: null }} />
-      <Tabs.Screen name="payments-pending" options={{ href: null }} />
-      <Tabs.Screen name="shop-category/[name]" options={{ href: null }} />
-      <Tabs.Screen name="chat" options={{ href: null }} />
-      <Tabs.Screen name="my-wallet" options={{ href: null }} />
-      {/* June 2026 — newly added admin screens hidden from bottom tab bar.
-         They are reachable from /admin/more.tsx so the bottom nav stays
-         locked to: Home · Users · Shop · Payouts · Wallet · More. */}
-      <Tabs.Screen name="ai-tools" options={{ href: null }} />
-      <Tabs.Screen name="service-analytics" options={{ href: null }} />
-      <Tabs.Screen name="subcategories/[parentId]" options={{ href: null }} />
-      {/* Finance Dashboard was merged into System Wallet (2026-05-30). The
-         file still exists as a redirect for old bookmarks — keep it hidden
-         from the locked 6-tab bottom nav. */}
-      <Tabs.Screen name="finance-dashboard" options={{ href: null }} />
-      {/* June 2026 — user requested Broadcast be removed from the bottom
-         tab strip; keep it reachable only via /admin/broadcast direct
-         URL if needed. */}
-      <Tabs.Screen name="broadcast" options={{ href: null }} />
-      {/* Sep 2026 — Phase 2 returns/reconciliation + push diagnostics.
-         Reachable from /admin/more.tsx; hidden so the bottom nav stays
-         locked to the 6 tabs. */}
-      <Tabs.Screen name="returns" options={{ href: null }} />
-      <Tabs.Screen name="push-diagnostics" options={{ href: null }} />
-      {/* Oct 2026 — Delivery Partners was auto-registering as a 7th tab and
-         breaking the locked 6-tab bar. It lives in /admin/more.tsx instead. */}
-      <Tabs.Screen name="delivery-partners" options={{ href: null }} />
+      {HIDDEN.map((name) => (
+        <Tabs.Screen key={name} name={name} options={{ href: null }} />
+      ))}
     </Tabs>
   );
 }

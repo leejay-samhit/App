@@ -23,6 +23,7 @@ import { getProductPreview } from "../../src/product-preview";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../../src/cashback";
 import { ProductRail, type Rail } from "../../src/product-rail";
+import { useRechargePay, RazorpayWebViewModal, accountIsValid } from "../../src/recharge-pay";
 
 /* ─── Types ─── */
 type StyledText = { text?: string; bold?: boolean; font_size?: number | null; align?: "left" | "center" | "right" };
@@ -44,6 +45,11 @@ type Product = {
   extra_attrs?: Record<string, string>;
   spec_tabs?: { name: string; rows: { label: string; value: string }[] }[];
   whats_in_box?: { name: string; image_data_url: string }[];
+  // Jun 2026 — a Recharge plan pays online straight from this page: no cart,
+  // no address, no delivery.
+  subcategory?: string; sub_category?: string;
+  recharge_kind?: "mobile" | "dth" | string;
+  recharge_network?: string; recharge_state?: string;
 };
 type Review = { id: string; user_id: string; user_name: string; rating: number; title: string; body: string; images: string[]; verified_purchase: boolean; created_at: string; helpful_count?: number; voted_helpful?: boolean };
 
@@ -56,6 +62,12 @@ type Review = { id: string; user_id: string; user_name: string; rating: number; 
 export default function ProductDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
+  // Jun 2026 — when the shopper arrives from the Recharge screen the number
+  // and circle he already typed travel with him, so "Pay online" here needs
+  // no re-typing (and never asks for an address).
+  const params = useLocalSearchParams<{
+    rchKind?: string; rchAccount?: string; rchState?: string; rchNetwork?: string;
+  }>();
   const { user } = useAuth();
   // ── Jun 2026 — INSTANT OPEN ────────────────────────────────────────────
   // The card the customer tapped already knows the name, price and cover
@@ -107,6 +119,17 @@ export default function ProductDetailScreen() {
   const [askOpen, setAskOpen] = useState(false);
   const [askText, setAskText] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
+  // ── Recharge plan: pay online, no cart / address (Jun 2026) ──────────
+  const isRecharge = !!(
+    product?.recharge_kind || /^recharge$/i.test(String(product?.category || ""))
+    || params.rchKind
+  );
+  const rechargeKind: "mobile" | "dth" =
+    (product?.recharge_kind as any) || (params.rchKind as any) || "mobile";
+  const [rechargeOpen, setRechargeOpen] = useState(false);
+  const [rechargeAccount, setRechargeAccount] = useState(String(params.rchAccount || ""));
+  const { pay: payRecharge, paying: rechargePaying, rzpHtml, handleMessage, cancel: cancelRzp } =
+    useRechargePay(() => setRechargeOpen(false));
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -523,8 +546,9 @@ export default function ProductDetailScreen() {
             </View>
           ) : null}
 
-          {/* Qty stepper */}
-          {inStock ? (
+          {/* Qty stepper — a recharge plan is bought once, never by the
+              dozen, so the stepper is hidden for those. */}
+          {inStock && !isRecharge ? (
             <View style={styles.qtyCard}>
               <Text style={styles.qtyLabel}>QUANTITY</Text>
               <View style={styles.qtyRow}>
@@ -697,6 +721,17 @@ export default function ProductDetailScreen() {
             <ActivityIndicator color={colors.primary} size="small" />
             <Text style={[styles.buyBtnText, { color: colors.textMuted }]}>Loading…</Text>
           </View>
+        ) : isRecharge ? (
+          /* A recharge is paid for on the spot — nothing ships, so the cart
+             and the address step are skipped entirely. */
+          <TouchableOpacity
+            onPress={() => setRechargeOpen(true)}
+            style={[styles.buyBtn, { flex: 1 }]}
+            testID="recharge-pay-online"
+          >
+            <Feather name="zap" size={18} color={colors.primaryFg} />
+            <Text style={styles.buyBtnText}>Pay online · {formatINR(product.price)}</Text>
+          </TouchableOpacity>
         ) : inStock ? (
           <>
             <TouchableOpacity onPress={() => onAddToCart(false)} disabled={adding} style={[styles.cartBtn, adding && { opacity: 0.5 }]} testID="add-to-cart">
@@ -712,6 +747,72 @@ export default function ProductDetailScreen() {
           </View>
         )}
       </View>
+
+      {/* Recharge — number + pay, the only two things a plan needs */}
+      <Modal visible={rechargeOpen} transparent animationType="slide" onRequestClose={() => setRechargeOpen(false)}>
+        <Pressable style={styles.sheetOverlay} onPress={() => setRechargeOpen(false)}>
+          <Pressable style={styles.rechargeSheet} onPress={() => {}}>
+            <View style={styles.sheetGrab} />
+            <Text style={styles.guideTitle}>
+              {rechargeKind === "mobile" ? "Recharge a mobile number" : "Recharge a DTH box"}
+            </Text>
+            <Text style={styles.rechargeSub} numberOfLines={2}>
+              {product.name} · {formatINR(product.price)}
+            </Text>
+            <View style={styles.rechargeInputRow}>
+              {rechargeKind === "mobile" ? (
+                <Text style={styles.rechargeCc}>+91</Text>
+              ) : (
+                <Feather name="tv" size={16} color={colors.textMuted} />
+              )}
+              <TextInput
+                value={rechargeAccount}
+                onChangeText={(v) => setRechargeAccount(
+                  rechargeKind === "mobile" ? v.replace(/\D+/g, "").slice(0, 10) : v.slice(0, 24),
+                )}
+                placeholder={rechargeKind === "mobile" ? "9876543210" : "Subscriber / customer ID"}
+                placeholderTextColor={colors.textMuted}
+                keyboardType={rechargeKind === "mobile" ? "number-pad" : "default"}
+                style={styles.rechargeInput}
+                autoFocus
+                testID="recharge-sheet-account"
+              />
+              {accountIsValid(rechargeKind, rechargeAccount) ? (
+                <Feather name="check-circle" size={17} color={colors.success} />
+              ) : null}
+            </View>
+            <Text style={styles.rechargeNote}>
+              No delivery address needed — the recharge is applied to this number.
+            </Text>
+            <TouchableOpacity
+              onPress={() => payRecharge({
+                kind: rechargeKind,
+                productId: product.id,
+                planName: product.name,
+                account: rechargeAccount,
+                state: String(params.rchState || product.recharge_state || "") || undefined,
+                network: String(params.rchNetwork || product.recharge_network || "") || undefined,
+                prefill: { name: (user as any)?.name, email: (user as any)?.email, contact: rechargeAccount },
+              })}
+              disabled={!!rechargePaying || !accountIsValid(rechargeKind, rechargeAccount)}
+              style={[
+                styles.buyBtn,
+                { marginTop: 14 },
+                (!!rechargePaying || !accountIsValid(rechargeKind, rechargeAccount)) && { opacity: 0.5 },
+              ]}
+              testID="recharge-sheet-pay"
+            >
+              {rechargePaying ? <ActivityIndicator color={colors.primaryFg} size="small" /> : (
+                <>
+                  <Feather name="zap" size={18} color={colors.primaryFg} />
+                  <Text style={styles.buyBtnText}>Pay {formatINR(product.price)}</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+      <RazorpayWebViewModal html={rzpHtml} onMessage={handleMessage} onCancel={cancelRzp} />
 
       {/* Ask Vendor modal */}
       {/* Size-guide sheet — real measurements so shoppers order the right
@@ -1071,6 +1172,26 @@ const styles = StyleSheet.create({
   },
   guideHead: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10 },
   guideTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain },
+  // Jun 2026 — recharge pay sheet (no cart, no address).
+  rechargeSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    paddingHorizontal: spacing.screen, paddingTop: 10, paddingBottom: 26,
+  },
+  sheetGrab: {
+    width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border,
+    alignSelf: "center", marginBottom: 12,
+  },
+  rechargeSub: { fontSize: 12.5, color: colors.textMuted, fontWeight: "700", marginTop: 4 },
+  rechargeInputRow: {
+    flexDirection: "row", alignItems: "center", gap: 8, marginTop: 14,
+    borderWidth: 1, borderColor: colors.border, borderRadius: radii.card,
+    paddingHorizontal: 12, minHeight: 50, backgroundColor: colors.background,
+  },
+  rechargeCc: { fontSize: 14, fontWeight: "800", color: colors.textMuted },
+  rechargeInput: { flex: 1, fontSize: 15, fontWeight: "700", color: colors.textMain },
+  rechargeNote: { fontSize: 11, color: colors.textMuted, marginTop: 8, lineHeight: 15 },
+
   guideSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   guideRow: {
     flexDirection: "row", alignItems: "center",

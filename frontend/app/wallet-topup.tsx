@@ -135,10 +135,16 @@ export default function WalletTopupScreen() {
     setRzpVisible(false);
     setTimeout(() => setRzpHtml(""), 250);
     if (!resolve) return;
-    if (data?.ok) {
-      resolve({ ok: true, paymentId: data.paymentId, orderId: data.orderId, signature: data.signature });
+    // Jun 2026 — buildRazorpayHtml posts {type:"success"|"cancel"|"failed"},
+    // NOT {ok:true}. The old check read `data.ok`, so a successful native
+    // top-up was reported back as a cancel and the customer had to recover
+    // the payment by hand.
+    if (data.type === "success") {
+      resolve({ ok: true, paymentId: data.payment_id, orderId: data.order_id, signature: data.signature });
+    } else if (data.type === "cancel") {
+      resolve({ ok: false, cancelled: true });
     } else {
-      resolve({ ok: false, cancelled: !!data?.cancelled, error: data?.error });
+      resolve({ ok: false, error: data.error || "Payment failed", code: data.code });
     }
   };
 
@@ -370,10 +376,10 @@ export default function WalletTopupScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      <Modal visible={rzpVisible} animationType="slide" onRequestClose={() => onRzpMessage("{}")}>
+      <Modal visible={rzpVisible} animationType="slide" onRequestClose={() => onRzpMessage('{"type":"cancel"}')}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
           <View style={styles.header}>
-            <TouchableOpacity onPress={() => onRzpMessage('{"cancelled":true}')} style={styles.backBtn} hitSlop={10}>
+            <TouchableOpacity onPress={() => onRzpMessage('{"type":"cancel"}')} style={styles.backBtn} hitSlop={10}>
               <Feather name="x" size={20} color={colors.textMain} />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>Secure payment</Text>

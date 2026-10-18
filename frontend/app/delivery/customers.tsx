@@ -22,6 +22,21 @@ const PILL: Record<string, string> = {
   out_for_delivery: "#0E7490", delivered: "#15803D",
 };
 
+/** Orders of ONE customer, bucketed per shop — the rider hands over seller by
+ *  seller, so the cash figure has to be readable per shop as well. */
+function groupByShop(orders: any[]) {
+  const map = new Map<string, { shop_name: string; orders: any[]; value: number; cash: number }>();
+  for (const o of orders || []) {
+    const key: string = o.shop_name || "Shop";
+    const g = map.get(key) || { shop_name: key, orders: [] as any[], value: 0, cash: 0 };
+    g.orders.push(o);
+    g.value = Math.round((g.value + Number(o.total || 0)) * 100) / 100;
+    g.cash = Math.round((g.cash + Number(o.cash_to_collect || 0)) * 100) / 100;
+    map.set(key, g);
+  }
+  return [...map.values()].sort((a, b) => b.cash - a.cash);
+}
+
 export default function DeliveryCustomers() {
   const router = useRouter();
   const [items, setItems] = useState<any[]>([]);
@@ -168,43 +183,15 @@ export default function DeliveryCustomers() {
                   </View>
                 </View>
 
-                <TouchableOpacity
-                  style={s.expandBtn}
-                  onPress={() => setOpen((o) => ({ ...o, [c.user_id]: !expanded }))}
-                  testID={`dp-customer-expand-${c.user_id}`}
-                >
-                  <Text style={s.expandText}>
-                    {expanded ? "Hide orders" : `Show ${c.order_count} order${c.order_count === 1 ? "" : "s"}`}
-                  </Text>
-                  <Feather name={expanded ? "chevron-up" : "chevron-down"} size={15} color={colors.primary} />
-                </TouchableOpacity>
-
-                {expanded ? (
-                  <View style={{ gap: 8, marginTop: 4 }}>
-                    {c.orders.map((o: any) => (
-                      <View key={o.id} style={s.orderRow} testID={`dp-customer-order-${o.id}`}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={s.orderNo}>{o.order_number}</Text>
-                          <Text style={s.orderShop} numberOfLines={1}>{o.shop_name}</Text>
-                          {(o.items || []).slice(0, 3).map((i: any, idx: number) => (
-                            <Text key={idx} style={s.orderItem} numberOfLines={1}>
-                              {`• ${i.name} × ${i.qty}`}
-                            </Text>
-                          ))}
-                        </View>
-                        <View style={{ alignItems: "flex-end", gap: 4 }}>
-                          <View style={[s.pill, { backgroundColor: PILL[o.status] || colors.textMuted }]}>
-                            <Text style={s.pillText}>{(o.status_label || o.status).toUpperCase()}</Text>
-                          </View>
-                          <Text style={s.orderAmt}>{formatINR(o.total)}</Text>
-                          {o.cash_to_collect > 0 ? (
-                            <Text style={s.orderCash}>{`COD ${formatINR(o.cash_to_collect)}`}</Text>
-                          ) : null}
-                        </View>
-                      </View>
-                    ))}
-                  </View>
-                ) : null}
+                {/* Which shops this doorstep covers, at a glance. */}
+                <View style={s.shopStrip}>
+                  {groupByShop(c.orders).map((g) => (
+                    <View key={g.shop_name} style={s.shopChip}>
+                      <Text style={s.shopChipName} numberOfLines={1}>{g.shop_name}</Text>
+                      <Text style={s.shopChipCount}>{g.orders.length}</Text>
+                    </View>
+                  ))}
+                </View>
 
                 <View style={s.actionRow}>
                   {c.next_status && c.next_status !== "delivered" ? (
@@ -232,6 +219,62 @@ export default function DeliveryCustomers() {
                     <Text style={s.actionText}>Mark all delivered</Text>
                   </TouchableOpacity>
                 </View>
+                <TouchableOpacity
+                  style={s.expandBtn}
+                  onPress={() => setOpen((o) => ({ ...o, [c.user_id]: !expanded }))}
+                  testID={`dp-customer-expand-${c.user_id}`}
+                >
+                  <Text style={s.expandText}>
+                    {expanded ? "Hide orders" : `Show ${c.order_count} order${c.order_count === 1 ? "" : "s"}`}
+                  </Text>
+                  <Feather name={expanded ? "chevron-up" : "chevron-down"} size={15} color={colors.primary} />
+                </TouchableOpacity>
+
+                {/* Shop-wise inside the doorstep: the rider still has to hand
+                    over per seller, so the orders are grouped by shop with a
+                    running cash figure for each. */}
+                {expanded ? (
+                  <View style={{ gap: 10 }}>
+                    {groupByShop(c.orders).map((g) => (
+                      <View key={g.shop_name} style={s.shopBlock}>
+                        <View style={s.shopHead}>
+                          <Feather name="shopping-bag" size={12} color={colors.textMuted} />
+                          <Text style={s.shopName} numberOfLines={1}>{g.shop_name}</Text>
+                          <Text style={s.shopMeta}>
+                            {g.orders.length} · {formatINR(g.value)}
+                          </Text>
+                        </View>
+                        {g.cash > 0 ? (
+                          <Text style={s.shopCash}>{`Collect ${formatINR(g.cash)} cash for this shop`}</Text>
+                        ) : null}
+                        {g.orders.map((o: any) => (
+                          <View key={o.id} style={s.orderRow} testID={`dp-customer-order-${o.id}`}>
+                            <View style={s.orderLeft}>
+                              <Text style={s.orderNo} numberOfLines={1}>{o.order_number}</Text>
+                              {(o.items || []).slice(0, 3).map((i: any, idx: number) => (
+                                <Text key={idx} style={s.orderItem} numberOfLines={1}>
+                                  {`${i.qty} × ${i.name}`}
+                                </Text>
+                              ))}
+                            </View>
+                            <View style={s.orderRight}>
+                              <View style={[s.pill, { backgroundColor: PILL[o.status] || colors.textMuted }]}>
+                                <Text style={s.pillText}>{(o.status_label || o.status).toUpperCase()}</Text>
+                              </View>
+                              <Text style={s.orderAmt}>{formatINR(o.total)}</Text>
+                              {o.cash_to_collect > 0 ? (
+                                <Text style={s.orderCash}>{`COD ${formatINR(o.cash_to_collect)}`}</Text>
+                              ) : (
+                                <Text style={s.orderPaid}>Prepaid</Text>
+                              )}
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+
               </View>
             );
           })
@@ -255,7 +298,7 @@ const s = StyleSheet.create({
   card: {
     marginHorizontal: spacing.screen, marginBottom: 10, padding: 13,
     backgroundColor: colors.surface, borderRadius: radii.card,
-    borderWidth: 1, borderColor: colors.border, gap: 8,
+    borderWidth: 1, borderColor: colors.border, gap: 10,
   },
   cardTop: { flexDirection: "row", alignItems: "center", gap: 10 },
   avatar: {
@@ -282,21 +325,42 @@ const s = StyleSheet.create({
   },
   expandBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
-    minHeight: 40,
+    minHeight: 44, borderRadius: 10, backgroundColor: colors.surfaceMuted,
   },
   expandText: { fontSize: 12.5, fontWeight: "800", color: colors.primary },
   orderRow: {
-    flexDirection: "row", gap: 10, padding: 10, borderRadius: 10,
+    flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 10,
+    borderRadius: 10, backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  orderLeft: { flex: 1, minWidth: 0, gap: 2 },
+  orderRight: { width: 104, alignItems: "flex-end", gap: 3 },
+  orderNo: { fontSize: 12.5, fontWeight: "900", color: colors.textMain },
+  orderItem: { fontSize: 11, color: colors.textMuted, fontWeight: "600" },
+  orderAmt: { fontSize: 13.5, fontWeight: "900", color: colors.textMain, fontVariant: ["tabular-nums"] },
+  orderCash: { fontSize: 10.5, fontWeight: "900", color: colors.primary, fontVariant: ["tabular-nums"] },
+  orderPaid: { fontSize: 10.5, fontWeight: "800", color: colors.textMuted },
+  // Shop grouping inside one customer
+  shopStrip: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  shopChip: {
+    flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%",
+    paddingHorizontal: 9, paddingVertical: 5, borderRadius: 14,
     backgroundColor: colors.surfaceMuted,
   },
-  orderNo: { fontSize: 12.5, fontWeight: "900", color: colors.textMain },
-  orderShop: { fontSize: 11.5, fontWeight: "700", color: colors.textMuted, marginTop: 1 },
-  orderItem: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-  orderAmt: { fontSize: 13, fontWeight: "900", color: colors.textMain, fontVariant: ["tabular-nums"] },
-  orderCash: { fontSize: 10.5, fontWeight: "800", color: colors.primary },
+  shopChipName: { flexShrink: 1, fontSize: 11, fontWeight: "800", color: colors.textMain },
+  shopChipCount: {
+    fontSize: 10, fontWeight: "900", color: colors.primaryFg, overflow: "hidden",
+    backgroundColor: colors.primary, borderRadius: 8, minWidth: 16,
+    textAlign: "center", paddingHorizontal: 4, paddingVertical: 1,
+  },
+  shopBlock: { gap: 6 },
+  shopHead: { flexDirection: "row", alignItems: "center", gap: 6 },
+  shopName: { flex: 1, fontSize: 11.5, fontWeight: "900", color: colors.textMain },
+  shopMeta: { fontSize: 11, fontWeight: "800", color: colors.textMuted, fontVariant: ["tabular-nums"] },
+  shopCash: { fontSize: 10.5, fontWeight: "800", color: colors.primary },
   pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
   pillText: { fontSize: 8.5, fontWeight: "900", color: "#FFFFFF", letterSpacing: 0.5 },
-  actionRow: { flexDirection: "row", gap: 8, marginTop: 2 },
+  actionRow: { flexDirection: "row", gap: 8 },
   actionBtn: {
     flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
     gap: 6, minHeight: 44, borderRadius: 10, backgroundColor: colors.primary,

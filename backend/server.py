@@ -2213,6 +2213,8 @@ async def admin_create_product(p: ProductCreate, admin: Dict[str, Any] = Depends
     from core.variants import apply_variants_to_payload
     payload = compress_product_payload(p.dict())
     payload = apply_variants_to_payload(payload, float(payload.get("price") or 0))
+    from core.taxonomy import normalize_product_taxonomy
+    payload = await normalize_product_taxonomy(payload)
     doc = {"id": str(uuid.uuid4()), **payload, "created_at": now_utc().isoformat()}
     await db.products.insert_one(doc)
     doc.pop("_id", None)
@@ -2457,6 +2459,8 @@ async def admin_update_product(product_id: str, payload: ProductUpdate, admin: D
         else (target.get("base_price") or target.get("price") or 0)
     )
     update = apply_variants_to_payload(update, _base)
+    from core.taxonomy import normalize_product_taxonomy
+    update = await normalize_product_taxonomy(update, target)
     await db.products.update_one({"id": product_id}, {"$set": update})
     # Dec 2026 — Bust shop caches so customers see the publish/edit
     # change on their very next /products call (was up to 60s delay).
@@ -8598,6 +8602,8 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
     # rewrites `stock` (sum of options) and `price` (cheapest buyable
     # option) so every existing badge / filter / POS screen keeps working.
     payload = apply_variants_to_payload(payload, float(payload.get("price") or 0))
+    from core.taxonomy import normalize_product_taxonomy
+    payload = await normalize_product_taxonomy(payload)
     doc = {
         "id": str(uuid.uuid4()),
         **{k: v for k, v in payload.items() if k != "vendor_id"},
@@ -8661,6 +8667,8 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
         else (target.get("base_price") or target.get("price") or 0)
     )
     update = apply_variants_to_payload(update, _base)
+    from core.taxonomy import normalize_product_taxonomy
+    update = await normalize_product_taxonomy(update, target)
     await db.products.update_one({"id": product_id}, {"$set": update})
     try:
         from routes.products_public import bust_products_public_caches

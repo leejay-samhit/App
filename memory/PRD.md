@@ -2332,3 +2332,59 @@ Razorpay path is unchanged and still posts its bank CREDIT.
   drift, guards, and the Razorpay remit regression.
 - Screenshots: admin Cash-on-hand card, rider Money card with the new maths
   line and "Use wallet" button, rider Customers screen.
+
+## Jun-2026 batch 3 — admin nav lock, recharge payment + hero card, rails, DP polish
+
+### P. Admin bottom bar is locked by ONE list
+Every new `/app/admin/` screen auto-registered as a 7th tab (Recharge options
+was the latest). `app/admin/_layout.tsx` now keeps a single `HIDDEN` array and
+maps it to `<Tabs.Screen … href:null />`, so adding a screen is one line and the
+bar stays Home · Users · Shop · Payouts · Wallet · More. Recharge options lives
+in /admin/more.tsx only. Verified by screenshot: exactly 6 tabs.
+
+### Q. Recharge pays online on a real phone, from a hero card
+`openRazorpayCheckout()` throws on native by design — the gateway has to be
+hosted in a WebView — and the Recharge screen was calling it directly, which is
+the error the owner saw. New `src/recharge-pay.tsx` owns the whole flow once:
+`useRechargePay()` (start → mock or gateway → verify, with the WebView resolver
+and the `{type:"success"|"cancel"|"failed"}` message mapping) plus
+`<RazorpayWebViewModal/>`. Used by BOTH the Recharge screen and the product
+page. The same wrong-shape bug was fixed in `app/wallet-topup.tsx`, where a
+successful native top-up was being read as a cancel.
+
+Tapping a plan now opens the product hero card, carrying the number + circle in
+the route params. For a recharge product the hero card swaps Add-to-cart /
+Buy-now for "Pay online · ₹X", which opens a sheet with just the number —
+no cart, no address, no delivery (the qty stepper is hidden too).
+
+### R. Vendor picks the CIRCLE; the operator is derived
+`rich-product-editor.tsx` shows a "Circle / State" chip row (incl. "All
+circles") whenever the category is Recharge, saving `recharge_state`.
+`core/taxonomy.py` (new) runs on all four product write paths and
+(a) mirrors `sub_category` ↔ `subcategory`, (b) derives `recharge_kind` /
+`recharge_network` from the picked operator sub-category. So the vendor types
+nothing twice and the customer's State → Network filter actually matches.
+
+### S. "Ready to add" rail follows the SUB-category
+The editor wrote `sub_category` while `routes/product_rails.py` read
+`subcategory`, so rail 1 silently fell back to the whole category. It now
+matches either shape with a case-insensitive `$or`, and the rail-2 guest
+fallback stays inside the sub-category, widening to the category only when
+that leaves the rail empty.
+
+### T. Rider Customers screen alignment
+Actions moved above the (long) order list, a shop chip strip shows which
+sellers the doorstep covers, and the expanded list is grouped per shop with
+`N · ₹value` and a "Collect ₹X cash for this shop" line. Order rows now use a
+fixed 104 px right column (status pill / amount / COD-or-Prepaid) so nothing
+is ragged.
+
+### Verification
+- testing_agent iteration 93 — `tests/test_iter93_taxonomy_recharge_rails.py`
+  **16/16 PASS** (taxonomy mirror on all 4 write paths, mobile + DTH auto-tag,
+  empty circle = all circles, publish-gated plan listing + circle filter, rails
+  `$or` match and fallback invariant, recharge pay start/verify with state and
+  network omitted, cascade + tree regression, no recharge keys leaking onto
+  ordinary products).
+- Screenshots: 6-tab admin bar, recharge plan list → hero card → pay sheet
+  (prefilled number, "No delivery address needed"), rider Customers card.

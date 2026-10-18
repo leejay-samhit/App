@@ -271,6 +271,10 @@ export function RichProductEditor({
   // ── Clothes-specific ──
   const [subCategory, setSubCategory] = useState<string>(""); // male|female|boys|girls
   const [clothingSize, setClothingSize] = useState<string>("");
+  // ── Recharge-specific (Jun 2026) — the circle this plan is valid in.
+  // "" means every circle. The operator comes from the sub-category chip.
+  const [rechargeState, setRechargeState] = useState<string>("");
+  const [rechargeStates, setRechargeStates] = useState<{ slug: string; name: string }[]>([]);
   // ── Device identity (July 2026) — Serial + IMEI-1 + IMEI-2 ──
   // Optional across ALL products.  IMEIs are validated client-side with a
   // Luhn checksum (industry-standard 15-digit ID for phones).  Backend
@@ -671,6 +675,7 @@ export function RichProductEditor({
     setNewSubFeature("");
     setSubCategory(e.sub_category || "");
     setClothingSize(e.clothing_size || "");
+    setRechargeState((e as any).recharge_state || "");
     setSerialNumber((e as any).serial_number || "");
     setImei1((e as any).imei_1 || "");
     setImei2((e as any).imei_2 || "");
@@ -1269,6 +1274,23 @@ export function RichProductEditor({
 
   // ── AI Image Generation (Clothes only) ──
   const isClothes = (category || "").trim().toLowerCase() === "clothes";
+  // Jun 2026 — Recharge plans need a circle AND an operator.
+  const isRecharge = (category || "").trim().toLowerCase() === "recharge";
+  React.useEffect(() => {
+    if (!isRecharge || rechargeStates.length) return;
+    api.get<any>("/recharge/options")
+      .then(({ data }) => {
+        const seen = new Set<string>();
+        const out: { slug: string; name: string }[] = [];
+        for (const kind of ["mobile", "dth"]) {
+          for (const st of data?.[kind]?.states || []) {
+            if (st?.slug && !seen.has(st.slug)) { seen.add(st.slug); out.push({ slug: st.slug, name: st.name }); }
+          }
+        }
+        setRechargeStates(out);
+      })
+      .catch(() => setRechargeStates([]));
+  }, [isRecharge, rechargeStates.length]);
   const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
 
   const AI_STYLES = [
@@ -1539,6 +1561,9 @@ export function RichProductEditor({
         whats_in_box: whatsInBox.filter((b) => b.name.trim() || b.image_data_url),
         sub_category: (subCategory || "").trim() || undefined,
         clothing_size: isClothes ? (clothingSize || undefined) : undefined,
+        // Recharge (Jun 2026) — circle only; kind + operator are derived from
+        // the sub-category server-side (core/taxonomy.py).
+        recharge_state: isRecharge ? (rechargeState || null) : undefined,
         // Device identity (July 2026) — trimmed, `undefined` when blank so
         // the backend keeps a null/empty value rather than a literal "".
         serial_number: (serialNumber.trim()
@@ -2019,6 +2044,37 @@ export function RichProductEditor({
                     testID="product-subcat-generic"
                     maxLength={40}
                   />
+                </>
+              ) : null}
+
+              {/* Jun 2026 — Recharge needs the CIRCLE as well as the
+                  operator, otherwise the customer's State filter on the
+                  Recharge screen can never match the plan. Chips come from
+                  the admin's own state list (/recharge/options). */}
+              {isRecharge ? (
+                <>
+                  <Text style={modalStyles.fieldLabel}>Circle / State</Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>
+                    The Recharge screen filters by State then Network, so pick the circle this plan
+                    is valid in. “All circles” shows it in every state.
+                  </Text>
+                  <View style={sectionStyles.chipRow}>
+                    {[{ slug: "", name: "All circles" }, ...rechargeStates].map((st) => {
+                      const active = (rechargeState || "") === st.slug;
+                      return (
+                        <TouchableOpacity
+                          key={st.slug || "all"}
+                          onPress={() => setRechargeState(st.slug)}
+                          style={[sectionStyles.chip, active && sectionStyles.chipActive]}
+                          testID={`product-recharge-state-${st.slug || "all"}`}
+                        >
+                          <Text style={[sectionStyles.chipText, active && sectionStyles.chipTextActive]}>
+                            {st.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
                 </>
               ) : null}
 

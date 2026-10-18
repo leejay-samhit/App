@@ -25,7 +25,7 @@ import { useRouter } from "expo-router";
 import { api, formatApiError } from "../src/api";
 import { useAuth } from "../src/auth";
 import { notify } from "../src/notify";
-import { openRazorpayCheckout, type RazorpayResult } from "../src/razorpay";
+import { useRechargePay, RazorpayWebViewModal, accountIsValid } from "../src/recharge-pay";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
 type Option = { id: string; name: string; slug: string; kind: string; group: string };
@@ -53,7 +53,6 @@ export default function RechargeScreen() {
   const [picker, setPicker] = useState<"state" | "network" | null>(null);
   const [groups, setGroups] = useState<PlanGroup[]>([]);
   const [plansLoading, setPlansLoading] = useState(false);
-  const [paying, setPaying] = useState<string | null>(null);
 
   const loadOptions = useCallback(async () => {
     try {
@@ -100,82 +99,35 @@ export default function RechargeScreen() {
 
   useEffect(() => { loadPlans(); }, [loadPlans]);
 
-  const accountValid = service === "mobile"
-    ? /^[6-9]\d{9}$/.test(account.replace(/\D+/g, ""))
-    : account.trim().length >= 6;
+  const accountValid = accountIsValid((service || "mobile") as any, account);
 
-  const onPay = async (plan: Plan) => {
-    if (!accountValid) {
-      notify(
-        service === "mobile" ? "Enter a mobile number" : "Enter a subscriber ID",
-        service === "mobile"
-          ? "We need the 10-digit number you want to recharge."
-          : "We need the DTH subscriber / customer ID.",
-      );
-      return;
-    }
-    setPaying(plan.id);
-    try {
-      const { data: start } = await api.post<{
-        payment_id: string; razorpay_order_id: string; amount_paise: number;
-        key_id: string; is_mock: boolean; description?: string;
-        prefill?: { name?: string; email?: string; contact?: string };
-      }>("/recharge/payment/start", {
-        kind: service,
-        product_id: plan.id,
-        account: account.replace(/\s+/g, ""),
-        state: state?.slug,
-        network: network?.slug,
-      });
+  // Jun 2026 — the gateway now runs through the shared hook so it works on a
+  // real phone (WebView) as well as the web preview.
+  const { pay, paying, rzpHtml, handleMessage, cancel } = useRechargePay(() => setAccount(""));
 
-      let result: RazorpayResult;
-      if (start.is_mock) {
-        // Preview/sandbox — simulate the gateway so the whole flow still
-        // runs end to end without live keys.
-        await new Promise((r) => setTimeout(r, 1000));
-        result = {
-          ok: true,
-          paymentId: `pay_MOCK_${Math.random().toString(36).slice(2, 14)}`,
-          orderId: start.razorpay_order_id,
-          signature: `sig_MOCK_${Math.random().toString(36).slice(2, 20)}`,
-        };
-      } else {
-        result = await openRazorpayCheckout({
-          orderId: start.razorpay_order_id,
-          amountPaise: start.amount_paise,
-          keyId: start.key_id,
-          name: "Slangcart",
-          description: start.description || plan.name,
-          prefill: {
-            name: start.prefill?.name || user?.name,
-            email: start.prefill?.email || (user as any)?.email,
-            contact: start.prefill?.contact || account,
-          },
-          themeColor: colors.primary,
-        });
-      }
+  const onPay = (plan: Plan) => pay({
+    kind: (service || "mobile") as "mobile" | "dth",
+    productId: plan.id,
+    planName: plan.name,
+    account,
+    state: state?.slug,
+    network: network?.slug,
+    prefill: { name: user?.name, email: (user as any)?.email, contact: account },
+  });
 
-      if (!result.ok) {
-        notify("Payment cancelled", result.error || "You can try again any time.");
-        return;
-      }
-      const { data: done } = await api.post("/recharge/payment/verify", {
-        payment_id: start.payment_id,
-        razorpay_order_id: result.orderId,
-        razorpay_payment_id: result.paymentId,
-        razorpay_signature: result.signature,
-      });
-      notify(
-        "Recharge booked",
-        `${formatINR(done.amount)} for ${done.account} — you'll get a confirmation shortly.`,
-      );
-      setAccount("");
-    } catch (e) {
-      notify("Recharge failed", formatApiError(e));
-    } finally {
-      setPaying(null);
-    }
-  };
+  // Tapping the plan itself opens the full hero card. The account number and
+  // circle travel with it so "Pay online" there needs no re-typing and still
+  // never asks for an address.
+  const openPlan = (plan: Plan) => router.push({
+    pathname: "/product/[id]",
+    params: {
+      id: plan.id,
+      rchKind: service || "mobile",
+      rchAccount: account,
+      rchState: state?.slug || "",
+      rchNetwork: network?.slug || "",
+    },
+  } as any);
 
   if (loading) {
     return (
@@ -322,10 +274,17 @@ export default function RechargeScreen() {
                 <View key={g.name} style={{ marginTop: 18 }}>
                   <Text style={styles.groupTitle}>{g.name}</Text>
                   {g.products.map((p) => (
-                    <View key={p.id} style={styles.planRow} testID={`recharge-plan-${p.id}`}>
+                    <TouchableOpacity
+                      key={p.id}
+                      style={styles.planRow}
+                      onPress={() => openPlan(p)}
+                      activeOpacity={0.8}
+                      testID={`recharge-plan-${p.id}`}
+                    >
                       <View style={{ flex: 1 }}>
                         <Text style={styles.planAmount}>{formatINR(p.price)}</Text>
                         <Text style={styles.planName} numberOfLines={2}>{p.name}</Text>
+                        <Text style={styles.planMore}>View details</Text>
                       </View>
                       <TouchableOpacity
                         onPress={() => onPay(p)}
@@ -344,7 +303,7 @@ export default function RechargeScreen() {
                           </Text>
                         )}
                       </TouchableOpacity>
-                    </View>
+                    </TouchableOpacity>
                   ))}
                 </View>
               ))
@@ -392,6 +351,9 @@ export default function RechargeScreen() {
           </TouchableOpacity>
         </View>
       </Modal>
+
+      {/* Razorpay on native (WebView) — web opens the JS checkout directly */}
+      <RazorpayWebViewModal html={rzpHtml} onMessage={handleMessage} onCancel={cancel} />
     </SafeAreaView>
   );
 }
@@ -479,6 +441,7 @@ const styles = StyleSheet.create({
   },
   planAmount: { fontSize: 16, fontWeight: "900", color: colors.textMain },
   planName: { fontSize: 11.5, lineHeight: 16, color: colors.textMuted, marginTop: 2, fontWeight: "600" },
+  planMore: { fontSize: 10.5, color: colors.primary, fontWeight: "800", marginTop: 4 },
   payBtn: {
     backgroundColor: colors.primary, paddingHorizontal: 16,
     minHeight: 40, minWidth: 96, borderRadius: 999,

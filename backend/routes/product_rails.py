@@ -191,7 +191,8 @@ async def product_rails(
     """The two rails for a product page."""
     product = await db.products.find_one(
         {"id": product_id},
-        {"_id": 0, "id": 1, "category": 1, "subcategory": 1, "brand": 1, "price": 1},
+        {"_id": 0, "id": 1, "category": 1, "subcategory": 1, "sub_category": 1,
+         "brand": 1, "price": 1},
     )
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -199,11 +200,18 @@ async def product_rails(
     live = {"active": {"$ne": False}, "id": {"$ne": product_id}}
 
     # ── Rail 1: more in the same subcategory ─────────────────────────────
-    sub = product.get("subcategory")
+    # Jun-2026 — the editor writes `sub_category` while every reader asked
+    # for `subcategory`, so this silently fell back to the WHOLE category
+    # (the owner saw rice next to soap). Match BOTH shapes.
+    sub = (product.get("subcategory") or product.get("sub_category") or "").strip()
     cat = product.get("category")
-    sib_q = dict(live)
+    sub_match: Dict[str, Any] = {}
     if sub:
-        sib_q["subcategory"] = sub
+        rx = {"$regex": f"^{re.escape(sub)}$", "$options": "i"}
+        sub_match = {"$or": [{"subcategory": rx}, {"sub_category": rx}]}
+    sib_q = dict(live)
+    if sub_match:
+        sib_q.update(sub_match)
     elif cat:
         sib_q["category"] = cat
     siblings = await db.products.find(sib_q, CARD_FIELDS).limit(RAIL_SIZE * 3).to_list(RAIL_SIZE * 3)
@@ -236,15 +244,20 @@ async def product_rails(
             personalised = bool(rail_you)
 
     if not rail_you:
-        # No history yet — show other good sellers in this category instead
-        # of an empty rail.
-        fallback_q = dict(live)
-        if cat:
-            fallback_q["category"] = cat
-        seen = {c["id"] for c in rail_sub}
-        fb = await db.products.find(
-            {**fallback_q, "id": {"$nin": list(seen | {product_id})}}, CARD_FIELDS,
-        ).limit(RAIL_SIZE).to_list(RAIL_SIZE)
+        # No history yet — stay inside the item's OWN sub-category (owner's
+        # Jun-2026 call: a ready-to-add list built from the whole category
+        # just looks random), and only widen to the category if that leaves
+        # the rail empty.
+        seen = {c["id"] for c in rail_sub} | {product_id}
+        fb: List[Dict[str, Any]] = []
+        if sub_match:
+            fb = await db.products.find(
+                {**live, **sub_match, "id": {"$nin": list(seen)}}, CARD_FIELDS,
+            ).limit(RAIL_SIZE).to_list(RAIL_SIZE)
+        if not fb and cat:
+            fb = await db.products.find(
+                {**live, "category": cat, "id": {"$nin": list(seen)}}, CARD_FIELDS,
+            ).limit(RAIL_SIZE).to_list(RAIL_SIZE)
         rail_you = [_card(p) for p in fb]
 
     return {
@@ -252,7 +265,7 @@ async def product_rails(
             {
                 "key": "subcategory",
                 "title": f"More in {sub or cat or 'this range'}",
-                "subtitle": "Same category, ready to add",
+                "subtitle": "Same sub-category, ready to add" if sub else "Same category, ready to add",
                 "items": rail_sub,
             },
             {
