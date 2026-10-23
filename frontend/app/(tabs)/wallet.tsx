@@ -138,6 +138,7 @@ export default function WalletScreen() {
   const [shopWallet, setShopWallet] = useState<{
     available: number; personal_wallet: number; pending_withdrawals: number;
     cod_to_collect: number; min_withdrawal: number; can_withdraw: boolean;
+    cashback_outstanding?: number; withdrawal_fee_pct?: number;
     withdraw_blocked_reason: string; payout_promise: string; in_sync: boolean;
   } | null>(null);
 
@@ -470,6 +471,43 @@ export default function WalletScreen() {
               style={styles.modalInput}
             />
             {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            {isSeller ? (
+              <View style={styles.settleBreak} testID="withdraw-breakdown">
+                <View style={styles.settleRow}>
+                  <Text style={styles.settleLabel}>You asked for</Text>
+                  <Text style={styles.settleValue}>{formatINR(Number(amount) || 0)}</Text>
+                </View>
+                {(shopWallet?.cashback_outstanding || 0) > 0 ? (
+                  <View style={styles.settleRow}>
+                    <Text style={styles.settleLabel}>Cashback outstanding adjusted</Text>
+                    <Text style={styles.settleValue}>
+                      − {formatINR(Math.min(shopWallet?.cashback_outstanding || 0, Number(amount) || 0))}
+                    </Text>
+                  </View>
+                ) : null}
+                <View style={styles.settleRow}>
+                  <Text style={styles.settleLabel}>
+                    Transaction fee {(shopWallet?.withdrawal_fee_pct ?? 2.56)}%
+                  </Text>
+                  <Text style={styles.settleValue}>
+                    − {formatINR(((Number(amount) || 0) * (shopWallet?.withdrawal_fee_pct ?? 2.56)) / 100)}
+                  </Text>
+                </View>
+                <View style={[styles.settleRow, styles.settleTotalRow]}>
+                  <Text style={[styles.settleLabel, { color: colors.textMain, fontWeight: "800" }]}>
+                    Reaches your bank
+                  </Text>
+                  <Text style={[styles.settleValue, { color: colors.primary, fontWeight: "900" }]}
+                    testID="withdraw-net">
+                    {formatINR(Math.max(0,
+                      (Number(amount) || 0)
+                      - Math.min(shopWallet?.cashback_outstanding || 0, Number(amount) || 0)
+                      - ((Number(amount) || 0) * (shopWallet?.withdrawal_fee_pct ?? 2.56)) / 100,
+                    ))}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
             <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
               <TouchableOpacity onPress={() => setShowModal(false)} style={[styles.modalBtn, { backgroundColor: colors.surfaceMuted }]}>
                 <Text style={{ color: colors.textMain, fontWeight: "700" }}>Cancel</Text>
@@ -690,6 +728,14 @@ const styles = StyleSheet.create({
   modalSub: { fontSize: 13, color: colors.textMuted, marginTop: 4, marginBottom: 16 },
   modalInput: { backgroundColor: colors.surfaceMuted, borderRadius: radii.input, paddingHorizontal: 16, paddingVertical: 16, fontSize: 18, color: colors.textMain, fontWeight: "700" },
   errorText: { color: "#B3261E", fontSize: 13, marginTop: 8 },
+  settleBreak: {
+    marginTop: 12, padding: 12, borderRadius: 12,
+    backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, gap: 6,
+  },
+  settleRow: { flexDirection: "row", justifyContent: "space-between", gap: 10 },
+  settleTotalRow: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8, marginTop: 2 },
+  settleLabel: { fontSize: 12.5, color: colors.textMuted, fontWeight: "600", flex: 1 },
+  settleValue: { fontSize: 13, color: colors.textMain, fontWeight: "800" },
   modalBtn: { flex: 1, paddingVertical: 14, borderRadius: radii.button, alignItems: "center" },
   detailRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 12 },
   detailKey: { fontSize: 12, color: colors.textMuted, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0, width: 120 },

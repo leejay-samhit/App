@@ -1870,6 +1870,46 @@ async def admin_reject_withdrawal(
         extra={"withdrawal_id": wid,
                **({"wallet_impact": "vendor_earnings_only"} if _wf == shop_money.VENDOR_WALLET else {})},
     )
+    # Jun-2026 — a settlement that never happened must not cost the seller the
+    # 2.56% transaction fee: give it back and take the revenue off the books.
+    _fee = round(float(w.get("transaction_fee") or 0), 2)
+    if _fee > 0.009:
+        await shop_money.credit(
+            w["user_id"], _wf, _fee,
+            idempotency_key=f"WDL_FEEBACK:{wid}",
+            group="revenue_ledger",
+            txn_type="withdrawal_transaction_fee_refund",
+            vendor_id=w["user_id"],
+            source_wallet="system_treasury",
+            settlement_status="rejected",
+            description=(
+                f"Transaction fee ₹{_fee:,.2f} returned — settlement rejected"
+                + (f" ({reason})" if reason else "")
+            ),
+            extra={"withdrawal_id": wid, "reverses_fee": True,
+                   **({"wallet_impact": "vendor_earnings_only"} if _wf == shop_money.VENDOR_WALLET else {})},
+        )
+        # The reversal runs on EVERY reject, not only when the credit above was
+        # fresh: `shop_money.post` is keyed, so a replay is a no-op, while a
+        # reject whose fee credit landed in an earlier call still gets its
+        # revenue taken off the books.
+        _rev = await shop_money.post(
+                group="revenue_ledger",
+                txn_type="reversal",
+                amount=_fee,
+                debit=_fee,
+                idempotency_key=f"WDLFEEREV_REJECT:{wid}",
+                user_id=admin["id"],
+                vendor_id=w["user_id"],
+                source_wallet="system_treasury",
+                settlement_status="reversed",
+                description=f"Withdrawal transaction fee reversed — settlement {wid[:8]} rejected",
+                extra={"withdrawal_id": wid, "original_type": "platform_fee_collected"},
+            )
+        if _rev is not None:
+            await credit_admin_bucket("platform_fee_collected", -_fee, also_total_earned=False)
+    # The cashback that was adjusted on the request is NOT returned: it was a
+    # genuine debt the seller owed and it is now settled.
     await db.withdrawals.update_one(
         {"id": wid},
         {"$set": {
@@ -5798,6 +5838,29 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
         except Exception as _cb_err:
             logger.warning(f"cashback settlement failed for {order_id}: {str(_cb_err)[:300]}")
 
+        # ── RECHARGE DONE (Jun-2026 owner report) ─────────────────────────
+        # A recharge order has nothing to ship: "delivered" means the seller
+        # (or the rider working that operator) actually performed the top-up.
+        # That is the moment the buyer's Recharge history must stop saying
+        # "Processing" and read "Successful".
+        if order.get("is_recharge") and order.get("recharge_id"):
+            done_at = now_utc().isoformat()
+            res_rc = await db.recharges.update_one(
+                {"id": order["recharge_id"], "status": {"$ne": "success"}},
+                {"$set": {"status": "success", "completed_at": done_at,
+                          "completed_by": actor_name, "completed_by_role": actor_role}},
+            )
+            if res_rc.modified_count:
+                try:
+                    await _create_notification(
+                        order["user_id"], "order", "Recharge successful",
+                        f"{order.get('recharge_account') or ''} · ₹{float(order.get('total') or 0):.0f} "
+                        f"— your recharge is done.",
+                        extra={"order_id": order_id, "action_url": "/recharge-history"},
+                    )
+                except Exception:
+                    pass
+
     # ── DELIVERED → settle the delivery charge, once, for EVERY order ────
     # Phase 1: the ONLY money Slangcart takes on a shop order is the
     # delivery charge, and it is recognised the moment delivery succeeds:
@@ -5964,33 +6027,55 @@ async def admin_update_order_status(order_id: str, payload: OrderStatusUpdate, a
             order["user_id"], "order", "Order cancelled",
             f"₹{int(order_total)} refunded to your wallet." if paid_via == "wallet" else "Your order was cancelled.",
         )
-    elif payload.status != "cancelled":
+    elif payload.status != "cancelled" and payload.status != prev_status:
+        # Only a REAL transition talks: re-saving the same status (a double tap
+        # on the vendor's button, a rider retry) must not notify again.
         title, body = ORDER_STATUS_COPY.get(
             payload.status, (f"Order {payload.status}", f"Your order is now {payload.status}."),
         )
-        await _create_notification(order["user_id"], "order", title, body, push=False)
+        # Jun-2026 — a recharge has no parcel: "Your parcel has been
+        # delivered" was plainly wrong, and its own "Recharge successful"
+        # notification (written in the delivered branch above) already tells
+        # the buyer what happened. Only re-word the earlier stages.
+        if order.get("is_recharge"):
+            if payload.status == "delivered":
+                title = body = ""
+            else:
+                title = "Recharge update"
+                body = (
+                    f"{order.get('recharge_account') or 'Your recharge'} — the seller is "
+                    f"working on it."
+                )
+        if title:
+            await _create_notification(order["user_id"], "order", title, body, push=False)
         # Sep 2026 — also push it to the phone, and tell the vendor.
         try:
             from routes.push import send_push
             targets = [order["user_id"]]
             if order.get("vendor_id"):
                 await _create_notification(
-                    order["vendor_id"], "vendor", title,
+                    order["vendor_id"], "vendor", title or "Recharge done",
+                    (
+                        f"{order.get('order_number') or order['id'][:8]} — recharge of "
+                        f"{order.get('recharge_account') or 'the number'} is "
+                        f"{'done' if payload.status == 'delivered' else 'in progress'}."
+                    ) if order.get("is_recharge") else
                     f"{order.get('order_number') or order['id'][:8]} is now {payload.status.replace('_', ' ')}.",
                     extra={"order_id": order["id"], "action_url": "/vendor/orders"},
                     push=False,  # covered by the batched send_push below
                 )
                 targets.append(order["vendor_id"])
-            await send_push(
-                recipients=targets,
-                data={
-                    "title": f"📦 {title}",
-                    "message": f"{order.get('order_number') or ''} · {body}".strip(" ·"),
-                    "action_url": f"/orders/{order['id']}",
-                },
-                idempotency_key=f"order-status-{order['id']}-{payload.status}",
-                category="orders",
-            )
+            if title:
+                await send_push(
+                    recipients=targets,
+                    data={
+                        "title": f"{'⚡' if order.get('is_recharge') else '📦'} {title}",
+                        "message": f"{order.get('order_number') or ''} · {body}".strip(" ·"),
+                        "action_url": f"/orders/{order['id']}",
+                    },
+                    idempotency_key=f"order-status-{order['id']}-{payload.status}",
+                    category="orders",
+                )
         except Exception as e:
             logging.warning(f"order status push failed (non-blocking): {e}")
     await _audit_log(admin, "order.status", "order", order_id, {"status": payload.status, "prev": prev_status})

@@ -3,12 +3,13 @@
 import React from "react";
 import { View, StyleSheet } from "react-native";
 import ChatListScreen from "../(tabs)/chat";
-import { DPTabBar } from "../../src/delivery-ui";
+import { DPTabBar, useDPSwipe } from "../../src/delivery-ui";
 import { colors } from "../../src/theme";
 
 export default function DeliveryChat() {
+  const swipe = useDPSwipe();
   return (
-    <View style={s.wrap}>
+    <View style={s.wrap} {...swipe}>
       <ChatListScreen />
       <DPTabBar />
     </View>

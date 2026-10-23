@@ -25,6 +25,10 @@ export default function AdminDeliveryPartners() {
   const [search, setSearch] = useState("");
   const [allPins, setAllPins] = useState<string[]>([]);
   const [pinFilter, setPinFilter] = useState<Set<string>>(new Set());
+  // Jun 2026 — shops come in two flavours now: normal parcel shops (mapped as
+  // before) and RECHARGE sellers, who are mapped operator-wise.
+  const [mapKind, setMapKind] = useState<"normal" | "recharge">("normal");
+  const [scopes, setScopes] = useState<Record<string, { kinds: string[]; networks: string[] }>>({});
   const [mapBusy, setMapBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -64,6 +68,8 @@ export default function AdminDeliveryPartners() {
       const d = data as any;
       setVendors(d?.vendors || []);
       setPicked(new Set(d?.mapped_vendor_ids || []));
+      setScopes(d?.mapped_scopes || {});
+      setMapKind("normal");
       setAllPins(d?.all_pincodes || []);
       // Pre-select the PINs the rider said he covers so the admin instantly
       // sees the shops that actually match his area.
@@ -82,6 +88,7 @@ export default function AdminDeliveryPartners() {
     try {
       await api.put(`/admin/delivery-partners/${mapFor.id}/vendors`, {
         vendor_ids: Array.from(picked),
+        recharge_scopes: scopes,
       });
       setMapFor(null);
       await load();
@@ -91,6 +98,7 @@ export default function AdminDeliveryPartners() {
   };
 
   const shown = vendors.filter((v) => {
+    if (!!v.is_recharge !== (mapKind === "recharge")) return false;
     const q = search.trim().toLowerCase();
     const pins: string[] = v.pincodes || [];
     const hitSearch = !q
@@ -116,6 +124,31 @@ export default function AdminDeliveryPartners() {
     shown.forEach((v) => next.delete(v.id));
     setPicked(next);
   };
+
+  // Recharge scope helpers — an empty list means "every type this seller
+  // sells", so the admin only has to tick what he wants to restrict to.
+  const scopeOf = (vid: string) => scopes[vid] || { kinds: [], networks: [] };
+  const toggleScope = (
+    vid: string, field: "kinds" | "networks", value: string, vendor?: any,
+  ) => {
+    const cur = scopeOf(vid);
+    const list = cur[field].includes(value)
+      ? cur[field].filter((x) => x !== value)
+      : [...cur[field], value];
+    const next = { ...cur, [field]: list };
+    // Un-ticking "DTH" must also drop the DTH operators that were ticked,
+    // otherwise the saved scope would contradict itself.
+    if (field === "kinds" && list.length > 0 && vendor) {
+      const allowed = new Set(
+        (vendor.recharge_networks || [])
+          .filter((n: any) => list.includes(n.kind))
+          .map((n: any) => n.slug),
+      );
+      next.networks = cur.networks.filter((n) => allowed.has(n));
+    }
+    setScopes({ ...scopes, [vid]: next });
+  };
+  const recCount = vendors.filter((v) => v.is_recharge).length;
 
   return (
     <SafeAreaView style={s.safe} edges={["top"]}>
@@ -235,8 +268,29 @@ export default function AdminDeliveryPartners() {
               {mapFor?.name || mapFor?.email}
             </Text>
           </View>
+          <View style={s.tabRow}>
+            {(["normal", "recharge"] as const).map((k) => {
+              const on = mapKind === k;
+              return (
+                <TouchableOpacity
+                  key={k}
+                  style={[s.tabChip, on && s.tabChipOn]}
+                  onPress={() => setMapKind(k)}
+                  testID={`adp-mapkind-${k}`}
+                >
+                  <Text style={[s.tabText, on && s.tabTextOn]}>
+                    {k === "normal"
+                      ? `Normal shops (${vendors.length - recCount})`
+                      : `Recharge shops (${recCount})`}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
           <Text style={s.mapHint}>
-            {`Pick the shops this rider delivers for. He only ever sees orders from these shops. ${picked.size} selected.`}
+            {mapKind === "recharge"
+              ? `Pick the recharge sellers and the operators this rider handles. Tick nothing under a seller and he gets every recharge of that shop. ${picked.size} selected.`
+              : `Pick the shops this rider delivers for. He only ever sees orders from these shops. ${picked.size} selected.`}
           </Text>
           <TextInput
             style={s.search}
@@ -291,9 +345,10 @@ export default function AdminDeliveryPartners() {
           <ScrollView contentContainerStyle={{ paddingBottom: 90 }}>
             {shown.map((v) => {
               const on = picked.has(v.id);
+              const sc = scopeOf(v.id);
               return (
+                <View key={v.id}>
                 <TouchableOpacity
-                  key={v.id}
                   style={[s.vendorRow, on && s.vendorRowOn]}
                   onPress={() => {
                     const next = new Set(picked);
@@ -316,6 +371,53 @@ export default function AdminDeliveryPartners() {
                     </Text>
                   </View>
                 </TouchableOpacity>
+                {on && v.is_recharge ? (
+                  <View style={s.scopeBox} testID={`adp-scope-${v.id}`}>
+                    <Text style={s.filterLabel}>Recharge type</Text>
+                    <View style={s.scopeChips}>
+                      {(v.recharge_kinds || []).map((k: string) => {
+                        const kOn = sc.kinds.includes(k);
+                        return (
+                          <TouchableOpacity
+                            key={k}
+                            style={[s.pinChip, kOn && s.pinChipOn]}
+                            onPress={() => toggleScope(v.id, "kinds", k, v)}
+                            testID={`adp-kind-${v.id}-${k}`}
+                          >
+                            <Text style={[s.pinText, kOn && s.pinTextOn]}>
+                              {k === "mobile" ? "Mobile recharge" : "DTH recharge"}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <Text style={s.filterLabel}>Operators</Text>
+                    <View style={s.scopeChips}>
+                      {(v.recharge_networks || [])
+                        .filter((n: any) => sc.kinds.length === 0 || sc.kinds.includes(n.kind))
+                        .map((n: any) => {
+                        const nOn = sc.networks.includes(n.slug);
+                        return (
+                          <TouchableOpacity
+                            key={n.slug}
+                            style={[s.pinChip, nOn && s.pinChipOn]}
+                            onPress={() => toggleScope(v.id, "networks", n.slug)}
+                            testID={`adp-net-${v.id}-${n.slug}`}
+                          >
+                            <Text style={[s.pinText, nOn && s.pinTextOn]}>{n.name}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <Text style={s.meta}>
+                      {sc.kinds.length === 0 && sc.networks.length === 0
+                        ? "Gets every recharge order of this shop."
+                        : `Gets only ${sc.kinds.length ? sc.kinds.map((k) => k === "mobile" ? "Mobile" : "DTH").join(" + ") : "any type"}`
+                          + (sc.networks.length ? ` · ${sc.networks.length} operator${sc.networks.length === 1 ? "" : "s"}` : "")}
+                    </Text>
+                  </View>
+                ) : null}
+                </View>
               );
             })}
             {shown.length === 0 ? <Text style={s.empty}>No shops match.</Text> : null}
@@ -417,6 +519,15 @@ const s = StyleSheet.create({
     paddingHorizontal: spacing.screen, marginBottom: 6, letterSpacing: 0.3,
   },
   pinRow: { paddingHorizontal: spacing.screen, gap: 8, paddingBottom: 4 },
+  scopeChips: {
+    flexDirection: "row", flexWrap: "wrap", gap: 8,
+    paddingHorizontal: spacing.screen, paddingBottom: 8,
+  },
+  scopeBox: {
+    marginHorizontal: spacing.screen, marginTop: -4, marginBottom: 10,
+    paddingVertical: 10, backgroundColor: colors.surfaceMuted,
+    borderRadius: radii.card, borderWidth: 1, borderColor: colors.border,
+  },
   pinChip: {
     paddingHorizontal: 13, paddingVertical: 8, borderRadius: 999,
     backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,

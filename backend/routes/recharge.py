@@ -426,11 +426,78 @@ async def resync_categories(
     return await sync_shop_categories()
 
 
+async def _route_to_supplier(
+    rows: List[Dict[str, Any]],
+    pincode: Optional[str],
+    lat: Optional[float],
+    lng: Optional[float],
+) -> Dict[str, Any]:
+    """Jun-2026 — LOCAL recharge seller wins, otherwise the all-India one.
+
+    One seller supplies recharges for the whole country (delivery mode
+    "Everyone"). Any other seller may also list recharge plans but only for
+    his own pincodes / km radius. The owner's rule: when a shopper is inside
+    such a seller's zone, the order must go to HIM and the all-India plans
+    must not even be shown there; everywhere else the all-India seller serves.
+    """
+    vids = sorted({str(r.get("vendor_id")) for r in rows if r.get("vendor_id")})
+    if not vids:
+        return {"rows": rows, "supplier": "national", "vendor_ids": []}
+    vendors = {
+        v["id"]: v
+        async for v in db.users.find(
+            {"id": {"$in": vids}},
+            {"_id": 0, "id": 1, "lat": 1, "lng": 1, "location": 1,
+             "delivery_radius_km": 1, "delivery_radius_mode": 1,
+             "delivery_pincodes": 1, "store_pincode": 1, "pincode": 1,
+             "delivery_available": 1, "vendor_business_name": 1, "shop_name": 1,
+             "name": 1},
+        )
+    }
+    from core.delivery import EVERYWHERE, vendor_covers, vendor_zone
+
+    local_ids: set[str] = set()
+    national_ids: set[str] = set()
+    for vid, v in vendors.items():
+        if vendor_zone(v).get("mode") == EVERYWHERE:
+            national_ids.add(vid)
+            continue
+        if pincode or (lat is not None and lng is not None):
+            res = await vendor_covers(v, pincode=pincode, lat=lat, lng=lng)
+            if res.get("covered"):
+                local_ids.add(vid)
+    if local_ids:
+        keep = local_ids
+        supplier = "local"
+    elif national_ids:
+        # The all-India supplier, plus any admin-seeded plan with no vendor.
+        keep = national_ids
+        supplier = "national"
+    else:
+        # Nobody is marked as an all-India supplier yet — never hide the whole
+        # catalogue over a configuration gap; show every plan instead.
+        keep = set(vendors.keys())
+        supplier = "national"
+    kept = [r for r in rows if (not r.get("vendor_id")) or str(r.get("vendor_id")) in keep]
+    names = [
+        (vendors[v].get("vendor_business_name") or vendors[v].get("shop_name")
+         or vendors[v].get("name") or "")
+        for v in sorted(keep) if v in vendors
+    ]
+    return {
+        "rows": kept, "supplier": supplier, "vendor_ids": sorted(keep),
+        "supplier_names": [n for n in names if n],
+    }
+
+
 @router.get("/recharge/products")
 async def recharge_products(
     kind: str,
     state: Optional[str] = None,
     network: Optional[str] = None,
+    pincode: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Plans for one state + network, grouped by their own subcategory so the
     screen can show "Unlimited", "Data add-on" etc. under the dropdowns.
@@ -475,6 +542,8 @@ async def recharge_products(
     rows = await db.products.find(
         {"$and": ands}, {"_id": 0, "device_units": 0},
     ).limit(500).to_list(500)
+    routed = await _route_to_supplier(rows, pincode, lat, lng)
+    rows = routed["rows"]
     rows.sort(key=lambda r: float(r.get("price") or 0))
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for p in rows:
@@ -485,5 +554,7 @@ async def recharge_products(
         groups.setdefault(label or "Plans", []).append(p)
     return {
         "count": len(rows),
+        "supplier": routed["supplier"],
+        "supplier_names": routed.get("supplier_names") or [],
         "groups": [{"name": k, "products": v} for k, v in groups.items()],
     }

@@ -9,9 +9,10 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useRouter } from "expo-router";
 import { api } from "../../src/api";
 import { colors, spacing, radii, formatINR } from "../../src/theme";
-import { DPHeader, DPTabBar, DPMoneyCard, DPEmpty } from "../../src/delivery-ui";
+import { DPHeader, DPTabBar, DPMoneyCard, DPEmpty, useDPSwipe } from "../../src/delivery-ui";
 
 export default function DeliveryDashboard() {
+  const swipe = useDPSwipe();
   const router = useRouter();
   const [nw, setNw] = useState<any>(null);
   const [shops, setShops] = useState<any[]>([]);
@@ -67,7 +68,7 @@ export default function DeliveryDashboard() {
   }
 
   return (
-    <SafeAreaView style={s.safe} edges={["top"]}>
+    <SafeAreaView style={s.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <DPHeader title="Delivery" subtitle={nw?.name || ""} />
       <ScrollView

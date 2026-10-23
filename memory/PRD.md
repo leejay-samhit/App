@@ -2494,3 +2494,136 @@ bank_tally_net +online, vendor_payable +price, net_worth unchanged.
   path + 400 + 401, split legs, clamping, rejection and replay idempotency.
 - Screenshots: rider shop-wise card, vendor RECHARGE THIS NUMBER block, pay
   sheet with wallet option + sticky button.
+
+---
+
+## BB. Jun 2026 — owner's 10-item batch
+
+### 1. Swipe everywhere
+`src/use-swipe-pager.useTabSwipe(order, tab, setTab)` is the one in-screen
+flick, now on admin Returns · Approvals · KYC · Payouts · Approved · Rejected ·
+Cashback · Backups · AI tools · Service applications, vendor Net worth ·
+Returns, rider Net worth. `delivery-ui.useDPSwipe()` flicks the rider between
+Delivery ↔ Chat ↔ Profile on every rider screen. The admin bottom tabs
+(Home · Users · Shop · Payouts · Wallet · More) swipe too, but stand down on a
+screen that owns its own strip (`OWN_STRIP`, currently `payouts`) so the strip
+keeps the gesture.
+
+### 2. Fingerprint on first login
+`src/biometric-enroll-prompt.tsx` mounts inside `AuthProvider`: once per
+account per device (`biometric_asked_v1:{uid}`), only when the phone has a
+biometric enrolled and the user hasn't already turned it on. "Not now" always
+available; nothing is blocked. Never shows on web.
+
+### 3. Recharge: processing → successful
+The DELIVERED branch of `admin_update_order_status` flips
+`db.recharges.status` to `success` + `completed_at` + who did it, and notifies
+the buyer "Recharge successful". Vendor, admin and rider all route through
+that one function. Replay is a no-op. A recharge never says "parcel delivered".
+
+### 4. Who supplies a recharge
+`GET /recharge/products` takes `pincode` / `lat` / `lng`:
+a seller whose own zone (pincode list / km radius) covers the shopper wins —
+`supplier: "local"`, and the all-India seller's plans are hidden in that area.
+Everywhere else the all-India seller (delivery mode = `everywhere`) serves,
+along with any admin-seeded plan that has no vendor. If nobody is marked
+all-India the catalogue is still shown (never an empty screen). The screen
+prints "Served by <shop> — a seller in your area".
+
+### 5. Rider mapping, category-wise
+`/admin/delivery-partners/{dp}/vendors` returns `is_recharge`,
+`recharge_kinds`, `recharge_networks` (each with its kind) and `mapped_scopes`;
+the PUT accepts `recharge_scopes: {vendor_id: {kinds, networks}}` and stores it
+on `dp_vendor_map`. `_order_in_scope()` hides out-of-scope recharge orders from
+`/delivery-partner/me/orders` + `/me/customers` and 403s a status move. Empty
+scope = every recharge of that shop. Parcel orders are untouched.
+UI: the map-shops sheet has "Normal shops (n)" / "Recharge shops (n)" and, per
+recharge seller, Mobile/DTH + operator chips (operators filter by the ticked
+kinds).
+
+### 6. Bag wallet summary
+`/cart` load now calls `refresh()` so the footer shows the live wallet from
+`/auth/me` instead of a stale snapshot (the "₹0 / short by ₹3" bug).
+
+### 7. Receivables + ONE recovery process
+`master.receivables_total = pending_collections + cashback_receivable +
+vendor_receivable`, inside net worth. `cashback_receivable` =
+Σ `users.cashback_outstanding`; `vendor_receivable` = open `vendor_outstanding`
+rows that are not cashback (refunds / fees the company advanced).
+Recovery is ONE process — `core.cashback.recover_outstanding_from_wallet`
+takes it out of the seller's `vendor_earnings` into the treasury: one wallet
+debit, one bucket credit, rows settled oldest-first. The bank-deposit and cash
+entries (and `recover_vendor_outstanding`) are gone, so nothing is hand-typed
+twice. The debt is claimed with a conditional `$inc` BEFORE the debit, so
+parallel taps cannot over-recover.
+
+### 8 + 9. Seller settlement
+`POST /withdrawals` for a seller: cashback outstanding is adjusted into the
+treasury first, then a **2.56%** transaction fee goes to the Revenue Ledger
+(`platform_fee_collected`), and only the remainder is raised as the payout
+(`amount`), with `requested_amount` / `cashback_adjusted` / `transaction_fee`
+on the row. The wallet drops by exactly what was requested, in three idempotent
+ledger rows. The whole thing runs under an atomic per-user claim
+(`users.settlement_busy_at`, 2-minute stale takeover) so four parallel taps
+raise exactly one. Rejecting returns the payout AND the fee and reverses the
+revenue. Riders pay no fee. The app shows the same arithmetic before you submit.
+
+### 10. Returns refund comes from the seller
+Refund is vendor shop wallet → customer wallet (unchanged), and
+`/admin/returns/{id}/refund-from-company` now 400s while the seller's wallet
+can cover it. One outstanding row per return, closed when paid and superseded
+when the company funds it.
+
+### Reports
+The group-wise Excel has a **Recharge** sheet, and every `shop_money` debit
+(delivery fee, cashback recovery, withdrawal hold, transaction fee, return
+refund) finally lands in the Debit column with a negative Amount and its
+remark — they used to read as credits.
+
+### Verification
+- `tests/test_jun2026_owner_batch.py` 13/13 · `tests/test_jun2026_recharge_and_settlement.py` 15/15
+- `tests/test_iter96_fixes.py` 11/11 (parallel recovery, parallel settlements, fee reversal)
+- testing_agent iteration 96 + its `tests/test_iter96_reconciliation.py` 7/7
+
+### BB-2. Iteration 97 corrections
+- **Receivables only counts money that left the treasury.** A `return_refund`
+  row is a PARKED refund (seller short, nobody paid yet) and is not an asset;
+  only `*_company_funded` rows are. `scripts/close_stale_parked_refunds.py`
+  closed 11 stale rows (₹6,600) from returns that were already refunded.
+- **Fee reversal is unconditional.** Rejecting a settlement always posts the
+  keyed `reversal` row and decrements the Revenue bucket off that row, so a
+  reject whose fee credit landed in an earlier call still reverses.
+  `_reversals_for()` sums |amount| per row (old rows were negative, new ones
+  positive, and they cancelled out).
+- **Replays are silent.** Order/recharge notifications only fire on a real
+  status transition, and the seller gets one "Refund blocked" nudge per return.
+- **Scope sanity.** The server drops an operator whose kind is not ticked, so
+  "DTH + Airtel" cannot be saved for a rider.
+
+### BB-3. Iteration 98 — the last of the money gaps
+- **`core/vendor_advances.py`** — every non-cashback debt (a return refund
+  Slangcart funded while the shop wallet was short, delivery fees) is totalled
+  and recovered the SAME single way: out of the seller's shop-earnings wallet,
+  ledger type `advance_recovery`. The admin button clears cashback first and
+  then the advances in one tap, and the seller's NEXT SALE clears them
+  automatically, which is what the "it will be recovered from your next sales"
+  notice promises.
+- **Rejected settlements keep nothing.** `scripts/backfill_rejected_fee_refunds.py`
+  returned ₹1,152 of fees on 9 old rejects and reversed them out of Revenue.
+- **The vendor statement adds up.** Withdrawal reversals, delivery reversals,
+  returned cashback funding, recoveries, transaction fees and fee refunds are
+  all on the Net worth breakdown now (they were missing, leaving it ₹1.84 lakh
+  out), and `scripts/reconcile_vendor_ledger.py` posts ONE explicit `LEDGERFIX`
+  row where an old fixture wrote a balance without a transaction, so
+  "Balanced" reads YES and every rupee has a row behind it.
+
+### BB-4. Iteration 99 — delivery fee + statement close-out
+- **A delivery fee is owed once.** The short-wallet row is upserted per ORDER
+  and closed as soon as the fee is paid, so retrying a delivery cannot bill it
+  again (it is a recoverable debt now, so this mattered).
+- **The vendor Excel Reconciliation sheet** carries the same lines as the
+  screen, so it ties to the ledger balance; `advance_recovery` exports under
+  Vendor Outstanding and the fee refund / adjustments under Vendor Settlement.
+- Automated suites no longer leave the real test seller short — they return
+  what they recovered, and the ₹675 taken by earlier runs was credited back
+  with a labelled correction row.

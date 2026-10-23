@@ -11,7 +11,7 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, spacing, radii, formatINR } from "../../src/theme";
-import { DPHeader, DPTabBar, DPStatusFilter, DPEmpty } from "../../src/delivery-ui";
+import { DPHeader, DPTabBar, DPStatusFilter, DPEmpty, useDPSwipe } from "../../src/delivery-ui";
 
 // The only forward moves a rider can make, in order (see NEXT below).
 const LABELS: Record<string, string> = {
@@ -29,6 +29,7 @@ const PILL: Record<string, string> = {
 };
 
 export default function DeliveryOrders() {
+  const swipe = useDPSwipe();
   const router = useRouter();
   const params = useLocalSearchParams<{ status?: string; vendor_id?: string }>();
   const [status, setStatus] = useState(String(params.status || "all"));
@@ -212,7 +213,7 @@ export default function DeliveryOrders() {
   };
 
   return (
-    <SafeAreaView style={s.safe} edges={["top"]}>
+    <SafeAreaView style={s.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <DPHeader
         title="Orders"

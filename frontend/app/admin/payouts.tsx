@@ -7,6 +7,7 @@ import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useInfiniteList } from "../../src/use-infinite-list";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type Withdrawal = {
   id: string;
@@ -48,6 +49,7 @@ export default function AdminPayouts() {
   const [digest, setDigest] = useState<Digest | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<"pending" | "processing" | "success" | "rejected">(initialTab);
+  const swipe = useTabSwipe(["pending", "processing", "success", "rejected"] as const, tab, setTab);
 
   // Phase 1 Session C — infinite scroll over the withdrawal queue. Re-renders
   // when `tab` changes (resetKey embeds the current status filter).
@@ -224,7 +226,7 @@ export default function AdminPayouts() {
   );
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <View style={styles.header}>
         <Text style={styles.overline}>ADMIN · FINANCE</Text>
         <Text style={styles.h1}>Withdrawals</Text>

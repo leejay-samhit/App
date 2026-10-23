@@ -53,3 +53,31 @@ export function useSwipePager({ onNext, onPrev, enabled = true }: Options) {
 
   return responder.panHandlers;
 }
+
+/**
+ * Jun 2026 — the same flick for an IN-SCREEN tab / filter strip (My Orders
+ * status filters, Net Worth sections, admin Approvals, vendor Returns …).
+ * Pass the tab keys in the order they are drawn plus the current value:
+ *
+ *   const swipe = useTabSwipe(ORDER, tab, setTab);
+ *   <SafeAreaView {...swipe}>
+ *
+ * Swiping stops at the ends (no wrap-around), which is what users expect
+ * from a filter row.
+ */
+export function useTabSwipe<T extends string>(
+  order: readonly T[],
+  current: T,
+  setTab: (t: T) => void,
+) {
+  const ref = useRef({ order, current, setTab });
+  ref.current = { order, current, setTab };
+  const step = (dir: 1 | -1) => {
+    const { order: o, current: c, setTab: set } = ref.current;
+    const i = o.indexOf(c);
+    if (i < 0) return;
+    const next = o[i + dir];
+    if (next !== undefined) set(next);
+  };
+  return useSwipePager({ onNext: () => step(1), onPrev: () => step(-1) });
+}

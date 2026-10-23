@@ -505,18 +505,24 @@ async def settle_delivery_fee(
             extra={"wallet_impact": "vendor_earnings_only"},
         )
     except InsufficientFunds as err:
-        await db.vendor_outstanding.insert_one({
-            "id": str(uuid.uuid4()),
-            "vendor_id": vendor_id,
-            "vendor_name": order.get("vendor_name"),
-            "kind": "delivery_fee",
-            "amount": fee,
-            "recovered": 0.0,
-            "status": "open",
-            "order_id": order_id,
-            "order_number": order.get("order_number"),
-            "created_at": ts,
-        })
+        # Oct-2026 — ONE row per order, however many times the delivery is
+        # retried. It used to insert a fresh row on every attempt, so moving
+        # an order delivered → shipped → delivered while the wallet was short
+        # left the same ₹20 fee owed two or three times over.
+        await db.vendor_outstanding.update_one(
+            {"order_id": order_id, "kind": "delivery_fee"},
+            {"$set": {
+                "vendor_id": vendor_id,
+                "vendor_name": order.get("vendor_name"),
+                "amount": fee,
+                "status": "open",
+                "order_number": order.get("order_number"),
+                "updated_at": ts,
+            }, "$setOnInsert": {
+                "id": str(uuid.uuid4()), "recovered": 0.0, "created_at": ts,
+            }},
+            upsert=True,
+        )
         await record_financial_error(
             "delivery_fee_unfunded", str(err),
             order_id=order_id, vendor_id=vendor_id, amount=fee,
@@ -529,6 +535,14 @@ async def settle_delivery_fee(
 
     if row is None:
         return {"settled": True, "amount": 0.0, "reason": "already_settled"}
+
+    # The fee is PAID now, so a row parked by an earlier short attempt must
+    # not stay open — otherwise the same rupees are recovered a second time.
+    await db.vendor_outstanding.update_many(
+        {"order_id": order_id, "kind": "delivery_fee", "status": "open"},
+        {"$set": {"status": "closed", "closed_at": ts,
+                  "closed_reason": "delivery_fee_paid"}},
+    )
 
     # Treasury + Revenue Ledger (Group 1 · delivery-charge revenue).
     #

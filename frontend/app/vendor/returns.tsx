@@ -11,6 +11,7 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, spacing, formatINR } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type ReturnDoc = {
   id: string;
@@ -53,6 +54,7 @@ const META: Record<string, { label: string; color: string; bg: string }> = {
 export default function VendorReturnsScreen() {
   const router = useRouter();
   const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("requested");
+const swipe = useTabSwipe(TABS.map((t) => t.key), tab, setTab);
   const [items, setItems] = useState<ReturnDoc[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
@@ -92,7 +94,7 @@ export default function VendorReturnsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} testID="vendor-returns-back">

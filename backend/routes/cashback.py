@@ -16,7 +16,7 @@ from core.cashback import (
     clamp_pct,
     customer_cashback_summary,
     fund_pending_cashback,
-    recover_vendor_outstanding,
+    recover_outstanding_from_wallet,
 )
 from core.db import db
 from core.security import get_current_user, require_admin, require_admin_role
@@ -179,7 +179,12 @@ async def admin_cashback_outstanding(
     vendor_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Money Slangcart fronted on behalf of sellers and has not recovered."""
-    q: Dict[str, Any] = {"status": "open", "kind": "cashback"}
+    from core import vendor_advances
+    # Oct-2026 — the screen shows EVERY rupee a seller owes us: fronted
+    # cashback AND advances (a return refund the company paid because his
+    # wallet was short, fees). One list, one recovery button.
+    q: Dict[str, Any] = {"status": "open",
+                         "kind": {"$in": ["cashback", *vendor_advances.RECOVERABLE_KINDS]}}
     if vendor_id:
         q["vendor_id"] = vendor_id
     rows = await db.vendor_outstanding.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
@@ -190,10 +195,34 @@ async def admin_cashback_outstanding(
             "vendor_id": r["vendor_id"],
             "vendor_name": r.get("vendor_name"),
             "outstanding": 0.0,
+            "cashback_outstanding": 0.0,
+            "advance_outstanding": 0.0,
             "orders": 0,
         })
         slot["outstanding"] = round(slot["outstanding"] + owed, 2)
+        if r.get("kind") == "cashback":
+            slot["cashback_outstanding"] = round(slot.get("cashback_outstanding", 0.0) + owed, 2)
+        else:
+            slot["advance_outstanding"] = round(slot.get("advance_outstanding", 0.0) + owed, 2)
         slot["orders"] += 1
+    # Jun-2026 — recovery now comes out of the seller's shop-earnings wallet,
+    # so the admin must see what is actually collectable right now.
+    if by_vendor:
+        async for v in db.users.find(
+            {"id": {"$in": list(by_vendor.keys())}},
+            {"_id": 0, "id": 1, "vendor_earnings": 1, "vendor_business_name": 1,
+             "shop_name": 1, "name": 1},
+        ):
+            slot = by_vendor.get(v["id"])
+            if not slot:
+                continue
+            avail = round(float(v.get("vendor_earnings") or 0), 2)
+            slot["vendor_name"] = (
+                slot.get("vendor_name") or v.get("vendor_business_name")
+                or v.get("shop_name") or v.get("name")
+            )
+            slot["wallet_balance"] = avail
+            slot["recoverable_now"] = round(min(avail, slot["outstanding"]), 2)
     return {
         "vendors": sorted(by_vendor.values(), key=lambda x: -x["outstanding"]),
         "rows": rows,
@@ -207,8 +236,14 @@ async def admin_recover_outstanding(
     payload: Dict[str, Any],
     admin: Dict[str, Any] = Depends(require_admin_role("super_admin", "finance")),
 ) -> Dict[str, Any]:
-    """Record that a seller has paid Slangcart back. Settles their open
-    cashback outstanding oldest-first. No customer wallet is touched."""
+    """Recover fronted cashback from the seller's SHOP EARNINGS WALLET.
+
+    Jun-2026 — the old screen offered "cash entry" and "bank deposit", which
+    were two hand-typed entries for money that had not necessarily moved and
+    could be recorded twice. There is now exactly ONE process: pull it out of
+    the balance the seller already has with us. One wallet debit, one
+    treasury credit, one audit row — nothing to reconcile by hand.
+    """
     from server import credit_admin_bucket
 
     try:
@@ -218,24 +253,62 @@ async def admin_recover_outstanding(
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than zero")
 
-    note = str(payload.get("note") or "Seller settled outstanding cashback").strip()
-    method = str(payload.get("method") or "cash").strip().lower()
-    if method not in ("cash", "upi", "bank"):
-        raise HTTPException(status_code=400, detail="method must be cash, upi or bank")
-    reference = (str(payload.get("reference") or "").strip() or None)
-    if method in ("upi", "bank") and not reference:
+    note = str(payload.get("note") or "Shop earnings wallet recovery").strip()
+    try:
+        result = await recover_outstanding_from_wallet(
+            vendor_id, amount,
+            credit_admin_bucket=credit_admin_bucket,
+            note=note,
+            recorded_by=admin.get("email") or admin.get("id"),
+        )
+        # Oct-2026 — cashback first, then whatever the company advanced for
+        # this shop (a return refund it funded, fees). Same wallet, same
+        # single tap, two clearly-labelled ledger rows.
+        applied_cb = round(float(result.get("applied") or 0), 2)
+        left = round(amount - applied_cb, 2)
+        adv: Dict[str, Any] = {"applied": 0.0}
+        if left > 0.009:
+            from core import vendor_advances
+            adv = await vendor_advances.recover_from_wallet(
+                vendor_id, left,
+                credit_admin_bucket=credit_admin_bucket,
+                note=note,
+                recorded_by=admin.get("email") or admin.get("id"),
+            )
+        applied_adv = round(float(adv.get("applied") or 0), 2)
+        result = {
+            **result,
+            "cashback_applied": applied_cb,
+            "advance_applied": applied_adv,
+            "applied": round(applied_cb + applied_adv, 2),
+            "rows": int(result.get("rows") or 0) + int(adv.get("rows") or 0),
+            "outstanding_before": round(
+                float(result.get("outstanding_before") or 0)
+                + float(adv.get("outstanding_before") or 0), 2),
+            "outstanding_after": round(
+                float(result.get("outstanding_after") or 0)
+                + float(adv.get("outstanding_after") or 0), 2),
+            "unapplied": round(max(0.0, amount - applied_cb - applied_adv), 2),
+            "cashback_outstanding_after": result.get("outstanding_after"),
+            "advance_outstanding_after": adv.get("outstanding_after"),
+            "wallet_after": adv.get("wallet_after", result.get("wallet_after")),
+        }
+        if applied_cb <= 0.009 and applied_adv > 0.009:
+            result.pop("reason", None)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if result.get("applied", 0) <= 0.009 and result.get("reason") in ("wallet_empty", "nothing_to_recover"):
         raise HTTPException(
             status_code=400,
-            detail="A UTR / reference number is required for a UPI or bank deposit.",
+            detail=(
+                "There is nothing to recover from this seller right now."
+                if result.get("reason") == "nothing_to_recover" else
+                "This seller's shop earnings wallet has no balance to recover from yet. "
+                "It is recovered automatically from his next sale."
+            ),
         )
-    result = await recover_vendor_outstanding(
-        vendor_id, amount,
-        credit_admin_bucket=credit_admin_bucket,
-        note=note, method=method, reference=reference,
-        recorded_by=admin.get("email") or admin.get("id"),
-    )
     await _audit_log(admin, "cashback.recover_outstanding", "user", vendor_id, {
-        "amount": amount, "note": note, "method": method, "reference": reference, **result,
+        "amount": amount, "note": note, "method": "wallet", **result,
     })
     return {"ok": True, "at": now_utc().isoformat(), **result}
 

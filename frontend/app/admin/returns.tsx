@@ -10,6 +10,7 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, spacing, formatINR } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 const TABS = [
   { key: "returns", label: "Returns" },
@@ -21,6 +22,7 @@ const TABS = [
 export default function AdminReturnsScreen() {
   const router = useRouter();
   const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("returns");
+const swipe = useTabSwipe(TABS.map((t) => t.key), tab, setTab);
   const [rows, setRows] = useState<any[]>([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [errors, setErrors] = useState<any[]>([]);
@@ -91,7 +93,7 @@ export default function AdminReturnsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} testID="admin-returns-back">

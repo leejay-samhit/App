@@ -14,6 +14,7 @@ import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
 import { colors, spacing, radii, formatINR } from "../../src/theme";
 import { DPHeader, DPTabBar, DPMoneyCard, DPEmpty } from "../../src/delivery-ui";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../../src/razorpay";
 
 export default function DeliveryNetWorth() {
@@ -23,6 +24,7 @@ export default function DeliveryNetWorth() {
   const [txns, setTxns] = useState<any[]>([]);
   const [remits, setRemits] = useState<any[]>([]);
   const [tab, setTab] = useState<"summary" | "cash" | "payments">("summary");
+  const swipe = useTabSwipe(["summary", "cash", "payments"] as const, tab, setTab);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   // Pay-to-admin
@@ -161,7 +163,7 @@ export default function DeliveryNetWorth() {
   }
 
   return (
-    <SafeAreaView style={s.safe} edges={["top"]}>
+    <SafeAreaView style={s.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <DPHeader title="Money" subtitle="Cash collected and paid in" />
 

@@ -278,6 +278,25 @@ async def admin_refund_from_company(return_id: str, admin: Dict[str, Any] = Depe
     row = await db.returns.find_one({"id": return_id}, {"_id": 0})
     if not row:
         raise HTTPException(status_code=404, detail="Return not found")
+    # Jun-2026 OWNER RULE — a refund comes out of the SELLER's shop wallet.
+    # The treasury may only step in when his balance genuinely cannot cover
+    # it, so an accidental tap here can never make the company pay money the
+    # seller already has.
+    payable = round(
+        float(row.get("refund_amount") or 0) - float(row.get("cashback_netted_off_refund") or 0), 2,
+    )
+    seller = await db.users.find_one(
+        {"id": row.get("vendor_id")}, {"_id": 0, "vendor_earnings": 1},
+    ) or {}
+    if round(float(seller.get("vendor_earnings") or 0), 2) + 0.009 >= payable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The seller's shop wallet can cover this refund — use "
+                "\"Retry refund from seller balance\". The company only funds a "
+                "refund when the seller is genuinely short."
+            ),
+        )
     credit_admin_bucket, notify = await _injected()
     try:
         out = await rt.process_refund(

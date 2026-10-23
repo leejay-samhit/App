@@ -584,19 +584,24 @@ async def process_refund(
                     _stage("refund_pending", "Slangcart", "system",
                            f"Seller balance short — ₹{payout:.2f} refund awaiting admin"),
                 )
-                await db.vendor_outstanding.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "vendor_id": vendor_id,
-                    "vendor_name": ret.get("vendor_name"),
-                    "kind": "return_refund",
-                    "amount": payout,
-                    "recovered": 0.0,
-                    "status": "open",
-                    "order_id": ret.get("order_id"),
-                    "order_number": ret.get("order_number"),
-                    "return_id": return_id,
-                    "created_at": ts,
-                })
+                # Jun-2026 — ONE open row per return, however many times the
+                # refund is retried. It used to insert a fresh row on every
+                # attempt, so a seller's outstanding grew with each retry.
+                await db.vendor_outstanding.update_one(
+                    {"return_id": return_id, "kind": "return_refund"},
+                    {"$set": {
+                        "vendor_id": vendor_id,
+                        "vendor_name": ret.get("vendor_name"),
+                        "amount": payout,
+                        "status": "open",
+                        "order_id": ret.get("order_id"),
+                        "order_number": ret.get("order_number"),
+                        "updated_at": ts,
+                    }, "$setOnInsert": {
+                        "id": str(uuid.uuid4()), "recovered": 0.0, "created_at": ts,
+                    }},
+                    upsert=True,
+                )
                 await shop_money.record_financial_error(
                     "return_refund_unfunded", str(err),
                     return_id=return_id, order_id=ret.get("order_id"), vendor_id=vendor_id,
@@ -606,11 +611,18 @@ async def process_refund(
                 await db.orders.update_one(
                     {"id": ret["order_id"]}, {"$set": {"return_status": "refund_pending"}},
                 )
-                if notify:
+                # One nudge per return, not one per retry.
+                already_nudged = await db.notifications.find_one({
+                    "user_id": vendor_id,
+                    "title": "Refund blocked — add money",
+                    "return_id": return_id,
+                })
+                if notify and not already_nudged:
                     await notify(
                         vendor_id, "vendor", "Refund blocked — add money",
                         f"₹{payout:.0f} refund for return {ret.get('return_number')} could not be "
                         f"paid because your balance is short. Add money to clear it.",
+                        extra={"return_id": return_id, "action_url": "/vendor/returns"},
                     )
                 return {"ok": False, "reason": "vendor_balance_short", "needed": payout}
 
@@ -652,19 +664,28 @@ async def process_refund(
                 extra={"return_id": return_id, "recoverable": True},
             )
             await credit_admin_bucket("shopping_margin", -funded_by_company, also_total_earned=False)
-            await db.vendor_outstanding.insert_one({
-                "id": str(uuid.uuid4()),
-                "vendor_id": vendor_id,
-                "vendor_name": ret.get("vendor_name"),
-                "kind": "return_refund_company_funded",
-                "amount": funded_by_company,
-                "recovered": 0.0,
-                "status": "open",
-                "order_id": ret.get("order_id"),
-                "order_number": ret.get("order_number"),
-                "return_id": return_id,
-                "created_at": ts,
-            })
+            # The "seller was short" row is replaced by the company-funded
+            # one: the debt is the same rupees, now owed to the treasury.
+            await db.vendor_outstanding.update_many(
+                {"return_id": return_id, "kind": "return_refund", "status": "open"},
+                {"$set": {"status": "superseded", "settled_at": ts,
+                          "superseded_by": "return_refund_company_funded"}},
+            )
+            await db.vendor_outstanding.update_one(
+                {"return_id": return_id, "kind": "return_refund_company_funded"},
+                {"$set": {
+                    "vendor_id": vendor_id,
+                    "vendor_name": ret.get("vendor_name"),
+                    "amount": funded_by_company,
+                    "status": "open",
+                    "order_id": ret.get("order_id"),
+                    "order_number": ret.get("order_number"),
+                    "updated_at": ts,
+                }, "$setOnInsert": {
+                    "id": str(uuid.uuid4()), "recovered": 0.0, "created_at": ts,
+                }},
+                upsert=True,
+            )
             if notify:
                 await notify(
                     vendor_id, "vendor", "Slangcart paid your refund",
@@ -706,6 +727,12 @@ async def process_refund(
             "refund_company_funded": funded_by_company,
             "updated_at": ts,
         }},
+    )
+    # The refund went through — any "seller balance short" row for this
+    # return is now history.
+    await db.vendor_outstanding.update_many(
+        {"return_id": return_id, "kind": "return_refund", "status": "open"},
+        {"$set": {"status": "settled", "settled_at": ts}},
     )
     await _push_stage(
         return_id,

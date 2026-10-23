@@ -10,6 +10,7 @@ Endpoints
   • GET  /withdrawals/me   — user history (opt-in pagination)
 """
 import uuid
+from datetime import timedelta
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -33,6 +34,10 @@ MIN_WITHDRAWAL_AMOUNT = 5000.0
 # role-based so the delivery-partner wallet screen and this endpoint can
 # never disagree: routes/delivery_partner.MIN_WITHDRAWAL is the same number.
 MIN_WITHDRAWAL_DP = 1000.0
+# Jun-2026 owner rule — every seller settlement carries a 2.56% transaction
+# fee, collected into the System Wallet treasury's Revenue Ledger before the
+# payout is raised. Riders and the admin company wallet are not charged.
+WITHDRAWAL_FEE_PCT = 2.56
 
 
 @router.post("/withdrawals")
@@ -98,6 +103,42 @@ async def request_withdrawal(
 
     # One open settlement at a time — protects against a double-tapped
     # request and against a duplicated bank callback later on.
+    #
+    # Jun-2026 — the check below and the insert further down were two separate
+    # steps, so four parallel taps all passed the check and the fee + cashback
+    # recovery were taken three times over. A single atomic claim on the user
+    # document now gates the whole settlement: whoever flips `settlement_busy`
+    # from unset/stale to now owns it, everybody else is told to wait. The
+    # stamp is released in `finally`, and a stale one (> 2 min, i.e. a crashed
+    # request) can be taken over so nobody is locked out for good.
+    lock_now = now_utc()
+    stale_before = (lock_now - timedelta(minutes=2)).isoformat()
+    claim = await db.users.update_one(
+        {"id": user["id"], "$or": [
+            {"settlement_busy_at": None},
+            {"settlement_busy_at": {"$exists": False}},
+            {"settlement_busy_at": {"$lt": stale_before}},
+        ]},
+        {"$set": {"settlement_busy_at": lock_now.isoformat()}},
+    )
+    if claim.modified_count != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="A settlement request is already being processed. Please wait a moment.",
+        )
+    try:
+        return await _create_withdrawal(user, payload, is_seller, wallet_field)
+    finally:
+        await db.users.update_one(
+            {"id": user["id"]}, {"$unset": {"settlement_busy_at": ""}},
+        )
+
+
+async def _create_withdrawal(
+    user: Dict[str, Any], payload: WithdrawalRequest, is_seller: bool, wallet_field: str,
+) -> Dict[str, Any]:
+    """The settlement itself. Only ever runs inside the per-user claim above,
+    so the cashback adjustment, the fee and the hold happen exactly once."""
     existing = await db.withdrawals.find_one(
         {"user_id": user["id"], "status": {"$in": ["pending", "approved", "processing"]}},
         {"_id": 0, "id": 1, "amount": 1},
@@ -112,12 +153,114 @@ async def request_withdrawal(
         )
 
     wid = str(uuid.uuid4())
+    # ── Jun-2026 — what actually leaves the wallet on a seller settlement ──
+    #
+    #   requested  ₹X   (what the seller asked for, already covered by his
+    #                    available balance)
+    #     − cashback outstanding  → straight into the treasury (we fronted it)
+    #     − 2.56% transaction fee → Revenue Ledger
+    #     = net paid to his bank account
+    #
+    # Both deductions are taken from the SAME wallet, each with its own
+    # idempotent ledger row keyed on this withdrawal id, so nothing can be
+    # booked twice and every rupee is traceable from his Net Worth screen.
+    cashback_recovered = 0.0
+    fee = 0.0
+    if is_seller:
+        from server import credit_admin_bucket
+        from core.cashback import recover_outstanding_from_wallet
+
+        owed = round(float(user.get("cashback_outstanding") or 0), 2)
+        if owed > 0.009:
+            rec = await recover_outstanding_from_wallet(
+                user["id"], min(owed, payload.amount),
+                credit_admin_bucket=credit_admin_bucket,
+                note="Cashback adjusted on settlement request",
+                recorded_by=user.get("email"),
+                # Keyed on THIS settlement so a replay can never recover twice.
+                idempotency_key=f"CBRECOVER-WDL:{wid}",
+            )
+            cashback_recovered = round(float(rec.get("applied") or 0), 2)
+
+        fee = round(payload.amount * WITHDRAWAL_FEE_PCT / 100.0, 2)
+        net_payout = round(payload.amount - cashback_recovered - fee, 2)
+        if net_payout <= 0.009:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"After adjusting ₹{cashback_recovered:,.2f} cashback outstanding and the "
+                    f"{WITHDRAWAL_FEE_PCT:g}% transaction fee, nothing would be left to pay out. "
+                    f"Please raise a larger settlement."
+                ),
+            )
+        # Re-read: the recovery above has already left his wallet.
+        fresh = await db.users.find_one(
+            {"id": user["id"]}, {"_id": 0, shop_money.VENDOR_WALLET: 1},
+        ) or {}
+        left = round(float(fresh.get(shop_money.VENDOR_WALLET) or 0), 2)
+        if left + 0.009 < round(fee + net_payout, 2):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"₹{cashback_recovered:,.2f} cashback outstanding was recovered from your "
+                    f"wallet, leaving ₹{left:,.2f}. Please raise a settlement of at most that amount."
+                ),
+            )
+        if fee > 0.009:
+            try:
+                fee_row = await shop_money.debit(
+                    user["id"], shop_money.VENDOR_WALLET, fee,
+                    idempotency_key=f"WDLFEE:{wid}",
+                    group="revenue_ledger",
+                    txn_type="withdrawal_transaction_fee",
+                    vendor_id=user["id"],
+                    destination_wallet="system_treasury",
+                    settlement_status="settled",
+                    description=(
+                        f"Transaction fee {WITHDRAWAL_FEE_PCT:g}% on settlement "
+                        f"₹{payload.amount:,.2f} — ₹{fee:,.2f} to Slangcart"
+                    ),
+                    extra={"wallet_impact": "vendor_earnings_only", "withdrawal_id": wid,
+                           "fee_pct": WITHDRAWAL_FEE_PCT, "gross_amount": payload.amount},
+                )
+            except shop_money.InsufficientFunds as err:
+                raise HTTPException(status_code=400, detail=str(err))
+            if fee_row is not None:
+                await credit_admin_bucket("platform_fee_collected", fee, also_total_earned=False)
+                admin_doc = await db.users.find_one(
+                    {"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1},
+                )
+                await shop_money.post(
+                    group="revenue_ledger",
+                    txn_type="platform_fee_collected",
+                    amount=fee,
+                    credit=fee,
+                    idempotency_key=f"WDLFEEREV:{wid}",
+                    user_id=(admin_doc or {}).get("id"),
+                    vendor_id=user["id"],
+                    shop_name=user.get("vendor_business_name") or user.get("shop_name") or user.get("name"),
+                    destination_wallet="system_treasury",
+                    settlement_status="settled",
+                    description=(
+                        f"Withdrawal transaction fee {WITHDRAWAL_FEE_PCT:g}% · settlement "
+                        f"₹{payload.amount:,.2f} by {user.get('vendor_business_name') or user.get('name')}"
+                    ),
+                    extra={"withdrawal_id": wid, "fee_pct": WITHDRAWAL_FEE_PCT,
+                           "gross_amount": payload.amount},
+                )
+    else:
+        net_payout = round(payload.amount, 2)
+
     doc = {
         "id": wid,
         "user_id": user["id"],
         "user_name": user["name"],
         "user_email": user["email"],
-        "amount": payload.amount,
+        "amount": net_payout,
+        "requested_amount": round(payload.amount, 2),
+        "cashback_adjusted": cashback_recovered,
+        "transaction_fee": fee,
+        "transaction_fee_pct": WITHDRAWAL_FEE_PCT if is_seller else 0.0,
         "status": "pending",
         "upi_id": user.get("upi_id"),
         "bank_account": user.get("bank_account"),
@@ -133,23 +276,65 @@ async def request_withdrawal(
     # request is rolled back — a settlement can never create money.
     try:
         await shop_money.debit(
-            user["id"], wallet_field, payload.amount,
+            user["id"], wallet_field, net_payout,
             idempotency_key=f"WDL:{wid}",
             group="withdrawal",
             txn_type="withdrawal_hold",
             vendor_id=user["id"] if is_seller else None,
             destination_wallet="pending_withdrawal",
             settlement_status="pending",
-            description=f"Settlement requested — ₹{payload.amount:,.0f} moved to pending",
+            description=(
+                f"Settlement requested — ₹{net_payout:,.0f} moved to pending"
+                + (f" (₹{payload.amount:,.0f} requested"
+                   + (f", ₹{cashback_recovered:,.2f} cashback adjusted" if cashback_recovered > 0.009 else "")
+                   + (f", ₹{fee:,.2f} transaction fee" if fee > 0.009 else "") + ")"
+                   if (cashback_recovered > 0.009 or fee > 0.009) else "")
+            ),
             extra={"withdrawal_id": wid,
+                   "requested_amount": round(payload.amount, 2),
+                   "cashback_adjusted": cashback_recovered,
+                   "transaction_fee": fee,
                    **({"wallet_impact": "vendor_earnings_only"} if is_seller else {})},
         )
     except shop_money.InsufficientFunds as err:
         await db.withdrawals.delete_one({"id": wid})
+        # The fee was taken a moment ago for a settlement that is not
+        # happening — hand it straight back so the seller is never charged
+        # for a request that failed.
+        if fee > 0.009:
+            back = await shop_money.credit(
+                user["id"], wallet_field, fee,
+                idempotency_key=f"WDLFEEBACK:{wid}",
+                group="revenue_ledger",
+                txn_type="withdrawal_transaction_fee_refund",
+                vendor_id=user["id"],
+                source_wallet="system_treasury",
+                settlement_status="reversed",
+                description=f"Transaction fee ₹{fee:,.2f} returned — settlement could not be raised",
+                extra={"withdrawal_id": wid, "reverses_fee": True,
+                       "wallet_impact": "vendor_earnings_only"},
+            )
+            if back is not None:
+                from server import credit_admin_bucket as _cab
+                await _cab("platform_fee_collected", -fee, also_total_earned=False)
+                await shop_money.post(
+                    group="revenue_ledger",
+                    txn_type="reversal",
+                    amount=fee,
+                    debit=fee,
+                    idempotency_key=f"WDLFEEREV_FAILED:{wid}",
+                    vendor_id=user["id"],
+                    source_wallet="system_treasury",
+                    settlement_status="reversed",
+                    description="Withdrawal transaction fee reversed — settlement could not be raised",
+                    extra={"withdrawal_id": wid, "original_type": "platform_fee_collected"},
+                )
         raise HTTPException(status_code=400, detail=str(err))
     await _create_notification(
         user["id"], "withdrawal", "Withdrawal requested",
-        f"₹{int(payload.amount)} withdrawal is pending admin approval.",
+        f"₹{int(net_payout)} withdrawal is pending admin approval."
+        + (f" ₹{cashback_recovered:,.0f} cashback outstanding was adjusted." if cashback_recovered > 0.009 else "")
+        + (f" Transaction fee ₹{fee:,.2f}." if fee > 0.009 else ""),
     )
     doc.pop("_id", None)
     return doc
@@ -210,6 +395,11 @@ async def vendor_wallet_summary(user: Dict[str, Any] = Depends(get_current_user)
     ).to_list(20000)
     view["cod_to_collect"] = round(sum(float(o.get("cod_due") or 0) for o in cod_rows), 2)
     view["wallet_frozen"] = bool(user.get("wallet_frozen"))
+    # Jun-2026 — what a settlement will actually cost, so the seller sees the
+    # same arithmetic the API applies: cashback we fronted comes off first,
+    # then the transaction fee, and the rest reaches his bank.
+    view["cashback_outstanding"] = round(float(user.get("cashback_outstanding") or 0), 2)
+    view["withdrawal_fee_pct"] = WITHDRAWAL_FEE_PCT
     view["payout_promise"] = (
         "Approved settlements are deposited to your bank within 24 hours on banking days."
     )

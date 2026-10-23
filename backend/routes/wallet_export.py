@@ -35,17 +35,22 @@ GROUPS: List[Tuple[str, str, List[str]]] = [
     ("pending_cashback",    "Pending Cashback",         ["cashback_pending"]),
     ("cashback_reversal",   "Cashback Reversals",       ["cashback_reversal", "cashback_funding_refund"]),
     ("vendor_cashback_fund","Vendor Cashback Funding",  ["cashback_funding"]),
-    ("vendor_outstanding",  "Vendor Outstanding",       ["cashback_platform_funded", "vendor_outstanding", "cashback_vendor_recovery"]),
-    ("delivery_charges",    "Delivery Charges",         ["delivery_charge_collected", "delivery_charge_reversal"]),
+    ("vendor_outstanding",  "Vendor Outstanding",       ["cashback_platform_funded", "vendor_outstanding", "cashback_vendor_recovery", "cashback_recovery", "advance_recovery"]),
+    ("delivery_charges",    "Delivery Charges",         ["delivery_charge_collected", "delivery_charge_reversal", "delivery_charge_paid", "dp_delivery_commission"]),
     ("customer_add_money",  "Customer Add Money",       ["wallet_topup", "add_money", "razorpay_topup"]),
     ("razorpay",            "Razorpay Payments",        ["registration_fee", "razorpay_payment", "direct_signup_credit"]),
-    ("cod",                 "COD",                      ["cod_collected"]),
-    ("orders",              "Order Payments",           ["order", "purchase", "order_payment"]),
-    ("refunds",             "Refunds",                  ["refund"]),
-    ("reversals",           "Reversals",                ["shop_commission_reversal", "service_commission_reversal", "platform_fee_reversal", "vendor_sale_reversal", "refund_clawback", "mlm_cutover_reversal", "mlm_cutover_reclaim"]),
-    ("vendor_settlement",   "Vendor Settlement",        ["vendor_sale", "vendor_payout", "withdrawal"]),
+    ("cod",                 "COD",                      ["cod_collected", "cod_order", "dp_cash_collected", "dp_cash_remitted", "dp_cash_paid_from_wallet", "vendor_cod_self_collected"]),
+    ("orders",              "Order Payments",           ["order", "purchase", "order_payment", "order_payment_upi"]),
+    ("refunds",             "Refunds",                  ["refund", "return_refund_debit", "return_refund_credit", "refund_company_funded", "withdrawal_refund", "payment_reconciliation_refund"]),
+    ("reversals",           "Reversals",                ["shop_commission_reversal", "service_commission_reversal", "platform_fee_reversal", "reversal", "vendor_sale_reversal", "refund_clawback", "mlm_cutover_reversal", "mlm_cutover_reclaim"]),
+    ("vendor_settlement",   "Vendor Settlement",        ["vendor_sale", "vendor_payout", "withdrawal", "withdrawal_hold", "withdrawal_transaction_fee",
+                                                 "withdrawal_transaction_fee_refund",
+                                                 "vendor_adjustment_credit", "vendor_adjustment_debit"]),
     ("gst",                 "GST",                       ["gst_collected"]),
     ("treasury",            "Slangcart Treasury",       ["system_deposit", "admin_credit", "admin_debit", "fee_residual", "l1_funding", "shop_commission", "service_commission", "shopping_margin", "service_margin", "platform_fee_collected", "expense"]),
+    # Jun-2026 — mobile / DTH recharge money has its own sheet so the owner
+    # can tie every top-up to the number that was recharged.
+    ("recharge",            "Recharge",                 ["recharge", "recharge_payment_upi"]),
     ("legacy_referral",     "Legacy Referral (closed)", ["referral_payout", "cascade_overflow"]),
 ]
 
@@ -193,6 +198,16 @@ async def _decorate(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         is_vendor_row = bool(vend.get("is_vendor"))
         is_admin_row = (owner.get("role") == "admin")
         amount = float(r.get("amount") or 0)
+        # Jun-2026 — ledger rows written by core.shop_money carry explicit
+        # credit/debit columns and ALWAYS store `amount` as a positive
+        # magnitude. Reading only the sign of `amount` therefore showed every
+        # wallet DEBIT (delivery fee, cashback recovery, withdrawal hold,
+        # return refund) as a credit in the Excel report. Credit/debit win
+        # whenever they are present; legacy rows keep the signed behaviour.
+        c_col = float(r.get("credit") or 0)
+        d_col = float(r.get("debit") or 0)
+        has_cols = bool(c_col or d_col)
+        signed = round(c_col - d_col, 2) if has_cols else round(amount, 2)
         party_code = (
             vend_codes.get(vend.get("id") or "")
             if is_vendor_row else cust_codes.get(owner.get("id") or "")
@@ -217,15 +232,16 @@ async def _decorate(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             ),
             "_group": group_of(r.get("type") or ""),
             "_wallet_group": wallet_group,
-            "_debit": round(abs(amount), 2) if amount < 0 else 0.0,
-            "_credit": round(amount, 2) if amount > 0 else 0.0,
+            "_debit": round(d_col, 2) if has_cols else (round(abs(amount), 2) if amount < 0 else 0.0),
+            "_credit": round(c_col, 2) if has_cols else (round(amount, 2) if amount > 0 else 0.0),
+            "_amount": signed,
         })
     return out
 
 
 def _row_cells(r: Dict[str, Any]) -> List[Any]:
     created = r.get("created_at") or ""
-    amount = float(r.get("amount") or 0)
+    amount = float(r.get("_amount") if r.get("_amount") is not None else (r.get("amount") or 0))
     return [
         r.get("_short_id") or "",
         _date_cell(created),
@@ -290,9 +306,9 @@ async def export_groupwise(
         pre_query["created_at"] = {"$lt": date_from}
         for pre in await _decorate(await _load_rows(pre_query, cap)):
             k = pre["_group"]
-            opening_by_group[k] = round(opening_by_group.get(k, 0.0) + float(pre.get("amount") or 0), 2)
+            opening_by_group[k] = round(opening_by_group.get(k, 0.0) + float(pre.get("_amount") or 0), 2)
             wk = pre["_wallet_group"]
-            opening_by_group[wk] = round(opening_by_group.get(wk, 0.0) + float(pre.get("amount") or 0), 2)
+            opening_by_group[wk] = round(opening_by_group.get(wk, 0.0) + float(pre.get("_amount") or 0), 2)
 
     wb = Workbook(write_only=False)
     wb.remove(wb.active)

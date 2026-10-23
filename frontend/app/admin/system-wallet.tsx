@@ -135,9 +135,13 @@ type NetWorth = {
   };
   master: {
     pending_collections: number; net_worth: number; formula: string;
+    cashback_receivable?: number; receivables_total?: number;
     components?: {
       bank_tally_net: number;
       pending_collections: number;
+      cashback_receivable?: number;
+      receivables_total?: number;
+      cashback_receivable_sellers?: number;
       user_wallet_balance: number;
       vendor_payable?: number;
       vendor_payable_sellers?: number;
@@ -547,9 +551,21 @@ export default function AdminSystemWallet() {
                     <Text style={styles.nwCompLabel}>＋ Cash on hand</Text>
                     <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.bank_tally_net)}</Text>
                   </View>
-                  <View style={styles.nwCompCol}>
+                  <View style={styles.nwCompCol} testID="sw-receivables">
                     <Text style={styles.nwCompLabel}>＋ Receivables</Text>
-                    <Text style={styles.nwCompValue}>{formatINR(netWorth.master.components.pending_collections)}</Text>
+                    <Text style={styles.nwCompValue}>
+                      {formatINR(netWorth.master.components.receivables_total
+                        ?? netWorth.master.components.pending_collections)}
+                    </Text>
+                  </View>
+                  {/* Jun 2026 — cashback we paid shoppers on a seller's behalf
+                      is money owed back to us, so it is part of Receivables
+                      and of the net worth above. */}
+                  <View style={styles.nwCompCol} testID="sw-cashback-receivable">
+                    <Text style={styles.nwCompLabel}>　· Cashback owed by sellers</Text>
+                    <Text style={styles.nwCompValue}>
+                      {formatINR(netWorth.master.components.cashback_receivable || 0)}
+                    </Text>
                   </View>
                   <View style={styles.nwCompCol}>
                     <Text style={[styles.nwCompLabel, { color: "#FECACA" }]}>− User wallets</Text>

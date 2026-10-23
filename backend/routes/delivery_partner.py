@@ -45,6 +45,8 @@ router = APIRouter()
 CASH_FIELD = "dp_cash_in_hand"
 MIN_WITHDRAWAL = 1000.0            # owner's rule for delivery partners
 DP_STATUSES = ("confirmed", "shipped", "out_for_delivery", "delivered")
+# Recharge kinds a rider can be scoped to (mirrors routes.recharge.KINDS).
+KINDS_RECHARGE = ("mobile", "dth")
 # Oct 2026 — when a rider is mapped to a shop, the SELLER's order management
 # stops at accepting (or cancelling) the order. Everything after that is the
 # rider's job, so the seller panel and API both refuse those transitions.
@@ -266,6 +268,61 @@ async def admin_dp_reject(
 
 class DPMapping(BaseModel):
     vendor_ids: List[str] = Field(default_factory=list)
+    # Jun-2026 — per-seller recharge scope: {vendor_id: {"kinds": ["mobile"],
+    # "networks": ["airtel", "jio"]}}. Empty / missing = that seller's whole
+    # queue, which is how every normal shop is mapped.
+    recharge_scopes: Dict[str, Dict[str, List[str]]] = Field(default_factory=dict)
+
+
+async def _network_kinds() -> Dict[str, str]:
+    """slug → recharge kind ("mobile" / "dth") for every configured operator."""
+    out: Dict[str, str] = {}
+    async for o in db.recharge_options.find(
+        {"group": "network"}, {"_id": 0, "slug": 1, "kind": 1},
+    ):
+        if o.get("slug"):
+            out[o["slug"]] = o.get("kind") or "mobile"
+    return out
+
+
+async def _recharge_catalogue_by_vendor() -> Dict[str, Dict[str, List[str]]]:
+    """Which sellers sell recharges, and of what kind / operator.
+
+    Reads the live catalogue (a seller "is a recharge seller" because he has
+    recharge plans, not because of a flag someone forgot to tick). Vendor-
+    added plans may carry only the mirrored sub-category name ("Airtel"), so
+    the operator list is resolved through the option names too.
+    """
+    name_to_slug: Dict[str, str] = {}
+    kind_of_slug: Dict[str, str] = {}
+    async for o in db.recharge_options.find(
+        {"group": "network"}, {"_id": 0, "name": 1, "slug": 1, "kind": 1},
+    ):
+        if o.get("name") and o.get("slug"):
+            name_to_slug[str(o["name"]).strip().lower()] = o["slug"]
+            kind_of_slug[o["slug"]] = o.get("kind") or "mobile"
+    out: Dict[str, Dict[str, List[str]]] = {}
+    async for p in db.products.find(
+        {"$or": [
+            {"recharge_kind": {"$in": list(KINDS_RECHARGE)}},
+            {"category": {"$regex": "recharge", "$options": "i"}},
+        ]},
+        {"_id": 0, "vendor_id": 1, "recharge_kind": 1, "recharge_network": 1,
+         "subcategory": 1, "sub_category": 1},
+    ):
+        vid = str(p.get("vendor_id") or "")
+        if not vid:
+            continue
+        slug = p.get("recharge_network") or name_to_slug.get(
+            str(p.get("subcategory") or p.get("sub_category") or "").strip().lower(), "",
+        )
+        kind = p.get("recharge_kind") or kind_of_slug.get(slug or "", "mobile")
+        row = out.setdefault(vid, {"kinds": [], "networks": []})
+        if kind and kind not in row["kinds"]:
+            row["kinds"].append(kind)
+        if slug and slug not in row["networks"]:
+            row["networks"].append(slug)
+    return out
 
 
 @router.get("/admin/delivery-partners/{dp_id}/vendors")
@@ -283,9 +340,24 @@ async def admin_dp_vendors(dp_id: str, _admin: Dict[str, Any] = Depends(require_
     if not dp:
         raise HTTPException(status_code=404, detail="Delivery partner not found")
     mapped = await db.dp_vendor_map.find(
-        {"dp_id": dp_id, "active": True}, {"_id": 0, "vendor_id": 1},
+        {"dp_id": dp_id, "active": True},
+        {"_id": 0, "vendor_id": 1, "recharge_kinds": 1, "recharge_networks": 1},
     ).to_list(1000)
     mapped_ids = [m["vendor_id"] for m in mapped]
+    scope_by_vendor = {
+        m["vendor_id"]: {
+            "kinds": m.get("recharge_kinds") or [],
+            "networks": m.get("recharge_networks") or [],
+        } for m in mapped
+    }
+    recharge_cat = await _recharge_catalogue_by_vendor()
+    net_names: Dict[str, str] = {}
+    net_kinds: Dict[str, str] = {}
+    async for o in db.recharge_options.find(
+        {"group": "network"}, {"_id": 0, "slug": 1, "name": 1, "kind": 1},
+    ):
+        net_names[o.get("slug") or ""] = o.get("name") or o.get("slug") or ""
+        net_kinds[o.get("slug") or ""] = o.get("kind") or "mobile"
     vendors = await db.users.find(
         {"is_vendor": True, "is_vendor_approved": True},
         {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1,
@@ -301,6 +373,18 @@ async def admin_dp_vendors(dp_id: str, _admin: Dict[str, Any] = Depends(require_
                 pins.add(str(v[key]).strip())
         v["pincodes"] = sorted(pins)
         v["pincode"] = v.get("pincode") or v.get("store_pincode") or (v["pincodes"][0] if v["pincodes"] else "")
+        # Jun-2026 — a recharge seller is mapped operator-wise, so the admin
+        # screen needs to know which list he belongs in and what he sells.
+        cat = recharge_cat.get(v["id"]) or {}
+        v["is_recharge"] = bool(cat)
+        v["recharge_kinds"] = cat.get("kinds") or []
+        v["recharge_networks"] = [
+            {"slug": s, "name": net_names.get(s) or s, "kind": net_kinds.get(s) or "mobile"}
+            for s in (cat.get("networks") or [])
+        ]
+        sc = scope_by_vendor.get(v["id"]) or {}
+        v["mapped_recharge_kinds"] = sc.get("kinds") or []
+        v["mapped_recharge_networks"] = sc.get("networks") or []
     vendors.sort(key=lambda r: (not r["mapped"], str(r.get("shop") or "").lower()))
     # Every PIN any seller covers — powers the admin's pincode filter chips.
     all_pins = sorted({p for v in vendors for p in v["pincodes"]})
@@ -309,6 +393,7 @@ async def admin_dp_vendors(dp_id: str, _admin: Dict[str, Any] = Depends(require_
         "dp_name": dp.get("name") or dp.get("email"),
         "dp_pincodes": [str(p).strip() for p in (dp.get("dp_pincodes") or []) if str(p).strip()],
         "mapped_vendor_ids": mapped_ids,
+        "mapped_scopes": scope_by_vendor,
         "vendors": vendors,
         "all_pincodes": all_pins,
     }
@@ -333,12 +418,27 @@ async def admin_set_dp_vendors(
     for vid in wanted:
         v = await db.users.find_one({"id": vid}, {"_id": 0, "vendor_business_name": 1,
                                                  "shop_name": 1, "name": 1})
+        scope = (body.recharge_scopes or {}).get(vid) or {}
+        kinds = [str(k) for k in (scope.get("kinds") or []) if str(k) in KINDS_RECHARGE]
+        networks = [str(n) for n in (scope.get("networks") or []) if str(n).strip()]
+        # A DTH-only rider cannot also be scoped to a mobile operator: drop any
+        # operator that does not belong to a ticked kind (the UI does the same,
+        # this is the server having the last word).
+        if networks:
+            kind_of = await _network_kinds()
+            if not kinds:
+                # Operators picked without a kind: the kinds are implied by the
+                # operators themselves, so the saved scope is never ambiguous.
+                kinds = sorted({(kind_of.get(n) or "mobile") for n in networks})
+            networks = [n for n in networks if (kind_of.get(n) or "mobile") in kinds]
         await db.dp_vendor_map.update_one(
             {"dp_id": dp_id, "vendor_id": vid},
             {"$set": {
                 "active": True,
                 "shop_name": (v or {}).get("vendor_business_name") or (v or {}).get("shop_name")
                 or (v or {}).get("name") or "Seller",
+                "recharge_kinds": kinds,
+                "recharge_networks": networks,
                 "mapped_at": ts,
                 "mapped_by": admin.get("email"),
             }, "$setOnInsert": {"id": str(uuid.uuid4())}},
@@ -402,6 +502,42 @@ async def _mapped_vendor_ids(dp_id: str) -> List[str]:
     return [r["vendor_id"] for r in rows]
 
 
+# ── Jun-2026 — RECHARGE riders are mapped category-wise ────────────────
+#
+# A recharge seller's queue is not "parcels from one shop": it is operator
+# work. The owner's rule is that a rider can be put on, say, Airtel + Jio
+# MOBILE recharges of that seller and must not see his DTH jobs at all. The
+# scope lives on the mapping row (`recharge_kinds` / `recharge_networks`);
+# an empty scope means "everything this seller sells", which is exactly how
+# every pre-existing mapping behaves.
+async def _dp_scopes(dp_id: str) -> Dict[str, Dict[str, Any]]:
+    rows = await db.dp_vendor_map.find(
+        {"dp_id": dp_id, "active": True},
+        {"_id": 0, "vendor_id": 1, "recharge_kinds": 1, "recharge_networks": 1},
+    ).to_list(1000)
+    return {
+        r["vendor_id"]: {
+            "kinds": [str(k) for k in (r.get("recharge_kinds") or [])],
+            "networks": [str(n) for n in (r.get("recharge_networks") or [])],
+        }
+        for r in rows
+    }
+
+
+def _order_in_scope(order: Dict[str, Any], scopes: Dict[str, Dict[str, Any]]) -> bool:
+    if not order.get("is_recharge"):
+        return True
+    sc = scopes.get(str(order.get("vendor_id") or "")) or {}
+    kinds, nets = sc.get("kinds") or [], sc.get("networks") or []
+    if not kinds and not nets:
+        return True
+    if kinds and str(order.get("recharge_kind") or "mobile") not in kinds:
+        return False
+    if nets and str(order.get("recharge_network") or "") not in nets:
+        return False
+    return True
+
+
 @router.get("/delivery-partner/me/vendors")
 async def dp_my_vendors(dp: Dict[str, Any] = Depends(require_dp)):
     """The shops this rider delivers for, with live order counts."""
@@ -461,6 +597,8 @@ async def dp_my_orders(
     rows = await db.orders.find(filt, {"_id": 0}).sort("created_at", -1).limit(
         max(1, min(int(limit or 300), 500)),
     ).to_list(500)
+    scopes = await _dp_scopes(dp["id"])
+    rows = [r for r in rows if _order_in_scope(r, scopes)]
     buyer_ids = list({r.get("user_id") for r in rows if r.get("user_id")})
     buyers: Dict[str, Any] = {}
     if buyer_ids:
@@ -488,7 +626,12 @@ async def dp_my_orders(
         r["is_mine"] = r.get("dp_id") == dp["id"]
         r["status_label"] = STATUS_LABELS.get(r.get("status") or "", (r.get("status") or "").title())
     counts: Dict[str, int] = {}
-    for r in await db.orders.find(filt, {"_id": 0, "status": 1}).to_list(2000):
+    for r in await db.orders.find(
+        filt, {"_id": 0, "status": 1, "vendor_id": 1, "is_recharge": 1,
+               "recharge_kind": 1, "recharge_network": 1},
+    ).to_list(2000):
+        if not _order_in_scope(r, scopes):
+            continue
         k = r.get("status") or "placed"
         counts[k] = counts.get(k, 0) + 1
     return {"items": rows, "total": len(rows), "counts": counts, "mapped_vendors": len(vids)}
@@ -584,6 +727,8 @@ async def dp_update_status(
         raise HTTPException(status_code=404, detail="Order not found")
     if order.get("vendor_id") not in vids:
         raise HTTPException(status_code=403, detail="This order's shop is not mapped to you")
+    if not _order_in_scope(order, await _dp_scopes(dp["id"])):
+        raise HTTPException(status_code=403, detail="This recharge type is not assigned to you")
     out = await _dp_move_order(
         dp, order, body.status, body.delivery_person_name or "", body.delivery_person_phone or "",
     )
@@ -635,7 +780,8 @@ async def dp_my_customers(
     rows = await db.orders.find(filt, {"_id": 0}).sort("created_at", -1).limit(
         max(1, min(int(limit or 200), 500)),
     ).to_list(500)
-
+    scopes = await _dp_scopes(dp["id"])
+    rows = [r for r in rows if _order_in_scope(r, scopes)]
     buyer_ids = list({r.get("user_id") for r in rows if r.get("user_id")})
     buyers: Dict[str, Any] = {}
     if buyer_ids:
@@ -792,6 +938,8 @@ async def dp_advance_customer(
         {"user_id": user_id, "vendor_id": {"$in": vids}, "status": {"$in": OPEN_STATUSES}},
         {"_id": 0},
     ).sort("created_at", 1).to_list(200)
+    scopes = await _dp_scopes(dp["id"])
+    rows = [r for r in rows if _order_in_scope(r, scopes)]
     if not rows:
         raise HTTPException(status_code=404, detail="This customer has no open orders for your shops")
 

@@ -17,6 +17,7 @@ import { LocationGate } from "../src/location-gate";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
 import { registerForPush } from "../src/push";
 import { GoogleRedirectHandler } from "../src/google-redirect-handler";
+import { BiometricEnrollPrompt } from "../src/biometric-enroll-prompt";
 import { ContentWidthProvider, TABLET_MAX_WIDTH } from "../src/content-width";
 import { colors } from "../src/theme";
 
@@ -283,6 +284,9 @@ function RootLayoutInner() {
             <ChatSettingsProvider>
             <GoogleRedirectHandler />
             <PushReRegister />
+            {/* Jun 2026 — ask every signed-in user, once per device, to set up
+                fingerprint login for next time. */}
+            <BiometricEnrollPrompt />
             <GlobalFont>
               {/* Standard status bar — Android reserves space for it automatically
                   now that edge-to-edge is off, matching how Chrome browser

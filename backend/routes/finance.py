@@ -98,8 +98,10 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
 
         net_worth =
               bank_balance
-            + pending_collections
+            + cash_on_hand
+            + receivables (pending payments + cashback owed by sellers)
             − user_liability
+            − vendor_payable
             − pending_withdrawals
             − gst_payable
 
@@ -143,10 +145,15 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     async def _reversals_for(original_types: list) -> float:
         agg = await db.transactions.aggregate([
             {"$match": {"type": "reversal", "original_type": {"$in": original_types}, "status": "success"}},
-            {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
+            {"$group": {"_id": None, "sum": {
+                # Older rows stored the amount negative and newer ones store it
+                # positive (every ledger row is positive now, with the sign in
+                # the credit/debit columns). Take the magnitude of each ROW so
+                # the two styles cannot cancel each other out.
+                "$sum": {"$abs": {"$ifNull": ["$amount", 0]}},
+            }}},
         ]).to_list(1)
-        # Reversal amounts are stored negative; flip to positive for subtraction.
-        return abs(float((agg or [{}])[0].get("sum") or 0))
+        return round(float((agg or [{}])[0].get("sum") or 0), 2)
 
     reg_reversed = await _reversals_for(["registration_fee"])
     registration_revenue = reg_fee_total - reg_reversed
@@ -368,6 +375,42 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     ]).to_list(1)
     pending_collections = float((pending_collections_agg or [{}])[0].get("sum") or 0)
 
+    # ── Jun-2026 owner request — CASHBACK WE FRONTED IS A RECEIVABLE ────
+    # Slangcart pays the shopper's cashback out of the treasury and recovers
+    # it from the seller (automatically off his next sale credit, or by the
+    # admin pulling it from his shop-earnings wallet). Until it comes back it
+    # is money owed TO us, so it belongs in Receivables and in net worth —
+    # without it the treasury looked permanently short by exactly the
+    # cashback float.
+    cb_out_agg = await db.users.aggregate([
+        {"$match": {"cashback_outstanding": {"$gt": 0}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$cashback_outstanding"},
+                    "count": {"$sum": 1}}},
+    ]).to_list(1)
+    cashback_receivable = round(float((cb_out_agg or [{}])[0].get("sum") or 0), 2)
+    cashback_receivable_sellers = int((cb_out_agg or [{}])[0].get("count") or 0)
+    # Money the company advanced on a seller's behalf for a RETURN refund (or
+    # an unfunded delivery fee) is owed back to us too, so it belongs in
+    # Receivables next to the cashback float. Cashback rows are excluded here
+    # because `users.cashback_outstanding` above already counts them.
+    # NOTE: only kinds where the money actually left the treasury count. A
+    # plain `return_refund` row is just a PARKED refund (the seller is short
+    # and nobody has been paid yet), so it is not a receivable.
+    other_out_agg = await db.vendor_outstanding.aggregate([
+        {"$match": {"status": "open",
+                    "kind": {"$in": ["return_refund_company_funded",
+                                     "delivery_fee_company_funded",
+                                     "delivery_fee"]}}},
+        {"$group": {"_id": None,
+                    "sum": {"$sum": {"$subtract": ["$amount", {"$ifNull": ["$recovered", 0]}]}},
+                    "count": {"$sum": 1}}},
+    ]).to_list(1)
+    vendor_receivable = round(float((other_out_agg or [{}])[0].get("sum") or 0), 2)
+    vendor_receivable_rows = int((other_out_agg or [{}])[0].get("count") or 0)
+    receivables_total = round(
+        pending_collections + cashback_receivable + vendor_receivable, 2,
+    )
+
     # Compute a Bank Balance Tally that's reconciliation-aware. This is what
     # the System Wallet hero card displays. Includes reversals, adjustments
     # AND expenses (Bug-1 fix · 2026-05-30) — expenses MUST debit the bank.
@@ -460,7 +503,7 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
     #             − pending withdrawals       (Group 6)
     #             − GST payable               (Group 3)
     net_worth = round(
-        bank_balance + cash_on_hand + pending_collections
+        bank_balance + cash_on_hand + receivables_total
         - user_wallet_balance - vendor_payable - pending_withdrawals - gst_payable,
         2,
     )
@@ -613,13 +656,23 @@ async def admin_finance_net_worth(_: Dict[str, Any] = Depends(require_admin)):
         },
         "master": {
             "pending_collections": round(pending_collections, 2),
+            "cashback_receivable": cashback_receivable,
+            "cashback_receivable_sellers": cashback_receivable_sellers,
+            "vendor_receivable": vendor_receivable,
+            "vendor_receivable_rows": vendor_receivable_rows,
+            "receivables_total": receivables_total,
             "net_worth":           net_worth,
-            "formula":             "bank_balance + cash_on_hand + pending − customer_wallet − vendor_payable − pending_withdrawals − gst_payable",
+            "formula":             "bank_balance + cash_on_hand + receivables (pending payments + cashback owed by sellers + refunds/fees we advanced) − customer_wallet − vendor_payable − pending_withdrawals − gst_payable",
             "components": {
                 "bank_balance":        bank_balance,
                 "bank_tally_net":      bank_tally_net,
                 "cash_on_hand":        cash_on_hand,
                 "pending_collections": round(pending_collections, 2),
+                "cashback_receivable": cashback_receivable,
+                "cashback_receivable_sellers": cashback_receivable_sellers,
+                "vendor_receivable":   vendor_receivable,
+                "vendor_receivable_rows": vendor_receivable_rows,
+                "receivables_total":   receivables_total,
                 "user_wallet_balance": round(user_wallet_balance, 2),
                 "vendor_payable":      vendor_payable,
                 "vendor_payable_sellers": vendor_payable_count,

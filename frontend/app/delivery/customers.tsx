@@ -15,7 +15,7 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, spacing, radii, formatINR } from "../../src/theme";
-import { DPHeader, DPTabBar, DPEmpty } from "../../src/delivery-ui";
+import { DPHeader, DPTabBar, DPEmpty, useDPSwipe } from "../../src/delivery-ui";
 import { captureCurrentPlace } from "../../src/capture-location";
 
 const PILL: Record<string, string> = {
@@ -39,6 +39,7 @@ function groupByShop(orders: any[]) {
 }
 
 export default function DeliveryCustomers() {
+  const swipe = useDPSwipe();
   const router = useRouter();
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -126,7 +127,7 @@ export default function DeliveryCustomers() {
   }
 
   return (
-    <SafeAreaView style={s.safe} edges={["top"]}>
+    <SafeAreaView style={s.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <DPHeader title="Customers" subtitle="All orders of one customer, together" />
 

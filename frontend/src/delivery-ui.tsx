@@ -6,6 +6,7 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter, usePathname } from "expo-router";
 import { colors, radii, formatINR } from "./theme";
 import { TabBarIcon } from "./tab-bar-icon";
+import { useSwipePager } from "./use-swipe-pager";
 
 // Riders get THREE destinations only — no Shop, no Services (owner's rule).
 // Chat and Profile live at /delivery/* so the buyer bottom tab bar (Shop ·
@@ -52,6 +53,27 @@ export function DPHeader({ title, subtitle }: { title: string; subtitle?: string
       </TouchableOpacity>
     </View>
   );
+}
+
+/**
+ * Jun 2026 — left/right flick moves between the rider's three destinations,
+ * exactly like the buyer tab bar. Spread the result on a screen's root view:
+ *   <SafeAreaView style={s.safe} {...useDPSwipe()}>
+ */
+export function useDPSwipe() {
+  const router = useRouter();
+  const path = usePathname() || "";
+  const index = DP_TABS.findIndex((t) => t.isActive(path));
+  const step = (dir: 1 | -1) => {
+    if (index < 0) return;
+    const next = DP_TABS[index + dir];
+    if (next) router.replace(next.path as any);
+  };
+  return useSwipePager({
+    onNext: () => step(1),
+    onPrev: () => step(-1),
+    enabled: index >= 0,
+  });
 }
 
 export function DPTabBar() {

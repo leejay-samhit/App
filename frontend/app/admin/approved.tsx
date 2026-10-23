@@ -7,6 +7,7 @@ import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { downloadText } from "../../src/download";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type ApprovedRecord = {
   id: string;
@@ -51,6 +52,7 @@ export default function AdminApproved() {
   const canDelete = role === "super_admin";
 
   const [tab, setTab] = useState<Tab>("all");
+const swipe = useTabSwipe(TABS.map((t) => t.key), tab, setTab);
   const [items, setItems] = useState<ApprovedRecord[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
@@ -121,7 +123,7 @@ export default function AdminApproved() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} testID="approved-back">
           <Feather name="arrow-left" size={20} color={colors.textMain} />

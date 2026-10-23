@@ -5,12 +5,14 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type App = { id: string; user_id: string; name?: string; email?: string; phone?: string; service_name: string; service_category: string; pincode: string; charge: number; description?: string; status: string; created_at: string; reject_reason?: string };
 
 export default function AdminServiceApplications() {
   const router = useRouter();
   const [tab, setTab] = useState<"pending" | "approved" | "rejected">("pending");
+const swipe = useTabSwipe(["pending", "approved", "rejected"] as const, tab, setTab);
   const [items, setItems] = useState<App[]>([]);
   const [counts, setCounts] = useState<any>({ pending: 0, approved: 0, rejected: 0 });
   const [loading, setLoading] = useState(true);
@@ -55,7 +57,7 @@ export default function AdminServiceApplications() {
   if (loading) return <SafeAreaView style={styles.safe}><View style={styles.center}><ActivityIndicator color={colors.primary} /></View></SafeAreaView>;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}><Feather name="arrow-left" size={20} color={colors.textMain} /></TouchableOpacity>
         <View style={{ flex: 1 }}>

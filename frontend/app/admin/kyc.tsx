@@ -8,6 +8,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type KYCUser = {
   id: string;
@@ -38,6 +39,7 @@ export default function AdminKYC() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<"pending" | "approved" | "rejected">("pending");
+const swipe = useTabSwipe(["pending", "approved", "rejected"] as const, tab, setTab);
   const [rejectFor, setRejectFor] = useState<KYCUser | null>(null);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -96,7 +98,7 @@ export default function AdminKYC() {
     (u.has_aadhaar_front ? 1 : 0) + (u.has_aadhaar_back ? 1 : 0) + (u.has_pan_image ? 1 : 0) + (u.has_selfie ? 1 : 0);
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} testID="kyc-back">
           <Feather name="arrow-left" size={20} color={colors.textMain} />

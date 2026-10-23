@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="7" time="5.184" timestamp="2026-10-23T06:31:53.658493+00:00" hostname="agent-env-57c39a9c-cb19-400f-91cf-18478588c9e6"><testcase classname="tests.test_iter98_final_batch.TestFixA" name="test_parked_refund_not_receivable_and_one_nudge" time="2.070" /><testcase classname="tests.test_iter98_final_batch.TestFixA" name="test_company_funded_raises_receivable" time="0.889" /><testcase classname="tests.test_iter98_final_batch.TestFixA" name="test_company_funded_receivable_is_recoverable" time="0.632"><failure message="AssertionError: company-funded refund receivable has no recovery path&#10;assert 'open' != 'open'">self = &lt;test_iter98_final_batch.TestFixA object at 0xfc6e889d8c10&gt;
+A = {'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlOWNkNTM4My1lMWFlLTQ2MjAtYmNlYi04MzVkMDhjZjV...XBlIjoiYWNjZXNzIiwic2lkIjoiOTY1MDNkNWFhOGM1NGQ4OWJkNTE1MjFhNzlkMmFlOTAifQ.P3iAg3C2vTUGnaJQ-gw3GNgnNGHp5RvzM4j-si0VuK0'}
+seeded = {'cid': 'TEST_c_022488', 'company_rid': 'TEST_r_2028dab9', 'dpid': 'TEST_dp_022488', 'mk_order': &lt;function seeded.&lt;locals&gt;.mk_order at 0xfc6e899ec220&gt;, ...}
+
+    def test_company_funded_receivable_is_recoverable(self, A, seeded):
+        # The seller now has money; can the admin's ONE recovery process pull it back?
+        rid = seeded.get("company_rid")
+        if not rid:
+            pytest.skip("no company-funded row")
+        mdb.users.update_one({"id": seeded["vid"]}, {"$set": {"vendor_earnings": 500.0}})
+        m0 = nw(A)["master"]
+        r = requests.post(f"{BASE}/admin/cashback/outstanding/{seeded['vid']}/recover", headers=A,
+                          json={"amount": 150, "note": "TEST_iter98"}, timeout=60)
+        print("recover", r.status_code, r.text[:300])
+        m1 = nw(A)["master"]
+        row = mdb.vendor_outstanding.find_one({"return_id": rid, "kind": "return_refund_company_funded"}, {"_id": 0})
+        v = mdb.users.find_one({"id": seeded["vid"]}, {"_id": 0, "vendor_earnings": 1})
+        print("row after recover", row.get("status"), row.get("recovered"), "vendor_earnings", v,
+              "d_rec", round(m1["receivables_total"] - m0["receivables_total"], 2))
+&gt;       assert row["status"] != "open", "company-funded refund receivable has no recovery path"
+E       AssertionError: company-funded refund receivable has no recovery path
+E       assert 'open' != 'open'
+
+tests/test_iter98_final_batch.py:144: AssertionError</failure></testcase><testcase classname="tests.test_iter98_final_batch.TestFixD" name="test_notify_once_per_transition[False]" time="0.515" /><testcase classname="tests.test_iter98_final_batch.TestFixD" name="test_notify_once_per_transition[True]" time="0.517" /><testcase classname="tests.test_iter98_final_batch.TestFixE" name="test_dth_scope_drops_mobile_operator" time="0.278" /><testcase classname="tests.test_iter98_final_batch.TestFixC" name="test_platform_fee_bucket_ties_to_rows" time="0.154" /></testsuite></testsuites>

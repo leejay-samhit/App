@@ -728,7 +728,26 @@ async def auto_recover_from_vendor_credit(
         {"id": vendor_id}, {"_id": 0, "cashback_outstanding": 1},
     ) or {}).get("cashback_outstanding") or 0), 2)
     if owed <= 0.009:
-        return {"recovered": 0.0, "outstanding_before": 0.0, "outstanding_after": 0.0}
+        # No cashback debt — but the company may still have advanced a refund
+        # for this shop, and that comes out of this very credit too.
+        advance = 0.0
+        try:
+            from core import vendor_advances
+            avail = round(float((await db.users.find_one(
+                {"id": vendor_id}, {"_id": 0, "vendor_earnings": 1},
+            ) or {}).get("vendor_earnings") or 0), 2)
+            if avail > 0.009:
+                adv = await vendor_advances.recover_from_wallet(
+                    vendor_id, avail,
+                    credit_admin_bucket=credit_admin_bucket,
+                    note=f"Recovered from sale {order.get('order_number') or order.get('id')}",
+                    idempotency_key=f"ADVRECOVER:{order.get('id')}",
+                )
+                advance = round(float(adv.get("applied") or 0), 2)
+        except Exception as err:
+            logger.warning("advance auto-recovery failed for %s: %s", vendor_id, str(err)[:200])
+        return {"recovered": 0.0, "advance_recovered": advance,
+                "outstanding_before": 0.0, "outstanding_after": 0.0}
 
     available = round(float((await db.users.find_one(
         {"id": vendor_id}, {"_id": 0, "vendor_earnings": 1},
@@ -765,7 +784,25 @@ async def auto_recover_from_vendor_credit(
     await _settle_outstanding_rows(vendor_id, take)
     await db.users.update_one({"id": vendor_id}, {"$inc": {"cashback_outstanding": -take}})
     await credit_admin_bucket("cashback_funded", take, also_total_earned=False)
+    # Oct-2026 — the same sale also clears what the company ADVANCED for this
+    # shop (a return refund it funded while his wallet was short). The seller
+    # was told "it will be recovered from your next sales", so it is.
+    advance = 0.0
+    try:
+        from core import vendor_advances
+        left = round(max(0.0, available - take), 2)
+        if left > 0.009:
+            adv = await vendor_advances.recover_from_wallet(
+                vendor_id, left,
+                credit_admin_bucket=credit_admin_bucket,
+                note=f"Recovered from sale {order.get('order_number') or order_id}",
+                idempotency_key=f"ADVRECOVER:{order_id}",
+            )
+            advance = round(float(adv.get("applied") or 0), 2)
+    except Exception as err:  # never break a sale over a recovery
+        logger.warning("advance auto-recovery failed for %s: %s", vendor_id, str(err)[:200])
     return {
+        "advance_recovered": advance,
         "recovered": take,
         "outstanding_before": owed,
         "outstanding_after": round(owed - take, 2),
@@ -804,77 +841,111 @@ async def _settle_outstanding_rows(vendor_id: str, amount: float) -> int:
     return touched
 
 
-async def recover_vendor_outstanding(
+async def recover_outstanding_from_wallet(
     vendor_id: str,
     amount: float,
     *,
     credit_admin_bucket,
-    note: str = "Seller settled outstanding cashback",
-    method: str = "cash",
-    reference: Optional[str] = None,
+    note: str = "Recovered from seller's shop-earnings wallet",
     recorded_by: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Apply money a seller has PHYSICALLY paid Slangcart (cash or a manual
-    UPI deposit) against their open cashback outstanding, oldest first. The
-    customer is NEVER credited again — this only settles the debt between the
-    seller and the platform.
+    """Jun-2026 OWNER RULE — ONE recovery process: the seller's own wallet.
 
-    Oct-2026 — `method` now decides where the money shows up:
-      * `upi` / `bank` → a real `bank_ledger` credit, so the Bank Balance
-        Tally still reconciles line-by-line against the statement
-      * `cash`         → stays out of the bank ledger and is counted in
-        cash-on-hand, because no rupee reached the bank account
-    Either way one treasury row is written, so the System Wallet drill-down
-    and company net worth both move by exactly this amount, once.
+    Cashback is money Slangcart fronted to the shopper on the seller's
+    behalf, and the seller's shop-earnings wallet is where his money already
+    sits, so recovery is a straight wallet → treasury transfer:
+
+        vendor wallet (Group 2 liability) ──►  treasury (cashback_funded)
+
+    No "bank deposit" and no "cash entry" any more: those asked the admin to
+    type in money that never moved and could be entered twice. Here nothing
+    can be double-booked — the wallet debit is idempotent, the outstanding
+    rows are settled oldest-first for exactly the amount debited, and the
+    treasury is credited exactly once for the same figure.
     """
-    remaining = round(max(0.0, float(amount or 0)), 2)
-    if remaining <= 0.009:
-        return {"applied": 0.0, "rows": 0}
+    from core import shop_money
 
-    ts = now_utc().isoformat()
-    method = (method or "cash").strip().lower()
-    if method not in ("cash", "upi", "bank"):
-        method = "cash"
+    want = round(max(0.0, float(amount or 0)), 2)
+    if want <= 0.009:
+        return {"applied": 0.0, "rows": 0, "method": "wallet"}
 
-    applied = round(min(remaining, round(float((await db.users.find_one(
-        {"id": vendor_id}, {"_id": 0, "cashback_outstanding": 1},
-    ) or {}).get("cashback_outstanding") or 0), 2)), 2)
-    rows = await _settle_outstanding_rows(vendor_id, applied) if applied > 0.009 else 0
-    unapplied = round(remaining - applied, 2)
+    v = await db.users.find_one(
+        {"id": vendor_id},
+        {"_id": 0, "id": 1, "cashback_outstanding": 1, "vendor_earnings": 1,
+         "vendor_business_name": 1, "shop_name": 1, "name": 1},
+    )
+    if not v:
+        raise ValueError("Seller not found")
+    owed = round(float(v.get("cashback_outstanding") or 0), 2)
+    available = round(float(v.get("vendor_earnings") or 0), 2)
+    take = round(min(want, owed, max(0.0, available)), 2)
+    if take <= 0.009:
+        return {
+            "applied": 0.0, "rows": 0, "method": "wallet",
+            "outstanding_before": owed, "outstanding_after": owed,
+            "wallet_before": available, "wallet_after": available,
+            "reason": "nothing_to_recover" if owed <= 0.009 else "wallet_empty",
+        }
 
-    if applied > 0.009:
-        await db.users.update_one({"id": vendor_id}, {"$inc": {"cashback_outstanding": -applied}})
-        await credit_admin_bucket("cashback_funded", applied, also_total_earned=False)
-        ref = reference or f"CBRECOVER-MANUAL:{uuid.uuid4().hex[:10]}"
-        await _txn({
-            "user_id": vendor_id,
-            "type": "cashback_vendor_recovery",
-            "amount": applied,
-            "status": "success",
-            "description": f"{note} \u2014 \u20b9{applied:g} recovered ({method.upper()})",
-            "vendor_id": vendor_id,
-            "recovery_method": method,
-            "reference_number": ref,
-            "recorded_by": recorded_by,
-            "created_at": ts,
-        })
-        # A manual UPI/bank deposit really did land in the company account,
-        # so it MUST have a bank row or the tally drifts from the statement.
-        if method in ("upi", "bank"):
-            from core.bank import post_bank
-            await post_bank(
-                kind="credit",
-                amount=applied,
-                category="cashback_recovery",
-                description=f"Seller cashback recovery \u2014 {note}",
-                ref_key=f"CBRECOVER:{ref}",
-                utr=reference,
-                vendor_id=vendor_id,
-                payment_method="upi_manual",
-                happened_at=ts,
-                extra={"recorded_by": recorded_by},
-            )
-    return {"applied": applied, "rows": rows, "unapplied": unapplied, "method": method}
+    shop = v.get("vendor_business_name") or v.get("shop_name") or v.get("name") or "Seller"
+    ref = uuid.uuid4().hex[:10]
+    key = idempotency_key or f"CBRECOVER-WALLET:{ref}"
+    # Jun-2026 — CLAIM THE DEBT FIRST. Two taps used to read the same
+    # `cashback_outstanding`, each pass the cap, and both debit the wallet,
+    # driving the outstanding negative. The conditional `$inc` below can only
+    # succeed for one of them; the loser recovers nothing and the money is
+    # handed straight back if the wallet debit then fails.
+    claimed = await db.users.update_one(
+        {"id": vendor_id, "cashback_outstanding": {"$gte": take}},
+        {"$inc": {"cashback_outstanding": -take}},
+    )
+    if claimed.modified_count != 1:
+        return {"applied": 0.0, "rows": 0, "method": "wallet", "reason": "already_recovered",
+                "outstanding_before": owed, "outstanding_after": owed}
+    row = None
+    try:
+        row = await shop_money.debit(
+            vendor_id, shop_money.VENDOR_WALLET, take,
+            idempotency_key=key,
+            group="vendor_payable",
+            txn_type="cashback_recovery",
+            vendor_id=vendor_id,
+            shop_name=shop,
+            settlement_status="recovered",
+            description=(
+                f"{note} \u2014 \u20b9{take:g} of \u20b9{owed:g} cashback outstanding taken "
+                f"from {shop}'s shop earnings wallet into the System Wallet treasury"
+            ),
+            extra={"wallet_impact": "vendor_earnings_only", "manual_recovery": True,
+                   "recovery_method": "wallet", "recorded_by": recorded_by,
+                   "recovery_ref": key},
+        )
+    except shop_money.InsufficientFunds:
+        await db.users.update_one({"id": vendor_id}, {"$inc": {"cashback_outstanding": take}})
+        return {"applied": 0.0, "rows": 0, "method": "wallet", "reason": "wallet_empty",
+                "outstanding_before": owed, "outstanding_after": owed}
+    except Exception:
+        await db.users.update_one({"id": vendor_id}, {"$inc": {"cashback_outstanding": take}})
+        raise
+    if row is None:
+        # Replay of the same key — put the debt straight back.
+        await db.users.update_one({"id": vendor_id}, {"$inc": {"cashback_outstanding": take}})
+        return {"applied": 0.0, "rows": 0, "method": "wallet", "reason": "replay"}
+
+    rows = await _settle_outstanding_rows(vendor_id, take)
+    await credit_admin_bucket("cashback_funded", take, also_total_earned=False)
+    return {
+        "applied": take,
+        "rows": rows,
+        "method": "wallet",
+        "unapplied": round(want - take, 2),
+        "outstanding_before": owed,
+        "outstanding_after": round(owed - take, 2),
+        "wallet_before": available,
+        "wallet_after": round(available - take, 2),
+        "reference": key,
+    }
 
 
 async def customer_cashback_summary(user_id: str) -> Dict[str, Any]:

@@ -11,7 +11,7 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, spacing, radii, formatINR } from "../../src/theme";
-import { DPHeader, DPTabBar, DPEmpty } from "../../src/delivery-ui";
+import { DPHeader, DPTabBar, DPEmpty, useDPSwipe } from "../../src/delivery-ui";
 
 const LABELS: Record<string, string> = {
   dp_delivery_commission: "Delivery earning",
@@ -24,6 +24,7 @@ const LABELS: Record<string, string> = {
 };
 
 export default function DeliveryWallet() {
+  const swipe = useDPSwipe();
   const router = useRouter();
   const [w, setW] = useState<any>(null);
   const [txns, setTxns] = useState<any[]>([]);
@@ -75,7 +76,7 @@ export default function DeliveryWallet() {
   const pending = Number(w?.pending_withdrawals || 0);
 
   return (
-    <SafeAreaView style={s.safe} edges={["top"]}>
+    <SafeAreaView style={s.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <DPHeader title="My wallet" subtitle="Your delivery earnings" />
       {loading ? (

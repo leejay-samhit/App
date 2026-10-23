@@ -11,6 +11,7 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { notify } from "../../src/notify";
 import { downloadServerFile } from "../../src/download";
 import { DateRangeFilter } from "../../src/date-range-picker";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type PendingRow = {
   order_id: string;
@@ -29,6 +30,7 @@ type GroupRow = { key: string; label: string; credits: number; debits: number; n
 export default function AdminCashbackScreen() {
   const router = useRouter();
   const [tab, setTab] = useState<"pending" | "outstanding" | "export">("pending");
+const swipe = useTabSwipe(["pending", "outstanding", "export"] as const, tab, setTab);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [pending, setPending] = useState<PendingRow[]>([]);
@@ -39,8 +41,6 @@ export default function AdminCashbackScreen() {
   const [dlBusy, setDlBusy] = useState<string | null>(null);
   const [recoverFor, setRecoverFor] = useState<any | null>(null);
   const [recoverAmount, setRecoverAmount] = useState("");
-  const [recoverMethod, setRecoverMethod] = useState<"cash" | "upi">("cash");
-  const [recoverRef, setRecoverRef] = useState("");
   const [recoverMsg, setRecoverMsg] = useState("");
   const [recoverBusy, setRecoverBusy] = useState(false);
   const [groups, setGroups] = useState<GroupRow[]>([]);
@@ -135,27 +135,19 @@ export default function AdminCashbackScreen() {
   const onRecover = async () => {
     if (!recoverFor) return;
     const amt = parseFloat(recoverAmount);
-    if (!amt || amt <= 0) { setRecoverMsg("Enter the amount the seller paid."); return; }
-    if (recoverMethod === "upi" && !recoverRef.trim()) {
-      setRecoverMsg("A UTR / reference number is required for a UPI deposit.");
-      return;
-    }
+    if (!amt || amt <= 0) { setRecoverMsg("Enter the amount to collect."); return; }
     setRecoverBusy(true);
     setRecoverMsg("");
     try {
       const { data } = await api.post(
         `/admin/cashback/outstanding/${recoverFor.vendor_id}/recover`,
-        {
-          amount: amt,
-          method: recoverMethod,
-          reference: recoverRef.trim() || undefined,
-          note: recoverMethod === "upi" ? "Seller UPI deposit" : "Cash received from seller",
-        },
+        { amount: amt, note: "Shop earnings wallet recovery" },
       );
       setRecoverFor(null);
       notify(
-        "Recovery recorded",
-        `${formatINR(data.applied)} settled${data.unapplied > 0 ? ` · ${formatINR(data.unapplied)} was more than owed and not applied` : ""}.`,
+        "Recovered from wallet",
+        `${formatINR(data.applied)} moved from the seller's shop earnings wallet to the treasury`
+        + `${data.unapplied > 0 ? ` · ${formatINR(data.unapplied)} could not be collected yet` : ""}.`,
       );
       load();
     } catch (e) {
@@ -170,7 +162,7 @@ export default function AdminCashbackScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <ScrollView
         contentContainerStyle={styles.container}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
@@ -283,13 +275,21 @@ export default function AdminCashbackScreen() {
               <TouchableOpacity
                 key={v.vendor_id}
                 style={styles.row}
-                onPress={() => { setRecoverFor(v); setRecoverAmount(String(v.outstanding)); setRecoverMethod("cash"); setRecoverRef(""); setRecoverMsg(""); }}
+                onPress={() => { setRecoverFor(v); setRecoverAmount(String(v.recoverable_now ?? v.outstanding)); setRecoverMsg(""); }}
                 testID={`cashback-recover-open-${v.vendor_id}`}
                 activeOpacity={0.8}
               >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle}>{v.vendor_name || v.vendor_id.slice(0, 8)}</Text>
-                  <Text style={styles.rowSub}>{v.orders} order{v.orders === 1 ? "" : "s"} fronted · tap to record a recovery</Text>
+                  <Text style={styles.rowSub}>
+                    {v.orders} item{v.orders === 1 ? "" : "s"} · wallet {formatINR(Number(v.wallet_balance || 0))} · tap to collect
+                  </Text>
+                  {Number(v.advance_outstanding || 0) > 0 ? (
+                    <Text style={styles.rowSub}>
+                      cashback {formatINR(Number(v.cashback_outstanding || 0))} · refunds we paid{" "}
+                      {formatINR(Number(v.advance_outstanding || 0))}
+                    </Text>
+                  ) : null}
                 </View>
                 <Text style={styles.rowAmount}>{formatINR(v.outstanding)}</Text>
                 <Feather name="chevron-right" size={16} color={colors.textMuted} />
@@ -381,40 +381,38 @@ export default function AdminCashbackScreen() {
         ) : null}
       </ScrollView>
 
-      {/* Oct-2026 — record a manual recovery: cash in hand or a UPI deposit.
-          A UPI deposit writes a real bank row so the Bank Balance Tally
-          still reconciles against the statement; cash stays in cash-on-hand. */}
+      {/* Jun-2026 — ONE recovery process: pull it from the seller's shop
+          earnings wallet. The old "cash received" / "UPI deposit" entries
+          asked the admin to type money that had not necessarily moved and
+          could be entered twice. */}
       <Modal visible={!!recoverFor} transparent animationType="slide" onRequestClose={() => setRecoverFor(null)}>
         <Pressable style={styles.recBackdrop} onPress={() => setRecoverFor(null)} />
         <View style={styles.recSheet} testID="cashback-recover-sheet">
           <View style={styles.recGrab} />
-          <Text style={styles.recTitle}>Record recovery</Text>
+          <Text style={styles.recTitle}>Shop earnings wallet recovery</Text>
           <Text style={styles.recSub}>
             {recoverFor?.vendor_name || "Seller"} owes {formatINR(Number(recoverFor?.outstanding || 0))}
+            {Number(recoverFor?.advance_outstanding || 0) > 0
+              ? ` — ${formatINR(Number(recoverFor?.cashback_outstanding || 0))} cashback + ${formatINR(Number(recoverFor?.advance_outstanding || 0))} refunds we paid`
+              : ""}
           </Text>
 
-          <Text style={styles.fieldLabel}>How did the money arrive?</Text>
-          <View style={styles.recMethodRow}>
-            {([
-              { key: "cash", label: "Cash received", icon: "dollar-sign" },
-              { key: "upi", label: "UPI / bank deposit", icon: "smartphone" },
-            ] as const).map((m) => {
-              const on = recoverMethod === m.key;
-              return (
-                <TouchableOpacity
-                  key={m.key}
-                  onPress={() => setRecoverMethod(m.key)}
-                  style={[styles.recMethod, on && styles.recMethodOn]}
-                  testID={`recover-method-${m.key}`}
-                >
-                  <Feather name={m.icon} size={15} color={on ? colors.primaryFg : colors.primary} />
-                  <Text style={[styles.recMethodText, on && { color: colors.primaryFg }]}>{m.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
+          <View style={styles.recWalletCard} testID="recover-wallet-card">
+            <View style={styles.recWalletRow}>
+              <Text style={styles.recWalletLabel}>Seller wallet balance</Text>
+              <Text style={styles.recWalletValue} testID="recover-wallet-balance">
+                {formatINR(Number(recoverFor?.wallet_balance || 0))}
+              </Text>
+            </View>
+            <View style={styles.recWalletRow}>
+              <Text style={styles.recWalletLabel}>Can be collected now</Text>
+              <Text style={[styles.recWalletValue, { color: colors.primary }]} testID="recover-collectable">
+                {formatINR(Number(recoverFor?.recoverable_now || 0))}
+              </Text>
+            </View>
           </View>
 
-          <Text style={styles.fieldLabel}>Amount received (₹)</Text>
+          <Text style={styles.fieldLabel}>Amount to collect (₹)</Text>
           <TextInput
             value={recoverAmount}
             onChangeText={setRecoverAmount}
@@ -423,43 +421,24 @@ export default function AdminCashbackScreen() {
             placeholderTextColor={colors.textMuted}
             testID="recover-amount"
           />
-
-          {recoverMethod === "upi" ? (
-            <>
-              <Text style={[styles.fieldLabel, { marginTop: 12 }]}>UTR / reference number</Text>
-              <TextInput
-                value={recoverRef}
-                onChangeText={setRecoverRef}
-                placeholder="e.g. 431290771234"
-                placeholderTextColor={colors.textMuted}
-                style={styles.input}
-                autoCapitalize="characters"
-                testID="recover-reference"
-              />
-              <Text style={styles.recNote}>
-                This creates a bank-ledger credit, so the Bank Balance Tally keeps
-                matching your statement line-by-line.
-              </Text>
-            </>
-          ) : (
-            <Text style={styles.recNote}>
-              Cash never reaches the bank account, so this is counted in Cash on
-              Hand — not in the bank balance.
-            </Text>
-          )}
+          <Text style={styles.recNote}>
+            This moves the money out of the seller&apos;s shop earnings wallet into the
+            System Wallet treasury — one wallet debit, one treasury credit, nothing
+            typed twice. Whatever is left is recovered automatically from his next sale.
+          </Text>
 
           {recoverMsg ? <Text style={styles.recError}>{recoverMsg}</Text> : null}
 
           <TouchableOpacity
             onPress={onRecover}
-            disabled={recoverBusy}
-            style={[styles.primaryBtn, recoverBusy && { opacity: 0.6 }]}
+            disabled={recoverBusy || Number(recoverFor?.recoverable_now || 0) <= 0}
+            style={[styles.primaryBtn, (recoverBusy || Number(recoverFor?.recoverable_now || 0) <= 0) && { opacity: 0.6 }]}
             testID="recover-submit"
           >
             {recoverBusy
               ? <ActivityIndicator color={colors.primaryFg} />
               : <><Feather name="check-circle" size={16} color={colors.primaryFg} />
-                  <Text style={styles.primaryBtnText}>Record recovery</Text></>}
+                  <Text style={styles.primaryBtnText}>Collect from wallet</Text></>}
           </TouchableOpacity>
           <TouchableOpacity onPress={() => setRecoverFor(null)} style={styles.recCancel} testID="recover-cancel">
             <Text style={styles.recCancelText}>Cancel</Text>
@@ -517,6 +496,14 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.surface,
   },
   dlBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
+  recWalletCard: {
+    marginTop: 4, marginBottom: 14, padding: 12, borderRadius: radii.card,
+    backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border,
+    gap: 6,
+  },
+  recWalletRow: { flexDirection: "row", justifyContent: "space-between", gap: 10 },
+  recWalletLabel: { fontSize: 12.5, color: colors.textMuted, fontWeight: "600" },
+  recWalletValue: { fontSize: 13.5, color: colors.textMain, fontWeight: "800" },
   // Manual-recovery bottom sheet
   recBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)" },
   recSheet: {
@@ -527,14 +514,6 @@ const styles = StyleSheet.create({
   recGrab: { alignSelf: "center", width: 44, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 16 },
   recTitle: { fontSize: 18, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3 },
   recSub: { fontSize: 13, color: colors.textMuted, marginTop: 3, marginBottom: 16, fontWeight: "600" },
-  recMethodRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
-  recMethod: {
-    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
-    gap: 6, minHeight: 46, borderRadius: 11,
-    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface,
-  },
-  recMethodOn: { backgroundColor: colors.primary, borderColor: colors.primary },
-  recMethodText: { fontSize: 12, fontWeight: "800", color: colors.primary },
   recNote: { fontSize: 11, lineHeight: 16, color: colors.textMuted, marginTop: 8 },
   recError: { fontSize: 12.5, color: "#B3261E", fontWeight: "700", marginTop: 10 },
   recCancel: { alignItems: "center", paddingVertical: 14, marginTop: 4 },

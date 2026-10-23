@@ -60,6 +60,11 @@ TYPE_GROUPS = {
     "cashback_funding_refund": "cashback_funding_returned",
     "vendor_adjustment_credit": "adjustments_credit",
     "vendor_adjustment_debit": "adjustments_debit",
+    # What the platform clawed back out of this wallet.
+    "cashback_recovery": "recoveries",
+    "advance_recovery": "recoveries",
+    "withdrawal_transaction_fee": "transaction_fees",
+    "withdrawal_transaction_fee_refund": "transaction_fee_refunds",
 }
 
 
@@ -82,7 +87,8 @@ async def vendor_net_worth(vendor: Dict[str, Any] = Depends(require_vendor)):
         if not c and not d:
             amt = abs(_f(r.get("amount")))
             if key in ("sales", "delivery_charge_reversals", "withdrawal_reversals",
-                       "cashback_funding_returned", "adjustments_credit", "opening"):
+                       "cashback_funding_returned", "adjustments_credit", "opening",
+                       "transaction_fee_refunds"):
                 c = amt
             else:
                 d = amt
@@ -145,6 +151,15 @@ async def vendor_net_worth(vendor: Dict[str, Any] = Depends(require_vendor)):
             "refunds": _r((buckets.get("refunds") or {}).get("debit")),
             "withdrawals": _r((buckets.get("withdrawals") or {}).get("debit")),
             "cashback_funded": _r((buckets.get("cashback_funded") or {}).get("debit")),
+            # Oct-2026 — the money that comes BACK also has to be on the
+            # statement, otherwise the lines cannot add up to the balance
+            # (a rejected settlement alone was ₹1.8 lakh off).
+            "withdrawal_reversals": _r((buckets.get("withdrawal_reversals") or {}).get("credit")),
+            "delivery_charge_reversals": _r((buckets.get("delivery_charge_reversals") or {}).get("credit")),
+            "cashback_funding_returned": _r((buckets.get("cashback_funding_returned") or {}).get("credit")),
+            "recoveries": _r((buckets.get("recoveries") or {}).get("debit")),
+            "transaction_fees": _r((buckets.get("transaction_fees") or {}).get("debit")),
+            "transaction_fee_refunds": _r((buckets.get("transaction_fee_refunds") or {}).get("credit")),
             "adjustments": _r(
                 _f((buckets.get("adjustments_credit") or {}).get("credit"))
                 - _f((buckets.get("adjustments_debit") or {}).get("debit"))
@@ -168,7 +183,11 @@ async def vendor_net_worth(vendor: Dict[str, Any] = Depends(require_vendor)):
             if outstanding else 0
         ),
         "reconciliation": {
-            "formula": "opening + sales - delivery charges - refunds - withdrawals = available balance",
+            "formula": (
+                "opening + sales + withdrawal reversals + delivery reversals + returned "
+                "cashback funding + adjustments + other − sale reversals − delivery charges "
+                "− refunds − withdrawals − cashback funded = available balance"
+            ),
             "computed": view["ledger_balance"],
             "stored": view["available_balance"],
             "difference": view["unledgered_difference"],
@@ -573,10 +592,17 @@ async def export_net_worth(
     _sheet("Reconciliation", ["Item", "Amount"], [
         ["Opening (ledger)", nw["breakdown"]["opening"]],
         ["Sales", nw["breakdown"]["sales"]],
+        ["Sale reversals", -nw["breakdown"]["sale_reversals"]],
         ["Delivery charges paid", -nw["breakdown"]["delivery_charges"]],
+        ["Delivery charges returned", nw["breakdown"]["delivery_charge_reversals"]],
         ["Refunds paid", -nw["breakdown"]["refunds"]],
         ["Withdrawals", -nw["breakdown"]["withdrawals"]],
+        ["Withdrawals returned (rejected)", nw["breakdown"]["withdrawal_reversals"]],
+        ["Transaction fees", -nw["breakdown"]["transaction_fees"]],
+        ["Transaction fees returned", nw["breakdown"]["transaction_fee_refunds"]],
         ["Cashback funded", -nw["breakdown"]["cashback_funded"]],
+        ["Cashback funding returned", nw["breakdown"]["cashback_funding_returned"]],
+        ["Recovered by Slangcart", -nw["breakdown"]["recoveries"]],
         ["Adjustments", nw["breakdown"]["adjustments"]],
         ["Other", nw["breakdown"]["other"]],
         ["= Ledger balance", nw["ledger_balance"]],

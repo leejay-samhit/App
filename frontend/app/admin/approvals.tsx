@@ -8,6 +8,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type ApprovalUser = {
   id: string;
@@ -53,6 +54,7 @@ export default function AdminApprovals() {
   const router = useRouter();
   const params = useLocalSearchParams<{ focus?: string }>();
   const [tab, setTab] = useState<"pending" | "approved" | "rejected">("pending");
+const swipe = useTabSwipe(["pending", "approved", "rejected"] as const, tab, setTab);
   const [items, setItems] = useState<ApprovalUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -135,7 +137,7 @@ export default function AdminApprovals() {
     s === "approved" ? colors.success : s === "rejected" ? "#B3261E" : colors.warning;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} testID="approvals-back">
           <Feather name="arrow-left" size={20} color={colors.textMain} />

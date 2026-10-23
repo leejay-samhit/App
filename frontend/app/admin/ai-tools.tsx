@@ -15,6 +15,7 @@ import * as Clipboard from "expo-clipboard";
 import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type Kind = "service_description" | "category_description" | "marketing" | "service_title" | "improve";
 const KINDS: { k: Kind; label: string; hint: string }[] = [
@@ -36,6 +37,7 @@ const IMG_STYLES: { k: ImgStyle; label: string }[] = [
 export default function AdminAITools() {
   const router = useRouter();
   const [tab, setTab] = useState<"text" | "image">("text");
+const swipe = useTabSwipe(["text", "image"] as const, tab, setTab);
 
   // Text gen state
   const [kind, setKind] = useState<Kind>("service_description");
@@ -95,7 +97,7 @@ export default function AdminAITools() {
   };
 
   return (
-    <SafeAreaView style={s.safe} edges={["top"]}>
+    <SafeAreaView style={s.safe} edges={["top"]} {...swipe}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <View style={s.header}>
           <TouchableOpacity onPress={() => router.back()} style={s.iconBtn}>

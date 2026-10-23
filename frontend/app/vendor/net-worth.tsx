@@ -12,6 +12,7 @@ import { api } from "../../src/api";
 import { colors, spacing, formatINR } from "../../src/theme";
 import { downloadServerFile } from "../../src/download";
 import { DateRangeFilter } from "../../src/date-range-picker";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type NetWorth = {
   shop_name?: string;
@@ -42,6 +43,7 @@ const TABS = [
 export default function VendorNetWorthScreen() {
   const router = useRouter();
   const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("summary");
+const swipe = useTabSwipe(TABS.map((t) => t.key), tab, setTab);
   const [nw, setNw] = useState<NetWorth | null>(null);
   const [ledger, setLedger] = useState<any>(null);
   const [offline, setOffline] = useState<any>(null);
@@ -88,7 +90,7 @@ export default function VendorNetWorthScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} testID="networth-back">

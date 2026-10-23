@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" skipped="0" tests="3" time="2.201" timestamp="2026-10-23T06:09:33.620089+00:00" hostname="agent-env-57c39a9c-cb19-400f-91cf-18478588c9e6"><testcase classname="tests.test_iter97_concurrency" name="test_parallel_settlements_8" time="1.480"><failure message="AssertionError: [400, 400, 400, 400, 400, 429, ...]&#10;assert 0 == 1&#10; +  where 0 = len([])">tests/test_iter97_concurrency.py:62: in test_parallel_settlements_8
+    assert len(ok) == 1, codes
+E   AssertionError: [400, 400, 400, 400, 400, 429, ...]
+E   assert 0 == 1
+E    +  where 0 = len([])</failure></testcase><testcase classname="tests.test_iter97_concurrency" name="test_lock_release_and_stale" time="0.117"><failure message="AssertionError: {&quot;error&quot;:&quot;rate_limited&quot;,&quot;message&quot;:&quot;Too many requests. Please slow down and try again in a moment.&quot;,&quot;detail&quot;:&quot;5 per 1 hour&quot;}&#10;assert 429 == 409&#10; +  where 429 = &lt;Response [429]&gt;.status_code">tests/test_iter97_concurrency.py:88: in test_lock_release_and_stale
+    assert r.status_code == 409, r.text
+E   AssertionError: {"error":"rate_limited","message":"Too many requests. Please slow down and try again in a moment.","detail":"5 per 1 hour"}
+E   assert 429 == 409
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_iter97_concurrency" name="test_parallel_recoveries_5" time="0.483"><failure message="assert 100.0 == 60&#10; +  where 100.0 = round((9216.5 - 9116.5), 2)&#10; +    where 9116.5 = bal()">tests/test_iter97_concurrency.py:105: in test_parallel_recoveries_5
+    assert round(b0 - bal(), 2) == 60
+E   assert 100.0 == 60
+E    +  where 100.0 = round((9216.5 - 9116.5), 2)
+E    +    where 9116.5 = bal()</failure></testcase></testsuite></testsuites>

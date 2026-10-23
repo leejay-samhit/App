@@ -65,9 +65,14 @@ export default function CartScreen() {
       }, 0);
       setTotal(Number(data.total) > 0 ? Number(data.total) : localTotal);
       setDelivery(data.delivery || null);
+      // Jun 2026 — the footer shows the live wallet balance. Reading it off a
+      // stale auth snapshot made the bag claim "₹0 / wallet short by ₹3" for
+      // shoppers who actually had money, so pull /auth/me every time the bag
+      // opens.
+      await refresh();
     } catch {}
     finally { setLoading(false); setRefreshing(false); }
-  }, []);
+  }, [refresh]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
   const onRefresh = useCallback(() => { setRefreshing(true); load(); }, [load]);

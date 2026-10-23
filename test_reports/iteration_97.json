@@ -1,0 +1,58 @@
+{
+  "summary": "Iteration 97 retested the 7 fixes from iteration 96, on both backend and frontend. Regression is all green: test_iter96_reconciliation 7/7, test_iter96_fixes 11/11, test_jun2026_owner_batch 13/13 and test_jun2026_recharge_and_settlement 15/15. The Excel export still has the Recharge sheet with negative, remarked debits. I verified FIX 1, 2 and 3 independently. FIX 1: 8 parallel POST /withdrawals gave one 200, four 409 and three 429 (the 5/hour rate limit). That left 1 open withdrawal, the wallet down exactly 5000, 1 fee row and 1 CBRECOVER-WDL row. The lock is released, a fresh lock returns 409 and a lock older than 3 minutes is taken over. FIX 2: 5 parallel recoveries collected the debt exactly once, the outstanding never went negative and the row settled. FIX 3: reject returned 4872 + 128 (4960 after the 40 cashback that was correctly recovered), and a replayed reject changed nothing. FIX 4: the buyer gets exactly one 'Recharge successful' and an earlier 'Recharge update', with no parcel copy and nothing on replay. The vendor still gets 'Recharge done' again on every replayed delivered PATCH. FIX 5: verified with CDP touch swipes. The payouts strip goes Pending to Processing to Success and stays on /admin/payouts. Shop swipes into payouts, Wallet swipes back into payouts, Users goes to Shop, Wallet goes to More, and the Approvals strip still swipes. FIX 6: the core flow works. A short seller parks exactly one row after 3 retries, the row is settled once the seller funds, and the refund goes vendor wallet to customer wallet with 2 ledger rows and no treasury leg. A replay is a no-op. A company-funded refund leaves exactly one open return_refund_company_funded row (the shortfall, 300) and the parked row becomes superseded. BUT the new vendor_receivable counts parked 'return_refund' rows, where the company advanced nothing, as receivables. A parked refund raises net worth by its full amount. There are also 11 legacy open return_refund rows (₹6600, all for returns already refunded and completed) that make up the whole live Receivables of ₹6600 and inflate net worth by ₹6600. FIX 7: /recharge/products returns 7 plans at local and non-local pincodes with supplier local/national. The map-shops operator chips filter by kind, and un-ticking Mobile drops Airtel from the scope (verified in the UI, not saved). The fingerprint copy reads correctly.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/admin/finance/net-worth (routes/finance.py:391-401)", "issue": "vendor_receivable counts every open non-cashback vendor_outstanding row, including kind 'return_refund'. These rows are written when the seller is short and the refund is PARKED, so nobody has advanced any money. Parking a 300 refund raised receivables_total and net_worth by +300 (test_iter97_returns_outstanding::test_short_seller_parks_once_then_closes). Only money the company actually advanced should count, such as 'return_refund_company_funded' or an unfunded delivery fee.", "priority": "HIGH"},
+      {"endpoint": "vendor_outstanding data (legacy)", "issue": "11 open kind='return_refund' rows for testvendor (REF5, REF11 … REF65, 600 each, ₹6600 in total) belong to returns that are already status=completed, refund_status=paid and have a vendor_debit_txn_id. They were never closed because the old code had no close step. Because of the new vendor_receivable they are now the whole live Receivables (6600.0, 11 rows) and inflate net worth by ₹6600. They need a one-time backfill that sets status 'settled' wherever returns.refund_status == 'paid'.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "PATCH /api/admin/orders/{id}/status (server.py ~6040-6050)", "issue": "Each replayed 'delivered' PATCH on a recharge order sends the VENDOR another 'Recharge done' notification: 3 delivered calls gave 3 rows. The buyer side is correct. A replayed status on a parcel order also re-sends the buyer 'Order delivered', because the elif branch does not check prev_status == payload.status. Push is protected by its idempotency_key; the in-app notification is not."},
+      {"endpoint": "POST /api/admin/withdrawals/{id}/reject (server.py:1892-1906)", "issue": "The platform-fee revenue reversal only runs `if _fee_row is not None`. If the fee credit succeeded but the request died before the reversal (or the first attempt raced), every replay sees _fee_row None and never posts the reversal. Live evidence: withdrawal 276686a3-88cd-429c-8449-62fadbebcef2 (rejected 05:58, 'iter96 fee reversal') has WDL_FEEBACK but no WDLFEEREV_REJECT, so platform_fee revenue is overstated by 128. The post is already idempotent by key, so run it every time."},
+      {"endpoint": "transactions type 'reversal'", "issue": "The fee reversal row is stored with amount = -128 and debit = 128. Every other shop_money row has a positive amount with credit/debit columns, so an export that sums amount and debit can double-negate."},
+      {"endpoint": "POST /api/admin/returns/{id}/refund (parked retries)", "issue": "Each retry on a short seller sends another 'Refund blocked — add money' notification and push: 3 retries gave 3 pushes. The vendor_outstanding row itself is correctly deduplicated."},
+      {"endpoint": "PUT /api/admin/delivery-partners/{id}/vendors", "issue": "The server accepts a contradictory recharge scope, e.g. kinds ['dth'] with networks ['airtel'] (a mobile operator). Only the UI filters this; the backend should drop networks whose kind is not ticked."},
+      {"endpoint": "core/returns.py:659 (company funded)", "issue": "credit_admin_bucket('shopping_margin', -funded) books the funded amount as a margin loss, while the same rupees are also booked as a recoverable receivable. The P&L shows it as both an expense and an asset. Net worth is not affected."},
+      {"endpoint": "tests/test_jun2026_recharge_and_settlement.py", "issue": "This suite raises a 5000 settlement for testvendor and never rejects it, which left an open ₹4872 withdrawal that blocks the next settlement. I rejected it during this run."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter97_concurrency.py",
+    "/app/backend/tests/test_iter97_returns_outstanding.py",
+    "/app/backend/tests/test_iter97_recharge_notify.py",
+    "/app/backend/tests/test_iter96_reconciliation.py",
+    "/app/test_reports/pytest/iter97_concurrency.xml",
+    "/app/test_reports/pytest/iter97_final.xml"
+  ],
+  "action_items": [
+    "HIGH: routes/finance.py vendor_receivable — exclude kind 'return_refund' (parked, nothing advanced). Count only rows where company money actually went out (return_refund_company_funded, unfunded delivery fee, …), or add an 'advanced: true' flag and match on it.",
+    "HIGH: one-time backfill — set vendor_outstanding status 'settled' for kind='return_refund' rows whose return has refund_status='paid' (11 rows, ₹6600, testvendor). Receivables and net worth will then drop by ₹6600.",
+    "Make the reject fee reversal unconditional (it is already idempotent via WDLFEEREV_REJECT:{wid}), and heal withdrawal 276686a3-88cd-429c-8449-62fadbebcef2 (post its missing reversal and take 128 off the platform_fee bucket).",
+    "admin_update_order_status: skip the stage notifications (buyer and vendor) when prev_status == payload.status, so replays do not re-notify.",
+    "process_refund: notify 'Refund blocked' only when the vendor_outstanding upsert actually inserted a row (upserted_id) rather than on every retry.",
+    "Store the 'reversal' row's amount as a positive number with debit set, to match the shop_money convention.",
+    "Validate recharge_scopes on the backend so networks are dropped when their kind is not ticked.",
+    "Make test_jun2026_recharge_and_settlement.py reject the settlement it raises."
+  ],
+  "critical_code_review_comments": [
+    "withdrawals.py lock: the conditional claim with a 2-minute stale takeover and a finally-unset is correct. It compares ISO strings, which is fine while every writer uses the same UTC isoformat.",
+    "The 5/hour rate limit on POST /withdrawals also counts 400/409 responses, so a seller who mistypes the amount 5 times is locked out for an hour.",
+    "process_refund has no per-return claim. Debits and credits are idempotent by key, but credit_admin_bucket('shopping_margin') is not, so two parallel refund-from-company calls could take the margin twice. Add an atomic status claim (returned/refund_pending -> refunding).",
+    "Recharge push title still carries the '📦' parcel emoji ('📦 Recharge update')."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter97_concurrency.py",
+    "/app/backend/tests/test_iter97_returns_outstanding.py",
+    "/app/backend/tests/test_iter97_recharge_notify.py"
+  ],
+  "success_rate": {"backend": "93% (regression 46/46; new 4/6 — the 2 failures are the phantom receivable and the replayed vendor notification)", "frontend": "100% (swipe 7/7 checks, operator chips 4/4)"},
+  "seed_data_creation": "Returns tests use throwaway TEST_v_/TEST_c_ users and TEST_r_ returns, all deleted afterwards along with their transactions, notifications and outstanding rows. The cashback debts seeded on testvendor (TEST_iter97_ rows, 200 in total over two runs) were recovered from his wallet through the normal recovery path, so wallet and ledger agree. The open ₹4872 withdrawal left by the main-agent suite was rejected, with fee returned. testvendor ends with vendor_earnings 9016.5, cashback_outstanding 0, no open withdrawal and no settlement lock. Two recharge orders (₹19 each) were completed for testbuyer and their recharges tagged with account 'TEST_iter97'. The rider scope was restored to {mobile, airtel}. The backend was restarted 3 times to reset the in-memory rate limiter.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The test_jun2026_*.py and test_iter96_fixes.py files are plain scripts: run them with `python tests/<file>.py`, because pytest collects 0 tests from them. The frontend .env key is EXPO_PUBLIC_BACKEND_URL; EXPO_BACKEND_URL is not set. POST /withdrawals is limited to 5/hour (in-memory, and 400s count too); restart the backend between settlement suites. The minimum settlement is ₹5000. Transaction 'extra' fields are flattened to the top level, so query return_id, not extra.return_id. The delivery-partners admin screen needs adp-tab-partners, then adp-map-{rider}, then adp-mapkind-recharge before the adp-scope-{vendor} chips appear; use the ':visible' selector. Use CDP touch for swipes."
+}

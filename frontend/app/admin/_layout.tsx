@@ -1,10 +1,21 @@
-import { Tabs } from "expo-router";
-import { Platform } from "react-native";
+import { Tabs, useRouter, useSegments } from "expo-router";
+import { useCallback } from "react";
+import { Platform, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../../src/theme";
 import { useAuth } from "../../src/auth";
 import { SCOPED_ADMIN_ROLES } from "../../src/admin-roles";
 import { tabIcon, TAB_LABEL_STYLE } from "../../src/tab-bar-icon";
+import { useSwipePager } from "../../src/use-swipe-pager";
+
+// Jun 2026 — the admin bottom tabs flick left/right like every other tab row
+// in the app. Scoped to the six visible tabs; a drilled-in admin screen keeps
+// its own gestures.
+const ADMIN_SWIPE_ORDER = ["home", "users", "shop", "payouts", "wallet", "more"];
+// Screens that own an in-screen filter strip (Pending / Processing / …).
+// There the flick belongs to the strip, so the bottom-tab swipe stands down
+// — you can still swipe INTO these tabs from a neighbour.
+const OWN_STRIP = new Set(["payouts"]);
 
 /** Sep 2026 — scoped manager roles see ONLY their own section. */
 const SCOPED_ROLES = SCOPED_ADMIN_ROLES;
@@ -52,12 +63,28 @@ export default function AdminLayout() {
   // full admin: their tab bar is just their own section + profile, and the
   // backend blocks everything else (core/security.ADMIN_AREAS).
   const scoped = SCOPED_ROLES.includes(String((user as any)?.admin_role || ""));
+  const router = useRouter();
+  const segments = useSegments() as string[];
+  const current = segments[segments.length - 1] || "";
+  const tabIndex = scoped ? -1 : ADMIN_SWIPE_ORDER.indexOf(current);
+  const goToTab = useCallback((dir: 1 | -1) => {
+    if (tabIndex < 0) return;
+    const next = ADMIN_SWIPE_ORDER[tabIndex + dir];
+    if (next) router.navigate(`/admin/${next}` as any);
+  }, [tabIndex, router]);
+  const swipeHandlers = useSwipePager({
+    onNext: () => goToTab(1),
+    onPrev: () => goToTab(-1),
+    enabled: tabIndex >= 0 && !OWN_STRIP.has(current),
+  });
   const tab = (visible: boolean, options: any) => (visible ? options : { href: null });
   return (
+    <View style={{ flex: 1 }} {...swipeHandlers}>
     <Tabs
       initialRouteName={scoped ? "manager-home" : "shop"}
       screenOptions={{
         headerShown: false,
+        animation: "shift",
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.textMuted,
         tabBarHideOnKeyboard: true,
@@ -92,5 +119,6 @@ export default function AdminLayout() {
         <Tabs.Screen key={name} name={name} options={{ href: null }} />
       ))}
     </Tabs>
+    </View>
   );
 }

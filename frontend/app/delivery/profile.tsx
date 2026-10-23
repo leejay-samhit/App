@@ -4,12 +4,13 @@
 import React from "react";
 import { View, StyleSheet } from "react-native";
 import ProfileScreen from "../(tabs)/profile";
-import { DPTabBar } from "../../src/delivery-ui";
+import { DPTabBar, useDPSwipe } from "../../src/delivery-ui";
 import { colors } from "../../src/theme";
 
 export default function DeliveryProfile() {
+  const swipe = useDPSwipe();
   return (
-    <View style={s.wrap}>
+    <View style={s.wrap} {...swipe}>
       <ProfileScreen />
       <DPTabBar />
     </View>

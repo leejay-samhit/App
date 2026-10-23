@@ -10,6 +10,7 @@ import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { AppBackupPanel } from "../../src/app-backup-panel";
 import { colors, radii, spacing } from "../../src/theme";
+import { useTabSwipe } from "../../src/use-swipe-pager";
 
 type Backup = {
   id: string;
@@ -29,6 +30,7 @@ export default function AdminBackups() {
   // in-database auto-history. They used to be two separate screens, which is
   // why taking a backup here looked like it did nothing useful.
   const [tab, setTab] = useState<"file" | "snapshots">("file");
+const swipe = useTabSwipe(["file", "snapshots"] as const, tab, setTab);
 
   const [items, setItems] = useState<Backup[]>([]);
   const [meta, setMeta] = useState<{ interval_seconds: number; retention: number; auto_retention?: number } | null>(null);
@@ -122,7 +124,7 @@ export default function AdminBackups() {
   const totalRows = (b: Backup) => Object.values(b.counts || {}).reduce((a, c) => a + c, 0);
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top"]} {...swipe}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} testID="backups-back">
           <Feather name="arrow-left" size={20} color={colors.textMain} />

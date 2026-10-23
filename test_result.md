@@ -9373,3 +9373,162 @@ agent_communication:
       shop_money posts into the `transactions` collection (there is no
       `shop_money` collection); the +price row on a recharge order is the
       VENDOR's credit, not a duplicate buyer row.
+
+  - agent: "main"
+    message: |
+      Jun 2026 batch 6 (owner's 10-item list). Backend:
+      • Recharge: db.recharges.status flips 'processing' → 'success' with
+        completed_at inside the DELIVERED branch of admin_update_order_status
+        (so vendor, admin and rider all go through it); buyer gets a
+        "Recharge successful" notice and NOT "your parcel has been delivered".
+      • /recharge/products now takes pincode/lat/lng and routes supply:
+        a seller whose zone covers the shopper wins ("supplier":"local") and
+        the all-India (delivery mode = everywhere) plans are hidden there;
+        with no everywhere-seller configured it falls back to showing all
+        plans rather than an empty catalogue.
+      • DP mapping is recharge-aware: dp_vendor_map rows carry
+        recharge_kinds / recharge_networks, _order_in_scope filters the
+        rider's orders/customers lists and 403s an out-of-scope status move.
+        Empty scope = everything (back-compat).
+      • Treasury: master.receivables_total = pending_collections +
+        cashback_receivable (users.cashback_outstanding) + vendor_receivable
+        (open vendor_outstanding rows that are NOT cashback, i.e. refunds /
+        fees the company advanced) and net worth includes it.
+      • ONE recovery process: POST /admin/cashback/outstanding/{vid}/recover
+        pulls from vendor_earnings (core.cashback.recover_outstanding_from_wallet).
+        Cash / UPI-deposit entry and recover_vendor_outstanding() are DELETED.
+        The debt is claimed with a conditional $inc BEFORE the wallet debit,
+        so parallel taps can never over-recover.
+      • Settlements: 2.56% WITHDRAWAL_FEE_PCT → Revenue Ledger
+        (platform_fee_collected) and cashback outstanding adjusted first;
+        withdrawals.amount is the NET to bank, requested_amount /
+        cashback_adjusted / transaction_fee are stored on the row. The whole
+        settlement runs under an atomic per-user claim
+        (users.settlement_busy_at, 2-min stale takeover) so 4 parallel taps
+        raise exactly one. Rejecting returns the payout AND the fee, with a
+        type:"reversal" + original_type:"platform_fee_collected" row so
+        group_1_revenue.platform_fee drops back.
+      • Returns: one outstanding row per return (upsert on return_id+kind),
+        closed when the refund is paid, superseded when the company funds it;
+        /admin/returns/{id}/refund-from-company 400s when the seller's shop
+        wallet can cover it.
+      • Excel: shop_money rows store a POSITIVE amount with credit/debit
+        columns — the export now reads those columns, so every wallet debit
+        shows as a debit with a negative Amount. New "Recharge" sheet.
+      Frontend: swipe on admin bottom tabs + 12 in-screen strips
+      (src/use-swipe-pager.useTabSwipe) and rider screens
+      (delivery-ui.useDPSwipe); /admin/payouts leaves the flick to its own
+      strip. First-login fingerprint prompt (src/biometric-enroll-prompt).
+      Bag reads the live wallet via refresh(). Map-shops sheet splits
+      normal / recharge sellers with kind + operator chips. Cashback sheet
+      shows wallet balance + collectable. Withdraw sheet shows the
+      cashback/fee/net breakdown.
+      Tests: backend/tests/test_jun2026_owner_batch.py 13/13,
+      test_jun2026_recharge_and_settlement.py 15/15,
+      test_iter96_fixes.py 11/11 (races + fee reversal),
+      testing agent's test_iter96_reconciliation.py 7/7.
+
+  - agent: "main"
+    message: |
+      Iteration 97 follow-ups, all fixed and re-verified:
+      • Receivables now counts ONLY money that actually left the treasury
+        (kind return_refund_company_funded / delivery_fee_company_funded).
+        A parked refund (seller short, nobody paid) is no longer a receivable.
+      • scripts/close_stale_parked_refunds.py closed the 11 stale open
+        return_refund rows (₹6,600) whose returns were already refunded;
+        Receivables is back to ₹0.
+      • The fee reversal on reject now runs on EVERY reject (shop_money.post is
+        keyed, so a replay is a no-op) and the admin-bucket decrement is gated
+        on the reversal row, not on the fee credit. The one withdrawal that had
+        its fee back without a reversal (276686a3) was retyped from
+        platform_fee_reversal → reversal + original_type and the bucket was
+        corrected.
+      • _reversals_for() sums |amount| per ROW: old rows stored the reversal
+        negative and new rows store it positive, and they were cancelling each
+        other out (16 rows summed to −256 instead of 1,792). All negative
+        reversal amounts were normalised to positive.
+      • Replayed statuses no longer notify: the whole notify block is gated on
+        `payload.status != prev_status`, so a double tap or a rider retry is
+        silent for buyer AND seller. Recharge pushes carry ⚡, not 📦.
+      • One "Refund blocked — add money" nudge per return, not one per retry.
+      • The server drops an operator that does not belong to a ticked recharge
+        kind, so "DTH + Airtel" can no longer be saved.
+      • test_jun2026_recharge_and_settlement.py rejects its own settlement at
+        the end so it no longer blocks the next run.
+      Suites: owner_batch 13/13 · recharge_and_settlement 16/16 ·
+      iter96_fixes 11/11 · iter96_reconciliation 7/7 ·
+      iter97_returns_outstanding 2/2 · iter97_recharge_notify 1/1 ·
+      iter97_concurrency 2 passed + 1 skipped (the 5/hour settlement rate
+      limit refuses before the lock can be asserted — expected).
+
+  - agent: "main"
+    message: |
+      Iteration 98 follow-ups:
+      • NEW core/vendor_advances.py — the non-cashback debts (a return refund
+        the company funded, delivery fees) are now totalled and recovered the
+        same single way: straight out of the seller's shop-earnings wallet,
+        rows CLAIMED with optimistic $inc-on-exact-value before the wallet is
+        touched and handed back if the debit fails. Ledger row type
+        `advance_recovery`.
+      • The admin recovery button now clears cashback FIRST and then the
+        advances in one tap (response carries cashback_applied /
+        advance_applied), /admin/cashback/outstanding lists both with a
+        per-seller split, and the screen shows "cashback X + refunds we paid Y".
+      • auto_recover_from_vendor_credit also clears advances from the seller's
+        next sale (keyed ADVRECOVER:{order_id}), so "it will be recovered from
+        your next sales" is now true — including when there is no cashback debt
+        at all.
+      • scripts/close_stale_parked_refunds.py read db.order_returns, which does
+        not exist (the collection is db.returns) — fixed, and it now KEEPS a row
+        whose return it cannot find instead of closing it.
+      • scripts/backfill_rejected_fee_refunds.py repaired the 9 rejected
+        settlements that kept their ₹128 fee: ₹1,152 returned to the seller and
+        reversed out of Revenue.
+      • Vendor Net worth statement now lists withdrawal reversals, delivery
+        reversals, returned cashback funding, recoveries, transaction fees and
+        fee refunds, so the lines add up to the ledger balance exactly (was
+        ₹1.84 lakh short). scripts/reconcile_vendor_ledger.py posted the one
+        explicit LEDGERFIX row for the ₹6,716 testvendor gap left by old
+        fixtures that wrote vendor_earnings directly — Balanced: YES.
+      • Open `delivery_fee` rows count as receivables too; a rider saved with
+        operators but no kind ticked gets the kinds derived from the operators;
+        the seller's recharge notice no longer says "is now shipped".
+      Suites: owner_batch 13/13 · recharge_and_settlement 16/16 ·
+      iter96_fixes 11/11 · iter96_reconciliation 7/7 · iter97 returns/notify
+      pass · iter98_final_batch 7/7 · NEW test_iter98_advance_recovery.py 11/11.
+      iter97_concurrency is flaky only because of the 5/hour settlement rate
+      limit and login throttling (it skips/retries clean).
+
+  - agent: "main"
+    message: |
+      Iteration 99 follow-ups (final):
+      • core/shop_money.settle_delivery_fee now UPSERTS one delivery_fee
+        outstanding row per order and CLOSES it the moment the fee is actually
+        paid, so delivered → shipped → delivered while the wallet is short can
+        no longer bill the same ₹20 two or three times (verified with the
+        testing agent's own iter99_delivery_fee_retry_probe: one row, then
+        closed + one delivery_charge_paid row).
+      • The vendor Excel "Reconciliation" sheet lists the same lines as the API
+        breakdown (sale reversals, delivery returned, withdrawals returned,
+        transaction fees + refunds, cashback funding returned, recovered by
+        Slangcart), so it sums to the ledger balance.
+      • advance_recovery now exports under Vendor Outstanding, the fee refund
+        and vendor adjustments under Vendor Settlement, and `reversal` under
+        Reversals (they were falling into Treasury).
+      • vendor_advances._unclaim only rolls a claim back when nobody has
+        claimed on top of it, so a failed debit cannot wipe a parallel
+        recovery; the recover response now merges rows / outstanding_before /
+        outstanding_after / unapplied across cashback + advances.
+      • Returned the ₹675 the automated suites had recovered from testvendor
+        against advances the company never funded (keyed
+        TESTFIXCORRECTION:advance_recovery:oct2026) and
+        test_iter98_advance_recovery.py now puts the money back itself.
+      Final state: testvendor in_sync TRUE (6,827.5 stored = ledger), no open
+      settlement, no lock, no cashback owed, no open advances; Receivables 0;
+      platform_fee 17.82 = fee rows − reversals; the testing agent's money
+      sweep reports zero duplicate transactions and zero debits without a
+      remark. Suites: owner_batch 13/13 · recharge_and_settlement 16/16 ·
+      iter96_fixes 11/11 · iter96_reconciliation 7/7 · iter97 returns/notify ·
+      iter98_final_batch 7/7 · iter98_advance_recovery 12/12 ·
+      iter99_closing 13/13. (Running the suites back to back trips the login
+      and 5/hour settlement rate limiters — space them out.)

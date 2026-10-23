@@ -27,6 +27,7 @@ import { useAuth } from "../src/auth";
 import { notify } from "../src/notify";
 import { useRechargePay, RazorpayWebViewModal, accountIsValid } from "../src/recharge-pay";
 import { RechargeHistoryRow, useRepeatRecharge, type RechargeRow } from "../src/recharge-history";
+import { useDeliveryLocation } from "../src/use-delivery-location";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
 type Option = {
@@ -57,6 +58,11 @@ export default function RechargeScreen() {
 
   const [picker, setPicker] = useState<"state" | "network" | null>(null);
   const [groups, setGroups] = useState<PlanGroup[]>([]);
+  // Who is serving these plans — a nearby seller ("local") or the all-India
+  // supplier ("national"). Shown as a small line above the plan list.
+  const [supplier, setSupplier] = useState<"local" | "national">("national");
+  const [supplierNames, setSupplierNames] = useState<string[]>([]);
+  const { pincode, coords } = useDeliveryLocation();
   const [plansLoading, setPlansLoading] = useState(false);
 
   const loadOptions = useCallback(async () => {
@@ -103,16 +109,25 @@ export default function RechargeScreen() {
     if (!service || !state || !network) { setGroups([]); return; }
     setPlansLoading(true);
     try {
+      // Jun 2026 — the delivery location decides WHO supplies the recharge:
+      // a seller covering this pincode / radius if there is one, else the
+      // all-India supplier. Sending it keeps that choice on the server.
       const { data } = await api.get("/recharge/products", {
-        params: { kind: service, state: state.slug, network: network.slug },
+        params: {
+          kind: service, state: state.slug, network: network.slug,
+          pincode: pincode || undefined,
+          lat: coords?.lat, lng: coords?.lng,
+        },
       });
       setGroups(data.groups || []);
+      setSupplier(data.supplier || "national");
+      setSupplierNames(data.supplier_names || []);
     } catch {
       setGroups([]);
     } finally {
       setPlansLoading(false);
     }
-  }, [service, state, network]);
+  }, [service, state, network, pincode, coords?.lat, coords?.lng]);
 
   useEffect(() => { loadPlans(); }, [loadPlans]);
 
@@ -314,7 +329,16 @@ export default function RechargeScreen() {
                 </Text>
               </View>
             ) : (
-              groups.map((g) => (
+              <>
+              {supplier === "local" ? (
+                <View style={styles.hint} testID="recharge-supplier-local">
+                  <Feather name="map-pin" size={14} color={colors.primary} />
+                  <Text style={styles.hintText}>
+                    Served by {supplierNames[0] || "a shop near you"} — a seller in your area.
+                  </Text>
+                </View>
+              ) : null}
+              {groups.map((g) => (
                 <View key={g.name} style={{ marginTop: 18 }}>
                   <Text style={styles.groupTitle}>{g.name}</Text>
                   {g.products.map((p) => (
@@ -373,7 +397,8 @@ export default function RechargeScreen() {
                     </TouchableOpacity>
                   ))}
                 </View>
-              ))
+              ))}
+              </>
             )}
           </>
         )}
