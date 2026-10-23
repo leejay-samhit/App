@@ -9,7 +9,7 @@ import { useAuth } from "../src/auth";
 import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
-import { SubscriptionHero, SubscriptionBenefits, SkipSubscriptionButton } from "../src/subscription";
+import { SubscriptionHero, SubscriptionBenefits, SubscriptionSplit, SkipSubscriptionButton } from "../src/subscription";
 import { SignupGateCard } from "../src/signup-gate-card";
 
 type PayMethod = "upi" | "card" | "netbanking";
@@ -305,15 +305,27 @@ export default function Payment() {
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.container}>
-        <View style={styles.topRow}>
+        <View style={[styles.topRow, { justifyContent: "space-between" }]}>
+          {/* A member who came here from inside the app can go back; a brand
+              new account has nowhere to go but out. */}
+          {(user as any)?.subscription_skipped || user?.registration_paid ? (
+            <TouchableOpacity
+              onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/shop" as any))}
+              style={styles.iconBtn}
+              testID="payment-back"
+            >
+              <Feather name="arrow-left" size={18} color={colors.textMain} />
+            </TouchableOpacity>
+          ) : <View style={{ width: 44 }} />}
           <TouchableOpacity onPress={logout} style={styles.iconBtn} testID="payment-logout">
             <Feather name="log-out" size={18} color={colors.textMain} />
           </TouchableOpacity>
         </View>
 
-        {/* Subscription hero + the 8 member benefits (Aug-2026) */}
+        {/* Membership hero + the member benefits + where the money goes */}
         <SubscriptionHero amount={config.amount} appName={app_name} />
         <SubscriptionBenefits />
+        <SubscriptionSplit />
 
         {/* Mandatory mobile + optional invite code — gates both options */}
         <SignupGateCard onPassed={() => setGatePassed(true)} />
@@ -538,7 +550,7 @@ const styles = StyleSheet.create({
   container: { padding: spacing.screen, paddingBottom: 40 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   topRow: { flexDirection: "row", justifyContent: "flex-end", marginBottom: 16 },
-  iconBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  iconBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   hero: { width: "100%", height: 160, borderRadius: 20, marginBottom: 24 },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.accent, fontWeight: "700", marginBottom: 10 },
   h1: { fontSize: 32, fontWeight: "800", color: colors.textMain, lineHeight: 38, letterSpacing: -1 },

@@ -348,7 +348,7 @@ export default function AdminUsers() {
             <View style={{ alignItems: "flex-end" }}>
               <Text style={styles.userAmount}>{formatINR(item.total_earned)}</Text>
               <View style={[styles.statusDot, { backgroundColor: item.registration_paid ? colors.success : colors.warning }]}>
-                <Text style={styles.statusDotText}>{item.registration_paid ? "₹118 PAID" : "NO SUB"}</Text>
+                <Text style={styles.statusDotText}>{item.registration_paid ? "MEMBER" : "FREE"}</Text>
               </View>
             </View>
             <Feather name="chevron-right" size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />

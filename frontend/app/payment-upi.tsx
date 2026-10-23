@@ -30,7 +30,7 @@ import { useBranding } from "../src/branding";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { useSmsUtrListener, isSmsConsentAvailable } from "../src/sms-utr";
 import QRCode from "react-native-qrcode-svg";
-import { SubscriptionHero, SubscriptionBenefits, SkipSubscriptionButton } from "../src/subscription";
+import { SubscriptionHero, SubscriptionBenefits, SubscriptionSplit, SkipSubscriptionButton } from "../src/subscription";
 
 type Config = {
   methods_enabled: { razorpay: boolean; upi_manual: boolean };
@@ -245,9 +245,10 @@ export default function UpiManualPayment() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
 
-          {/* Subscription hero + the 8 member benefits (Aug-2026) */}
+          {/* Membership hero + the member benefits + where the money goes */}
           <SubscriptionHero amount={cfg.amount} appName={brand.app_name} />
           <SubscriptionBenefits />
+        <SubscriptionSplit />
 
           {/* Pending banner */}
           {isPending ? (

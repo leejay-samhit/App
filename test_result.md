@@ -9532,3 +9532,111 @@ agent_communication:
       iter98_final_batch 7/7 · iter98_advance_recovery 12/12 ·
       iter99_closing 13/13. (Running the suites back to back trips the login
       and 5/hour settlement rate limiters — space them out.)
+
+  - agent: "main"
+    message: |
+      Membership batch (owner's subscription + payout-structure list), Jun-2026.
+      Backend:
+      • NEW routes/subscription.py — GET /subscription/config (paywall),
+        GET+PUT /admin/subscription/config (price, cashback %, invite bonus,
+        member switches, support WhatsApp) and
+        GET /admin/payout-structure/vendors + PUT .../{vendor_id}.
+      • The ₹118 split now happens in ONE place
+        (_credit_no_ref_signup_to_admin): ₹18 → gst_collected,
+        50% of the remaining ₹100 → the member's wallet
+        (type subscription_cashback, keyed SUBCASHBACK:{uid}),
+        the rest → direct_signup revenue, and ₹25 of THAT → the inviter's
+        wallet (keyed INVITEBONUS:{uid}, only when the inviter is a paid
+        member and is not the admin — a blank/unknown code belongs to the
+        admin code, so admin simply keeps it). The bonus can never exceed
+        the platform's share (PUT 400s).
+      • Checked TWICE before any of it books: the user is re-read and must
+        have registration_paid AND a successful payment row (or be an
+        admin-created offline account). A paid FLAG with no payment row
+        books nothing.
+      • Members get every service-provider number free and unlimited:
+        /services/reveal-config returns total 0 + is_subscriber, and
+        reveal-phone skips the debit entirely. Free accounts still pay the
+        configured fee (quoted to members as non_member_total).
+      • Vendor/service/rider applications already required registration_paid
+        — the copy now says "members only".
+      • Per-shop payout structure: core.cashback.product_cashback_pct reads
+        product → vendor.default_cashback_pct → platform default (delivery
+        already supported a per-shop override). Checkout warms a per-shop
+        cache, so a 10-line cart reads each shop once. Changing a rate
+        affects FUTURE orders only — every order froze its own % at checkout.
+      • Vendor product edits need admin approval AGAIN: any meaningful change
+        to a live product unpublishes it, sets review_status=pending +
+        review_fields, and notifies both sides; stock/variant-only touches
+        stay live; admin publishing clears the flag; a vendor still cannot
+        publish himself.
+      Frontend: src/subscription.tsx rewritten as the green crystal-glass kit
+      (SubscriptionProvider/useSubscription, hero, 7-benefit list with the
+      member-vs-free difference on every row, ₹118 split card, MembershipCard,
+      MemberBadge/FreeBadge, PrioritySupportButton → wa.me, SubscribeBanner,
+      SubscriptionLocked). Removed benefits (better shopping / priority
+      customer / higher cashback / delivery perks / lifetime) are gone — the
+      list is server-driven. New admin screens /admin/subscription and
+      /admin/payout-structure (both hidden from the admin tab bar, linked from
+      More). Vendor + admin product screens show IN REVIEW / NEEDS APPROVAL
+      and admin has a "needs approval" filter. Users list badge reads
+      MEMBER / FREE.
+      Tests: backend/tests/test_membership_batch.py 26/26.
+
+  - agent: "main"
+    message: |
+      Iteration 100 fixes — the 4 money bugs in the ₹118 split:
+      • The UPI / offline path paid ₹59. GST is ALWAYS the 18-of-118
+        component; only whether it is BOOKED here changes
+        (`gst_to_book`). It is never folded back into `net`, so the member
+        always gets 50% of ₹100.
+      • The admin side is now claimed with its own idempotency keys
+        (SUBREV / SUBREVROW / SUBGST on transactions.idempotency_key), so a
+        replay or a race cannot book the revenue, the GST or the row twice.
+      • `commission_triggered` is claimed with ONE find_one_and_update, and
+        released again when the split refuses to book — an approval that
+        lands before the payment row no longer burns the member's ₹50.
+      • Only a real subscription payment counts: type registration_fee /
+        registration_fee_upi, status success/paid/completed AND amount ≥ the
+        price − 1. A ₹10 wallet top-up no longer unlocks the split.
+      • total_earned comes back down with the ₹25 invite bonus.
+      • The invite-bonus guard validates BEFORE saving.
+      • Shopping cashback is a member benefit now too: a free account's order
+        lines freeze at 0%, matching what the paywall says (it used to pay
+        cashback on delivery to an account the paywall told was locked).
+      • /service/apply answers 403 like the other two applications.
+      • Payout structure warns when cashback is switched off platform-wide;
+        /payment has a back button for anyone who got there from inside the
+        app; the provider upsell link is a 44px target; admin test IDs no
+        longer contain label text.
+      tests/test_membership_batch.py now 35/35 — including the UPI path
+      paying ₹50, 4 concurrent triggers booking ₹50 + ₹18 + one row exactly
+      once, the released claim paying out when the payment lands, and the
+      ₹10 top-up being refused.
+
+  - agent: "main"
+    message: |
+      Iteration 101 fixes:
+      • The "check twice" guard is now its own helper
+        (`_subscription_payment_ok`) called at the TOP of
+        _trigger_referral_commissions — before the claim, before the offline
+        pre-credit reversal and before the roster counter. A refused split
+        can no longer leave direct_added ₹118 short, and the GST decision
+        reads the FRESH user document.
+      • The invite roster counter moved after the booking and is keyed per
+        invitee (`counted_signups`), so refuse-then-retry counts one invitee
+        once. (The remaining probe failure is an artefact of calling
+        `_credit_no_ref_signup_to_admin` directly, which no real path does.)
+      • UPI-manual joinings now CREDIT the gst_collected bucket, not just
+        write the row — they were ₹18 short in the GST ledger, while the
+        owner's rule is ₹18 of every ₹118 however it was paid. Verified: the
+        bucket delta on a real UPI approve is now exactly 18.0.
+      • `_credit_no_ref_signup_to_admin` returns whether it booked.
+      • Vendor and rider applications answer with the members-only wording,
+        and /payment's buttons are 44px.
+      Suites after the fixes: test_membership_batch 35/35 ·
+      iter101_upi_manual_real 6/6 · iter101_apply_receivables 6/6 ·
+      iter101_member_cashback_e2e 27/27 · iter101_subscription_race_probe
+      31/32 (the one failure is the direct-call artefact above) ·
+      owner_batch 13/13 · iter96/97/98/99 29/29 ·
+      iter98_advance_recovery 12/12.

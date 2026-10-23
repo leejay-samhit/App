@@ -25,7 +25,7 @@ import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
 import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { colors, radii, spacing } from "../../src/theme";
-import { SubscribeBanner } from "../../src/subscription";
+import { SubscribeBanner, MembershipCard } from "../../src/subscription";
 import { GradientCard } from "../../src/gradient-card";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
@@ -224,6 +224,7 @@ export default function ProfileScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
         >
           <SubscribeBanner />
+          <MembershipCard />
           <GradientCard variant="royal" style={{ marginBottom: spacing.cardPad, padding: 24 }}>
             <View style={{ flexDirection: "row", alignItems: "center" }}>
               {/* Avatar: tap to view full size, long-press / camera icon to upload.

@@ -441,6 +441,14 @@ async def approve_manual_payment(
                             {"id": fresh["id"]},
                             {"$set": {"registration_gst_collected_at_create": True}},
                         )
+                        # Oct-2026 — the row was written but the GST TOTAL was
+                        # never raised, so UPI joinings were ₹18 short in the
+                        # System Wallet's GST ledger. The owner's rule is ₹18
+                        # of every ₹118, whichever way it was paid.
+                        from server import credit_admin_bucket
+                        await credit_admin_bucket(
+                            "gst_collected", registration_gst, also_total_earned=False,
+                        )
                     # Re-read fresh to pick up the new flags before commissions
                     fresh = await db.users.find_one({"id": fresh["id"]}) or fresh
             except Exception:

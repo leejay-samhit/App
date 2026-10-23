@@ -253,8 +253,8 @@ export default function ServiceApply() {
   const banner = needsRegistration
     ? {
         color: colors.error,
-        label: "Pay your ₹100 registration fee first to list a service.",
-        cta: { text: "Pay now", route: "/payment" },
+        label: "Only members can list a service — become a member to apply.",
+        cta: { text: "Become a member", route: "/payment" },
       }
     : isApproved
     ? { color: colors.success, label: "You're a verified service provider" }

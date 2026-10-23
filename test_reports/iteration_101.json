@@ -1,0 +1,53 @@
+{
+  "summary": "RETEST of the 8 membership money fixes from iter100. I verified them independently with new probes instead of re-running test_membership_batch.py. All 8 fixes HOLD. (1) GST-at-create / UPI path: member gets ₹50, revenue is ₹50 (₹25 with an inviter), no second GST booking; the row shows 25/18/50. (2) Race safety: 8 concurrent triggers, plus a mix of 8 concurrent direct split calls, 4 concurrent triggers and 3 sequential re-triggers. Every case booked direct_signup, gst (+18), total_earned and every row exactly once; member ₹50 and inviter ₹25 exactly once. A unique sparse index exists on transactions.idempotency_key. The real UPI-manual approve endpoint, hit by 4 concurrent + 2 sequential admin POSTs, paid member 50, revenue +50 and direct_added net 0, with one row of each kind and one deposit. (3) The claim is released on a refused split: re-triggering after the ₹118 row lands pays 50/25. (4) Strict payment check: a ₹10 wallet_topup, a ₹10 registration_fee, a pending ₹118, a ₹118 row with no status and a ₹118 wallet_topup all book nothing and release the claim. A ₹118 registration_fee success, a ₹118 registration_fee_upi paid and a ₹117 completed row all book 50/50/18. (5) Config: an oversized bonus returns 400 and is not persisted (checked on both the admin and public GET). Price, switches and WhatsApp round-trip. Lowering cashback_pct to 40 allows a ₹55 bonus; raising it to 60 with that bonus returns 400. (6) total_earned rises by +25 with an inviter. (7) Real COD orders: the free testbuyer's line froze 0% and no cashback rows were written. As a member, the line froze the shop's 5% and settled exactly one ₹10 cashback_credit plus one cashback_funding across 3 delivery replays. (8) With valid bodies, /service/apply, /vendor/apply and /delivery-partner/apply all return 403 for a free account, and no application was created. Regression is green: owner_batch 13/13, iter96_reconciliation 7/7, iter98_final_batch + iter99_closing 20/20, iter100 money probe 26/26. Vendor in_sync is true with unledgered 0. Receivables tie: vendor_receivable equals the open vendor_outstanding (0), and cashback_receivable equals the summed cashback_outstanding (0). There are no duplicate idempotency_key or (type, user, reference_number) rows. Two NEW lower-severity defects, both on the claim-release path: (a) the pre-credit reversal runs before the 'check twice' guard, so a refused split leaves direct_added short by ₹118 and the pre-credit flag gone; (b) direct_referrals_count is bumped again on every release and re-trigger. Frontend: the /payment back arrow and Logout both show for testbuyer, and back goes to /shop. The upsell link is 175x44 and opens /payment. The amber payout-structure warning shows when cashback_enabled is false and hides when it is true. No deprecated Expo packages.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "_trigger_referral_commissions → offline pre-credit reversal (server.py:950-982)", "issue": "The direct_added reversal runs, and offline_pre_credit_amount is $unset, BEFORE _credit_no_ref_signup_to_admin's 'check twice' guard. When the guard refuses (paid flag missing, or no payment row and no GST-at-create flag), the claim is released but the ₹118 reversal stays. direct_added drops ₹118 while nothing is booked (probe F6: da −118, member 0, ds 0). Because the flag is already unset, the guard's `offline_pre_credit_amount > 0` branch (server.py:730) can never be true; it is dead code. In practice the UPI path always sets registration_gst_collected_at_create, so this only bites when that write fails or registration_paid is not set yet."},
+      {"endpoint": "_trigger_referral_commissions → roster counter (server.py:984-994)", "issue": "The inviter's direct_referrals_count is $inc'd before the split runs. Each release followed by a re-trigger bumps it again: skip once, then pay, gives a count of 2 for one invitee (probe F3). No money moves, but the count shown on the roster is inflated."},
+      {"endpoint": "_credit_no_ref_signup_to_admin crash window (server.py:771-795)", "issue": "The SUBREV claim row is inserted BEFORE the bucket credits. If the process dies between the claim and credit_admin_bucket, every later retry sees the claim and returns, so the revenue/GST is never booked. Low probability. Consider booking buckets with $inc in the same step, or a reconciler that checks for a SUBREV claim without a SUBREVROW row."},
+      {"endpoint": "_credit_no_ref_signup_to_admin gst_to_book (server.py:749)", "issue": "gst_to_book reads the caller's (possibly stale) `joiner` dict instead of `fresh_joiner`, which was re-read a few lines above. It works today because upi_manual re-reads before calling. Use fresh_joiner for consistency."},
+      {"endpoint": "GST on the UPI-manual path (routes/upi_manual.py:421-443)", "issue": "Info / business check. On a UPI joining the ₹18 GST row is written, but the gst_collected bucket gets +0; Razorpay joinings get +18. finance.py Group 3 shows entry GST for Razorpay joinings only (a documented June-2026 rule). The owner's ask says '18 rupees in GST Ledger' for every subscription, so confirm UPI/offline joinings are meant to stay out of the GST ledger."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/payment", "issues": ["payment-back and payment-logout iconBtn are 40x40, under the 44pt minimum touch target (payment.tsx:553). Add hitSlop or size them to 44."]},
+      {"screen": "/services/[id] bottom CTA", "issues": ["The reveal-upsell tap target is fine at 175x44, but its text is 11px muted with numberOfLines=1, and it sits above the ₹1.18 price on its own line, which looks detached. Consider 12-13px and aligning it with the price row."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iter101_subscription_race_probe.py",
+    "/app/backend/tests/iter101_member_cashback_e2e.py",
+    "/app/backend/tests/iter101_apply_receivables.py",
+    "/app/backend/tests/iter101_upi_manual_real.py",
+    "/app/test_reports/pytest/iter101_regress_a.xml",
+    "/app/test_reports/pytest/iter101_regress_b.xml"
+  ],
+  "action_items": [
+    "MEDIUM: In _trigger_referral_commissions, run the payment 'check twice' guard BEFORE the offline pre-credit reversal, or undo the reversal (re-credit direct_added and restore offline_pre_credit_amount) when the split refuses. Today a refused split leaves direct_added ₹118 short, and the guard's offline_pre_credit_amount branch is dead code.",
+    "LOW: Move the direct_referrals_count $inc so it runs only after the split actually books (or key it once per joiner, e.g. a referral_counted flag), so a release followed by a re-trigger does not double-count.",
+    "LOW: Use fresh_joiner, not joiner, for registration_gst_collected_at_create in gst_to_book.",
+    "LOW: Make the payment.tsx iconBtn (back/logout) at least 44x44, or add hitSlop.",
+    "INFO: Confirm with the owner that UPI/offline joinings' ₹18 GST stays out of the gst_collected bucket and the GST ledger (Razorpay-only rule)."
+  ],
+  "critical_code_review_comments": [
+    "The admin-side idempotency is sound. The unique sparse index on transactions.idempotency_key is the lock for SUBREV/SUBREVROW/SUBGST. Member and inviter credits go through shop_money with SUBCASHBACK/INVITEBONUS keys, and 8-way plus mixed races stayed exactly-once.",
+    "commission_triggered is now claimed atomically with find_one_and_update ($ne:true), and it is released on both refusal paths.",
+    "Checkout's _cb_line_pct freezes 0% for free accounts, based on user.registration_paid at checkout time. Settlement honours the frozen line, so a member's later upgrade does not retro-credit old orders (correct).",
+    "Config PUT validates against the merged probe BEFORE writing. Each tested 400 left settings untouched."
+  ],
+  "updated_files": [
+    "/app/frontend/app/admin/payout-structure.tsx (added testID=\"payout-cashback-off-warning\" to the amber warnBar)",
+    "new test files listed in test_report_links"
+  ],
+  "success_rate": {"backend": "97% (78/80 genuine checks; the 2 failures are new minor issues, and 2 further probe failures share root cause (b), with 1 induced by a forced manual unset)", "frontend": "100% (back arrow + Logout, upsell tap target → /payment, warning shown/hidden)"},
+  "seed_data_creation": "All TEST_i101* users, transactions, notifications, manual_payments, system_wallet_deposits and the TEST_i101 product were deleted. Admin buckets (direct_signup, gst_collected, direct_added) and total_earned were reversed to 0 drift. Restored: settings.cashback_enabled=False, subscription config (118/50%/25/switches true/WhatsApp ''), the testvendor per-shop cashback override (cleared), testbuyer registration_paid=False, and testbuyer's parked reveal invoice. Left in place: 2 real delivered COD orders (SC-E93A79 free, SC-840A86 member) with their ledger rows. testbuyer's wallet is net −₹9 versus my start: +₹10 member cashback (legit), −₹19 Airtel recharge made by test_jun2026_owner_batch.py itself. I did not reverse it, to keep the ledger rows consistent.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run python3 tests/iter101_subscription_race_probe.py (it self-cleans). It currently reads 29/32: the 3 failures are the pre-credit-before-guard issue (F6) and the roster double-count (F3, and the mixed case). tests/iter101_upi_manual_real.py drives the real /admin/payments/{id}/approve endpoint with 4 concurrent POSTs and fully reverses. tests/iter101_member_cashback_e2e.py places 2 real COD orders, temporarily flips cashback_enabled and the testbuyer flag, then restores both. test_jun2026_owner_batch.py is a plain script (python3 path), not pytest, and spends ₹19 of testbuyer's wallet on a recharge each run. Login throttles: space runs by ~20-30s.",
+  "rca_of_issue": "F6: _trigger_referral_commissions claims, reverses the offline pre-credit (direct_added −fee, $unset offline_pre_credit_amount), and only THEN calls _credit_no_ref_signup_to_admin. That function re-reads the user, and when the guard refuses it releases only commission_triggered. Repro: user with registration_paid=True, offline_pre_credit_amount=118, no registration_fee row, no gst flag → trigger → direct_added −118, nothing booked. Fix: move the guard ahead of the reversal, or roll the reversal back on refusal. F3 counter: the $inc of direct_referrals_count sits before the split. Repro: paid user with no payment row and a member inviter → trigger (released) → insert row → trigger → count=2."
+}

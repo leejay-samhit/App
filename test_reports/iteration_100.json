@@ -1,0 +1,71 @@
+{
+  "summary": "Membership batch (₹118 subscription) review. Backend: 3 new probes written and run, separate from test_membership_batch.py. Money-split probe 17/26, e2e 19/24 (3 of the 5 failures were bad test bodies; re-run with valid bodies passes), reveal/apply probe 4/5 (the 1 fail is a status-code nit). Verified OK: Razorpay-path split 50/25/18/25 (admin direct_signup goes UP by 25, not 50); a non-member inviter gets nothing and admin keeps 50; the admin EARN code pays nothing out; the replay guard via commission_triggered; checkout under a per-shop override freezes 7.5% on the line and keeps it when the rate changes; delivery settles one cashback_credit + one cashback_funding row with no duplicates; re-approval works (price edit → pending and hidden, public detail 404, vendor cannot self-publish, admin approve restores it, stock-only edit stays live); a member reveal is ₹0 with no debit; free_reveals=false makes members pay; free accounts are refused on all 3 applications; vendor in_sync=true and receivables tie (0 vs no open vendor_outstanding). CRITICAL money bugs: (1) UPI-manual and offline joinings pay the member ₹59 and book ₹59 as revenue instead of 50/50. (2) _credit_no_ref_signup_to_admin is not idempotent for admin buckets or ledger rows; it relies only on a racy commission_triggered check-then-set, so 2 concurrent triggers double-book ₹50 revenue + ₹18 GST. (3) The 'check twice' skip burns commission_triggered, so a member whose payment row arrives later never gets the ₹50. (4) Any wallet_topup/admin_credit/order_payment_upi row, or a row with no status, passes the payment check. (5) PUT /admin/subscription/config saves an invalid invite bonus before returning 400. Frontend: all requested screens render and work (paywall, free/member Profile, provider CTA, admin Membership, Payout structure save/clear, Users badges and filter, Products NEEDS APPROVAL). UX issues: /payment has no back button, counts disagree between screens, and cashback_enabled=False globally makes per-shop cashback overrides silently do nothing. No deprecated Expo packages detected (expo-av, expo-barcode-scanner, expo-background-fetch all absent); no SafeAreaView issues found (the screens checked import it from react-native-safe-area-context).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "server._credit_no_ref_signup_to_admin (UPI-manual confirm + admin offline-create paths)", "issue": "When registration_gst_collected_at_create=True (set by routes/upi_manual.py:~440 before the trigger), lines 732-734 set gst=0 and net=118, and cashback is then computed on 118: the member gets ₹59 (not ₹50) and direct_signup gets ₹59 (₹34 with an inviter). Reproduced in iter100_subscription_money_probe case E. Fix: always compute net = gross - gross*18/118 for the cashback/revenue split, and only skip the GST bucket credit/row when it was already booked.", "priority": "CRITICAL"},
+      {"endpoint": "server._trigger_referral_commissions / _credit_no_ref_signup_to_admin", "issue": "The admin bucket credits (direct_signup +revenue, gst_collected +18) and the direct_signup_credit/gst_collected transaction inserts have no idempotency key. Replaying the split function directly: member and inviter stay unchanged, but admin direct_signup goes up another ₹50 (the -25 is skipped because the invite credit returns None), GST another ₹18, and a second direct_signup_credit row is written. The only guard is commission_triggered, a non-atomic check (line 893) then set (line 896). asyncio.gather of 2 triggers on the same user → direct_signup +100, gst +36 (probe case G). Razorpay verify + webhook, or UPI confirm + admin approve, can race this way. Fix: claim atomically with find_one_and_update({id, commission_triggered:{$ne:true}}, {$set:{commission_triggered:true}}) and give the bucket credits/rows idempotency keys (SUBREV:{uid}, SUBGST:{uid}).", "priority": "CRITICAL"},
+      {"endpoint": "server._trigger_referral_commissions 'check twice' guard", "issue": "commission_triggered=True is set BEFORE _credit_no_ref_signup_to_admin runs its paid/payment-row guard. If the guard skips (e.g. admin_approve_user on an account flagged paid whose payment row is written later), the flag is burnt: the next trigger returns early and the member never gets the ₹50 or the inviter the ₹25 (probe case F). Fix: set commission_triggered only after the split actually books, or have the guard unset it on skip.", "priority": "HIGH"},
+      {"endpoint": "server._credit_no_ref_signup_to_admin paid_row query (lines 713-718)", "issue": "The 'successful payment' check accepts ANY row of type wallet_topup/admin_credit/order_payment_upi, and status None also matches rows with no status. It does not require a subscription row or an amount of at least the fee. A ₹10 wallet top-up unlocked the full ₹50 cashback + revenue + GST (probe case H). Fix: require type in (registration_fee, registration_fee_upi), status in (paid, success), and amount >= fee (or a wallet-debit row for the subscription).", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "PUT /api/admin/subscription/config", "issue": "routes/subscription.py:196 writes the update to settings BEFORE the invite-bonus > platform-share check at line 206. The request gets a 400 but the bad value (80) is already saved; the public /subscription/config then showed invite_bonus 50. Validate before writing."},
+      {"endpoint": "_credit_no_ref_signup_to_admin total_earned", "issue": "direct_signup is credited the full ₹50 with also_total_earned=True, then -25 with also_total_earned=False. Admin total_earned is overstated by ₹25 on every invited signup."},
+      {"endpoint": "Shop cashback for free accounts", "issue": "The free account testbuyer (registration_paid=False) got a ₹15 cashback_credit on delivery of order SC-582B5D, but the paywall says 'cashback, wallet and withdrawals stay locked' without a subscription. Confirm the intended rule and either gate it or fix the copy."},
+      {"endpoint": "settings.cashback_enabled=False (global)", "issue": "With cashback switched off globally, product_cashback_pct returns 0, so per-shop cashback overrides in Payout structure save fine but do nothing at checkout. The Payout structure screen shows no warning. I had to switch cashback on temporarily to test the override (restored afterwards)."},
+      {"endpoint": "POST /api/service/apply", "issue": "A free account is refused with 400 'Pay registration first', while /vendor/apply and /delivery-partner/apply return 403. The status codes are inconsistent."},
+      {"endpoint": "Admin counts", "issue": "Admin Membership shows 10 MEMBERS / 33 FREE (registration_paid). The Users 'Subscribers' chip shows 6 because it counts registration_source=razorpay only (server.py:1680), yet UPI-manual payers get the MEMBER badge. The definitions conflict."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Paywall /payment", "issue": "The only top-row control is Logout (payment-logout). A free user who opens it from Profile → Become a member has no in-app back button.", "testID": "payment-logout", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Admin Payout structure → per-shop cashback", "issue": "An override saves and shows OWN RATE, but checkout gives 0% cashback while global cashback_enabled is False. No hint is shown to the admin.", "affected_testIDs": ["ps-save", "ps-input-cb"]}
+    ],
+    "design_issues": [
+      {"screen": "services/[id] bottom CTA", "issues": ["The 'free for members · join for ₹118' link (reveal-upsell) is an underlined ~12px text line, so its touch target is well under 44pt in height."]},
+      {"screen": "admin/subscription", "issues": ["Input testIDs come from label slices with spaces/symbols (sub-input-Membersh, 'sub-input-Instant ', 'sub-input-Invite b'). Give them stable ids."]},
+      {"screen": "admin/products", "issues": ["The 'How to create a product' tour sheet opens on every visit and covers the Needs-approval stat and amber bar until dismissed."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/iter100_subscription_money_probe.py",
+    "/app/backend/tests/iter100_membership_e2e.py",
+    "/app/backend/tests/iter100_reveal_apply_probe.py",
+    "/app/backend/tests/iter100_ui_state.py",
+    "/app/backend/tests/iter100_seed_pending.py"
+  ],
+  "action_items": [
+    "CRITICAL: _credit_no_ref_signup_to_admin — compute the cashback/revenue split on the GST-exclusive ₹100 even when registration_gst_collected_at_create is set. UPI-manual members currently get ₹59.",
+    "CRITICAL: claim commission_triggered atomically (find_one_and_update with $ne:true) and give the direct_signup/gst_collected bucket credits and rows idempotency keys (SUBREV:{uid}, SUBGST:{uid}).",
+    "HIGH: don't burn commission_triggered when the 'check twice' guard skips. Set it after the split books, or unset it on skip.",
+    "HIGH: tighten the payment-row check to subscription rows only (registration_fee / registration_fee_upi, status paid/success, amount >= fee), with no None status.",
+    "PUT /admin/subscription/config: validate the invite bonus against the platform share BEFORE writing to settings.",
+    "Credit total_earned with the net revenue after the invite bonus, not the full ₹50.",
+    "Decide whether free accounts earn shop cashback. The paywall copy says it is locked, but ₹15 was credited.",
+    "Show a warning in Payout structure (and/or Membership) when global cashback_enabled is False.",
+    "Add a back button to /payment when it is reached from inside the app (router.canGoBack).",
+    "Align the Users 'Subscribers' filter with the MEMBER badge and the Membership screen counts (registration_paid).",
+    "Make POST /service/apply return 403 for non-members, like the other two application endpoints."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 10,781 lines. The subscription money logic should move into a core/subscription_money.py module with unit-testable pure split math.",
+    "_trigger_referral_commissions is called without awaiting a lock from 3 sites (razorpay verify line 1333, admin approve 4691, upi_manual 452). The only protection is a racy flag.",
+    "The vendor dashboard uses Alert.alert for errors (e.g. app/vendor/dashboard.tsx:105). It is a no-op on react-native-web, so web-preview users see no error."
+  ],
+  "updated_files": [
+    "/app/backend/tests/iter100_subscription_money_probe.py",
+    "/app/backend/tests/iter100_membership_e2e.py",
+    "/app/backend/tests/iter100_reveal_apply_probe.py",
+    "/app/backend/tests/iter100_ui_state.py",
+    "/app/backend/tests/iter100_seed_pending.py"
+  ],
+  "success_rate": {"backend": "~78% (40/50 assertions across the 3 probes; 3 e2e fails were bad test bodies, since re-run OK)", "frontend": "~95% (all requested screens/flows pass; 1 navigation UX gap)"},
+  "seed_data_creation": "All TEST_i100 users, products, transactions and notifications are deleted, and the admin bucket deltas and total_earned are reversed by the probe. One real COD order SC-582B5D (testbuyer → testvendor, 2×TEST_i100 Widget ₹100, the product doc is now deleted) was delivered. It left a ₹15 cashback_credit to testbuyer (wallet 47307 → 47322) funded by testvendor's shop wallet (cashback_funding -15) plus the normal delivery-fee settlement. I did not reverse these, to keep the ledger consistent; vendor in_sync=true. testbuyer is back to registration_paid=False, its reveal invoice was restored, the testvendor override is cleared, cashback_enabled is back to False, and subscription config is back to 118/50%/₹25/free_reveals=true.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run python3 tests/iter100_subscription_money_probe.py. After the fixes it should be 26/26, with cases E (UPI GST-at-create), F (skip-then-paid), G (concurrent), H (₹10 top-up) and the A2 direct replay now passing. It cleans up after itself. tests/iter100_membership_e2e.py places and delivers a real COD order each run (it temporarily enables cashback_enabled and restores it). The reveal/apply checks are in tests/iter100_reveal_apply_probe.py. Only one service provider exists (22c44148…), and testbuyer had already revealed it, so the UI tests park and restore that invoice with tests/iter100_ui_state.py park|restore|member|free. There are only 2 shops (testvendor, testvendor2). Login is limited to 10 per minute.",
+  "rca_of_issue": "₹59 cashback: the upi_manual approve path pre-books entry GST and sets registration_gst_collected_at_create, then calls the trigger. The split function zeroes gst and sets net=gross=118 to avoid double GST, but then reuses that net as the cashback base. Double booking: only shop_money.credit has idempotency keys; the credit_admin_bucket $inc calls and transactions.insert_one do not, and the outer commission_triggered flag is a read-then-write rather than an atomic claim."
+}

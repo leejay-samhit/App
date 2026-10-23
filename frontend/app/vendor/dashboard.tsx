@@ -33,7 +33,7 @@ type EarningRow = {
   buyer_email?: string;
   customer_name?: string;
 };
-type Product = { id: string; name: string; price: number; stock: number; image_url: string; description?: string; category?: string; is_published?: boolean; created_at?: string; interested_count?: number };
+type Product = { id: string; name: string; price: number; stock: number; image_url: string; description?: string; category?: string; is_published?: boolean; review_status?: string; created_at?: string; interested_count?: number };
 type Sale = { id: string; order_id: string; product_id: string; product_name: string; qty: number; line_total: number; vendor_share: number; commission_pct: number; created_at: string };
 type InterestedUser = { id: string; name: string; email: string; phone?: string };
 type QuestionAnswer = { id: string; by_id: string; by_name: string; by_role: string; text: string; created_at: string };
@@ -455,7 +455,11 @@ export default function VendorDashboard() {
                         ? <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.vendorImg} />
                         : <View style={[styles.vendorImg, { backgroundColor: "#F1F3F5" }]} />}
                       {item.is_published === false && (
-                        <View style={styles.vendorDraftPill}><Text style={styles.vendorDraftText}>HIDDEN</Text></View>
+                        <View style={styles.vendorDraftPill}>
+                          <Text style={styles.vendorDraftText}>
+                            {item.review_status === "pending" ? "IN REVIEW" : "HIDDEN"}
+                          </Text>
+                        </View>
                       )}
                       {oos && (
                         <View style={styles.vendorOosOverlay} pointerEvents="none">
@@ -650,7 +654,17 @@ export default function VendorDashboard() {
         visible={editorOpen}
         existing={editing as any}
         onClose={() => setEditorOpen(false)}
-        onSaved={async () => { setEditorOpen(false); await load(); }}
+        onSaved={async () => {
+          const wasLive = !!editing?.id && editing?.is_published !== false;
+          setEditorOpen(false);
+          await load();
+          if (wasLive) {
+            Alert.alert(
+              "Sent for approval",
+              "Your changes are saved, but the product stays hidden from the shop until an admin approves them.",
+            );
+          }
+        }}
         endpoints={{
           create: "/vendor/me/products",
           update: (id: string) => `/vendor/me/products/${id}`,

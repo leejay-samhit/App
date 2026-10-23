@@ -23,6 +23,7 @@ import { useLocalSearchParams, router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { useSubscription } from "../../src/subscription";
 
 type Review = {
   id: string;
@@ -68,12 +69,14 @@ export default function ProviderProfileScreen() {
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const { config: subConfig, isMember } = useSubscription();
   const [revealing, setRevealing] = useState(false);
   const [revealedPhone, setRevealedPhone] = useState<string | null>(null);
   const [revealedInvoiceId, setRevealedInvoiceId] = useState<string | null>(null);
   const [revealConfig, setRevealConfig] = useState<{
     fee: number; gst_pct: number; gst_amount: number; total: number;
     wallet_balance: number; revealed_provider_ids: string[];
+    is_subscriber?: boolean; non_member_total?: number;
   } | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   // Sep 2026 — the pay sheet is shared by "Get phone number" and
@@ -419,17 +422,29 @@ export default function ProviderProfileScreen() {
               <Text style={styles.ctaPhone} numberOfLines={1}>{revealedPhone}</Text>
               <Text style={styles.ctaSub}>UNLOCKED</Text>
             </>
+          ) : isMember ? (
+            /* Jun-2026 — a member gets every provider's number free, unlimited. */
+            <>
+              <Feather name="award" size={14} color={colors.success} />
+              <Text style={[styles.ctaPrice, { color: colors.success }]} numberOfLines={1}>FREE</Text>
+              <Text style={styles.ctaSub} numberOfLines={1}>unlimited numbers · member</Text>
+            </>
           ) : (
             <>
               <Feather name="lock" size={13} color={colors.textMuted} />
               <Text style={styles.ctaPrice} numberOfLines={1}>
                 {revealConfig ? formatINR(revealConfig.total) : "₹1 + GST"}
               </Text>
-              <Text style={styles.ctaSub} numberOfLines={1}>
-                {revealConfig && revealConfig.total > 0
-                  ? `₹${revealConfig.fee.toFixed(2)} + ₹${revealConfig.gst_amount.toFixed(2)} GST`
-                  : "to unlock phone & chat"}
-              </Text>
+              <TouchableOpacity
+                onPress={() => router.push("/payment" as any)}
+                style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 6 }}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                testID="reveal-upsell"
+              >
+                <Text style={[styles.ctaSub, { textDecorationLine: "underline", fontWeight: "800" }]} numberOfLines={1}>
+                  free for members · join for {formatINR(subConfig.price)}
+                </Text>
+              </TouchableOpacity>
             </>
           )}
         </View>

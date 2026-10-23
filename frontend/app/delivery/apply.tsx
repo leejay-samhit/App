@@ -12,6 +12,7 @@ import { Feather } from "@expo/vector-icons";
 import { Stack, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
+import { SubscriptionLocked } from "../../src/subscription";
 import { colors, spacing, radii } from "../../src/theme";
 
 const VEHICLES = ["bike", "scooter", "cycle", "car", "van"];
@@ -87,6 +88,10 @@ export default function DeliveryApply() {
 
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
+      ) : !user?.registration_paid ? (
+        <View style={{ padding: 16 }}>
+          <SubscriptionLocked feature="Delivering orders" />
+        </View>
       ) : status === "pending" ? (
         <View style={styles.pad}>
           <View style={styles.infoCard}>

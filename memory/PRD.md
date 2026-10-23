@@ -2627,3 +2627,73 @@ remark — they used to read as credits.
 - Automated suites no longer leave the real test seller short — they return
   what they recovered, and the ₹675 taken by earlier runs was credited back
   with a labelled correction row.
+
+---
+
+## CC. Jun 2026 — Membership (the ₹118 subscription)
+
+### The split, booked in ONE place
+`server._credit_no_ref_signup_to_admin` is the only place the ₹118 is
+recognised:
+
+| Of every ₹118 | Goes to |
+|---|---|
+| ₹18 | GST ledger (`gst_collected`) |
+| ₹50 | the member's own wallet, instantly (`subscription_cashback`) |
+| ₹25 | the inviter's wallet (`referral_payout`) — out of the platform's share |
+| ₹25 | platform revenue (`direct_signup`) |
+
+A blank or unknown invite code belongs to the admin's own EARN code, so there
+is nobody to pay and admin keeps the whole ₹50. Only a SUBSCRIBED inviter
+earns (the referral bonus is a member benefit). The bonus can never exceed the
+platform's share — Admin → Membership 400s before saving.
+
+**Checked twice.** `_subscription_payment_ok` runs before anything moves: the
+user is re-read and must have `registration_paid` AND a payment row of type
+`registration_fee` / `registration_fee_upi`, status success/paid/completed and
+amount ≥ price − 1 (a ₹10 top-up used to unlock the lot). An offline/UPI
+account passes on its pre-credit flag. If it refuses, the claim is RELEASED so
+the payout still happens when the payment lands.
+
+**No double entry.** `commission_triggered` is claimed with one
+`find_one_and_update`; the member credit, the inviter credit, the admin
+revenue, the GST and the revenue row each carry their own idempotency key
+(`SUBCASHBACK:` `INVITEBONUS:` `SUBREV:` `SUBREVROW:` `SUBGST:`). Eight
+concurrent triggers book everything exactly once. The UPI path credits the GST
+bucket too (it only wrote the row before).
+
+### What a member gets (the only list, served by the backend)
+`GET /subscription/config` → instant 50% cashback · real-time priority support
+on WhatsApp · zero ads · unlimited service-provider numbers free · apply as
+seller / service provider / rider · referral bonus · shopping cashback and bank
+withdrawals. The five the owner asked to drop (better shopping, our priority
+customer, higher cashback, delivery perks, lifetime free) are GONE.
+Free accounts: every number costs the configured phone-reveal fee, the three
+applications 403, and their order lines freeze cashback at 0% — the paywall and
+the wallet now say the same thing.
+
+### Admin → Membership (`/admin/subscription`)
+Price, cashback %, invite bonus, the three member switches and the support
+WhatsApp number, with the live ₹ split and member / free-account counts.
+Users shows a MEMBER / FREE badge.
+
+### Admin → Payout structure (`/admin/payout-structure`)
+Cashback % and delivery charge SHOP BY SHOP; a shop with no override follows
+the platform default (badges read OWN RATE / DEFAULT). Resolution order is
+product → `vendor.default_cashback_pct` → platform default. Rates apply to
+FUTURE orders only — every order freezes its own % at checkout. The screen
+warns when purchase cashback is switched off platform-wide.
+
+### Vendor products need approval EVERY time
+Any meaningful edit to a live product unpublishes it, sets
+`review_status=pending` + `review_fields`, notifies seller and admin, and it
+vanishes from the shop until an admin publishes it again (which clears the
+flag). Stock / variant-only edits stay live, and a vendor still cannot publish
+himself.
+
+### Look
+`src/subscription.tsx` is the green crystal-glass kit — layered
+LinearGradient + translucent highlight/glow (no backdrop-filter), gold on the
+money, and a deliberately flat grey locked state so the member / free
+difference reads at one glance. Used by the paywall, the upsell banner, the
+Profile membership card, the locked cards and the provider "Get number" row.

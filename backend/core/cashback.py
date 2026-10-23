@@ -69,13 +69,25 @@ def cashback_amount(purchase_amount: float, pct: Any) -> float:
     return round(base * clamp_pct(pct) / 100.0, 2)
 
 
-def product_cashback_pct(product: Dict[str, Any], settings: Optional[Dict[str, Any]] = None) -> float:
-    """Effective cashback % for a product. The vendor's own value wins; if
-    they never set one the admin default applies. Both are clamped."""
+def product_cashback_pct(
+    product: Dict[str, Any],
+    settings: Optional[Dict[str, Any]] = None,
+    vendor: Optional[Dict[str, Any]] = None,
+) -> float:
+    """Effective cashback % for a product.
+
+    Three levels, most specific first (Jun-2026 — the seller level is new;
+    Admin → Payout structure can now set a different rate per shop instead
+    of one rate for everybody):
+
+        product.cashback_pct  →  vendor.default_cashback_pct  →  settings
+    """
     settings = settings or {}
     if not settings.get("cashback_enabled", True):
         return 0.0
     raw = product.get("cashback_pct")
+    if raw in (None, "") and vendor:
+        raw = vendor.get("default_cashback_pct")
     if raw in (None, ""):
         raw = settings.get("default_cashback_pct") or 0
     return clamp_pct(raw)

@@ -65,6 +65,9 @@ type Product = {
   stock?: number;
   category?: string;
   is_published?: boolean;
+  review_status?: string;
+  review_fields?: string[];
+  review_requested_at?: string;
   vendor_id?: string;
   vendor_name?: string;
   vendor_email?: string;
@@ -86,6 +89,7 @@ export default function AdminProducts() {
   // Auto-opens on the admin's first visit to /admin/products
   const { visible: helpVisible, close: helpClose } = useFirstVisitGuide("products-v1");
   const [search, setSearch] = useState("");
+  const [reviewOnly, setReviewOnly] = useState(false);
   // Jul 2026 — Vendor filter: admin can narrow products by vendor.
   const [vendorFilter, setVendorFilter] = useState<VendorLite | null>(null);
   const [vendorPickerOpen, setVendorPickerOpen] = useState(false);
@@ -293,17 +297,38 @@ export default function AdminProducts() {
             <Stat label="Live" value={String(items.filter(p => p.is_published !== false).length)} accent />
             <Stat label="Out of stock" value={String(items.filter(p => (p.stock || 0) === 0).length)} warn />
             <Stat label="With interest" value={String(items.filter(p => (p.interested_count || 0) > 0).length)} />
+            <Stat
+              label="Needs approval"
+              value={String(items.filter(p => p.review_status === "pending").length)}
+              warn
+            />
           </View>
+
+          {/* Jun-2026 — a seller's edit pulls a live product out of the shop
+              until it is approved again. Surface that queue at the top. */}
+          {items.filter(p => p.review_status === "pending").length > 0 ? (
+            <TouchableOpacity
+              onPress={() => setReviewOnly(v => !v)}
+              style={styles.reviewBar}
+              testID="products-review-filter"
+            >
+              <Feather name={reviewOnly ? "check-square" : "square"} size={16} color={colors.warning} />
+              <Text style={styles.reviewBarText}>
+                {items.filter(p => p.review_status === "pending").length} edited by sellers — hidden from the shop until you approve
+              </Text>
+            </TouchableOpacity>
+          ) : null}
 
           {/* Grid */}
           {(() => {
             const q = search.trim().toLowerCase();
-            const filtered = q ? items.filter(p =>
+            const base = reviewOnly ? items.filter(p => p.review_status === "pending") : items;
+            const filtered = q ? base.filter(p =>
               p.name.toLowerCase().includes(q)
               || (p.category || "").toLowerCase().includes(q)
               || (p.vendor_name || "").toLowerCase().includes(q)
               || (p.vendor_email || "").toLowerCase().includes(q)
-            ) : items;
+            ) : base;
             if (filtered.length === 0) {
               return <Text style={styles.empty}>{search ? "No matches" : (vendorFilter ? `No products from ${vendorFilter.name} yet.` : "No products yet — tap the + to add one.")}</Text>;
             }
@@ -325,7 +350,11 @@ export default function AdminProducts() {
                           ? <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.gridImg} />
                           : <View style={[styles.gridImg, { backgroundColor: colors.surfaceMuted }]} />}
                         {item.is_published === false && (
-                          <View style={styles.draftPillTop}><Text style={styles.draftPillText}>DRAFT</Text></View>
+                          <View style={[styles.draftPillTop, item.review_status === "pending" && { backgroundColor: colors.warning }]}>
+                            <Text style={styles.draftPillText}>
+                              {item.review_status === "pending" ? "NEEDS APPROVAL" : "DRAFT"}
+                            </Text>
+                          </View>
                         )}
                         {oos && (
                           <View style={styles.oosOverlay} pointerEvents="none">
@@ -738,6 +767,13 @@ const styles = StyleSheet.create({
   editBtn: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceMuted },
   deleteBtn: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: "#FCE9E5" },
   empty: { padding: 40, textAlign: "center", color: colors.textMuted },
+
+  reviewBar: {
+    flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12,
+    paddingHorizontal: 14, paddingVertical: 12, borderRadius: radii.card,
+    backgroundColor: "#FFF7E6", borderWidth: 1, borderColor: colors.warning,
+  },
+  reviewBarText: { flex: 1, fontSize: 12, fontWeight: "800", color: "#8A5A00", lineHeight: 17 },
 
   // Jul 2026 — Vendor filter chip + row
   vendorFilterChip: {    flexDirection: "row", alignItems: "center", gap: 8,

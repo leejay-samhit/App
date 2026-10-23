@@ -29,6 +29,16 @@ MAX_CASHBACK_PCT = 10.0
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "registration_fee": REGISTRATION_FEE,
+    # ── Subscription (Jun-2026) ─────────────────────────────────────────
+    # Of the ₹118: 18 is GST and this % of the remaining ₹100 is credited
+    # to the member's wallet instantly as welcome cashback. The rest is
+    # platform revenue, out of which the inviter is paid `invite_bonus`.
+    "subscription_cashback_pct": 50.0,
+    "subscription_invite_bonus": 25.0,
+    # Member benefits that can be switched off platform-wide.
+    "subscription_free_reveals": True,      # unlimited service numbers, free
+    "subscription_zero_ads": True,
+    "subscription_priority_support": True,
     "vendor_commission_pct": 70,
     # ── Purchase cashback ────────────────────────────────────────────────
     # Credited to the customer wallet ONLY after a successful delivery.

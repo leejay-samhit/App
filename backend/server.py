@@ -682,7 +682,7 @@ async def refresh_token(request: Request, payload: _RefreshPayload):
 
 
 # ------------------ Payment (Mock) ------------------
-async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_sponsor: Optional[Dict[str, Any]]) -> None:
+async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_sponsor: Optional[Dict[str, Any]]) -> bool:
     """Credit admin's `direct_signup` bucket for users who joined WITHOUT a
     referral code. GST-INCLUSIVE math: settings.registration_fee is the gross
     total paid by the user.
@@ -697,7 +697,12 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
     settings = await get_settings()
     gross = float(settings.get("registration_fee") or 0)
     if gross <= 0:
-        return
+        return False
+    fresh_joiner = await db.users.find_one(
+        {"id": joiner["id"]},
+        {"_id": 0, "registration_paid": 1, "offline_pre_credit_amount": 1,
+         "registration_gst_collected_at_create": 1},
+    ) or {}
     # GST-inclusive: GST is a portion of the gross
     gst = round(gross * (REFERRAL_GST_PCT / (100.0 + REFERRAL_GST_PCT)), 2)
     net = round(gross - gst, 2)
@@ -705,20 +710,123 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
     # offline-creation, skip the entry-level GST here (would double-count).
     # Net still goes into direct_signup. Payout-level GST on L2-L10 platform
     # fees is untouched.
-    if joiner.get("registration_gst_collected_at_create"):
-        gst = 0.0
-        net = round(gross, 2)
+    # The GST component is ALWAYS 18-of-118 — what changes is whether it is
+    # booked here or was already booked when the account was created offline
+    # / approved on the UPI path. It must never be folded back into `net`,
+    # or the member's cashback (and admin's revenue) is computed on ₹118
+    # instead of ₹100 and everyone is paid ₹59.
+    gst_to_book = 0.0 if fresh_joiner.get("registration_gst_collected_at_create") else gst
 
     ts = now_utc().isoformat()
     ref = f"DIRSU-{str(uuid.uuid4())[:8].upper()}"
 
-    await credit_admin_bucket("direct_signup", net, also_total_earned=True)
-    if gst > 0:
-        await credit_admin_bucket("gst_collected", gst, also_total_earned=False)
+    # ── Jun-2026 · "Instant 50% cashback" ────────────────────────────────
+    # Of the ₹118 subscription: ₹18 is GST, and HALF of the remaining ₹100
+    # goes straight back into the member's wallet as welcome cashback. Only
+    # the other half is platform revenue. Booked here, in the one place the
+    # subscription fee is recognised, so the three ledgers can never drift.
+    settings_cb = float(settings.get("subscription_cashback_pct") or 0)
+    member_cashback = round(net * max(0.0, min(100.0, settings_cb)) / 100.0, 2)
+    revenue = round(net - member_cashback, 2)
 
     admin_user = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
     if not admin_user:
-        return
+        return False
+
+    # The admin side is claimed with its OWN idempotency keys (the unique
+    # index on `transactions.idempotency_key` is the lock), so two triggers
+    # racing on the same account can only ever book the revenue once.
+    rev_claimed = True
+    try:
+        await db.transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": admin_user["id"],
+            "type": "subscription_revenue_claim",
+            "idempotency_key": f"SUBREV:{joiner['id']}",
+            "amount": 0.0,
+            "status": "success",
+            "internal": True,
+            "description": f"Revenue claim for subscription of {joiner.get('name','')}",
+            "related_signup_id": joiner["id"],
+            "created_at": ts,
+        })
+    except Exception as err:
+        if "duplicate" in str(err).lower() or "E11000" in str(err):
+            rev_claimed = False
+        else:
+            raise
+    if not rev_claimed:
+        logger.info("subscription revenue already booked for %s", joiner["id"])
+        return False
+
+    await credit_admin_bucket("direct_signup", revenue, also_total_earned=True)
+    if gst_to_book > 0:
+        await credit_admin_bucket("gst_collected", gst_to_book, also_total_earned=False)
+
+    if member_cashback > 0.009:
+        from core import shop_money
+        await shop_money.credit(
+            joiner["id"], "wallet_balance", member_cashback,
+            idempotency_key=f"SUBCASHBACK:{joiner['id']}",
+            group="user_wallet",
+            txn_type="subscription_cashback",
+            source_wallet="system_treasury",
+            description=(
+                f"Welcome cashback — {int(settings_cb)}% of your ₹{net:g} subscription "
+                f"(₹{gross:g} paid, ₹{gst:g} GST) credited instantly"
+            ),
+            extra={"related_signup_id": joiner["id"], "reference_number": ref + "-CB"},
+        )
+        try:
+            await _create_notification(
+                joiner["id"], "wallet", f"₹{member_cashback:g} cashback credited",
+                f"Your subscription is active — {int(settings_cb)}% came straight back "
+                f"into your wallet.",
+            )
+        except Exception:
+            pass
+
+    # ── Invite bonus — paid OUT OF the platform's share ──────────────────
+    # The inviter gets ₹25 of admin's ₹50. A blank / unknown code belongs to
+    # the admin's own code, so there is nobody to pay and admin keeps it all.
+    # Only a SUBSCRIBED inviter earns (referral bonus is a member benefit).
+    invite_bonus = round(float(settings.get("subscription_invite_bonus") or 0), 2)
+    sponsor = placement_sponsor or {}
+    sponsor_is_admin = (sponsor.get("email") or "").lower() == ADMIN_EMAIL.lower()
+    if (
+        invite_bonus > 0.009
+        and sponsor.get("id")
+        and not sponsor_is_admin
+        and sponsor.get("registration_paid")
+        and invite_bonus <= revenue + 0.009
+    ):
+        from core import shop_money
+        paid = await shop_money.credit(
+            sponsor["id"], "wallet_balance", invite_bonus,
+            idempotency_key=f"INVITEBONUS:{joiner['id']}",
+            group="user_wallet",
+            txn_type="referral_payout",
+            source_wallet="system_treasury",
+            description=(
+                f"Invite bonus — {joiner.get('name') or 'a new member'} joined with your "
+                f"code {sponsor.get('referral_code') or ''}".strip()
+            ),
+            extra={"related_signup_id": joiner["id"], "source_user_id": joiner["id"],
+                   "source_user_name": joiner.get("name"),
+                   "reference_number": ref + "-INV"},
+        )
+        if paid is not None:
+            await credit_admin_bucket("direct_signup", -invite_bonus, also_total_earned=True)
+            revenue = round(revenue - invite_bonus, 2)
+            try:
+                await _create_notification(
+                    sponsor["id"], "wallet", f"₹{invite_bonus:g} invite bonus",
+                    f"{joiner.get('name') or 'Someone'} subscribed with your invite code.",
+                )
+            except Exception:
+                pass
+
+    net = revenue   # what the platform actually keeps, for the row below
 
     placement_name = (placement_sponsor or {}).get("name") or "admin"
     placement_email = (placement_sponsor or {}).get("email") or ""
@@ -727,15 +835,19 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
         "id": str(uuid.uuid4()),
         "user_id": admin_user["id"],
         "type": "direct_signup_credit",
+        "idempotency_key": f"SUBREVROW:{joiner['id']}",
         "amount": net,
         "gross_amount": gross,
         "gst_amount": gst,
         "gst_pct": REFERRAL_GST_PCT,
         "status": "success",
         "description": (
-            f"Direct join (no referral) · {joiner.get('name','')} · "
-            f"placed under {placement_name} · ₹{gross:g} gross − ₹{gst} GST = ₹{net} net"
+            f"Subscription · {joiner.get('name','')} · placed under {placement_name} · "
+            f"₹{gross:g} gross − ₹{gst:g} GST − ₹{member_cashback:g} member cashback"
+            + (f" − ₹{invite_bonus:g} invite bonus" if net < round(gross - gst - member_cashback, 2) - 0.009 else "")
+            + f" = ₹{net:g} revenue"
         ),
+        "member_cashback": member_cashback,
         "source_user_id": joiner["id"],
         "source_user_name": joiner.get("name"),
         "source_user_email": joiner.get("email"),
@@ -746,11 +858,12 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
         "created_at": ts,
     })
 
-    if gst > 0:
+    if gst_to_book > 0:
         await db.transactions.insert_one({
             "id": str(uuid.uuid4()),
             "user_id": admin_user["id"],
             "type": "gst_collected",
+            "idempotency_key": f"SUBGST:{joiner['id']}",
             # ── GST classification (June-2026) ───────────────────────────
             # `registration_entry` = the ₹18-of-₹118 GST embedded in a
             # joining fee. Group 3 (GST Ledger) DERIVES this figure from
@@ -771,6 +884,40 @@ async def _credit_no_ref_signup_to_admin(joiner: Dict[str, Any], placement_spons
             "created_at": ts,
         })
 
+    return True
+
+
+
+async def _subscription_payment_ok(user_id: str, gross: float) -> bool:
+    """Check TWICE that the ₹118 really arrived.
+
+    Nothing (member cashback, invite bonus, revenue, GST, the offline
+    pre-credit reversal, the roster counter) may happen on an unpaid
+    account, so this runs FIRST — before the claim and before any money is
+    touched — and is deliberately strict: only a subscription payment of
+    (almost) the full price counts, not a ₹10 wallet top-up.
+    """
+    u = await db.users.find_one(
+        {"id": user_id},
+        {"_id": 0, "registration_paid": 1, "offline_pre_credit_amount": 1,
+         "registration_gst_collected_at_create": 1},
+    ) or {}
+    if not u.get("registration_paid"):
+        logger.warning("subscription split skipped — %s is not marked paid", user_id)
+        return False
+    paid_row = await db.transactions.find_one({
+        "user_id": user_id,
+        "type": {"$in": ["registration_fee", "registration_fee_upi"]},
+        "status": {"$in": ["success", "paid", "completed"]},
+        "amount": {"$gte": round(gross - 1, 2)},
+    })
+    offline = float(u.get("offline_pre_credit_amount") or 0) > 0 or bool(
+        u.get("registration_gst_collected_at_create")
+    )
+    if not paid_row and not offline:
+        logger.warning("subscription split skipped — no payment row for %s", user_id)
+        return False
+    return True
 
 
 async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
@@ -791,9 +938,22 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
     """
     if user.get("commission_triggered"):
         return
+    settings_now = await get_settings()
+    if not await _subscription_payment_ok(
+        user["id"], float(settings_now.get("registration_fee") or 0),
+    ):
+        return
     sponsor_id = user.get("sponsor_id")
-    # Mark first so two concurrent approvals can never book the fee twice.
-    await db.users.update_one({"id": user["id"]}, {"$set": {"commission_triggered": True}})
+    # Claim in ONE atomic step — a check followed by a separate write let two
+    # concurrent approvals (admin tap + UPI confirm) both get through and book
+    # the fee twice. `find_one_and_update` with the condition in the filter
+    # hands the claim to exactly one caller.
+    claimed = await db.users.find_one_and_update(
+        {"id": user["id"], "commission_triggered": {"$ne": True}},
+        {"$set": {"commission_triggered": True}},
+    )
+    if claimed is None:
+        return
 
     # ─── Offline pre-credit REVERSAL (ledger integrity) ───────────────
     # Admin offline-create pre-credits the fee into `direct_added` so the
@@ -829,20 +989,25 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
             {"$unset": {"offline_pre_credit_amount": ""}},
         )
 
-    # ─── Invite-code roster counter (tracking only, pays nothing) ──────
     placement_sponsor = await db.users.find_one({"id": sponsor_id}) if sponsor_id else None
+
+    # ─── Revenue recognition — the ₹118 split ──────────────────────────
+    booked = await _credit_no_ref_signup_to_admin(user, placement_sponsor)
+
+    # ─── Invite-code roster counter (tracking only, pays nothing) ──────
+    # Counted only once the subscription actually booked, otherwise a
+    # refuse-then-retry showed one invitee as two.
     if (
-        sponsor_id
+        booked
+        and sponsor_id
         and placement_sponsor
         and (placement_sponsor.get("email") or "").lower() != ADMIN_EMAIL.lower()
     ):
         await db.users.update_one(
-            {"id": sponsor_id},
-            {"$inc": {"direct_referrals_count": 1}},
+            {"id": sponsor_id, "counted_signups": {"$ne": user["id"]}},
+            {"$inc": {"direct_referrals_count": 1},
+             "$addToSet": {"counted_signups": user["id"]}},
         )
-
-    # ─── Revenue recognition — 100% of the fee to the platform ─────────
-    await _credit_no_ref_signup_to_admin(user, placement_sponsor)
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {"fee_residual_backfilled": True}},
@@ -2501,7 +2666,22 @@ async def admin_update_product(product_id: str, payload: ProductUpdate, admin: D
     update = apply_variants_to_payload(update, _base)
     from core.taxonomy import normalize_product_taxonomy
     update = await normalize_product_taxonomy(update, target)
+    # An admin edit is itself the approval: publishing clears the review flag
+    # that a seller's edit raised.
+    if update.get("is_published"):
+        update["review_status"] = "approved"
+        update["review_reason"] = None
+        update["review_approved_at"] = now_utc().isoformat()
+        update["review_approved_by"] = admin.get("email") or admin.get("id")
     await db.products.update_one({"id": product_id}, {"$set": update})
+    if update.get("is_published") and target.get("review_status") == "pending":
+        try:
+            await _create_notification(
+                target.get("vendor_id") or "", "vendor", "Product approved",
+                f"\"{target.get('name') or 'Your product'}\" is live in the shop again.",
+            )
+        except Exception:
+            pass
     # Dec 2026 — Bust shop caches so customers see the publish/edit
     # change on their very next /products call (was up to 60s delay).
     try:
@@ -3569,8 +3749,28 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         cashback_amount as _cb_amount,
     )
 
+    # Per-shop cashback override (Admin → Payout structure). Cached per
+    # checkout so a 10-line cart still reads each shop once.
+    _cb_vendor_cache: Dict[str, Dict[str, Any]] = {}
+
+    async def _cb_vendor(vendor_id: Optional[str]) -> Dict[str, Any]:
+        if not vendor_id:
+            return {}
+        if vendor_id not in _cb_vendor_cache:
+            _cb_vendor_cache[vendor_id] = await db.users.find_one(
+                {"id": vendor_id}, {"_id": 0, "default_cashback_pct": 1},
+            ) or {}
+        return _cb_vendor_cache[vendor_id]
+
+    # Jun-2026 — shopping cashback is a MEMBER benefit. A free account's
+    # order lines freeze at 0%, so nothing is promised on screen that the
+    # wallet would not honour, and nothing is settled on delivery either.
+    _buyer_is_member = bool(user.get("registration_paid"))
+
     def _cb_line_pct(prod: Dict[str, Any]) -> float:
-        return _cb_pct(prod, settings)
+        if not _buyer_is_member:
+            return 0.0
+        return _cb_pct(prod, settings, _cb_vendor_cache.get(prod.get("vendor_id") or ""))
 
     # ---------------- ATOMIC STOCK DECREMENT (multi-product) ----------------
     # We decrement stock per line BEFORE wallet debit. If any line fails (out of
@@ -3646,6 +3846,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             # settled from the vendor wallet AFTER successful delivery.
             vendor_share = line_total if vendor_id else 0.0
             platform_share = 0.0 if vendor_id else line_total
+            await _cb_vendor(vendor_id)      # warm the per-shop cashback rate
             if vendor_id:
                 vendor_payouts[vendor_id] = vendor_payouts.get(vendor_id, 0.0) + vendor_share
             enriched.append({
@@ -8290,7 +8491,10 @@ async def require_vendor(user: Dict[str, Any] = Depends(get_current_user)) -> Di
 @api_router.post("/vendor/apply")
 async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if not user.get("registration_paid"):
-        raise HTTPException(status_code=403, detail="Complete registration before applying as a vendor")
+        raise HTTPException(
+            status_code=403,
+            detail="Only members can run a shop — activate your membership first",
+        )
     if user.get("approval_status") != "approved":
         raise HTTPException(status_code=403, detail="Your account must be approved by admin first")
     shop = (payload.shop_name or "").strip()
@@ -8754,7 +8958,42 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
     update = apply_variants_to_payload(update, _base)
     from core.taxonomy import normalize_product_taxonomy
     update = await normalize_product_taxonomy(update, target)
+    # ── Jun-2026 — EVERY edit needs admin approval again ─────────────────
+    # Approval used to be one-time: once published, a seller could rewrite
+    # the price, the name or the photos and it went straight to the shop.
+    # Now any change to a live product pulls it out of the shop and back
+    # into the admin queue; stock-only / visibility-only touches are
+    # exempt so a seller can still keep inventory accurate.
+    EXEMPT = {"stock", "variants", "is_active", "sold_count", "updated_at"}
+    meaningful = sorted(k for k in update.keys() if k not in EXEMPT)
+    needs_review = bool(meaningful) and bool(target.get("is_published"))
+    if needs_review:
+        update["is_published"] = False
+        update["review_status"] = "pending"
+        update["review_reason"] = "edited_by_vendor"
+        update["review_fields"] = meaningful[:20]
+        update["review_requested_at"] = now_utc().isoformat()
+    elif meaningful and not target.get("is_published"):
+        update["review_status"] = "pending"
+        update["review_fields"] = meaningful[:20]
     await db.products.update_one({"id": product_id}, {"$set": update})
+    if needs_review:
+        try:
+            await _create_notification(
+                vendor["id"], "vendor", "Product sent for approval",
+                f"\"{target.get('name') or 'Your product'}\" is hidden from the shop until "
+                f"an admin approves your changes ({', '.join(meaningful[:3])}"
+                f"{'…' if len(meaningful) > 3 else ''}).",
+            )
+            admin_doc = await db.users.find_one({"email": ADMIN_EMAIL.lower()}, {"_id": 0, "id": 1})
+            if admin_doc:
+                await _create_notification(
+                    admin_doc["id"], "admin", "Product edit needs approval",
+                    f"{vendor.get('vendor_business_name') or vendor.get('name')} edited "
+                    f"\"{target.get('name')}\" — it is unpublished until you approve it.",
+                )
+        except Exception:
+            pass
     try:
         from routes.products_public import bust_products_public_caches
         bust_products_public_caches()
@@ -9208,7 +9447,10 @@ async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Dep
     if user.get("role") == "admin":
         raise HTTPException(status_code=400, detail="Admins cannot apply as service providers")
     if not user.get("registration_paid"):
-        raise HTTPException(status_code=400, detail="Pay registration first")
+        raise HTTPException(
+            status_code=403,
+            detail="Only members can list a service — activate your membership first",
+        )
     # Reject if there's already a pending or approved application
     existing = await db.service_applications.find_one(
         {"user_id": user["id"], "status": {"$in": ["pending", "approved"]}}
@@ -10156,6 +10398,13 @@ async def get_phone_reveal_config(user: Dict[str, Any] = Depends(get_current_use
     gst_pct = float(settings.get("phone_reveal_gst_pct") if settings.get("phone_reveal_gst_pct") is not None else 18.0)
     gst_amt = round(fee * gst_pct / 100.0, 2)
     total = round(fee + gst_amt, 2)
+    # ── Member benefit — unlimited numbers, free ─────────────────────────
+    member = bool(user.get("registration_paid")) and bool(
+        settings.get("subscription_free_reveals", True)
+    )
+    paid_fee, paid_total = fee, total
+    if member:
+        fee = gst_amt = total = 0.0
     # Providers already revealed by this user (so we can show without re-charging)
     revealed_rows = await db.phone_reveal_invoices.find(
         {"user_id": user["id"]}, {"_id": 0, "provider_id": 1}
@@ -10167,6 +10416,10 @@ async def get_phone_reveal_config(user: Dict[str, Any] = Depends(get_current_use
         "total": total,
         "wallet_balance": float(user.get("wallet_balance") or 0),
         "revealed_provider_ids": list({r.get("provider_id") for r in revealed_rows if r.get("provider_id")}),
+        "is_subscriber": member,
+        "free_for_members": bool(settings.get("subscription_free_reveals", True)),
+        "non_member_fee": paid_fee,
+        "non_member_total": paid_total,
     }
 
 
@@ -10210,6 +10463,12 @@ async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, use
     gst_pct = float(settings.get("phone_reveal_gst_pct") if settings.get("phone_reveal_gst_pct") is not None else 18.0)
     gst_amt = round(fee * gst_pct / 100.0, 2)
     total = round(fee + gst_amt, 2)
+    # Jun-2026 — a subscriber gets every provider's number free, for ever.
+    is_member = bool(user.get("registration_paid")) and bool(
+        settings.get("subscription_free_reveals", True)
+    )
+    if is_member:
+        fee = gst_amt = total = 0.0
     bal = float(user.get("wallet_balance") or 0)
     if bal < total:
         raise HTTPException(
@@ -10302,7 +10561,8 @@ async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, use
         "service_name":    provider.get("service_name"),
         "service_category": provider.get("service_category"),
         "fee":             fee,
-        "gst_pct":         gst_pct,
+        "member_free":     is_member,
+        "gst_pct":         gst_pct if not is_member else 0.0,
         "gst_amount":      gst_amt,
         "total":           total,
         "currency":        "INR",
@@ -10541,6 +10801,8 @@ app.include_router(login_history_router.router, prefix="/api")
 app.include_router(order_payments_router.router, prefix="/api")
 from routes import delivery_partner as delivery_partner_router  # noqa: E402
 app.include_router(delivery_partner_router.router, prefix="/api")
+from routes import subscription as subscription_router  # noqa: E402
+app.include_router(subscription_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)
