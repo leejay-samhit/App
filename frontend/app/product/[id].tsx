@@ -5,7 +5,7 @@
 // delivery), qty + Add-to-Cart + Buy-Now + Save + Ask-Vendor,
 // product details panel (Brand/OS/RAM/CPU/Storage + extras), description,
 // spec tabs, What's-in-the-Box, customer reviews with rating + photos.
-import { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, ActivityIndicator,
   Alert, RefreshControl, TextInput, Modal, Pressable, KeyboardAvoidingView, Platform,
@@ -129,7 +129,26 @@ export default function ProductDetailScreen() {
     (product?.recharge_kind as any) || (params.rchKind as any) || "mobile";
   const [rechargeOpen, setRechargeOpen] = useState(false);
   const [rechargeAccount, setRechargeAccount] = useState(String(params.rchAccount || ""));
-  const { pay: payRecharge, paying: rechargePaying, rzpHtml, handleMessage, cancel: cancelRzp } =
+  const [payMode, setPayMode] = useState<"online" | "wallet" | "split">("online");
+  // Read the balance fresh when the sheet opens — the cached auth user can be
+  // stale, and offering "pay from wallet" against a stale number is worse
+  // than not offering it at all.
+  const [walletBalance, setWalletBalance] = useState(
+    Math.round(Number((user as any)?.wallet_balance || 0) * 100) / 100,
+  );
+  React.useEffect(() => {
+    if (!rechargeOpen) return;
+    api.get<{ wallet_balance?: number; wallet_frozen?: boolean }>("/auth/me")
+      .then(({ data }) => {
+        setWalletBalance(
+          data?.wallet_frozen ? 0 : Math.round(Number(data?.wallet_balance || 0) * 100) / 100,
+        );
+      })
+      .catch(() => {});
+  }, [rechargeOpen]);
+  const walletCovers = !!product && walletBalance + 0.009 >= Number(product?.price || 0);
+  const rechargeReady = accountIsValid(rechargeKind, rechargeAccount);
+  const { pay: payRecharge, payFromWallet, paying: rechargePaying, rzpHtml, handleMessage, cancel: cancelRzp } =
     useRechargePay(() => setRechargeOpen(false));
 
   const load = useCallback(async () => {
@@ -763,69 +782,128 @@ export default function ProductDetailScreen() {
         )}
       </View>
 
-      {/* Recharge — number + pay, the only two things a plan needs */}
+      {/* Recharge — number + how to pay. Nothing else a plan needs. */}
       <Modal visible={rechargeOpen} transparent animationType="slide" onRequestClose={() => setRechargeOpen(false)}>
-        <Pressable style={styles.sheetOverlay} onPress={() => setRechargeOpen(false)}>
-          <Pressable style={styles.rechargeSheet} onPress={() => {}}>
-            <View style={styles.sheetGrab} />
-            <Text style={styles.guideTitle}>
-              {rechargeKind === "mobile" ? "Recharge a mobile number" : "Recharge a DTH box"}
-            </Text>
-            <Text style={styles.rechargeSub} numberOfLines={2}>
-              {product.name} · {formatINR(product.price)}
-            </Text>
-            <View style={styles.rechargeInputRow}>
-              {rechargeKind === "mobile" ? (
-                <Text style={styles.rechargeCc}>+91</Text>
-              ) : (
-                <Feather name="tv" size={16} color={colors.textMuted} />
-              )}
-              <TextInput
-                value={rechargeAccount}
-                onChangeText={(v) => setRechargeAccount(
-                  rechargeKind === "mobile" ? v.replace(/\D+/g, "").slice(0, 10) : v.slice(0, 24),
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+          <Pressable style={styles.sheetOverlay} onPress={() => setRechargeOpen(false)}>
+            <Pressable style={styles.rechargeSheet} onPress={() => {}}>
+              <View style={styles.sheetGrab} />
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+                bounces={false}
+              >
+                <Text style={styles.guideTitle}>
+                  {rechargeKind === "mobile" ? "Recharge a mobile number" : "Recharge a DTH box"}
+                </Text>
+                <Text style={styles.rechargeSub} numberOfLines={2}>
+                  {product.name} · {formatINR(product.price)}
+                </Text>
+                <View style={styles.rechargeInputRow}>
+                  {rechargeKind === "mobile" ? (
+                    <Text style={styles.rechargeCc}>+91</Text>
+                  ) : (
+                    <Feather name="tv" size={16} color={colors.textMuted} />
+                  )}
+                  <TextInput
+                    value={rechargeAccount}
+                    onChangeText={(v) => setRechargeAccount(
+                      rechargeKind === "mobile" ? v.replace(/\D+/g, "").slice(0, 10) : v.slice(0, 24),
+                    )}
+                    placeholder={rechargeKind === "mobile" ? "9876543210" : "Subscriber / customer ID"}
+                    placeholderTextColor={colors.textMuted}
+                    keyboardType={rechargeKind === "mobile" ? "number-pad" : "default"}
+                    style={styles.rechargeInput}
+                    returnKeyType="done"
+                    testID="recharge-sheet-account"
+                  />
+                  {rechargeReady ? (
+                    <Feather name="check-circle" size={17} color={colors.success} />
+                  ) : null}
+                </View>
+
+                {/* How to pay — wallet first when it can cover the plan */}
+                <Text style={styles.rchPayLabel}>PAY WITH</Text>
+                {[
+                  { key: "online" as const, label: "Pay online", note: "UPI, card or netbanking", on: true },
+                  {
+                    key: "wallet" as const,
+                    label: `Slangcart wallet · ${formatINR(walletBalance)}`,
+                    note: walletCovers
+                      ? "Instant — nothing to pay online"
+                      : `Short by ${formatINR(Math.max(0, product.price - walletBalance))}`,
+                    on: walletCovers,
+                  },
+                  {
+                    key: "split" as const,
+                    label: `Wallet ${formatINR(walletBalance)} + ${formatINR(Math.max(0, product.price - walletBalance))} online`,
+                    note: "Use the wallet balance and pay the rest",
+                    on: !walletCovers && walletBalance > 0.5,
+                  },
+                ].filter((o) => o.on).map((o) => (
+                  <TouchableOpacity
+                    key={o.key}
+                    onPress={() => setPayMode(o.key)}
+                    style={[styles.rchPayRow, payMode === o.key && styles.rchPayRowOn]}
+                    testID={`recharge-pay-mode-${o.key}`}
+                  >
+                    <Feather
+                      name={payMode === o.key ? "check-circle" : "circle"}
+                      size={17}
+                      color={payMode === o.key ? colors.primary : colors.textMuted}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.rchPayTitle}>{o.label}</Text>
+                      <Text style={styles.rchPayNote}>{o.note}</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+
+                <Text style={styles.rechargeNote}>
+                  No delivery address needed — the recharge is applied to this number.
+                </Text>
+              </ScrollView>
+
+              {/* Sticky action: always visible, even with the keyboard up */}
+              <TouchableOpacity
+                onPress={() => {
+                  const args = {
+                    kind: rechargeKind,
+                    productId: product.id,
+                    planName: product.name,
+                    account: rechargeAccount,
+                    state: String(params.rchState || product.recharge_state || "") || undefined,
+                    network: String(params.rchNetwork || product.recharge_network || "") || undefined,
+                    prefill: { name: (user as any)?.name, email: (user as any)?.email, contact: rechargeAccount },
+                  };
+                  if (payMode === "wallet") return payFromWallet(args);
+                  return payRecharge({ ...args, walletAmount: payMode === "split" ? walletBalance : 0 });
+                }}
+                disabled={!!rechargePaying || !rechargeReady}
+                style={[
+                  styles.buyBtn,
+                  { marginTop: 12 },
+                  (!!rechargePaying || !rechargeReady) && { opacity: 0.5 },
+                ]}
+                testID="recharge-sheet-pay"
+              >
+                {rechargePaying ? <ActivityIndicator color={colors.primaryFg} size="small" /> : (
+                  <>
+                    <Feather name={payMode === "online" ? "zap" : "credit-card"} size={18} color={colors.primaryFg} />
+                    <Text style={styles.buyBtnText}>
+                      {payMode === "wallet"
+                        ? `Pay ${formatINR(product.price)} from wallet`
+                        : `Pay ${formatINR(payMode === "split" ? Math.max(0, product.price - walletBalance) : product.price)}`}
+                    </Text>
+                  </>
                 )}
-                placeholder={rechargeKind === "mobile" ? "9876543210" : "Subscriber / customer ID"}
-                placeholderTextColor={colors.textMuted}
-                keyboardType={rechargeKind === "mobile" ? "number-pad" : "default"}
-                style={styles.rechargeInput}
-                autoFocus
-                testID="recharge-sheet-account"
-              />
-              {accountIsValid(rechargeKind, rechargeAccount) ? (
-                <Feather name="check-circle" size={17} color={colors.success} />
-              ) : null}
-            </View>
-            <Text style={styles.rechargeNote}>
-              No delivery address needed — the recharge is applied to this number.
-            </Text>
-            <TouchableOpacity
-              onPress={() => payRecharge({
-                kind: rechargeKind,
-                productId: product.id,
-                planName: product.name,
-                account: rechargeAccount,
-                state: String(params.rchState || product.recharge_state || "") || undefined,
-                network: String(params.rchNetwork || product.recharge_network || "") || undefined,
-                prefill: { name: (user as any)?.name, email: (user as any)?.email, contact: rechargeAccount },
-              })}
-              disabled={!!rechargePaying || !accountIsValid(rechargeKind, rechargeAccount)}
-              style={[
-                styles.buyBtn,
-                { marginTop: 14 },
-                (!!rechargePaying || !accountIsValid(rechargeKind, rechargeAccount)) && { opacity: 0.5 },
-              ]}
-              testID="recharge-sheet-pay"
-            >
-              {rechargePaying ? <ActivityIndicator color={colors.primaryFg} size="small" /> : (
-                <>
-                  <Feather name="zap" size={18} color={colors.primaryFg} />
-                  <Text style={styles.buyBtnText}>Pay {formatINR(product.price)}</Text>
-                </>
-              )}
-            </TouchableOpacity>
+              </TouchableOpacity>
+            </Pressable>
           </Pressable>
-        </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
       <RazorpayWebViewModal html={rzpHtml} onMessage={handleMessage} onCancel={cancelRzp} />
 
@@ -1192,11 +1270,24 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderTopLeftRadius: 20, borderTopRightRadius: 20,
     paddingHorizontal: spacing.screen, paddingTop: 10, paddingBottom: 26,
+    maxHeight: "86%",
   },
   sheetGrab: {
     width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border,
     alignSelf: "center", marginBottom: 12,
   },
+  rchPayLabel: {
+    fontSize: 10, fontWeight: "900", letterSpacing: 0.7, color: colors.textMuted,
+    marginTop: 16, marginBottom: 6,
+  },
+  rchPayRow: {
+    flexDirection: "row", alignItems: "center", gap: 10, padding: 11, marginBottom: 7,
+    borderRadius: radii.card, borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  rchPayRowOn: { borderColor: colors.primary, backgroundColor: colors.surfaceMuted },
+  rchPayTitle: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  rchPayNote: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   rchTagRow: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginTop: 10 },
   rchTag: {
     flexDirection: "row", alignItems: "center", gap: 5,

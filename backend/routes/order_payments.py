@@ -186,6 +186,18 @@ class RechargeStart(BaseModel):
     account: str                    # mobile number, or DTH subscriber id
     state: Optional[str] = None
     network: Optional[str] = None
+    # Jun-2026 — how much of the plan to pay out of the Slangcart wallet.
+    # The rest goes to Razorpay, exactly like the shop checkout split.
+    wallet_amount: float = 0.0
+
+
+class RechargeWalletPay(BaseModel):
+    """Pay for a plan entirely from the Slangcart wallet (no gateway)."""
+    kind: str
+    product_id: str
+    account: str
+    state: Optional[str] = None
+    network: Optional[str] = None
 
 
 class RechargeVerify(BaseModel):
@@ -193,6 +205,128 @@ class RechargeVerify(BaseModel):
     razorpay_order_id: Optional[str] = None
     razorpay_payment_id: Optional[str] = None
     razorpay_signature: Optional[str] = None
+
+
+def _clean_account(kind: str, raw: str) -> str:
+    """Validate + normalise the number being recharged."""
+    if kind not in ("mobile", "dth"):
+        raise HTTPException(status_code=400, detail="kind must be mobile or dth")
+    account = re.sub(r"\s+", "", raw or "")
+    if kind == "mobile":
+        digits = re.sub(r"\D+", "", account)[-10:]
+        if len(digits) != 10 or digits[0] not in "6789":
+            raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number.")
+        return digits
+    if len(account) < 6:
+        raise HTTPException(status_code=400, detail="Enter a valid subscriber / customer ID.")
+    return account
+
+
+async def _recharge_plan(product_id: str) -> Dict[str, Any]:
+    plan = await db.products.find_one(
+        {"id": product_id, "active": {"$ne": False}},
+        {"_id": 0, "id": 1, "name": 1, "price": 1, "recharge_kind": 1,
+         "recharge_network": 1, "recharge_state": 1, "vendor_id": 1, "subcategory": 1},
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="That recharge plan is no longer available.")
+    if round(float(plan.get("price") or 0), 2) <= 0:
+        raise HTTPException(status_code=400, detail="This plan has no price set.")
+    return plan
+
+
+@router.post("/recharge/pay/wallet")
+async def pay_recharge_from_wallet(
+    payload: RechargeWalletPay,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Jun-2026 — pay for a plan straight from the Slangcart wallet.
+
+    No gateway, so there is no bank row: the money is already ours. The
+    wallet debit is atomic (guarded on the balance) so a double tap cannot
+    book two recharges, and the booking itself goes through the SAME
+    `book_recharge_order` the online path uses — same order, same seller
+    credit, same ledger rows.
+    """
+    account = _clean_account(payload.kind, payload.account)
+    plan = await _recharge_plan(payload.product_id)
+    amount = round(float(plan["price"]), 2)
+    if user.get("wallet_frozen"):
+        raise HTTPException(status_code=400, detail="Your wallet is frozen — contact support.")
+    balance = round(float(user.get("wallet_balance") or 0), 2)
+    if balance + 0.009 < amount:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Wallet has ₹{balance:,.2f} — ₹{round(amount - balance, 2):,.2f} short. Pay online instead.",
+        )
+
+    attempt = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "kind": payload.kind,
+        "product_id": plan["id"],
+        "plan_name": plan.get("name") or "Recharge",
+        "account": account,
+        "state": payload.state or plan.get("recharge_state"),
+        "network": payload.network or plan.get("recharge_network"),
+        "amount": amount,
+        "wallet_amount": amount,
+        "online_amount": 0.0,
+        "razorpay_order_id": None,
+        "razorpay_payment_id": None,
+        "status": "created",
+        "method": "wallet",
+        "is_mock": False,
+        "created_at": now_utc().isoformat(),
+    }
+    await db.recharge_payments.insert_one(dict(attempt))
+
+    debited = await db.users.update_one(
+        {"id": user["id"], "wallet_balance": {"$gte": amount}},
+        {"$inc": {"wallet_balance": -amount}},
+    )
+    if debited.modified_count == 0:
+        await db.recharge_payments.update_one(
+            {"id": attempt["id"]},
+            {"$set": {"status": "failed", "failed_reason": "insufficient_wallet"}},
+        )
+        raise HTTPException(status_code=400, detail="Wallet balance changed — please try again.")
+
+    recharge_id = str(uuid.uuid4())
+    await db.recharge_payments.update_one(
+        {"id": attempt["id"]},
+        {"$set": {"status": "paid", "recharge_id": recharge_id,
+                  "paid_at": now_utc().isoformat()}},
+    )
+    doc = {
+        "id": recharge_id,
+        "user_id": user["id"],
+        "kind": attempt["kind"],
+        "product_id": attempt["product_id"],
+        "plan_name": attempt["plan_name"],
+        "account": account,
+        "state": attempt.get("state"),
+        "network": attempt.get("network"),
+        "amount": amount,
+        "wallet_amount": amount,
+        "online_amount": 0.0,
+        "status": "processing",
+        "payment_id": attempt["id"],
+        "paid_via": "wallet",
+        "created_at": now_utc().isoformat(),
+    }
+    await db.recharges.insert_one(dict(doc))
+    from core.recharge_order import book_recharge_order
+    order = await book_recharge_order(user, attempt, recharge_id)
+    await db.recharges.update_one(
+        {"id": recharge_id},
+        {"$set": {"order_id": order.get("id"), "order_number": order.get("order_number")}},
+    )
+    return {
+        "ok": True, "recharge_id": recharge_id, "account": account, "amount": amount,
+        "plan_name": attempt["plan_name"], "status": "processing", "paid_via": "wallet",
+        "order_id": order.get("id"), "order_number": order.get("order_number"),
+    }
 
 
 @router.post("/recharge/payment/start")
@@ -211,31 +345,29 @@ async def start_recharge_payment(
     """
     if payload.kind not in ("mobile", "dth"):
         raise HTTPException(status_code=400, detail="kind must be mobile or dth")
-    account = re.sub(r"\s+", "", payload.account or "")
-    if payload.kind == "mobile":
-        digits = re.sub(r"\D+", "", account)[-10:]
-        if len(digits) != 10 or digits[0] not in "6789":
-            raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number.")
-        account = digits
-    elif len(account) < 6:
-        raise HTTPException(status_code=400, detail="Enter a valid subscriber / customer ID.")
+    account = _clean_account(payload.kind, payload.account)
 
-    plan = await db.products.find_one(
-        {"id": payload.product_id, "active": {"$ne": False}},
-        {"_id": 0, "id": 1, "name": 1, "price": 1, "recharge_kind": 1,
-         "recharge_network": 1, "recharge_state": 1, "vendor_id": 1, "subcategory": 1},
-    )
-    if not plan:
-        raise HTTPException(status_code=404, detail="That recharge plan is no longer available.")
+    plan = await _recharge_plan(payload.product_id)
     amount = round(float(plan.get("price") or 0), 2)
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="This plan has no price set.")
+
+    # Jun-2026 — wallet + UPI split, same rule as the shop checkout: the
+    # wallet can cover part (or all but a rupee) of the plan, Razorpay
+    # collects the rest. A FULL wallet payment goes through
+    # /recharge/pay/wallet instead, which needs no gateway at all.
+    balance = 0.0 if user.get("wallet_frozen") else round(float(user.get("wallet_balance") or 0), 2)
+    wallet_amount = round(min(max(0.0, float(payload.wallet_amount or 0)), balance, amount), 2)
+    online_amount = round(amount - wallet_amount, 2)
+    if online_amount <= 0.009:
+        raise HTTPException(
+            status_code=400,
+            detail="Your wallet covers this plan — use the Pay from wallet option.",
+        )
 
     creds = await get_creds()
     await db.recharge_payments.delete_many({"user_id": user["id"], "status": "created"})
     try:
         rzp_order_id = await create_order(
-            int(round(amount * 100)),
+            int(round(online_amount * 100)),
             f"rchg_{user['id'][:12]}_{uuid.uuid4().hex[:6]}",
             notes={"user_id": user["id"], "kind": "recharge",
                    "account": account, "plan": plan["id"]},
@@ -254,10 +386,12 @@ async def start_recharge_payment(
         "state": payload.state or plan.get("recharge_state"),
         "network": payload.network or plan.get("recharge_network"),
         "amount": amount,
-        "online_amount": amount,
+        "wallet_amount": wallet_amount,
+        "online_amount": online_amount,
         "razorpay_order_id": rzp_order_id,
         "razorpay_payment_id": None,
         "status": "created",
+        "method": "wallet_online" if wallet_amount > 0.009 else "online",
         "is_mock": creds["is_mock"],
         "created_at": now_utc().isoformat(),
     }
@@ -269,8 +403,10 @@ async def start_recharge_payment(
     return {
         "payment_id": attempt["id"],
         "razorpay_order_id": rzp_order_id,
-        "amount_paise": int(round(amount * 100)),
+        "amount_paise": int(round(online_amount * 100)),
         "amount": amount,
+        "online_amount": online_amount,
+        "wallet_amount": wallet_amount,
         "key_id": creds["key_id"],
         "is_mock": creds["is_mock"],
         "account": account,
@@ -332,6 +468,24 @@ async def verify_recharge_payment(
             if int(rzp.get("amount") or 0) not in (0, expected_paise):
                 raise HTTPException(status_code=400, detail="Payment amount does not match the plan")
 
+    # Jun-2026 — a wallet + UPI split pays its wallet slice here, once the
+    # gateway leg is confirmed. Atomic and guarded on the balance, so the
+    # recharge is never booked against money the wallet no longer has.
+    wallet_slice = round(float(attempt.get("wallet_amount") or 0), 2)
+    if wallet_slice > 0.009:
+        debited = await db.users.update_one(
+            {"id": user["id"], "wallet_balance": {"$gte": wallet_slice}},
+            {"$inc": {"wallet_balance": -wallet_slice}},
+        )
+        if debited.modified_count == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Your wallet no longer has ₹{wallet_slice:,.2f}. You have NOT been "
+                    f"charged twice — contact support with this payment id."
+                ),
+            )
+
     # Claim the attempt first — the guarded update is what makes a double
     # tap (or a webhook racing the client) impossible to double-book.
     recharge_id = str(uuid.uuid4())
@@ -361,31 +515,34 @@ async def verify_recharge_payment(
         "state": attempt.get("state"),
         "network": attempt.get("network"),
         "amount": attempt["amount"],
+        "wallet_amount": wallet_slice,
+        "online_amount": round(float(attempt.get("online_amount") or attempt["amount"]), 2),
         "status": "processing",
         "payment_id": attempt["id"],
+        "paid_via": "wallet_online" if wallet_slice > 0.009 else "online",
         "razorpay_payment_id": payload.razorpay_payment_id,
         "created_at": now_utc().isoformat(),
     }
     await db.recharges.insert_one(dict(doc))
-    await db.transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user["id"],
-        "type": "recharge",
-        "amount": -attempt["amount"],
-        "status": "success",
-        "description": (
-            f"{attempt['plan_name']} — {attempt['network'] or ''} "
-            f"{attempt['account']}".replace("  ", " ").strip()
-        ),
-        "recharge_id": recharge_id,
-        "razorpay_payment_id": payload.razorpay_payment_id,
-        # Paid straight from the bank to us — never touched the wallet.
-        "wallet_impact": "informational",
-        "created_at": now_utc().isoformat(),
-    })
+
+    # Jun-2026 FIX — a paid recharge now becomes a real ORDER: the seller
+    # sees the number to recharge, his shop wallet is credited, the online
+    # money lands in the Bank Ledger and both payment legs show in the
+    # customer's transactions. Before this, the money vanished from every
+    # report the moment it was taken.
+    from core.recharge_order import book_recharge_order
+    order = await book_recharge_order(
+        user, attempt, recharge_id, razorpay_payment_id=payload.razorpay_payment_id,
+    )
+    await db.recharges.update_one(
+        {"id": recharge_id},
+        {"$set": {"order_id": order.get("id"), "order_number": order.get("order_number")}},
+    )
     return {"ok": True, "recharge_id": recharge_id,
             "account": attempt["account"], "amount": attempt["amount"],
-            "plan_name": attempt["plan_name"], "status": "processing"}
+            "plan_name": attempt["plan_name"], "status": "processing",
+            "wallet_amount": wallet_slice,
+            "order_id": order.get("id"), "order_number": order.get("order_number")}
 
 
 @router.get("/recharge/history")

@@ -9354,3 +9354,22 @@ agent_communication:
       seed recharges from testbuyer's history.
       Still open for a future agent: there is no DELETE /admin/recharges/{id},
       so e2e recharge tests leave rows behind (I remove them via Mongo).
+
+  - agent: "main"
+    message: |
+      Jun 2026 batch 5 (money-critical) — a paid recharge now books a REAL
+      order via new core/recharge_order.py: vendor sees the number
+      (order_kind 'recharge', RC-xxxxxx), vendor_sales row, vendor shop
+      wallet credited once (VENDORSALE:{order_id} in `transactions`),
+      bank_ledger RCHGPAY row for the ONLINE slice only, buyer wallet + UPI
+      legs as separate rows, net worth unchanged. NEW POST
+      /recharge/pay/wallet (full wallet) and wallet_amount on
+      /recharge/payment/start (wallet + UPI split). UI: recharge sheet now
+      KeyboardAvoidingView + sticky Pay button + PAY WITH rows; vendor order
+      card shows a copyable RECHARGE THIS NUMBER block (address block hidden
+      for recharges); rider shop-wise card re-aligned (round call button,
+      top-aligned address, 2-col money strip).
+      testing_agent iteration 95 re-run: 17/17 PASS. NOTE for future agents —
+      shop_money posts into the `transactions` collection (there is no
+      `shop_money` collection); the +price row on a recharge order is the
+      VENDOR's credit, not a duplicate buyer row.

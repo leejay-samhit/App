@@ -132,25 +132,32 @@ export default function DeliveryOrders() {
               style={s.callBtn}
               testID={`dp-call-${o.id}`}
             >
-              <Feather name="phone" size={13} color={colors.primary} />
-              <Text style={s.callText}>Call</Text>
+              <Feather name="phone" size={14} color={colors.primary} />
             </TouchableOpacity>
           ) : null}
         </View>
-        <View style={s.line}>
-          <Feather name="map-pin" size={13} color={colors.textMuted} />
+        <View style={[s.line, { alignItems: "flex-start" }]}>
+          <Feather name="map-pin" size={13} color={colors.textMuted} style={{ marginTop: 2 }} />
           <Text style={s.lineText} numberOfLines={2}>
             {[addr.line1, addr.line2, addr.city, addr.pincode].filter(Boolean).join(", ") || "—"}
           </Text>
         </View>
-        <View style={s.line}>
-          <Feather name="shopping-cart" size={13} color={colors.textMuted} />
-          <Text style={s.lineText}>
-            {formatINR(o.total || 0)}
-            {Number(o.cash_to_collect || 0) > 0
-              ? ` · collect ${formatINR(Number(o.cash_to_collect))} cash`
-              : " · fully prepaid"}
-          </Text>
+
+        {/* Money, in two aligned columns — the rider reads these at a glance */}
+        <View style={s.statRow}>
+          <View style={s.stat}>
+            <Text style={s.statLabel}>ORDER VALUE</Text>
+            <Text style={s.statValue}>{formatINR(o.total || 0)}</Text>
+          </View>
+          <View style={s.stat}>
+            <Text style={s.statLabel}>CASH TO COLLECT</Text>
+            <Text style={[
+              s.statValue,
+              Number(o.cash_to_collect || 0) > 0 ? { color: colors.primary } : { color: colors.textMuted },
+            ]}>
+              {Number(o.cash_to_collect || 0) > 0 ? formatINR(Number(o.cash_to_collect)) : "Prepaid"}
+            </Text>
+          </View>
         </View>
 
         {Number(o.cash_to_collect || 0) > 0 && o.status !== "delivered" ? (
@@ -330,12 +337,21 @@ const s = StyleSheet.create({
   pill: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 999 },
   pillText: { color: "#fff", fontSize: 9, fontWeight: "900", letterSpacing: 0.6 },
   divider: { height: 1, backgroundColor: colors.border, marginVertical: 10 },
-  line: { flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 6 },
+  line: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8, minHeight: 20 },
   lineText: { flex: 1, fontSize: 12.5, color: colors.textMain, fontWeight: "600" },
-  callBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 7 },
-  callText: { color: colors.primary, fontSize: 12, fontWeight: "800" },
+  callBtn: {
+    width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.surfaceMuted,
+  },
+  statRow: { flexDirection: "row", gap: 8, marginTop: 4 },
+  stat: { flex: 1, backgroundColor: colors.surfaceMuted, borderRadius: 10, padding: 9 },
+  statLabel: { fontSize: 9, letterSpacing: 0.7, fontWeight: "900", color: colors.textMuted },
+  statValue: {
+    fontSize: 14.5, fontWeight: "900", color: colors.textMain, marginTop: 2,
+    fontVariant: ["tabular-nums"],
+  },
   cashStrip: {
-    flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4,
+    flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8,
     backgroundColor: "#FEF3C7", borderRadius: 8, paddingHorizontal: 9, paddingVertical: 7,
   },
   cashStripText: { flex: 1, color: "#92400E", fontSize: 11.5, fontWeight: "800" },

@@ -31,6 +31,7 @@ import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { OrderTimeline } from "../../src/order-timeline";
 import { FadeSlideIn, ListRowSkeleton } from "../../src/anim";
 import { downloadOrdersCsv, ExportOrderLike } from "../../src/exportOrdersCsv";
+import * as Clipboard from "expo-clipboard";
 
 type VendorSale = {
   id: string;
@@ -54,6 +55,12 @@ type VendorSale = {
   delivery_person_phone?: string | null;
   channel?: "online" | "pos";
   invoice_no?: string;
+  // Jun 2026 — recharge orders: the "delivery" is recharging this number.
+  is_recharge?: boolean;
+  order_kind?: string;
+  recharge_kind?: "mobile" | "dth" | string;
+  recharge_account?: string;
+  recharge_network?: string;
   // Dec 2026 — Delivery-address block (from checkout).  Includes optional
   // GPS coords so the vendor can tap "Open in Google Maps" and route to
   // the customer's exact location.
@@ -322,6 +329,34 @@ export default function VendorOrders() {
                   </View>
                 </View>
                 <View style={styles.divider} />
+                {/* Jun 2026 — a RECHARGE order: there is nothing to pack, the
+                    seller just has to recharge this number. Shown first and
+                    copyable so he can't mistype it. */}
+                {item.is_recharge || item.order_kind === "recharge" ? (
+                  <TouchableOpacity
+                    style={styles.rchRow}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      const num = String(item.recharge_account || "");
+                      Clipboard.setStringAsync(num);
+                      Alert.alert("Number copied", `${num} copied — recharge it, then mark this order done.`);
+                    }}
+                    testID={`vendor-order-recharge-${orderId}`}
+                  >
+                    <Feather
+                      name={item.recharge_kind === "dth" ? "tv" : "smartphone"}
+                      size={15}
+                      color={colors.primary}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.rchLabel}>
+                        {item.recharge_kind === "dth" ? "DTH SUBSCRIBER ID" : "RECHARGE THIS NUMBER"}
+                      </Text>
+                      <Text style={styles.rchNumber}>{item.recharge_account || "—"}</Text>
+                    </View>
+                    <Feather name="copy" size={14} color={colors.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
                 {safeItems.map((it, idx) => (
                   <TouchableOpacity
                     key={idx}
@@ -371,7 +406,7 @@ export default function VendorOrders() {
                     exact lat/lng; otherwise it falls back to an address
                     search query, which Maps still resolves accurately in
                     most cases. */}
-                {item.channel !== "pos" && item.shipping_address ? (() => {
+                {item.channel !== "pos" && item.shipping_address && !(item.is_recharge || item.order_kind === "recharge") ? (() => {
                   const addr = item.shipping_address!;
                   const hasCoords = typeof addr.latitude === "number" && typeof addr.longitude === "number"
                     && !Number.isNaN(addr.latitude as any) && !Number.isNaN(addr.longitude as any);
@@ -737,6 +772,16 @@ const styles = StyleSheet.create({
   itemQty: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   lineTotal: { fontSize: 12, fontWeight: "800", color: colors.textMain },
   totalRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  rchRow: {
+    flexDirection: "row", alignItems: "center", gap: 10, padding: 11, marginBottom: 8,
+    borderRadius: radii.card, backgroundColor: colors.surfaceMuted,
+    borderWidth: 1, borderColor: colors.primary,
+  },
+  rchLabel: { fontSize: 9.5, fontWeight: "900", letterSpacing: 0.6, color: colors.textMuted },
+  rchNumber: {
+    fontSize: 16, fontWeight: "900", color: colors.textMain, marginTop: 2,
+    letterSpacing: 0.5, fontVariant: ["tabular-nums"],
+  },
   codRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, paddingVertical: 8, paddingHorizontal: 10, borderRadius: 10, backgroundColor: "#FEF3C7", borderWidth: 1, borderColor: "#FDE68A" },
   codRowText: { flex: 1, fontSize: 11, fontWeight: "800", color: "#92400E" },
 

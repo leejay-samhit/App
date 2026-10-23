@@ -29,6 +29,9 @@ export type RechargePayArgs = {
   account: string;
   state?: string | null;
   network?: string | null;
+  // Jun 2026 — how much of the plan the Slangcart wallet should cover.
+  // 0 = pay the whole thing online; a partial amount splits wallet + UPI.
+  walletAmount?: number;
   prefill?: { name?: string; email?: string; contact?: string };
 };
 
@@ -90,6 +93,7 @@ export function useRechargePay(onDone?: () => void) {
         account: args.account.replace(/\s+/g, ""),
         state: args.state || undefined,
         network: args.network || undefined,
+        wallet_amount: Math.max(0, Number(args.walletAmount || 0)),
       });
 
       let result: RazorpayResult;
@@ -152,7 +156,42 @@ export function useRechargePay(onDone?: () => void) {
     }
   };
 
-  return { pay, paying, rzpHtml, handleMessage, cancel };
+  /** Pay the WHOLE plan from the Slangcart wallet — no gateway at all. */
+  const payFromWallet = async (args: RechargePayArgs): Promise<boolean> => {
+    if (!accountIsValid(args.kind, args.account)) {
+      notify(
+        args.kind === "mobile" ? "Enter a mobile number" : "Enter a subscriber ID",
+        "We need the number you want to recharge.",
+      );
+      return false;
+    }
+    setPaying(args.productId);
+    try {
+      const { data } = await api.post<{ amount: number; account: string; order_number?: string }>(
+        "/recharge/pay/wallet",
+        {
+          kind: args.kind,
+          product_id: args.productId,
+          account: args.account.replace(/\s+/g, ""),
+          state: args.state || undefined,
+          network: args.network || undefined,
+        },
+      );
+      notify(
+        "Recharge booked",
+        `${formatINR(data.amount)} paid from your wallet for ${data.account}.`,
+      );
+      onDone?.();
+      return true;
+    } catch (e) {
+      notify("Recharge failed", formatApiError(e));
+      return false;
+    } finally {
+      setPaying(null);
+    }
+  };
+
+  return { pay, payFromWallet, paying, rzpHtml, handleMessage, cancel };
 }
 
 /** The gateway itself on native. Renders nothing until `html` is set. */

@@ -8793,6 +8793,13 @@ async def vendor_my_sales(
                 "estimated_delivery_at": parent.get("estimated_delivery_at") or s.get("estimated_delivery_at"),
                 "delivery_person_name": parent.get("delivery_person_name") or s.get("delivery_person_name"),
                 "delivery_person_phone": parent.get("delivery_person_phone") or s.get("delivery_person_phone"),
+                # Jun-2026 — a RECHARGE order has nothing to pack: the seller
+                # needs the number to recharge, front and centre.
+                "order_kind": parent.get("order_kind"),
+                "is_recharge": bool(parent.get("is_recharge")),
+                "recharge_kind": parent.get("recharge_kind"),
+                "recharge_account": parent.get("recharge_account"),
+                "recharge_network": parent.get("recharge_network"),
             }
         grouped[oid]["items"].append(item)
         grouped[oid]["total"] = round(float(grouped[oid]["total"]) + line_total, 2)

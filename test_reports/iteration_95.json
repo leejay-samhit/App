@@ -1,0 +1,20 @@
+{
+  "summary": "Re-run of iteration 95 for the recharge money bugs, backend only. I corrected 4 wrong assertions in my own test file and changed no production code. All 17 cases pass. Covered: the order is created on verify (order_kind, is_recharge, recharge_account, vendor_id, totals); the vendor sees the order in /vendor/me/sales and a vendor_sales row exists; vendor_earnings goes up by the price exactly once via a transactions row with key VENDORSALE:{order_id}; bank_ledger gets an RCHGPAY row for the online part only; the net-worth check holds (bank_tally_net up by the online part, vendor_payable up by the price, master.net_worth unchanged); paying from the wallet works, returns 400 when the balance is too low and 401 when not logged in; the wallet+UPI split writes exactly 2 buyer rows and 1 vendor row; wallet_amount >= price is rejected and an oversized wallet_amount is clamped; replaying verify changes nothing. After the run, no test data was left in the DB.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter95_jan2026_recharge_money_bugs.py",
+    "/app/test_reports/pytest/pytest_iter95_rerun.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Test-only fixes: (1) the vendor credit is checked in the `transactions` collection (idempotency_key VENDORSALE:{oid}, type vendor_sale, user_id vendor, amount +19, txn_group vendor_payable). (2)/(3) The buyer checks only look at rows with {order_id, user_id: buyer_id}: 1 row for wallet-only, 2 for the split. Both flows also check for exactly 1 vendor row. (4) /recharge/products is checked for the {count, groups:[{name, products}]} shape, and the sum of products across groups must equal count.",
+    "The teardown now also deletes VENDORSALE rows from `transactions` instead of a `shop_money` collection that does not exist. Those rows were already removed by the order_id delete."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter95_jan2026_recharge_money_bugs.py"],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "not tested (backend only)"},
+  "seed_data_creation": "The suite creates a temporary ITER95 plan priced at ₹19 and a TEST_poor_* user, and deletes both in teardown. After the run, 0 leftover orders, recharges, products or users were found.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Vendor credits are written into `transactions` (VENDORSALE:{order_id}, user_id = vendor). Filter buyer transactions by user_id. Razorpay is mocked with pay_MOCK_*. The test reads EXPO_BACKEND_URL from /app/frontend/.env."
+}

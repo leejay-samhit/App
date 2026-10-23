@@ -2442,3 +2442,55 @@ tiles.
   advance regression).
 - Screenshots: recent recharges with Repeat, plan rows with tags, rider card
   with "0.4 km" + sort chips.
+
+## Jun-2026 batch 5 — recharge becomes a REAL order (money-critical)
+
+### Y. A paid recharge now books an order and moves the money
+Until now `/recharge/payment/verify` wrote only a `recharges` row and one
+transaction: the vendor never learned which number to recharge, the money
+appeared in NEITHER the System Wallet treasury NOR the Bank Ledger, and the
+seller's shop wallet was never credited. New `core/recharge_order.py`
+(`book_recharge_order`) gives a recharge the same skeleton as a shop order,
+calling the SAME engines:
+
+    orders        → vendor's work queue (order_kind "recharge", is_recharge,
+                    recharge_account / kind / network / state, RC-xxxxxx)
+    vendor_sales  → the seller's sales ledger row
+    transactions  → buyer wallet leg and/or UPI leg (and the vendor's
+                    VENDORSALE:{order_id} credit row)
+    shop_money    → credit_vendor_for_order() + cashback auto-recovery
+    bank_ledger   → RCHGPAY:{attempt_id} credit for the ONLINE slice only
+
+Idempotent on `recharge_id` + the existing ledger keys, so a replayed verify
+books and credits nothing twice. Treasury invariant proven by test:
+bank_tally_net +online, vendor_payable +price, net_worth unchanged.
+
+### Z. Wallet payment for a recharge
+- `POST /recharge/pay/wallet` — pay the whole plan from the wallet. Atomic,
+  balance-guarded debit, no bank row (the money was already ours), then the
+  same booking path.
+- `POST /recharge/payment/start` now takes `wallet_amount` for a wallet + UPI
+  split (clamped to the balance; a full-cover request is refused and pointed
+  at the wallet endpoint). Verify debits the wallet slice before booking.
+- The hero-card sheet shows a PAY WITH block: "Pay online", "Slangcart wallet
+  · ₹X" (when it covers the plan) or "Wallet ₹X + ₹Y online", with the balance
+  re-read from /auth/me each time the sheet opens.
+
+### AA. UI fixes in the same batch
+- Recharge pay sheet: `KeyboardAvoidingView` + scrollable body + a STICKY pay
+  button, so the button stays visible once the number keyboard is up
+  (owner's report). Sheet capped at 86% height.
+- Vendor → My Orders: a bordered "RECHARGE THIS NUMBER 98765…" block with
+  tap-to-copy, and the bogus "deliver to / Open in Maps" block is hidden for
+  recharge orders. `/vendor/me/sales` now returns the recharge fields.
+- Rider shop-wise list: call button is a 36 px round icon, the address row is
+  top-aligned for two-line addresses, and the money moved into the same
+  ORDER VALUE / CASH TO COLLECT two-column strip the Customers screen uses.
+
+### Verification
+- testing_agent iteration 95 (re-run) — `tests/test_iter95_jan2026_recharge_money_bugs.py`
+  **17/17 PASS**: order creation, vendor visibility, single vendor credit,
+  bank row for the online slice only, net-worth invariant, wallet pay happy
+  path + 400 + 401, split legs, clamping, rejection and replay idempotency.
+- Screenshots: rider shop-wise card, vendor RECHARGE THIS NUMBER block, pay
+  sheet with wallet option + sticky button.
