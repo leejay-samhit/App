@@ -44,10 +44,17 @@ KEY_CONFIGURED = bool(PUSH_KEY) and PUSH_KEY != "placeholder"
 # app, written to the in-app bell, and still never appear in the tray.
 #
 # The only supported migration is a NEW channel id. Every send is therefore
-# routed to a v2 channel, created at MAX importance in app/_layout.tsx, and
+# routed to a v3 channel, created at MAX importance in app/_layout.tsx, and
 # the legacy ids are transparently remapped so no call-site has to change.
-CHANNEL_ORDERS = "orders_v2"
-CHANNEL_CHAT = "chat_v2"
+#
+# Oct 2026 — v3 channels. The owner attached a custom doorbell tone and wants
+# it on every notification. Channel SOUND is frozen at creation just like
+# importance, so orders_v2/chat_v2 (born with "default") can never learn the
+# new tone — hence orders_v3/chat_v3, and `sound` is also sent in the payload
+# so iOS plays the same bundled file via aps.sound.
+CUSTOM_SOUND = "doorbell_tone.wav"  # basename; bundled via expo-notifications `sounds`
+CHANNEL_ORDERS = "orders_v3"
+CHANNEL_CHAT = "chat_v3"
 CHANNEL_BY_CATEGORY = {
     "chats": CHANNEL_CHAT,
     "orders": CHANNEL_ORDERS,
@@ -55,7 +62,12 @@ CHANNEL_BY_CATEGORY = {
     "login_alerts": CHANNEL_ORDERS,
     "vendor_new_order": CHANNEL_ORDERS,
 }
-LEGACY_CHANNEL_MAP = {"chat": CHANNEL_CHAT, "default": CHANNEL_ORDERS}
+LEGACY_CHANNEL_MAP = {
+    "chat": CHANNEL_CHAT,
+    "chat_v2": CHANNEL_CHAT,
+    "default": CHANNEL_ORDERS,
+    "orders_v2": CHANNEL_ORDERS,
+}
 
 # Module-level shared async client. Kept alive across the FastAPI lifespan
 # so connection pooling pays off.
@@ -356,7 +368,7 @@ async def send_push(
     `data` must include `title` and `message`. Optional keys: `subtext`,
     `image_url` (HTTPS), `action_url` (used as deep-link on tap),
     `channel_id` (Android channel — filled in automatically from `category`
-    when the caller omits it, and legacy ids are remapped to the v2 channels).
+    when the caller omits it, and legacy ids are remapped to the v3 channels).
 
     `category` opts the send into the user's notification preferences
     (Profile → Notification settings): "orders" | "chats" | "offers" |
@@ -410,14 +422,16 @@ async def send_push(
         return "chunked"
 
     # Android channel routing. An explicit legacy id is remapped, an absent
-    # one is derived from the category — so every payload names a v2 channel
-    # that was born at MAX importance.
+    # one is derived from the category — so every payload names a v3 channel
+    # that was born at MAX importance with the doorbell tone. `sound` is
+    # included for iOS (aps.sound); Android ignores it (channel-owned).
     payload_data = dict(data)
     channel = payload_data.get("channel_id")
     channel = LEGACY_CHANNEL_MAP.get(channel, channel) if channel else None
     if not channel:
         channel = CHANNEL_BY_CATEGORY.get(category or "", CHANNEL_ORDERS)
     payload_data["channel_id"] = channel
+    payload_data["sound"] = CUSTOM_SOUND
     entry["channel_id"] = channel
     entry["sent_recipients"] = len(requested)
 
@@ -617,10 +631,10 @@ async def push_diagnostics(
             "chat": CHANNEL_CHAT,
             "legacy_remap": LEGACY_CHANNEL_MAP,
             "note": (
-                "Android freezes a channel's importance at creation. The v2 ids "
-                "were introduced because the original 'default'/'chat' channels "
-                "already existed on devices at a lower importance, which silences "
-                "the tray while the in-app bell keeps working."
+                "Android freezes a channel's importance AND sound at creation. "
+                "v3 ids carry the custom doorbell tone at MAX importance; v2 "
+                "channels were born with the system default sound and cannot "
+                "learn a new one, which is why this migration exists."
             ),
         },
         "totals": {

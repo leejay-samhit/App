@@ -49,15 +49,38 @@ if (Platform.OS !== "web") {
 // written to the in-app bell, which is exactly the reported symptom:
 // "in-app notification works, tray shows nothing".
 //
-// The ONLY supported migration is a NEW channel id, so every send now routes
-// to `orders_v2` / `chat_v2` (the backend fills `channel_id` in centrally and
-// remaps the legacy ids). The old channels are still created so anything
-// already queued against them keeps working, and so users who tuned them
-// don't lose their settings.
+// The ONLY supported migration is a NEW channel id, so every send routes to
+// the newest channel (currently `orders_v3` / `chat_v3` — the backend fills
+// `channel_id` in centrally and remaps the legacy ids). Older channels are
+// still created so anything already queued against them keeps working, and
+// so users who tuned them don't lose their settings.
 if (Platform.OS === "android") {
-  Notifications.setNotificationChannelAsync("orders_v2", {
+  Notifications.setNotificationChannelAsync("orders_v3", {
     name: "Orders & delivery",
     description: "Order confirmations, payments, delivery and wallet updates",
+    importance: Notifications.AndroidImportance.MAX,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    sound: "doorbell_tone.wav",
+    enableVibrate: true,
+    vibrationPattern: [0, 250, 150, 250],
+    showBadge: true,
+  }).catch(() => {});
+  Notifications.setNotificationChannelAsync("chat_v3", {
+    name: "Chat messages",
+    description: "Replies from sellers, support and the team",
+    importance: Notifications.AndroidImportance.MAX,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    sound: "doorbell_tone.wav",
+    enableVibrate: true,
+    vibrationPattern: [0, 120, 80, 120],
+    showBadge: true,
+  }).catch(() => {});
+  // Legacy channels — kept (not deleted) so anything already queued against
+  // them keeps working, and so users who tuned them don't lose settings.
+  // Oct 2026: v2/v1 channels were born with the system default sound, which
+  // Android freezes at creation, so the doorbell tone lives only on v3.
+  Notifications.setNotificationChannelAsync("orders_v2", {
+    name: "Orders & delivery (old channel)",
     importance: Notifications.AndroidImportance.MAX,
     lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     sound: "default",
@@ -66,8 +89,7 @@ if (Platform.OS === "android") {
     showBadge: true,
   }).catch(() => {});
   Notifications.setNotificationChannelAsync("chat_v2", {
-    name: "Chat messages",
-    description: "Replies from sellers, support and the team",
+    name: "Chat messages (old channel)",
     importance: Notifications.AndroidImportance.MAX,
     lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     sound: "default",
@@ -75,7 +97,6 @@ if (Platform.OS === "android") {
     vibrationPattern: [0, 120, 80, 120],
     showBadge: true,
   }).catch(() => {});
-  // Legacy channels — kept (not deleted) for backward compatibility.
   Notifications.setNotificationChannelAsync("default", {
     name: "Default",
     importance: Notifications.AndroidImportance.MAX,

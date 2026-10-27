@@ -109,7 +109,10 @@
         "expo-notifications",
         {
           "color": "#143D2E",
-          "defaultChannel": "orders_v2"
+          "defaultChannel": "orders_v3",
+          "sounds": [
+            "./assets/sounds/doorbell_tone.wav"
+          ]
         }
       ],
       [

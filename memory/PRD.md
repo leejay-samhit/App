@@ -2723,3 +2723,34 @@ Details: /app/memory/ANDROID_R8_OPTIMIZATION.md
 Replaced with a partial index that only guards legacy rows having no
 `idempotency_key`; keyed rows rely on `uniq_idem_key`. Each guard index now has
 its own try/except, so one failure no longer skips the remaining guards.
+
+## Push notifications + custom tone (Oct 2026)
+
+User reported pushes not showing on a real phone and supplied a custom tone
+(mixkit doorbell wav → `frontend/assets/sounds/doorbell_tone.wav`, 4.4s stereo
+44.1kHz). Owner choices: test target is a generated APK/AAB build; tone on
+EVERY notification; fresh channels approved.
+
+Root causes checked (twice, per request):
+- Preview environment: EMERGENT_PUSH_KEY is the dev placeholder — every send
+  here is 401 and `push_devices` has 0 rows; push can only ever work on the
+  DEPLOYED app (key injected at publish). google-services.json present and
+  matches package com.slangcart.app.
+- Client registration (src/push.ts) uses native getDevicePushTokenAsync, posts
+  to /api/register-push, re-registers on token rotation, reports failures to
+  /push/client-status — verified against the integration playbook.
+
+Changes:
+- app.json: expo-notifications plugin gains `sounds` + `defaultChannel:
+  orders_v3`.
+- app/_layout.tsx: NEW channels `orders_v3` / `chat_v3` (MAX importance,
+  sound doorbell_tone.wav); v1/v2 kept for compatibility with "(old channel)"
+  display names (channel sound is frozen at creation, hence new ids).
+- backend/routes/push.py: CHANNEL_ORDERS/CHANNEL_CHAT → v3, legacy ids
+  (default/chat/orders_v2/chat_v2) remapped, `sound: doorbell_tone.wav` added
+  to every payload for iOS aps.sound.
+
+Verification limits: a real push CANNOT be received in this environment
+(placeholder key + no device registration). User must: Publish → deploy → new
+Android build → install → sign in → Admin → Push diagnostics → Send test push.
+That screen names the exact failing stage if a phone still stays silent.
