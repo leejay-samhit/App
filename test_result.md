@@ -9715,3 +9715,119 @@ agent_communication:
       :app:minifyReleaseWithR8 and the artefact must contain
       mapping/release/mapping.txt — no mapping means R8 did not run.
       Full audit + the release checklist: /app/memory/ANDROID_R8_OPTIMIZATION.md
+
+## 2026-10-27 · SIM-binding readiness module (main agent)
+      Owner choices: native Kotlin SIM module; Truecaller one-tap number proof;
+      enforce chat immediately; gate all customer-vendor + support chats; QR
+      device linking for web.
+      AUDIT: Expo managed SDK 54 (no committed android/ dir -> native code must
+      be a LOCAL EXPO MODULE); JWT + server session registry; chat = routes/chat.py
+      (~30 endpoints + /api/ws/chat); no pre-existing number verification at all
+      (users.phone is self-entered); targetSdk 35 / minSdk 24; no phone/SMS
+      permission existed before this change; Play Integrity scaffolding present
+      but dormant.
+      BUILT: frontend/modules/sim-binding (Kotlin: SubscriptionManager +
+      TelephonyManager, dual-SIM, eSIM via isEmbedded, roaming,
+      OnSubscriptionsChangedListener; states SIM_PRESENT/SIM_ABSENT/
+      SIM_STATE_UNKNOWN/PERMISSION_DENIED/DEVICE_UNSUPPORTED/
+      REVALIDATION_REQUIRED; NO IMEI/IMSI/ICCID/serial/subscriptionId, no SMS
+      permission); core/sim_binding.py (challenges, levels, HMAC carrier_fp,
+      audit, policy with clamp, chat_gate); core/truecaller.py (server-side
+      code->token->userinfo exchange, dormant without TRUECALLER_CLIENT_ID);
+      routes/sim_binding.py (10 endpoints); chat WRITE gate in routes/chat.py;
+      app/verify-sim.tsx, app/link-device.tsx, app/admin/sim-binding.tsx;
+      READ_PHONE_STATE added to app.json.
+      HARD RULE ENFORCED: sim_presence NEVER implies number_verified. With no
+      provider configured, required_level is clamped to sim_presence and the
+      API + admin screen say so.
+      NOT GATED (tested): products, cart, wallet, orders, payments, recharge,
+      vendor/delivery/admin tools, and ALL chat READS (history preserved).
+      TESTS: backend/tests/test_sim_binding.py 41/41 — forged/wrong/replayed/
+      expired/cross-account nonce, web platform refusal, SIM change wiping
+      number proof, link-code single-use + expiry + cross-account, policy clamp,
+      admin-only access, enforce off/on, no SIM identifiers stored, no nonce in
+      audit. Regression: membership 35, service reviews 22, owner batch 14,
+      refund math 11, iter96/97/98/99 28 — all green; vendor ledger "already
+      balanced".
+      CANNOT be verified here: Kotlin never compiles in this container (no JDK/
+      Gradle/Android SDK) — first compile is the Publish Android build; real
+      dual-SIM/eSIM/roaming/permission-denial needs real handsets; Truecaller
+      path is dormant (no Client ID supplied).
+      GOTCHA FOR FUTURE AGENTS: a router module using @limiter.limit must NOT
+      have `from __future__ import annotations` — FastAPI then treats Pydantic
+      body params as query params (422 "Field required: query.body").
+      Deliverables doc: /app/memory/SIM_BINDING.md
+
+## 2026-10-27 · SIM-binding hardening after iteration 103 review (main agent)
+      FIXED (all verified by tests):
+      1. CRITICAL web-link bypass — a claimed browser link kept chat for 24h
+         even after the phone reported SIM_ABSENT / revalidate / SIM swap.
+         record_device_check + require_revalidation now $unset
+         web_link_expires_at, and chat_gate only honours a link while the
+         phone itself still meets the requirement.
+      2. Ungated chat writes — PATCH /chat/messages/{id} (edit),
+         POST /chat/request/{id}/accept, POST /orders/{id}/chat-vendor
+         (routes/cart.py) and POST /products/{pid}/questions
+         (routes/products_extended.py, copied into a seller chat) are now all
+         gated.
+      3. Device linking was meaningless — verification is per ACCOUNT, so any
+         browser of a verified user passed and /link-device said "linked" ~4s
+         after minting a code with no phone scan. Fixes: src/api.ts sends
+         X-Client-Platform on every request (UA fallback in
+         core.sim_binding.is_browser_caller); chat_gate requires browsers to
+         hold a LIVE link; new GET /api/sim-binding/device-link/{code} and the
+         browser polls THAT instead of account status.
+      4. Alert.alert is a no-op on web -> blocked sends were silent. New
+         handleChatGateError() in src/sim-verification.tsx uses notify() and
+         offers "Verify now"/"Link my phone"; wired into chat/[id].tsx,
+         (tabs)/chat.tsx and services/[id].tsx.
+      Minor: removed dead block_on_sim_absent setting; same SIM re-inserted is
+      no longer a "swap" (fingerprints compared only between two PRESENT
+      readings); /verify-sim has Checking… + Sign-in states and no longer says
+      a SIM is "active in this phone" on web; /link-device has a signed-out
+      state; disabling enforcement in Admin now asks for confirmation.
+      ATTESTATION (iter103 item 5) — hook added, honestly still open:
+      /api/sim-binding/verify accepts play_integrity_token; when
+      PLAY_INTEGRITY_ENABLED=1 it is MANDATORY and a failed verdict is
+      rejected. Until that service account exists, a logged-in script can
+      still claim "SIM present". X-Client-Platform is a product rule, not a
+      security boundary.
+      TESTS: test_sim_binding.py 59/59 (was 41, +18 for the bypasses);
+      test_iter103_sim_binding_independent.py 13/13.
+      UNRELATED BUG FOUND + FIXED while regressing: admin Excel "Receivables"
+      counted open vendor_outstanding rows of kind return_refund (a refund the
+      SELLER owes the shopper, never advanced by the company), reading 4030
+      against the API's 30. routes/wallet_export.py now filters to the same
+      company-funded kinds as routes/finance.py. Also
+      test_iter102_partial_return_netting funded its seller 4700 for 6500 of
+      refunds -> its own 3rd refund parked; fixture now funds 6700.
+      REGRESSION after all of the above: receivables 13, partial-return 21,
+      iter96/97/98 15+1 skipped, iter99 13, reconcile "already balanced".
+
+## 2026-10-27 · SIM-binding iteration 104 retest fixes (main agent)
+      NEW HIGH FIXED: a browser could call /device-link/start AND /device-link/
+      claim in the same session, linking itself with no phone. claim now
+      rejects browser callers (sb.is_browser_caller on X-Client-Platform + UA)
+      and audits `browser_self_claim`. Covered by 5 new checks in
+      tests/test_sim_binding.py (64 passed).
+      WEB PROMPTS COMPLETED: handleChatGateError now also wired into
+      app/product/[id].tsx (Ask vendor), app/orders.tsx (Ask this seller) and
+      chat/[id].tsx message EDIT + IMAGE send.
+      UI: /verify-sim on web now reads "Verified on your phone" instead of
+      claiming a SIM is in the browser; "Sign in to verify" no longer flashes
+      on reload (checks getAuthToken before deciding); "[object Object]" error
+      text fixed in src/sim-verification.tsx.
+      WORKBOOK: parked return_refund rows appeared NOWHERE (the Vendor
+      Outstanding sheet is transaction-based and parking creates no txn).
+      Receivables sheet now has a labelled "NOT a receivable" block BELOW the
+      total with its own sub-total. iter104 test updated to assert the new
+      (correct) placement: visible below the total, absent above it.
+      DATA: deleted 12 leftover TEST_v99 vendor_outstanding rows that were
+      inflating live receivables.
+      REGRESSION: test_sim_binding 64, iter104 11, iter103 13, receivables 13,
+      partial-return 21, iter98+iter99 20, reconcile "already balanced".
+      STATE LEFT: enforce_chat=true, required_level=sim_presence,
+      testbuyer SIM_PRESENT with no web link, 0 open vendor_outstanding rows.
+      CAUTION FOR NEXT AGENT: a search_replace on app/product/[id].tsx briefly
+      deleted the `const onToggleHelpful = async (rev: Review) => {` line and
+      broke the web bundle — always re-read the region after editing that file.

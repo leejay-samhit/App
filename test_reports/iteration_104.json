@@ -1,0 +1,52 @@
+{
+  "summary": "RETEST of iter103 SIM-binding issues + regression. Independent suite /app/backend/tests/test_iter104_sim_retest.py: 9/11 pass. E1's script tests/test_sim_binding.py 59/59 and iter103 independent file 13/13 pass. FIXED and confirmed: issue 1 (web link is revoked on SIM_ABSENT, /revalidate and a carrier change; web_link_expires_at is unset; the browser is 403 at once and needs a NEW link even after the phone passes again); issue 2 (all 8 chat writes return 403 sim_verification_required, the blocked product question is not written to the DB, reads stay open); issue 3 (web header and browser-UA-only callers are 403 without a link, an expired link counts as no link, link-code status claimed=false then true, unknown code 404, another account's code 404); issue 4 on web (chat/[id] send and chat-list accept show window.confirm 'Verify to chat … [OK] Link my phone', and OK goes to /link-device); issue 6 (same SIM re-inserted is not sim_changed; 'Sign in to verify' when signed out; 'Checking…' while status loads; /link-device shows 'Sign in first' when signed out; the admin enforce toggle asks first: cancel sends no PATCH, OK sends {enforce_chat:false}). The attestation hook ignores a bogus play_integrity_token. Core rules hold: forged, replayed, expired, cross-account and web-platform nonces are rejected; client-claimed number_verified/level is ignored; /number-proof returns 503; admin endpoints are admin-only; the clamp applies; no IMEI/MCC/token is stored. Nothing outside chat is gated, checked with web and android headers on GETs plus cart add/remove, checkout, vendor product PATCH and delivery-partner endpoints. The Excel Receivables total equals the API's master.receivables_total. NEW HIGH finding: a browser can approve its OWN link code (start + claim, both from the browser, returns 200), so the 'browser needs a phone-approved link' rule can be bypassed without a phone scanning anything. FAILED requirement: parked return_refund vendor_outstanding rows do NOT appear on the 'Vendor Outstanding' sheet. That sheet is built only from wallet_transactions, and a parked refund creates no transaction. Deprecated packages detected: none (expo-av, expo-barcode-scanner and expo-background-fetch are not used; src/barcode-scanner-modal.tsx only mentions it in a comment).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/sim-binding/device-link/claim", "issue": "No check that the caller is the PHONE. The browser can mint a code (/device-link/start) and claim it itself with X-Client-Platform: web and a Chrome UA, which returns 200 linked:true. Its chat writes then pass, so device linking adds nothing for a user whose account phone ever passed. Reproduced in test_browser_cannot_self_claim_link and /tmp/selfclaim.py. Reference: backend/routes/sim_binding.py:289-345", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/admin/wallet/export/groupwise", "issue": "An open vendor_outstanding row of kind 'return_refund' is correctly left out of Receivables, but it is NOT shown on the 'Vendor Outstanding' sheet (or anywhere else in the workbook). That sheet is built only from wallet_transactions types (GROUPS in routes/wallet_export.py:38), and parking a refund (core/returns.py:590) writes no transaction. The comment at wallet_export.py:382-386 says these rows are on that sheet, which is not true. Receivables tie-out itself PASSES."},
+      {"endpoint": "data", "issue": "Leftover test row from an earlier suite: vendor_outstanding id f3d970b9-4a91-4e87-9b32-ff7e73b2a17e (vendor TEST_v99_3eab68, return_refund_company_funded, status open, 30 owed) is counted in the live receivables_total. It was not created by this run and was not deleted."},
+      {"endpoint": "chat writes not gated", "issue": "POST /chat/messages/{id}/react, /star, /chat/{id}/typing, /chat/report, block and DELETE message are still open while blocked. Probably fine (not new content), but reacting is a visible write to the other party. The owner should decide."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "verify-sim (web)", "issue": "Signed in on the WEBSITE with the account phone at SIM_PRESENT, the card still reads 'SIM detected — A SIM or eSIM is active in this phone.' A smaller subtitle says 'Reported by your Slangcart app, not by this browser.' The retest asked that web must not claim 'active in this phone', so this is only partly fixed. Reference: frontend/app/verify-sim.tsx:21,93-97", "testID": "verify-sim-state-title", "priority": "LOW"},
+      {"component": "verify-sim hard reload", "issue": "On a full page load while signed in, 'Sign in to verify' flashes for under 1s before auth restores and 'Checking…' appears. Use the auth loading flag. Reference: frontend/app/verify-sim.tsx:83", "testID": "verify-sim-state-title", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Product 'Ask the vendor' question while blocked (web)", "issue": "The 403 goes to Alert.alert('Failed', …), which shows nothing on web, and there is no 'Link my phone' action. handleChatGateError is not used. Reference: frontend/app/product/[id].tsx:280", "affected_testIDs": []},
+      {"flow": "My Orders 'Ask this seller' while blocked", "issue": "Uses notify with formatApiError, so there is no 'Link my phone' / 'Verify now' action. handleChatGateError is not used. Reference: frontend/app/orders.tsx:162-163", "affected_testIDs": []},
+      {"flow": "Chat message edit and image send while blocked (web)", "issue": "Both endpoints are now gated, but errors go to Alert.alert('Edit failed' / 'Image send failed'), which shows nothing on web. Reference: frontend/app/chat/[id].tsx:267,347", "affected_testIDs": ["composer-send"]},
+      {"flow": "Service provider start chat", "issue": "NOT exercised in the UI: it needs a provider plus the membership/terms flow, and testbuyer is registration_paid:false. From the code only: it calls handleChatGateError (services/[id].tsx:177).", "affected_testIDs": ["start-chat-btn"]}
+    ],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "missing-testIDs", "issue": "The chat-list referral-code search TextInput, the Find button and the send-request button have no testID, so the send-request path could not be automated. Reference: frontend/app/(tabs)/chat.tsx:157,172,374"},
+      {"component": "error-stringify", "issue": "runCheck does String(e.response.data.detail). For a dict detail this shows '[object Object]'. Reference: frontend/src/sim-verification.tsx:185"}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter104_sim_retest.py", "/app/test_reports/pytest/iter104_sim_retest.xml"],
+  "action_items": [
+    "HIGH: In POST /sim-binding/device-link/claim, reject browser callers (sb.is_browser_caller(x-client-platform, user-agent) → 403). Also consider saving the starter's session sid / X-Device-Fingerprint on the device_links doc at /start and rejecting a claim from the same sid/fingerprint, so a browser cannot approve its own QR.",
+    "Excel: show open return_refund (parked) vendor_outstanding rows on the 'Vendor Outstanding' sheet (or a dedicated 'Parked refunds' section) but keep them out of the Receivables total, or correct the comment at wallet_export.py:382 and the review claim.",
+    "Use handleChatGateError in product/[id].tsx onAskVendor, orders.tsx askSeller, and chat/[id].tsx edit + image send, so web users get the visible 'Link my phone' prompt.",
+    "On web, verify-sim should not say 'active in this phone'. Use wording like 'Your phone reported a SIM' when Platform.OS === 'web'.",
+    "Add testIDs to the chat-list search input, Find button and send-request button.",
+    "Optional: delete the leftover TEST_v99 vendor_outstanding row f3d970b9…, which inflates the live receivables by 30."
+  ],
+  "critical_code_review_comments": [
+    "device_link_claim checks only the account-level status (status_for), never who the caller is, so linking can be self-served from the browser.",
+    "is_browser_caller treats an empty UA as the app, so curl/scripts with no UA pass the gate without a link. This is accepted and documented as a product rule; noted for completeness.",
+    "The play_integrity_token hook is server-side only. The client (sim-verification.tsx:167-178) never sends a token, so enabling PLAY_INTEGRITY_ENABLED=1 today would reject every real device.",
+    "A PRESENT→ABSENT→PRESENT cycle with a DIFFERENT SIM is not flagged sim_changed (fingerprints are compared only between two PRESENT readings). This is acceptable today because ABSENT already clears number_verified and the web link, but it matters once Truecaller is on: a re-proof would then be the only guard."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter104_sim_retest.py (new test file only; no app code changed)"],
+  "success_rate": {"backend": "82% (9/11 in the independent suite; E1 suites 59/59 + 13/13)", "frontend": "90% of the tested web flows (send, accept, signed-out states, Checking…, admin confirm all pass; web verify-sim wording only partly fixed)"},
+  "seed_data_creation": "Temporary only: chat_request TEST_iter104_req and vendor_outstanding TEST_iter104_* row, both deleted. A no-op stock PATCH on Test Widget (same value). Vendor wallet not spent.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "State restored: enforce_chat=true, required_level=sim_presence, allow_web_without_link=false; testbuyer SIM_PRESENT, no web_link_expires_at, revalidate false, registration_paid false; no TEST_iter104 messages/questions/outstanding left. test_sim_binding.py is a plain script (run: python tests/test_sim_binding.py), not pytest. Challenge/verify are limited to 20/min; the iter104 file paces through 429s. Browser login works at /login (testIDs login-email-input / login-password-input / login-submit-button). The web gate prompt is a window.confirm, so handle it with page.on('dialog').",
+  "rca_of_issue": "Self-claim: the claim endpoint was written as 'called by the VERIFIED PHONE', but the only check is that the ACCOUNT's binding meets the requirement. The browser and the phone share an account, so the browser passes the same check. Reproduce: login → POST /sim-binding/device-link/start (web headers) → POST /sim-binding/device-link/claim with the same code and the same web headers → 200 → POST /chat/contact-support with web headers → 200. Mitigation: gate the claim on is_browser_caller and/or session/fingerprint difference."
+}

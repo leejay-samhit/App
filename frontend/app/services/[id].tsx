@@ -21,6 +21,7 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { Feather, MaterialIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
+import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { useSubscription } from "../../src/subscription";
@@ -173,6 +174,7 @@ export default function ProviderProfileScreen() {
       const r = await api.post<{ id: string }>("/chat/threads", { other_user_id: p.id });
       router.push(`/chat/${r.data.id}` as any);
     } catch (e) {
+      if (handleChatGateError(e, (path) => router.push(path as any))) return;
       Alert.alert("Couldn't open chat", formatApiError(e));
     } finally {
       setChatOpening(false);

@@ -2754,3 +2754,51 @@ Verification limits: a real push CANNOT be received in this environment
 (placeholder key + no device registration). User must: Publish → deploy → new
 Android build → install → sign in → Admin → Push diagnostics → Send test push.
 That screen names the exact failing stage if a phone still stays silent.
+
+## SIM-binding readiness module (Oct 2026)
+
+Owner choices: native Kotlin SIM module, Truecaller one-tap number proof,
+enforce chat immediately, gate all customer–vendor + support chats, QR device
+linking for the website.
+
+Shipped: local Expo module `frontend/modules/sim-binding` (SubscriptionManager
++ TelephonyManager, dual-SIM/eSIM/roaming, subscriptions-changed listener, no
+IMEI/IMSI/ICCID/serial, no SMS permission); backend `core/sim_binding.py`,
+`core/truecaller.py`, `routes/sim_binding.py`; server-side chat gate on chat
+WRITES only in `routes/chat.py`; screens `app/verify-sim.tsx`,
+`app/link-device.tsx`, `app/admin/sim-binding.tsx`; profile + admin-more entry
+points; `READ_PHONE_STATE` added to app.json.
+
+Key rule: `sim_presence` never implies `number_verified`. With no Truecaller
+Client ID configured the policy is clamped to `sim_presence` and says so.
+
+Tests: backend/tests/test_sim_binding.py — 41 passed. Regression suites
+re-run green. Kotlin cannot be compiled in this container; first compile is
+the Publish build. Full audit, costs, DoT/DPDP checklist and staged release:
+/app/memory/SIM_BINDING.md
+
+Note: removing `from __future__ import annotations` is REQUIRED in router
+modules that use `@limiter.limit` — with it, FastAPI mis-reads Pydantic body
+params as query params (422 "Field required: query.body").
+
+### SIM-binding — review rounds (iterations 103 & 104)
+
+Independent testing found, and we fixed: a claimed web link outliving the
+phone's SIM; four ungated chat writes (edit, request-accept, order
+chat-vendor, product question); device linking being meaningless because
+verification is per account (now the app sends X-Client-Platform and browsers
+must hold a live link); silent failures on the website (handleChatGateError +
+notify); and a browser approving its OWN link code (claim now refuses browser
+callers).
+
+Honest gap: no hardware attestation yet. `play_integrity_token` is accepted
+and becomes mandatory when PLAY_INTEGRITY_ENABLED=1, but the app does not send
+one yet, so that flag must stay off until it does.
+
+Unrelated fixes made while regression-testing: admin Excel Receivables no
+longer counts seller-owed refunds as company receivables (they now appear in a
+labelled block below the total), and test_iter102_partial_return_netting funds
+its fixture seller 6700 instead of 4700.
+
+Test state: test_sim_binding 64, iter103 13, iter104 11, receivables 13,
+partial-return 21, iter96-99 green, vendor ledger balanced.

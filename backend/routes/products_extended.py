@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from core.db import db
@@ -111,7 +111,19 @@ class AnswerIn(BaseModel):
 
 
 @router.post("/products/{pid}/questions")
-async def ask_question(pid: str, body: QuestionIn, user: Dict[str, Any] = Depends(get_current_user)):
+async def ask_question(pid: str, body: QuestionIn, request: Request, user: Dict[str, Any] = Depends(get_current_user)):
+    # A product question is copied into the customer-vendor chat, so it is a
+    # chat write and goes through the same gate.
+    from core.sim_binding import chat_gate as _chat_gate
+    _g = await _chat_gate(
+        user,
+        platform_header=request.headers.get("x-client-platform") or "",
+        user_agent=request.headers.get("user-agent") or "",
+    )
+    if not _g.get("allowed"):
+        raise HTTPException(status_code=403, detail={
+            "code": _g["code"], "message": _g["message"], "sim_status": _g.get("status"),
+        })
     p = await db.products.find_one({"id": pid})
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")

@@ -15,7 +15,7 @@ commission engine which still lives in server.py.
 import uuid
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.db import db
 from core.delivery_charges import compute_cart_delivery
@@ -560,13 +560,24 @@ async def my_orders(user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @router.post("/orders/{order_id}/chat-vendor")
-async def chat_vendor_for_order(order_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+async def chat_vendor_for_order(order_id: str, request: Request, user: Dict[str, Any] = Depends(get_current_user)):
     """Jun 2026 — One-tap "Ask this seller" from My Orders.
 
     A completed purchase is itself proof of relationship, so we skip the
     chat-request handshake and open (or reuse) a direct thread between the
     buyer and the order's vendor. Returns `{ thread_id }`.
     """
+    # Chat gate — opening a seller thread is a chat write.
+    from core.sim_binding import chat_gate as _chat_gate
+    _g = await _chat_gate(
+        user,
+        platform_header=request.headers.get("x-client-platform") or "",
+        user_agent=request.headers.get("user-agent") or "",
+    )
+    if not _g.get("allowed"):
+        raise HTTPException(status_code=403, detail={
+            "code": _g["code"], "message": _g["message"], "sim_status": _g.get("status"),
+        })
     o = await db.orders.find_one({"id": order_id, "user_id": user["id"]}, {"_id": 0})
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")

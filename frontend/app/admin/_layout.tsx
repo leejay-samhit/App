@@ -48,7 +48,7 @@ const HIDDEN = [
   // survives only as a redirect for old bookmarks.
   "finance-dashboard",
   "broadcast", "returns", "push-diagnostics", "delivery-partners",
-  "subscription", "payout-structure",
+  "subscription", "payout-structure", "sim-binding",
   // Jun 2026 — owner's report: Recharge options was showing as a 7th tab.
   // It belongs in More only.
   "recharge-options",

@@ -51,7 +51,10 @@ async def main():
         "vendor_id": VID, "amount": 400.0, "status": "paid", "funded_by": "platform",
         "reversed_total": 0.0, "created_at": ts,
     })
-    need = round(4700.0 - await _bal(VID, "vendor_earnings"), 2)
+    # The three refunds in this test total ₹6,500 (2,700 + 1,800 + 2,000), so
+    # funding only ₹4,700 made the third refund fail for lack of money and
+    # park itself as vendor_outstanding — a fixture shortfall, not a bug.
+    need = round(6700.0 - await _bal(VID, "vendor_earnings"), 2)
     if need > 0:
         await shop_money.credit(
             VID, shop_money.VENDOR_WALLET, need, idempotency_key=f"PRTTEST-FUND:{oid}",

@@ -7571,6 +7571,10 @@ async def on_startup():
         # Phase 2 — returns / inventory-restoration lookups + guards.
         from core import returns as _returns_core
         await _returns_core.ensure_indexes()
+        # SIM-binding (Oct 2026): single binding row per user, single-use
+        # challenges, audit lookups, unique device-link codes.
+        from core import sim_binding as _sim_binding
+        await _sim_binding.ensure_indexes()
         # Push diagnostics (Sep 2026): the send log is evidence, not data —
         # keep 30 days of it and index the lookups the admin screen uses.
         try:
@@ -10862,6 +10866,9 @@ from routes import delivery_partner as delivery_partner_router  # noqa: E402
 app.include_router(delivery_partner_router.router, prefix="/api")
 from routes import subscription as subscription_router  # noqa: E402
 app.include_router(subscription_router.router, prefix="/api")
+
+from routes import sim_binding as sim_binding_router  # noqa: E402
+app.include_router(sim_binding_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

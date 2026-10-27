@@ -1,0 +1,7 @@
+{
+  "name": "sim-binding",
+  "version": "1.0.0",
+  "description": "Local Expo module: Android SIM/eSIM presence readiness for Slangcart",
+  "main": "index.ts",
+  "private": true
+}

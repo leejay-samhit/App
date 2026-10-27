@@ -379,7 +379,18 @@ async def export_groupwise(
     # SAME figure as Receivables on System Wallet → Company net worth, so the
     # workbook and the screen can never disagree.
     rec_rows: List[Dict[str, Any]] = []
-    async for row in db.vendor_outstanding.find({"status": "open"}, {"_id": 0}):
+    # Oct 2026 — only the kinds the company actually PAID OUT are receivable.
+    # An open `return_refund` row is a refund the SELLER still owes the
+    # shopper (the company never advanced it), so counting it here inflated
+    # the workbook's receivables above the API's figure. Those rows are
+    # listed separately, below the total, further down this sheet.
+    async for row in db.vendor_outstanding.find(
+        {
+            "status": "open",
+            "kind": {"$in": ["return_refund_company_funded", "delivery_fee_company_funded", "delivery_fee"]},
+        },
+        {"_id": 0},
+    ):
         owed = round(float(row.get("amount") or 0) - float(row.get("recovered") or 0), 2)
         if owed <= 0.009:
             continue
@@ -393,6 +404,29 @@ async def export_groupwise(
             "since": row.get("created_at"),
             "note": row.get("description") or row.get("reason") or "",
         })
+    # Refunds a SELLER still owes a shopper. The company never advanced this
+    # money, so it is NOT a receivable and is excluded from the total above —
+    # but it creates no wallet transaction either, so without this block it
+    # would appear nowhere in the workbook at all.
+    pending_refund_rows: List[Dict[str, Any]] = []
+    async for row in db.vendor_outstanding.find(
+        {"status": "open", "kind": {"$nin": [
+            "return_refund_company_funded", "delivery_fee_company_funded", "delivery_fee",
+        ]}},
+        {"_id": 0},
+    ):
+        owed = round(float(row.get("amount") or 0) - float(row.get("recovered") or 0), 2)
+        if owed <= 0.009:
+            continue
+        pending_refund_rows.append({
+            "shop": row.get("vendor_name") or row.get("vendor_id"),
+            "kind": row.get("kind"),
+            "order": row.get("order_number") or row.get("order_id") or row.get("return_id") or "",
+            "owed": owed,
+            "since": row.get("created_at"),
+            "note": row.get("description") or row.get("reason") or "",
+        })
+
     cb_rows: List[Dict[str, Any]] = []
     async for v in db.users.find(
         {"cashback_outstanding": {"$gt": 0.009}},
@@ -445,6 +479,25 @@ async def export_groupwise(
                      + sum(r["owed"] for r in rec_rows if r["kind"] != "cashback"), 2)])
     ws.cell(row=ws.max_row, column=1).font = sum_font
     ws.cell(row=ws.max_row, column=2).font = sum_font
+
+    # Informational only — deliberately BELOW the total and never added to it.
+    # Parking a refund creates no wallet transaction, so without this block
+    # the money a seller owes a shopper would appear nowhere in the workbook.
+    if pending_refund_rows:
+        ws.append([])
+        ws.append(["NOT a receivable — refunds a seller still owes a shopper (the company never paid these)"])
+        ws.cell(row=ws.max_row, column=1).font = head_font
+        ws.append(["Shop", "Owed to shopper", "Kind", "Order / return", "Since", "Remarks"])
+        for i in range(1, 7):
+            c = ws.cell(row=ws.max_row, column=i)
+            c.font = head_font
+            c.fill = head_fill
+        for r in pending_refund_rows:
+            ws.append([r["shop"], r["owed"], r["kind"], r["order"], r["since"], r["note"]])
+        ws.append(["TOTAL awaiting the seller's wallet (excluded from receivables)",
+                   round(sum(r["owed"] for r in pending_refund_rows), 2)])
+        ws.cell(row=ws.max_row, column=1).font = sum_font
+        ws.cell(row=ws.max_row, column=2).font = sum_font
     for i, w in enumerate([34, 16, 24, 14, 14, 14, 24, 60], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 

@@ -11,6 +11,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
+import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 import { ChatShopCard, type ShopCard } from "../../src/chat-shop-card";
@@ -263,7 +264,9 @@ export default function ChatThreadScreen() {
       setDraft("");
       setMessages((prev) => prev.map((m) => m.id === id ? { ...m, text, edited: true } : m));
       api.patch(`/chat/messages/${id}`, { text }).catch((e) => {
-        Alert.alert("Edit failed", formatApiError(e));
+        if (!handleChatGateError(e, (p) => router.push(p as any))) {
+          Alert.alert("Edit failed", formatApiError(e));
+        }
         load();
       });
       return;
@@ -314,6 +317,9 @@ export default function ChatThreadScreen() {
         setMessages((prev) => prev.filter((m) => m.id !== temp.id));
         setDraft(text);
         setReplyTo(quoted);
+        // Chat is gated on SIM verification — send them to the fix instead of
+        // a dead end (and `notify` works on web, unlike Alert.alert).
+        if (handleChatGateError(e, (p) => router.push(p as any))) return;
         Alert.alert("Send failed", formatApiError(e));
       });
   };
@@ -340,7 +346,11 @@ export default function ChatThreadScreen() {
           });
         }
       }
-    } catch (e) { Alert.alert("Image send failed", formatApiError(e)); }
+    } catch (e) {
+      if (!handleChatGateError(e, (p) => router.push(p as any))) {
+        Alert.alert("Image send failed", formatApiError(e));
+      }
+    }
     finally { setPicking(false); }
   };
 

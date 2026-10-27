@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Required to read SIM/subscription STATE only. Slangcart never reads
+       IMEI, IMSI, ICCID or the SIM serial, and never sends SMS. -->
+  <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+  <!-- Phones without telephony hardware (tablets, some Android TV boxes)
+       must still be able to install the app — the module reports
+       DEVICE_UNSUPPORTED there. -->
+  <uses-feature android:name="android.hardware.telephony" android:required="false" />
+</manifest>

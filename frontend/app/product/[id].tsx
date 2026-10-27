@@ -17,6 +17,8 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError, resolveImageUrl } from "../../src/api";
+import { notify } from "../../src/notify";
+import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
 import { useContentWidth } from "../../src/content-width";
 import { getProductPreview } from "../../src/product-preview";
@@ -277,7 +279,10 @@ export default function ProductDetailScreen() {
           "The vendor has been notified. Their reply will appear in your Chat inbox.",
         );
       }
-    } catch (e) { Alert.alert("Failed", formatApiError(e)); }
+    } catch (e) {
+      if (handleChatGateError(e, (p) => router.push(p as any))) return;
+      notify("Failed", formatApiError(e));
+    }
   };
 
   const onToggleHelpful = async (rev: Review) => {

@@ -1,0 +1,68 @@
+{
+  "summary": "Tested SIM binding independently through the API (new pytest file, 13 tests: 11 pass, 2 fail on real bugs), DB inspection, a regression probe for a chat-blocked user, and Playwright UI runs at 390x844 on /profile, /verify-sim, /link-device, /admin/sim-binding and chat send while blocked. These all work: the core rule (a SIM_PRESENT check sets sim_presence and never sets number_verified, even when the client injects number_verified or level), nonce hardening (forged, unknown, cross-account, expired, web/WEB, unknown state and replay all return 400), number-proof returning 503 and staying unverified, the disclaimer, revalidate, the SIM-change wipe, link-code single use, expiry, cross-account refusal and the unverified-phone refusal, the admin-only checks and the policy clamp, and privacy (no identifier fields in sim_bindings, no nonce or link code in sim_audit). Chat REQUEST, THREADS, MESSAGES and contact-support writes return 403 with code=sim_verification_required and a plain-language message; GET threads, messages and starred return 200 while blocked. All 14 non-chat endpoints checked return 200 for a blocked buyer, a blocked vendor and an admin; checkout is not gated (it reached the normal out_of_delivery_zone 400, so no test order was created). FAILURES: (1) A web link (web_link_expires_at, account-wide, 24h) overrides SIM_ABSENT, revalidate_required and SIM change in chat_gate. Main agent's own suite had left this field on testbuyer, which silently bypassed the whole gate until I cleared it. (2) Some chat writes skip the gate: PATCH /chat/messages/{id} (edit) and POST /products/{pid}/questions (copied into the customer-vendor chat) both return 200 while blocked. (3) Device linking does nothing in practice, because verification is per account, not per device or session. The web /link-device screen shows 'This browser is linked' about 4s after minting a code, with no phone scan. (4) On web, a blocked chat send shows NOTHING: RN Alert.alert does nothing on web, so the 403 is swallowed and the draft is silently put back. (5) There is no device attestation, so any logged-in client can POST SIM_PRESENT with platform=android. No deprecated Expo packages detected (no expo-av, expo-barcode-scanner or expo-background-fetch). The Kotlin module reads only simState, the active subscription list, isEmbedded, mcc/mnc and roaming; subscriptionId is used locally and never sent.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "core/sim_binding.py chat_gate (web_link_expires_at branch, ~L417-424)", "issue": "Once a device-link is claimed, binding.web_link_expires_at lets EVERY chat write through for 24h, even after the phone reports SIM_ABSENT, after /revalidate, or after a SIM change. Reproduced: claim link, then verify SIM_ABSENT, then POST /chat/contact-support returns 200. Reproduced again: revalidate, then contact-support returns 200 while a link is present. record_device_check and require_revalidation never clear the link. Fix: honour the web link only when the phone's own binding meets the requirement right now (compute_level of the binding without the link), and $unset web_link_expires_at in record_device_check when sim_state != SIM_PRESENT or changed, and in require_revalidation.", "priority": "CRITICAL"},
+      {"endpoint": "PATCH /api/chat/messages/{msg_id}, POST /api/products/{pid}/questions", "issue": "Chat writes that skip the gate. While SIM_ABSENT: editing your own message returns 200, so a blocked user can rewrite old messages with any new content. Product questions return 200, and that route copies the question into a customer-vendor chat_threads/chat_messages pair (products_extended.py ~L135-180). Also not gated (code review): POST /chat/request/{id}/accept and POST /orders/{id}/chat-vendor (cart.py L562) both create threads. Add await _assert_sim_verified(user) to edit and accept. Skip the chat copy (or gate it) in ask_question, and gate chat-vendor.", "priority": "HIGH"},
+      {"endpoint": "Device-link design (routes/sim_binding.py device_link_start/claim + core status_for)", "issue": "Verification level is ACCOUNT-wide, not bound to a device or session (sid). Any session of a user who once posted SIM_PRESENT, including a browser that never linked, passes the gate, so allow_web_without_link=false has no effect and linking adds nothing. The web link also gives the 'linked' level to the whole account, not to the browser that showed the QR. Fix: store verification per session sid (or per device_fp), have claim mark the browser's sid (the start doc should record the browser's sid), and have the gate check the caller's sid.", "priority": "HIGH"},
+      {"endpoint": "POST /api/sim-binding/verify", "issue": "No device attestation. The nonce stops replay but not forgery: any logged-in script can fetch a challenge and POST sim_state=SIM_PRESENT, platform=android, and get sim_presence. is_device is trusted from the client and never used. This conflicts with the brief's 'reject client requests that merely claim success'. Recommend a Play Integrity token that carries the challenge nonce, verified server-side before accepting SIM_PRESENT; until then, document that sim_presence can be spoofed with curl.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "core/sim_binding.py DEFAULT_POLICY.block_on_sim_absent", "issue": "Policy key is stored and patchable but never read by chat_gate (dead config, so the admin toggle would be a no-op)."},
+      {"endpoint": "record_device_check carrier_fp", "issue": "SIM_ABSENT is fingerprinted with empty mcc/mnc and 0 slots, so taking out and putting back the SAME SIM sets sim_changed=true and revalidate_required. One extra check is needed, which auto-runs on foreground, so this is low impact."},
+      {"endpoint": "set_policy audit detail", "issue": "The policy_updated audit records only key names (plus updated_at and updated_by), not old/new values, so the admin event tail can't show who turned enforcement OFF versus ON."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "app/link-device.tsx poll (L64-70)", "issue": "The browser shows 'This browser is linked' about 4s after 'Show link code' with NO phone scan (confirmed in UI). The poll checks account-wide status.meets_requirement, which is already true for any account with a SIM check. It should poll that specific code's claimed status (e.g. GET /sim-binding/device-link/{code}).", "testID": "link-device-show-code", "priority": "HIGH"},
+      {"component": "app/chat/[id].tsx onSend catch (L319)", "issue": "Uses RN Alert.alert, which does nothing on react-native-web. On web a blocked send gets a 403 but the user sees no message and no 'Verify now'; the draft is silently put back (confirmed in UI). Use notify() from src/notify.ts, which falls back to window.confirm. Better still, show an inline banner above the composer with a Verify now button.", "testID": "composer-send", "priority": "HIGH"},
+      {"component": "app/(tabs)/chat.tsx onSendRequest / onAcceptRequest, app/services/[id].tsx start chat", "issue": "These entry points also use Alert.alert, which does nothing on web. They have no special handling for sim_verification_required and no 'Verify now' route, so a blocked user gets no explanation at these points.", "testID": "n/a", "priority": "MEDIUM"},
+      {"component": "/link-device, /verify-sim routes", "issue": "Reachable when logged out. /link-device shows a raw 'Not authenticated' error after 'Show link code' instead of redirecting to login.", "testID": "link-device-show-code", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Web device linking", "issue": "Linking the browser by QR gives no real authorisation: the backend gate is per account, and the UI declares the browser linked without any claim.", "affected_testIDs": ["link-device-show-code", "link-device-new-code"]}
+    ],
+    "design_issues": [
+      {"screen": "/verify-sim", "issues": ["Before status loads, the screen shows 'SIM status unclear… Try again in a moment' and 'Number not confirmed' (default SIM_STATE_UNKNOWN) instead of a loading state.", "On the website it says 'SIM detected — A SIM or eSIM is active in this phone', copied from the phone's account-level reading, which is confusing on a desktop."]},
+      {"screen": "/admin/sim-binding", "issues": ["The 'Require verification for chat' switch turns enforcement off for every user in one tap, with no confirmation."]}
+    ],
+    "react_native_issues": [
+      {"component": "Alert.alert on web", "issue": "The chat gate's error handling uses RN Alert.alert, which does nothing on react-native-web, so the SIM message never shows on web. Reference: /app/frontend/app/chat/[id].tsx:320"}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter103_sim_binding_independent.py",
+    "/app/backend/tests/iter103_set_sim_state.py",
+    "/app/backend/tests/iter103_blocked_user_order_regression.py",
+    "/app/test_reports/pytest/iter103_sim_binding.xml"
+  ],
+  "action_items": [
+    "CRITICAL: chat_gate must not let web_link_expires_at override SIM_ABSENT, revalidate_required or a SIM change. Clear the link in record_device_check (state != SIM_PRESENT or changed) and in require_revalidation.",
+    "Gate the remaining chat writes: PATCH /chat/messages/{id}, POST /chat/request/{id}/accept, POST /orders/{id}/chat-vendor, and the chat copy in POST /products/{pid}/questions.",
+    "Bind verification to the session (sid) or device so web sessions need an actual link claim. Make link-device poll that code's claim status, not meets_requirement.",
+    "Replace Alert.alert with notify() in the chat/[id].tsx send handler, and add sim_verification_required handling with a 'Verify now' route in (tabs)/chat.tsx and services/[id].tsx.",
+    "Add a Play Integrity check bound to the challenge nonce (or clearly document that sim_presence is spoofable).",
+    "Either wire block_on_sim_absent into chat_gate or remove it.",
+    "verify-sim: show a loading state while status is null, and use web-specific copy.",
+    "Auth-guard /link-device and /verify-sim.",
+    "Fix the test hygiene in test_sim_binding.py: it leaves web_link_expires_at on testbuyer, which hides every gate regression for 24h."
+  ],
+  "critical_code_review_comments": [
+    "routes/chat.py is 1300 lines; split it (threads, messages, requests, ws).",
+    "core/sim_binding.py and routes/chat.py keep 'from __future__ import annotations'. That is fine there because neither router uses @limiter.limit, but the note says it breaks limiter routes.",
+    "device_link_start does not record the browser's sid or user-agent, so nothing ties the claim back to that browser.",
+    "admin_overview returns the last 40 audit rows including ip/ua with no masking. Acceptable for admins, but note it for DPDP."
+  ],
+  "updated_files": [
+    "/app/frontend/app/verify-sim.tsx (testIDs added: verify-sim-back, verify-sim-check-button, verify-sim-link-device-button, verify-sim-open-settings, verify-sim-state-title, verify-sim-number-title, verify-sim-disclaimer)",
+    "/app/frontend/app/link-device.tsx (testIDs: link-device-back, link-device-show-code, link-device-new-code, link-device-go-verify, link-device-scan-button, link-device-code-input, link-device-claim-button)",
+    "/app/frontend/app/admin/sim-binding.tsx (testIDs: admin-sim-back, admin-sim-enforce-chat-switch, admin-sim-allow-web-switch)"
+  ],
+  "success_rate": {"backend": "85% (11/13 independent tests; the 2 failures are real gate bypasses)", "frontend": "75% (profile row, verify-sim, link-device QR/countdown/new code and admin toggle work; blocked chat send shows nothing on web; link-device shows a false 'linked')"},
+  "seed_data_creation": "None kept. Test chat messages (TEST_iter103*) were deleted. Temporary sim_bindings rows for testvendor/testbuyer2 were deleted. Tokens for testvendor and testbuyer2 were minted from their existing active sid (passwords unknown); no credentials were changed.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "State restored: policy enforce_chat=true, required_level=sim_presence; testbuyer sim_state=SIM_PRESENT, no web_link_expires_at, registration_paid=false. Use tests/iter103_set_sim_state.py SIM_ABSENT|SIM_PRESENT to toggle the block through the real challenge->verify path. The support thread for testbuyer is 671aefb5-4613-4dfd-afcd-b46e92b819f5. Before testing the gate, clear web_link_expires_at on testbuyer or it bypasses everything. Checkout for testbuyer with a Bengaluru address hits out_of_delivery_zone, so pick a vendor-zone pincode to place an order. Note: a bash write under /app was refused mid-run with 'owned by the regression harness'.",
+  "rca_of_issue": "Gate bypass RCA: chat_gate checks status_for(user) (account-level) first, then returns allowed=True if binding.web_link_expires_at is in the future, without re-checking sim_state or revalidate_required. The link is written onto the same per-user binding doc and is never cleared by record_device_check or require_revalidation. Repro: (1) verify SIM_PRESENT, (2) device-link/start then claim, (3) verify SIM_ABSENT, (4) POST /chat/contact-support returns 200 (expected 403). The false 'linked' message on web has the same root cause: per-account state is used as if it were per-device."
+}

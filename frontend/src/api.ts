@@ -1,5 +1,6 @@
 import axios, { AxiosError, AxiosRequestConfig } from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Platform } from "react-native";
 
 import { getDeviceFingerprint, getDeviceName } from "./device";
 
@@ -38,6 +39,11 @@ api.interceptors.request.use(async (config) => {
     config.headers = config.headers || {};
     (config.headers as any).Authorization = `Bearer ${token}`;
   }
+  // Oct 2026 — tells the server whether this call came from the installed app
+  // or a browser. The SIM-binding chat gate uses it to decide whether a
+  // linked phone is required (a browser has no SIM of its own).
+  config.headers = config.headers || {};
+  (config.headers as any)["X-Client-Platform"] = Platform.OS;
   try {
     const fp = await getDeviceFingerprint();
     if (fp) {
@@ -248,6 +254,11 @@ export const formatApiError = (e: any): string => {
   const detail = e?.response?.data?.detail;
   if (!detail) return e?.message || "Something went wrong. Please try again.";
   if (typeof detail === "string") return detail;
+  // Structured errors (e.g. the SIM-binding chat gate) carry a plain-language
+  // `message` alongside a machine code — show the sentence, not the JSON.
+  if (detail && typeof detail === "object" && typeof (detail as any).message === "string") {
+    return (detail as any).message;
+  }
   if (Array.isArray(detail)) {
     return detail
       .map((d: any) => (typeof d?.msg === "string" ? d.msg : JSON.stringify(d)))
