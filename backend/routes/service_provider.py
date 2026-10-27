@@ -58,10 +58,10 @@ async def update_my_availability(
 # ============================================================
 # Approved providers can update their listing without going through the
 # admin approval flow again. Only descriptive fields are mutable here —
-# pincode, sub-category, languages, description, etc. The parent category
-# can be changed too (categories are the public taxonomy and providers may
-# legitimately pivot e.g. "Plumbing" → "Electrical"). KYC, charge model,
-# and approval status are NOT editable from this endpoint.
+# pincode, sub-category, languages, description, visit charges, etc. The
+# parent category can be changed too (categories are the public taxonomy and
+# providers may legitimately pivot e.g. "Plumbing" → "Electrical"). KYC and
+# approval status are NOT editable from this endpoint.
 class ServiceEditRequest(BaseModel):
     service_name: Optional[str] = None
     category_id: Optional[str] = None
@@ -71,6 +71,9 @@ class ServiceEditRequest(BaseModel):
     pincode: Optional[str] = Field(default=None, min_length=6, max_length=6)
     description: Optional[str] = None
     languages: Optional[List[str]] = None
+    # Jun-2026 — the provider sets his own VISIT CHARGES (what a customer
+    # pays him to come and look at the job). 0 = "on request".
+    visit_charge: Optional[float] = Field(default=None, ge=0, le=1000000)
 
 
 @router.patch("/service/me")
@@ -112,6 +115,8 @@ async def update_my_service(
         sets["service_description"] = payload.description.strip() or None
     if payload.languages is not None:
         sets["service_languages"] = [x for x in payload.languages if isinstance(x, str)]
+    if payload.visit_charge is not None:
+        sets["service_charge"] = round(float(payload.visit_charge), 2)
 
     if not sets:
         raise HTTPException(status_code=400, detail="Nothing to update")
@@ -124,6 +129,7 @@ async def update_my_service(
     # primary update if the mirror write hits an issue.
     try:
         mirror: Dict[str, Any] = {}
+        if "service_charge" in sets:          mirror["charge"] = sets["service_charge"]
         if "service_name" in sets:           mirror["service_name"] = sets["service_name"]
         if "service_category" in sets:        mirror["service_category"] = sets["service_category"]
         if "category_id" in sets:             mirror["category_id"] = sets["category_id"]

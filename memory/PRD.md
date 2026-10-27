@@ -2697,3 +2697,29 @@ LinearGradient + translucent highlight/glow (no backdrop-filter), gold on the
 money, and a deliberately flat grey locked state so the member / free
 difference reads at one glance. Used by the paywall, the upsell banner, the
 Profile membership card, the locked cards and the provider "Get number" row.
+
+## Android release optimisation (Play Console DEX report)
+
+Root cause of "DEX optimization: Low / obfuscation 1%": `expo-build-properties`
+in `frontend/app.json` had `enableProguardInReleaseBuilds: false`, so release
+AABs were built with R8 disabled (no shrinking, no optimisation, no obfuscation).
+
+Change: shrinking + resource shrinking + obfuscation enabled for release, with a
+reviewed keep-rule set (`frontend/android/proguard-rules.pro`, mirrored into
+`android.extraProguardRules`) covering Hermes/JSC, React Native + JNI, Expo
+modules, Razorpay WebView checkout + JavascriptInterface, Firebase/GMS push,
+Reanimated, gesture-handler, screens, svg, FlashList, OkHttp/Okio, Kotlin
+metadata and all Parcelable/Serializable/enum/annotation surfaces.
+AGP stays on the Expo SDK 54 default (8.x); AGP 9.0 was NOT adopted.
+
+Still pending (cannot be done in this container): produce the signed AAB via
+Publish, confirm R8 metadata + new DEX size, upload `mapping.txt` to Play.
+Details: /app/memory/ANDROID_R8_OPTIMIZATION.md
+
+## Ledger fix (partial returns)
+
+`transactions.uniq_user_type_order` blocked a second keyed row for the same
+(user, type, order), so a customer's 2nd partial return silently paid nothing.
+Replaced with a partial index that only guards legacy rows having no
+`idempotency_key`; keyed rows rely on `uniq_idem_key`. Each guard index now has
+its own try/except, so one failure no longer skips the remaining guards.

@@ -373,6 +373,81 @@ async def export_groupwise(
         if subset:
             _sheet(label, subset, opening_by_group.get(key, 0.0))
 
+    # ── Receivables sheet (Jun-2026) ───────────────────────────────────
+    # What sellers still owe the treasury — the cashback we paid shoppers on
+    # their behalf and any refund the company advanced. The total here is the
+    # SAME figure as Receivables on System Wallet → Company net worth, so the
+    # workbook and the screen can never disagree.
+    rec_rows: List[Dict[str, Any]] = []
+    async for row in db.vendor_outstanding.find({"status": "open"}, {"_id": 0}):
+        owed = round(float(row.get("amount") or 0) - float(row.get("recovered") or 0), 2)
+        if owed <= 0.009:
+            continue
+        rec_rows.append({
+            "shop": row.get("vendor_name") or row.get("vendor_id"),
+            "kind": row.get("kind"),
+            "order": row.get("order_number") or row.get("order_id") or row.get("return_id") or "",
+            "amount": round(float(row.get("amount") or 0), 2),
+            "recovered": round(float(row.get("recovered") or 0), 2),
+            "owed": owed,
+            "since": row.get("created_at"),
+            "note": row.get("description") or row.get("reason") or "",
+        })
+    cb_rows: List[Dict[str, Any]] = []
+    async for v in db.users.find(
+        {"cashback_outstanding": {"$gt": 0.009}},
+        {"_id": 0, "id": 1, "vendor_business_name": 1, "name": 1,
+         "cashback_outstanding": 1, "vendor_earnings": 1},
+    ):
+        cb_rows.append({
+            "shop": v.get("vendor_business_name") or v.get("name") or v["id"],
+            "owed": round(float(v.get("cashback_outstanding") or 0), 2),
+            "wallet": round(float(v.get("vendor_earnings") or 0), 2),
+        })
+
+    ws = wb.create_sheet("Receivables")
+    ws.append(["RECEIVABLES — what sellers owe the System Wallet treasury"])
+    ws.cell(row=1, column=1).font = sum_font
+    ws.append([])
+    ws.append(["Cashback owed by sellers (paid to shoppers on their behalf)"])
+    ws.cell(row=ws.max_row, column=1).font = head_font
+    ws.append(["Shop", "Owed", "Their wallet balance", "Recoverable now"])
+    for i in range(1, 5):
+        c = ws.cell(row=ws.max_row, column=i)
+        c.font = head_font
+        c.fill = head_fill
+    for r in cb_rows:
+        ws.append([r["shop"], r["owed"], r["wallet"], round(min(r["owed"], r["wallet"]), 2)])
+    ws.append(["TOTAL", round(sum(r["owed"] for r in cb_rows), 2), "", ""])
+    ws.cell(row=ws.max_row, column=1).font = sum_font
+    ws.cell(row=ws.max_row, column=2).font = sum_font
+
+    ws.append([])
+    ws.append(["Other advances (refunds / fees the company paid for a seller)"])
+    ws.cell(row=ws.max_row, column=1).font = head_font
+    ws.append(["Shop", "Kind", "Reference", "Amount", "Recovered", "Still owed", "Since", "Remarks"])
+    for i in range(1, 9):
+        c = ws.cell(row=ws.max_row, column=i)
+        c.font = head_font
+        c.fill = head_fill
+    for r in rec_rows:
+        if r["kind"] == "cashback":
+            continue
+        ws.append([r["shop"], r["kind"], r["order"], r["amount"], r["recovered"],
+                   r["owed"], r["since"], r["note"]])
+    ws.append(["TOTAL", "", "", "", "",
+               round(sum(r["owed"] for r in rec_rows if r["kind"] != "cashback"), 2), "", ""])
+    ws.cell(row=ws.max_row, column=1).font = sum_font
+    ws.cell(row=ws.max_row, column=6).font = sum_font
+    ws.append([])
+    ws.append(["RECEIVABLES TOTAL (in Company net worth)",
+               round(sum(r["owed"] for r in cb_rows)
+                     + sum(r["owed"] for r in rec_rows if r["kind"] != "cashback"), 2)])
+    ws.cell(row=ws.max_row, column=1).font = sum_font
+    ws.cell(row=ws.max_row, column=2).font = sum_font
+    for i, w in enumerate([34, 16, 24, 14, 14, 14, 24, 60], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)

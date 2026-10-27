@@ -140,6 +140,7 @@ type NetWorth = {
       bank_tally_net: number;
       pending_collections: number;
       cashback_receivable?: number;
+      vendor_receivable?: number;
       receivables_total?: number;
       cashback_receivable_sellers?: number;
       user_wallet_balance: number;
@@ -565,6 +566,12 @@ export default function AdminSystemWallet() {
                     <Text style={styles.nwCompLabel}>　· Cashback owed by sellers</Text>
                     <Text style={styles.nwCompValue}>
                       {formatINR(netWorth.master.components.cashback_receivable || 0)}
+                    </Text>
+                  </View>
+                  <View style={styles.nwCompCol} testID="sw-vendor-receivable">
+                    <Text style={styles.nwCompLabel}>　· Refunds / fees we paid for sellers</Text>
+                    <Text style={styles.nwCompValue}>
+                      {formatINR(netWorth.master.components.vendor_receivable || 0)}
                     </Text>
                   </View>
                   <View style={styles.nwCompCol}>

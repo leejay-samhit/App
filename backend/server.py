@@ -97,6 +97,7 @@ ADMIN_SUB_ROLES = (
 )
 from core.security import (  # noqa: E402
     security,
+    get_current_user_optional,
     hash_password,
     verify_password,
     create_access_token,
@@ -7613,13 +7614,39 @@ async def _background_init():
         except Exception as _idx_err:
             logger.warning(f"sponsor_id index setup failed: {_idx_err}")
         # ---- Idempotency safety-net partial-unique indexes ----
+        # Oct-2026 — these are a SAFETY NET for legacy rows written before
+        # `idempotency_key` existed. Any row that carries an idempotency_key
+        # is already protected by `uniq_txn_idempotency`, and forcing one row
+        # per (user, type, order) on top of that broke genuine repeat events:
+        # the SECOND partial return of the same order silently moved no money,
+        # because its refund rows looked like duplicates. So the net now
+        # covers only rows WITHOUT a key.
         try:
-            await db.transactions.create_index(
-                [("user_id", 1), ("type", 1), ("order_id", 1)],
-                unique=True,
-                partialFilterExpression={"order_id": {"$exists": True, "$type": "string"}},
-                name="uniq_user_type_order",
-            )
+            # Its OWN try: this one can legitimately fail on historical data
+            # (legacy duplicates), and when it did, the single shared try
+            # skipped every index below it — leaving the razorpay / transfer /
+            # deposit guards uncreated.
+            try:
+                await db.transactions.drop_index("uniq_user_type_order")
+                logger.info("dropped the over-broad uniq_user_type_order index")
+            except Exception:
+                pass
+            try:
+                await db.transactions.create_index(
+                    [("user_id", 1), ("type", 1), ("order_id", 1)],
+                    unique=True,
+                    partialFilterExpression={
+                        "order_id": {"$exists": True, "$type": "string"},
+                        "idempotency_key": {"$exists": False},
+                    },
+                    name="uniq_user_type_order_legacy",
+                )
+            except Exception as _legacy_err:
+                logger.info(
+                    "legacy order-uniqueness net not applied (%s) — every money "
+                    "path carries an idempotency_key, which uniq_idem_key enforces",
+                    str(_legacy_err)[:160],
+                )
             await db.transactions.create_index(
                 [("user_id", 1), ("type", 1), ("booking_id", 1)],
                 unique=True,
@@ -10167,7 +10194,10 @@ class ServiceReviewIn(BaseModel):
 
 
 @api_router.get("/services/{provider_id}/profile")
-async def get_service_provider_profile(provider_id: str):
+async def get_service_provider_profile(
+    provider_id: str,
+    viewer: Optional[Dict[str, Any]] = Depends(get_current_user_optional),
+):
     """Public ID-card profile for a service provider — photo, charge, contact,
     aggregate rating + recent reviews. No auth required so anonymous browsers
     can preview before signing up.
@@ -10204,8 +10234,26 @@ async def get_service_provider_profile(provider_id: str):
         r["reviewer_name"] = full.split(" ")[0] if full else "Customer"
         r.pop("user_id", None)
     p["reviews"] = reviews_raw
-    # Bookings count (informational, drives "trusted by N customers" copy)
-    p["bookings_count"] = await db.service_bookings.count_documents({"provider_id": provider_id})
+    # Jun-2026 — "Contacted" is the honest number: how many customers took
+    # this provider's number (members for free, others after paying). The old
+    # bookings count stayed at 0 for everyone who simply phoned him.
+    contacted_ids = await db.phone_reveal_invoices.distinct(
+        "user_id", {"provider_id": provider_id},
+    )
+    booked_ids = await db.service_bookings.distinct(
+        "customer_id", {"provider_id": provider_id},
+    )
+    p["contacted_count"] = len({*(contacted_ids or []), *(booked_ids or [])})
+    p["bookings_count"] = p["contacted_count"]        # kept for older clients
+    p["visit_charge"] = float(p.get("service_charge") or 0)
+    p["can_review"] = bool(viewer) and bool(
+        await db.phone_reveal_invoices.find_one(
+            {"provider_id": provider_id, "user_id": viewer["id"]}, {"_id": 1},
+        )
+        or await db.service_bookings.find_one(
+            {"provider_id": provider_id, "customer_id": (viewer or {}).get("id")}, {"_id": 1},
+        )
+    )
     return p
 
 
@@ -10220,10 +10268,21 @@ async def post_service_review(
     provider = await db.users.find_one({"id": provider_id, "is_service_provider": True})
     if not provider:
         raise HTTPException(status_code=404, detail="Service provider not found")
-    # Must have at least one booking for this provider (anti-spam).
-    booked = await db.service_bookings.find_one({"provider_id": provider_id, "customer_id": user["id"]})
-    if not booked:
-        raise HTTPException(status_code=403, detail="You can only review providers you've booked")
+    # Jun-2026 — anyone who actually CONTACTED this provider can review him:
+    # members get the number free, non-members pay for it, and both have
+    # clearly dealt with him. A booking still counts.
+    contacted = await db.phone_reveal_invoices.find_one(
+        {"provider_id": provider_id, "user_id": user["id"]},
+    )
+    if not contacted:
+        contacted = await db.service_bookings.find_one(
+            {"provider_id": provider_id, "customer_id": user["id"]},
+        )
+    if not contacted:
+        raise HTTPException(
+            status_code=403,
+            detail="Get this provider's number first — only customers who contacted him can review",
+        )
     # Upsert latest review per user — replace if they review again.
     review_doc = {
         "id":           str(uuid.uuid4()),

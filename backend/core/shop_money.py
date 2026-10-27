@@ -43,6 +43,11 @@ CUSTOMER_WALLET = "wallet_balance"
 DELIVERY_GST_PCT = 18.0
 
 
+class LedgerBlocked(Exception):
+    """A ledger row was refused by a unique index that is NOT the idempotency
+    key — i.e. a real event was blocked, not a replay. Never swallowed."""
+
+
 class InsufficientFunds(Exception):
     """A debit was refused because the wallet could not cover it. NOTHING
     has been deducted — the caller must surface a financial error."""
@@ -139,8 +144,23 @@ async def post(
     try:
         await db.transactions.insert_one(doc)
     except Exception as err:
-        if "duplicate" in str(err).lower() or "E11000" in str(err):
-            return None
+        msg = str(err)
+        if "duplicate" in msg.lower() or "E11000" in msg:
+            # Only a clash on the IDEMPOTENCY KEY is a replay. A clash on any
+            # other unique index means a genuine, different event was blocked
+            # — swallowing that silently is how the second partial return of
+            # an order ended up moving no money at all.
+            if "uniq_idem_key" in msg or "idempotency_key" in msg:
+                return None
+            logger.error(
+                "ledger row REFUSED by %s — this is NOT a replay: key=%s type=%s amount=%s",
+                msg.split("index:")[-1].split()[0] if "index:" in msg else "unknown",
+                idempotency_key, txn_type, amount,
+            )
+            raise LedgerBlocked(
+                f"A ledger row for {txn_type} was refused by a database rule "
+                f"(not a replay): {msg[:200]}"
+            )
         raise
     doc.pop("_id", None)
     return doc

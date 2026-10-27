@@ -575,16 +575,27 @@ async def reverse_partial_cashback(
     credit_admin_bucket,
     notify=None,
 ) -> Dict[str, Any]:
-    """Claw back cashback for the RETURNED LINES ONLY (Phase 2).
+    """Settle the cashback on the RETURNED LINES by NETTING IT OFF the refund.
 
-    Owner rules honoured here:
-      * Reverse only what was ACTUALLY credited. If the cashback was never
-        paid (pending / cancelled / disabled) nothing is clawed back.
-      * Never reverse more than the order's remaining un-reversed cashback,
-        so several partial returns can never over-recover.
-      * The claw-back references the original cashback transaction.
-      * Whatever the customer's wallet cannot cover is netted off the refund
-        payout instead of pushing the wallet negative.
+    Jun-2026 OWNER RULE. A ₹5,000 item with 10% cashback cost the customer
+    ₹4,500 of real money (₹500 of it came back as cashback), so a return pays
+    back ₹4,500 — from the seller's shop wallet, nothing else. The cashback
+    is simply kept and deducted from the payout:
+
+        customer:  paid 5,000, keeps the 500 cashback, gets 4,500   → square
+        seller:    +5,000 on delivery, −4,500 refund, −500 cashback → square
+        treasury:  +500 recovered, −500 funded                      → square
+
+    Nothing is clawed back out of the customer's wallet and NOTHING touches
+    the treasury on a return any more — that leg used to leave the seller
+    ₹500 short and the company ₹500 up, which is the bug this replaces.
+
+    Still honoured:
+      * Only cashback that was ACTUALLY credited is netted (pending /
+        cancelled / disabled cashback nets nothing).
+      * Never more than the order's remaining un-reversed cashback, so
+        several partial returns cannot over-recover.
+      * The ledger row references the original cashback transaction.
     """
     order_id = order.get("id")
     want = round(float(amount or 0), 2)
@@ -618,63 +629,30 @@ async def reverse_partial_cashback(
         {"_id": 0, "id": 1},
     )
 
-    cust = await db.users.find_one({"id": customer_id}, {"_id": 0, "wallet_balance": 1})
-    held = round(float((cust or {}).get("wallet_balance") or 0), 2)
-    from_wallet = round(max(0.0, min(take, held)), 2)
-    shortfall = round(take - from_wallet, 2)
+    # The whole amount comes off the refund — the customer keeps the cashback
+    # in their wallet and simply receives that much less back.
+    from_wallet = 0.0
+    shortfall = take
 
-    if from_wallet > 0:
-        await db.users.update_one({"id": customer_id}, {"$inc": {"wallet_balance": -from_wallet}})
-        await _txn({
-            "user_id": customer_id,
-            "type": "cashback_reversal",
-            "amount": -from_wallet,
-            "status": "success",
-            "description": f"Cashback reversed on returned item(s) — order {order_no} ({reason})",
-            "order_id": order_id,
-            "return_id": return_id,
-            "cashback_ledger_id": ledger_id,
-            "reverses": (original or {}).get("id"),
-            "reverses_cashback": True,
-            "created_at": ts,
-        })
-        # Give the funder back the part we actually recovered.
-        funded_by = row.get("funded_by")
-        if funded_by == "vendor" and vendor_id:
-            await db.users.update_one({"id": vendor_id}, {"$inc": {"wallet_balance": from_wallet}})
-            await _txn({
-                "user_id": vendor_id,
-                "type": "cashback_funding_refund",
-                "amount": from_wallet,
-                "status": "success",
-                "description": f"Cashback funding returned — item(s) returned on order {order_no}",
-                "order_id": order_id,
-                "return_id": return_id,
-                "cashback_ledger_id": ledger_id,
-                "created_at": ts,
-            })
-        elif funded_by == "platform":
-            await credit_admin_bucket("cashback_funded", from_wallet, also_total_earned=False)
-            await _txn({
-                "user_id": None,
-                "type": "cashback_vendor_recovery",
-                "amount": from_wallet,
-                "status": "success",
-                "description": f"Fronted cashback recovered — item(s) returned on order {order_no}",
-                "order_id": order_id,
-                "vendor_id": vendor_id,
-                "return_id": return_id,
-                "cashback_ledger_id": ledger_id,
-                "created_at": ts,
-            })
-            if vendor_id:
-                await db.users.update_one(
-                    {"id": vendor_id}, {"$inc": {"cashback_outstanding": -from_wallet}},
-                )
-                await db.vendor_outstanding.update_many(
-                    {"cashback_ledger_id": ledger_id, "status": "open"},
-                    {"$inc": {"recovered": from_wallet}},
-                )
+    # A memo row so the netting is visible in every statement and export.
+    # It moves no money (the refund row carries the reduced amount), so it
+    # is written with amount 0 and the detail in the description.
+    await _txn({
+        "user_id": customer_id,
+        "type": "cashback_netted_off_refund",
+        "amount": 0.0,
+        "status": "success",
+        "description": (
+            f"₹{take:g} cashback kept by the customer and deducted from the refund "
+            f"on order {order_no} ({reason}) — no money moved"
+        ),
+        "order_id": order_id,
+        "return_id": return_id,
+        "cashback_ledger_id": ledger_id,
+        "reverses": (original or {}).get("id"),
+        "wallet_impact": "none",
+        "created_at": ts,
+    })
 
     new_total = round(already + take, 2)
     fully = new_total >= paid - 0.009
@@ -687,17 +665,19 @@ async def reverse_partial_cashback(
             "last_reverse_reason": reason,
         }},
     )
-    order_upd: Dict[str, Any] = {
-        "$set": {"cashback_status": "reversed" if fully else "partially_reversed"},
-    }
-    if shortfall > 0.009:
-        order_upd["$inc"] = {"cashback_recoverable": shortfall}
-    await db.orders.update_one({"id": order_id}, order_upd)
+    # NOTE: no `cashback_recoverable` any more — netting it off the refund IS
+    # the recovery. Adding it here too is how the same ₹500 used to be
+    # collected twice.
+    await db.orders.update_one(
+        {"id": order_id},
+        {"$set": {"cashback_status": "reversed" if fully else "partially_reversed",
+                  "cashback_netted_off_refund": new_total}},
+    )
     if notify and customer_id and take > 0.009:
-        tail = f" ₹{shortfall:g} was deducted from your refund." if shortfall > 0.009 else ""
         await notify(
-            customer_id, "cashback", "Cashback adjusted",
-            f"₹{take:g} cashback for the returned item(s) on order {order_no} was reversed.{tail}",
+            customer_id, "cashback", "Cashback kept, refund adjusted",
+            f"You keep the ₹{take:g} cashback on order {order_no}, so the refund for the "
+            f"returned item(s) is ₹{take:g} less — you are paid back exactly what you spent.",
         )
     return {
         "reversed": take,

@@ -53,6 +53,9 @@ type Provider = {
   rating_avg?: number;
   rating_count?: number;
   bookings_count?: number;
+  contacted_count?: number;
+  visit_charge?: number;
+  can_review?: boolean;
   reviews?: Review[];
 };
 
@@ -345,13 +348,15 @@ export default function ProviderProfileScreen() {
           </View>
           <View style={styles.factCard}>
             <MaterialIcons name="currency-rupee" size={16} color={colors.primary} />
-            <Text style={styles.factLabel}>Charge</Text>
-            <Text style={styles.factValue}>{p.service_charge ? formatINR(p.service_charge) : "On request"}</Text>
+            <Text style={styles.factLabel}>Visit charges</Text>
+            <Text style={styles.factValue} testID="provider-visit-charge">
+              {(p.visit_charge ?? p.service_charge) ? formatINR(p.visit_charge ?? p.service_charge ?? 0) : "On request"}
+            </Text>
           </View>
           <View style={styles.factCard}>
             <Feather name="check-circle" size={14} color={colors.primary} />
-            <Text style={styles.factLabel}>Bookings</Text>
-            <Text style={styles.factValue}>{p.bookings_count || 0}</Text>
+            <Text style={styles.factLabel}>Contacted</Text>
+            <Text style={styles.factValue} testID="provider-contacted-count">{p.contacted_count ?? p.bookings_count ?? 0}</Text>
           </View>
         </View>
 
@@ -377,11 +382,13 @@ export default function ProviderProfileScreen() {
         <View style={[styles.section, { marginBottom: 80 }]}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
             <Text style={styles.sectionTitle}>REVIEWS ({p.rating_count || 0})</Text>
-            {user ? (
+            {user && (p.can_review || revealedPhone) ? (
               <TouchableOpacity onPress={() => setReviewOpen(true)} style={styles.writeBtn} testID="write-review-btn">
                 <Feather name="edit-3" size={12} color={colors.primary} />
                 <Text style={styles.writeBtnText}>Write review</Text>
               </TouchableOpacity>
+            ) : user ? (
+              <Text style={styles.writeHint} testID="review-hint">Get the number to review</Text>
             ) : null}
           </View>
           {(p.reviews || []).length === 0 ? (
@@ -666,6 +673,7 @@ const styles = StyleSheet.create({
   langChip: { backgroundColor: colors.surfaceMuted, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
   langChipText: { fontSize: 11, fontWeight: "700", color: colors.textMain },
   writeBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: colors.brand100, borderRadius: 999 },
+  writeHint: { fontSize: 11, color: colors.textMuted, fontWeight: "700" },
   writeBtnText: { fontSize: 11, color: colors.primary, fontWeight: "800" },
   emptyCard: { paddingVertical: 24, alignItems: "center", gap: 6 },
   emptyText: { fontSize: 12, color: colors.textMuted, textAlign: "center" },

@@ -12,6 +12,7 @@ Run:  python3 scripts/reconcile_vendor_ledger.py [vendor_id]
 import asyncio
 import os
 import sys
+from datetime import datetime as _dt, timezone as _tz
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -32,7 +33,7 @@ async def fix(vendor_id: str) -> None:
         amount=abs(gap),
         credit=abs(gap) if is_credit else 0.0,
         debit=0.0 if is_credit else abs(gap),
-        idempotency_key=f"LEDGERFIX:{vendor_id}",
+        idempotency_key=f"LEDGERFIX:{vendor_id}:{abs(gap):.2f}:{int(_dt.now(_tz.utc).timestamp())}",
         user_id=vendor_id,
         vendor_id=vendor_id,
         settlement_status="adjusted",

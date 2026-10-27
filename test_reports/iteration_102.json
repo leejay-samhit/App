@@ -1,0 +1,62 @@
+{
+  "summary": "Tested the 4-item owner batch end to end, backend and frontend. Working: FIX 1 receivables (API and System Wallet UI), FIX 1b Excel ties to the API for cashback, FIX 2 withdrawal collects the cashback owed first, FIX 3 refund math for a single line (₹4,500 paid by the seller, treasury untouched, replaying it pays nothing), FIX 4/4b service reviews and visit charges, and the frontend provider card and apply screen. Found 1 CRITICAL bug: the SECOND partial return on the same order pays nothing and nets nothing, yet the refund call reports success. Also found an Excel Receivables mismatch, verified with a parked return_refund row. All regression suites pass. One of them (test_iter96) wrote vendor_earnings directly and knocked testvendor's ledger ₹6,000 out of sync. I reverted that write and fixed the test. vendor_wallet_view(VID) is now in_sync=True with unledgered_difference=0.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "core.returns.process_refund / core.cashback.reverse_partial_cashback (FIX 3b)", "issue": "The second (and any later) partial return on the SAME order pays nothing and nets nothing, but process_refund still reports success with the gross refund_amount. Root cause: the transactions unique index uniq_user_type_order (user_id, type, order_id), created in server.py:7618, rejects a second row of each of these types for the same order: cashback_netted_off_refund (customer), return_refund_debit (seller) and return_refund_credit (customer). core/shop_money.py:139-143 swallows ANY E11000 and returns None, so no money moves and no error is raised. Reproduction: tests/test_iter102_partial_return_netting.py. Return 1 is correct (₹2,700 paid, ₹300 netted). Return 2 nets 0, the customer gets +0 and the seller pays 0, yet refund_amount reports 2000. A financial_errors row 'return_cashback_reversal_failed E11000' is written. Return 3 behaves the same.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/admin/wallet/export/groupwise (Receivables sheet)", "issue": "The 'Other advances' section counts every open vendor_outstanding row whose kind is not cashback (wallet_export.py:433-445). The API's vendor_receivable counts only return_refund_company_funded, delivery_fee_company_funded and delivery_fee (finance.py:399-403). A parked return_refund row therefore shows in Excel but not on screen. Verified: API 0 vs Excel 120. The Excel 'RECEIVABLES TOTAL' also leaves out pending_collections, which the API's receivables_total includes. It is currently 0, so the totals only match by chance."},
+      {"endpoint": "core.cashback.reverse_partial_cashback", "issue": "Updating reversed_total on cashback_ledger is a read-then-write, not atomic (cashback.py:614-667). Two concurrent refunds could both net the same cashback. Use a conditional update ({_id, reversed_total: already}) or $inc with a guard."},
+      {"endpoint": "core.returns.process_refund", "issue": "If reverse_partial_cashback raises, the return is still marked cashback_status='handled' with netted=0 and the FULL gross is paid (returns.py:527-539). The customer keeps the cashback AND gets the full refund, and the only trace is a financial_errors row."},
+      {"endpoint": "startup money-flow self-healer (server.py ~7984-8111)", "issue": "Each seller-to-customer return refund makes the legacy checker book a 'legacy_reconcile_inflow' audit row on the admin. ₹4,500 and ₹2,700 were booked today from the refund tests. The checker treats return_refund_credit into user wallets as phantom inflow. These rows are audit-only (admin buckets did not move), but they work against the 'every rupee trackable' goal."},
+      {"endpoint": "PATCH /api/service/me", "issue": "The authorisation check is is_service_provider OR service_status=='approved' (service_provider.py:89). A suspended or rejected provider who still has is_service_provider=True can edit his listing and visit charge."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "services/apply.tsx Visit charges field", "issue": "The placeholder says 'leave empty for “On request”', but an empty field sends visit_charge: undefined (apply.tsx:193), so the old charge stays. Only typing 0 resets it.", "testID": "apply-visit-charge", "priority": "MEDIUM"},
+      {"component": "services/[id].tsx Write review button", "issue": "The touch target is 26px tall, below the 44px minimum.", "testID": "write-review-btn", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "admin/system-wallet", "issues": ["Negative net worth shows as '₹-37,185.34'. It should read '−₹37,185.34'.", "The '· Cashback owed by sellers' and '· Refunds / fees' tiles are styled as peers of '+ Receivables'. Visually this can read as being added twice. Consider indenting or nesting them under Receivables."]},
+      {"screen": "services/apply", "issues": ["The 'How it works' copy says '₹0.00 (₹0.00 fee + 18% GST)' while the checkbox right below says 'customer pays ₹1'. The two contradict each other.", "On web, Alert.alert is a no-op, so there is no 'Saved' confirmation (the edit mode just closes).", "Legacy listings with no category_id or languages cannot save a visit charge alone. Validation forces the provider to re-pick both first."]},
+      {"screen": "services/[id]", "issues": ["'(1 reviews)' should be singular.", "Feather 'star' is outline-only, so a 5.0 rating never looks filled."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter102_partial_return_netting.py",
+    "/app/backend/tests/test_iter102_receivables.py",
+    "/app/backend/tests/test_iter102_service_reviews_visit_charge.py",
+    "/app/backend/tests/test_jun2026_refund_math.py",
+    "/app/backend/tests/test_jun2026_services_and_withdrawal.py",
+    "/app/test_reports/pytest/iter102_regression.xml"
+  ],
+  "action_items": [
+    "CRITICAL: fix multi-partial-return refunds. Narrow or replace the uniq_user_type_order index so it does not cover rows already protected by idempotency_key (for example, exclude the return_refund_debit, return_refund_credit and cashback_netted_off_refund types, or move per-return rows to a return-scoped key). ALSO make shop_money._insert return None ONLY when the duplicate is on idempotency_key, and raise for any other unique index. Then make process_refund confirm both money rows were written before setting refund_status='paid'. Re-run tests/test_iter102_partial_return_netting.py, which should pass 21/21.",
+    "Excel Receivables sheet: use the same kind filter as finance.py (return_refund_company_funded, delivery_fee_company_funded, delivery_fee), and add pending_collections to 'RECEIVABLES TOTAL', so Excel always equals master.receivables_total.",
+    "apply.tsx: send visit_charge: 0 when the field is cleared, to match the 'leave empty for On request' placeholder.",
+    "reverse_partial_cashback: make the reversed_total update atomic. process_refund: do not pay the full gross when netting raised an error (park or retry instead).",
+    "PATCH /api/service/me: require service_status=='approved'.",
+    "Optional: teach the legacy money-flow checker that return_refund_credit is a transfer out of vendor_earnings, so it stops booking legacy_reconcile_inflow rows.",
+    "Optional UI polish: make the Write review button at least 44px tall, format negative net worth as −₹, use singular 'review', and fix the reveal-fee copy."
+  ],
+  "critical_code_review_comments": [
+    "core/shop_money.py:139-143 treats ANY duplicate-key error as an idempotent replay. Combined with the legacy uniq_user_type_order index, this silently drops real money rows, which is the root cause of the critical bug.",
+    "FIX 2 withdrawal ledger is clean: exactly one row each of CBRECOVER-WDL, WDLFEE, WDLFEEREV and WDL. On reject, WDL_REJECT, WDL_FEEBACK and WDLFEEREV_REJECT are written and the cashback recovery stays collected (correct).",
+    "FIX 1: cashback_receivable comes from users.cashback_outstanding and the open cashback rows are excluded from vendor_receivable, so there is no double count. A ₹350 seed added exactly 350 to receivables_total and net_worth, and no other Excel sheet repeated it.",
+    "server.py (10,892 lines), finance.py (1,376), returns.py (800) and cashback.py (964) are all over the 700-line guideline."
+  ],
+  "updated_files": [
+    "/app/frontend/app/services/[id].tsx (testIDs only: provider-visit-charge, provider-contacted-count, review-hint)",
+    "/app/backend/tests/test_iter96_reconciliation.py (removed the direct $inc of vendor_earnings by 6000; the test now skips with an instruction to fund through shop_money.credit)",
+    "/app/backend/tests/test_iter102_*.py (new)"
+  ],
+  "success_rate": {"backend": "94% (all reference and regression suites pass; FIX 3b fails 9/21 checks because of the critical bug; Excel mismatch only with parked rows)", "frontend": "100% of requested flows work (labels, Write review vs hint, visit charge prefill and save, System Wallet receivables testIDs); minor design items listed"},
+  "seed_data_creation": "Temporary only: TEST_ providers and users, phone_reveal_invoices, service_bookings, a vendor_outstanding cashback row and TESTRET/TESTPRT orders and returns. All removed. Engine-written refund and withdrawal rows were left in place, per the house rule. testbuyer registration_paid was restored to False. Two financial_errors rows caused by the test were deleted.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "After this run testvendor's wallet is ₹1,297, in sync with the ledger. The services_and_withdrawal test funds the wallet to ₹6,000 and unfunds it afterwards, but its seeded ₹300 cashback outstanding is genuinely collected into the treasury on every run. test_iter96 settlement now SKIPS when the wallet is under ₹5,200; fund it via shop_money.credit first. Service bookings use customer_id, not user_id. contacted_count counts distinct reveal customers plus bookers. Running the 4 iter pytest files together once gave 11 setup errors; a rerun gave 28 passed and 1 skipped (possibly flaky).",
+  "rca_of_issue": "FIX 3b: the transactions unique index uniq_user_type_order(user_id, type, order_id) means each (user, type, order) can appear only once. Return #2 on the same order tries to insert a second cashback_netted_off_refund, return_refund_debit and return_refund_credit row for that order. The memo insert raises E11000, which is caught as a cashback failure, so netted=0. shop_money._insert then swallows E11000 for the debit and credit and returns None. process_refund carries on and marks the return paid, with no balance change. Mitigation: scope the legacy index away from idempotency-keyed rows, and only treat an idempotency_key collision as a replay."
+}

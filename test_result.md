@@ -9640,3 +9640,78 @@ agent_communication:
       31/32 (the one failure is the direct-call artefact above) ·
       owner_batch 13/13 · iter96/97/98/99 29/29 ·
       iter98_advance_recovery 12/12.
+
+  - agent: "main"
+    message: |
+      Jun-2026 batch 8 (owner's 4-item list):
+      1. RECEIVABLES — already in net worth (cashback_receivable +
+         vendor_receivable); the screen now shows BOTH lines (cashback owed
+         by sellers, refunds/fees we paid for sellers) and the group-wise
+         Excel has a new **Receivables** sheet: per-seller cashback owed with
+         their wallet balance and what is recoverable now, the advance rows
+         with kind/reference/recovered/still-owed/remarks, and a
+         "RECEIVABLES TOTAL (in Company net worth)" line that equals the
+         figure on the screen.
+      2. WITHDRAWAL — verified end to end: ₹5,000 requested with ₹300
+         cashback owed → ₹300 collected into the treasury, 2.56% (₹128) fee
+         to the Revenue Ledger, ₹4,572 raised to the bank, shop wallet down
+         exactly ₹5,000, nothing still owed, Receivables back to 0.
+      3. RETURN REFUND MATH (the reported bug) — core.cashback
+         .reverse_partial_cashback no longer claws the cashback out of the
+         customer's wallet and no longer sends it to the treasury. The
+         cashback is NETTED OFF the refund: a ₹5,000 item with ₹500 cashback
+         refunds ₹4,500, seller → customer, and NOTHING touches the treasury.
+         Customer square (5,000 out, 500 + 4,500 back), seller square
+         (+5,000 − 4,500 − 500 cashback), treasury square (+500 recovered
+         − 500 funded). `cashback_recoverable` is no longer set on the order
+         (that was the second collection of the same ₹500), a memo row
+         `cashback_netted_off_refund` makes the netting visible in every
+         statement, and there is no parked row to reconcile.
+      4. SERVICE REVIEWS — anyone who got the provider's number can review
+         (members free, non-members after paying); a booking still counts.
+         "Bookings" is now "Contacted" (distinct customers who took the
+         number), and "Charge" is "Visit charges", which the provider edits
+         himself from his own screen (PATCH /service/me visit_charge, also
+         mirrored to the application doc). The profile returns can_review,
+         contacted_count and visit_charge.
+      Tests: NEW test_jun2026_refund_math.py 11/11 ·
+      NEW test_jun2026_services_and_withdrawal.py 16/16 ·
+      membership_batch 35/35 · owner_batch 13/13 · iter96/97/98/99 all green
+      · testvendor ledger in_sync TRUE.
+      NOTE for future tests: never write vendor_earnings/wallet_balance
+      directly and never delete engine transaction rows in cleanup — that is
+      what put the seller's statement out of step (fixed in both new tests;
+      scripts/reconcile_vendor_ledger.py can now be run repeatedly).
+
+  - agent: "main"
+    message: |
+      Android DEX / R8 optimisation (Play Console "Obfuscation 1%").
+      ROOT CAUSE: app.json → expo-build-properties → android had
+      enableProguardInReleaseBuilds=false and
+      enableShrinkResourcesInReleaseBuilds=false, so release builds ran D8
+      only — never R8. No mapping.txt was ever produced, which is why Play
+      showed 1% obfuscation and blank optimisation/shrinking percentages, and
+      why the DEX is 29.5 MB.
+      CHANGED: both flags → true, and extraProguardRules expanded 8 → 64
+      reviewed keep rules, mirrored in the new, documented
+      frontend/android/proguard-rules.pro (the file to edit; the app.json
+      string is generated from it). Rules cover every reflection surface in
+      this app: RN bridge/TurboModules/ReactProp, Expo modules, Hermes/JNI,
+      Reanimated + Worklets, Gesture Handler, Screens, SVG,
+      @JavascriptInterface + WebViewClient (Razorpay checkout runs in the
+      WebView), Firebase/GMS + FirebaseMessagingService, androidx.biometric /
+      security.crypto / camera, OkHttp/Okio, Kotlin metadata, Parcelable,
+      enums, and SourceFile+LineNumberTable so stack traces still de-obfuscate.
+      NOT done on purpose: no AGP 9.0 (Expo SDK 54 / RN 0.81 pin AGP 8.x —
+      forcing 9 breaks prebuild; R8 on AGP 8 already satisfies the signal, and
+      full mode is the AGP 8 default), no native minifyEnabled edits (prebuild
+      regenerates the project), no change to applicationId
+      (com.slangcart.app), signing, permissions, archs, JS or APIs.
+      VERIFIED HERE: `npx expo config --type public` resolves with both flags
+      true and all 64 rules, app.json is valid JSON, preview still boots.
+      CANNOT be verified here: this container has no JDK / Gradle / Android
+      SDK, so the AAB, its DEX size and mapping.txt must come from
+      Publish → Android build. The build log must show
+      :app:minifyReleaseWithR8 and the artefact must contain
+      mapping/release/mapping.txt — no mapping means R8 did not run.
+      Full audit + the release checklist: /app/memory/ANDROID_R8_OPTIMIZATION.md

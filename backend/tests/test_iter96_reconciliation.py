@@ -64,8 +64,8 @@ class TestSettlementReconciliation:
         close_open_withdrawals(H)
         v = db.users.find_one({"id": VID})
         if float(v.get("vendor_earnings") or 0) < 5200:
-            db.users.update_one({"id": VID}, {"$inc": {"vendor_earnings": 6000}})
-            pytest.skip("vendor wallet too low; topped — rerun")
+            # Never write vendor_earnings directly (breaks ledger sync) — fund via core.shop_money.credit.
+            pytest.skip("vendor wallet too low — fund it through core.shop_money.credit, then rerun")
         rid = seed_outstanding(100)
         try:
             n0 = nw(H)

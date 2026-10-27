@@ -51,6 +51,9 @@ export default function ServiceApply() {
   const [subcategories, setSubcategories] = useState<{ id: string; name: string; icon?: string }[]>([]);
   const [pincode, setPincode] = useState("");
   const [description, setDescription] = useState("");
+  // Jun-2026 — the provider's own VISIT CHARGES: what a customer pays him to
+  // come and look at the job. He can change it any time from his login.
+  const [visitCharge, setVisitCharge] = useState("");
   const [languages, setLanguages] = useState<string[]>([]);
   const [acceptTerms, setAcceptTerms] = useState(false);
   // Sept 2026 — Full T&C acceptance panel (mirror of web /become-provider).
@@ -80,6 +83,7 @@ export default function ServiceApply() {
     setPincode(listing.service_pincode || "");
     setDescription(listing.service_description || "");
     setLanguages(listing.service_languages || []);
+    setVisitCharge(listing.service_charge ? String(listing.service_charge) : "");
   };
 
   useEffect(() => {
@@ -118,6 +122,7 @@ export default function ServiceApply() {
           setPincode(data.application.pincode || "");
           setDescription(data.application.description || "");
           setLanguages(data.application.languages || []);
+          setVisitCharge(data.application.charge ? String(data.application.charge) : "");
         }
       } finally {
         setLoading(false);
@@ -185,6 +190,7 @@ export default function ServiceApply() {
           pincode,
           description: description.trim() || null,
           languages,
+          visit_charge: visitCharge.trim() === "" ? undefined : Number(visitCharge),
         });
         Alert.alert("Saved", "Your service details have been updated.", [
           { text: "OK", onPress: () => router.back() },
@@ -442,6 +448,23 @@ export default function ServiceApply() {
             editable={!locked}
           />
 
+          {/* Jun-2026 — visit charges, set by the provider himself. */}
+          <Text style={styles.label}>Visit charges (₹)</Text>
+          <TextInput
+            value={visitCharge}
+            onChangeText={setVisitCharge}
+            style={styles.input}
+            placeholder="e.g. 200 — leave empty for “On request”"
+            placeholderTextColor={colors.textMuted}
+            keyboardType="decimal-pad"
+            editable={!locked}
+            testID="apply-visit-charge"
+          />
+          <Text style={styles.helper}>
+            What a customer pays you to visit and look at the job. Shown on your card as
+            “Visit charges”. You can change it any time from this screen.
+          </Text>
+
           {/* Phone-reveal model — replaces the old "charge per booking" field.
               Customers pay a small platform fee to unlock the provider's number;
               the provider keeps 100% of whatever they earn off-platform. */}
@@ -459,7 +482,7 @@ export default function ServiceApply() {
               </Text>{" "}
               from them to reveal your phone number. You keep{" "}
               <Text style={{ fontWeight: "800", color: colors.success }}>100%</Text> of whatever
-              you charge the customer directly after that. There's no booking fee or commission
+              you charge the customer directly after that. There&apos;s no booking fee or commission
               on your earnings.
             </Text>
             {/* Sept 2026 — Full T&C panel for FIRST-TIME apply. Approved
@@ -573,6 +596,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   inlineErrorText: { color: colors.error, fontSize: 12, fontWeight: "700", flex: 1 },
+  helper: { fontSize: 11.5, color: colors.textMuted, marginTop: 6, lineHeight: 16 },
   label: {
     fontSize: 12, fontWeight: "700", color: colors.textMuted,
     marginTop: 14, marginBottom: 8, letterSpacing: 0.6,
