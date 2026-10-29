@@ -653,7 +653,7 @@ export function ShopHome({
       >
         <LocationBanner />
         {/* Free-tier upsell — hidden automatically for subscribed users. */}
-        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 10 }}>
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
           <SubscribeBanner compact />
         </View>
         {addedFlash ? (

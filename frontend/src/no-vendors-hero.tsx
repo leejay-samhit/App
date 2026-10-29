@@ -48,7 +48,7 @@ export function NoVendorsHero({ location, onBecomeVendor, compact }: Props) {
   };
 
   return (
-    <View style={[styles.wrap, compact && { paddingTop: 12 }]} testID="no-vendors-hero">
+    <View style={[styles.wrap, compact && { paddingTop: 0 }]} testID="no-vendors-hero">
       <View style={styles.card}>
         {/* Decorative accent strip */}
         <View style={styles.accent} />

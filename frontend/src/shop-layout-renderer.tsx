@@ -1470,7 +1470,7 @@ const styles = StyleSheet.create({
   slideTitle: { fontSize: 20, fontWeight: "900", color: "#fff", letterSpacing: -0.4, marginTop: 2 },
   slideCta: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, marginTop: 8, alignSelf: "flex-start" },
   slideCtaText: { fontSize: 11, fontWeight: "800" },
-  dotsRow: { flexDirection: "row", justifyContent: "center", gap: 5, marginTop: 8 },
+  dotsRow: { flexDirection: "row", justifyContent: "center", gap: 5, marginTop: 6 },
   dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.border },
   dotActive: { backgroundColor: colors.primary, width: 18 },
   // Category circles — equal width / icon size / spacing per spec.

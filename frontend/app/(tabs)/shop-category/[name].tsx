@@ -35,6 +35,12 @@ export default function ShopCategoryScreen() {
   // Aug 2026 — Bumped on every pull-to-refresh; passed down to
   // ShopLayoutRenderer so it re-fetches its admin-managed blocks live.
   const [refreshTick, setRefreshTick] = useState(0);
+  // Oct 2026 — spacing parity with the Shop home: when the admin HAS built
+  // layout blocks for this category, ContentContainer already leaves the
+  // 16 dp section gap above the grid/hero; when there are NO blocks, the
+  // grid wrapper is the first thing under the chips and must add that same
+  // 16 dp itself so the page keeps one format.
+  const [layoutBlockCount, setLayoutBlockCount] = useState(-1);
   // Sept 2026 — Cascading sub-category filter.  When the user taps a
   // sub-category chip at the top of the category screen, we filter the
   // product grid to only products that carry that sub_category value.
@@ -318,6 +324,7 @@ export default function ShopCategoryScreen() {
             const p = products.find((x) => x.id === id);
             onAddToCart(p || ({ id, name: "Item" } as any));
           }}
+          onBlocksResolved={setLayoutBlockCount}
         />
 
         {/* Product grid — Dec 2026: ALWAYS renders below the admin's
@@ -325,12 +332,11 @@ export default function ShopCategoryScreen() {
             banners without the grid disappearing, and the empty state
             uses the same location-aware NoVendorsHero regardless of
             whether a sub-filter is active.
-            Jun 2026 — the old `paddingTop: spacing.screen` stacked on top of
-            the renderer's own 16 dp footer + ContentContainer margin, which
-            left a ~48 dp dead band between the last block and the first
-            product row.  Trimmed to 2 dp and given a real section heading so
-            the break reads as intentional. */}
-        <View style={{ paddingHorizontal: spacing.screen, paddingTop: 2 }}>
+            Oct 2026 — ONE spacing format across the whole page: the only
+            vertical gap between any two sections is the 16 dp that
+            ContentContainer applies after the last layout block, so this
+            wrapper adds no top padding of its own. */}
+        <View style={{ paddingHorizontal: spacing.screen, paddingTop: layoutBlockCount === 0 ? 16 : 0 }}>
         {!loadingProducts && filtered.length > 0 ? (
           <View style={styles.gridHeadRow}>
             <Text style={styles.gridHeadTitle}>
@@ -424,7 +430,7 @@ const styles = StyleSheet.create({
   // Jun 2026 — heading above the category product grid
   gridHeadRow: {
     flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between",
-    gap: 8, marginTop: 10, marginBottom: 10,
+    gap: 8, marginBottom: 10,
   },
   gridHeadTitle: { fontSize: 15, fontWeight: "900", color: colors.textMain, letterSpacing: -0.3, flexShrink: 1 },
   gridHeadCount: { fontSize: 11.5, fontWeight: "700", color: colors.textMuted },

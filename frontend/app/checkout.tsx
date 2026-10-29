@@ -150,16 +150,28 @@ export default function CheckoutScreen() {
     taxable_value: number; cgst_amount: number; sgst_amount: number;
     total_gst: number; by_rate: any[];
   } | null>(null);
+  // Oct-2026 — the bag's delivery quote, computed by the SERVER with each
+  // seller's own delivery rule. Checkout used to recompute locally from the
+  // admin defaults only, so Buy Now (which lands here directly) could show
+  // the platform default instead of the vendor's configured charge.
+  const [serverDelivery, setServerDelivery] = useState<{
+    enabled: boolean; total: number; free: boolean; capped?: boolean;
+    cart_max?: number; add_more_for_free?: number; hint?: string;
+    per_seller?: { vendor_key: string; vendor_name: string; subtotal: number;
+      charge: number; free: boolean; reason?: string; free_above?: number;
+      add_more_for_free?: number }[];
+  } | null>(null);
 
   const load = useCallback(async () => {
     try {
       const [cRes, meRes, pRes] = await Promise.all([
-        api.get<{ items: CartItem[]; gst_summary?: any }>("/cart"),
+        api.get<{ items: CartItem[]; gst_summary?: any; delivery?: any }>("/cart"),
         api.get<any>("/auth/me"),
         api.get<any>("/orders/payment/pending").catch(() => ({ data: { pending: null } })),
       ]);
       setItems(cRes.data?.items || []);
       setGstSummary(cRes.data?.gst_summary || null);
+      setServerDelivery(cRes.data?.delivery || null);
       const bal = Number(meRes.data?.wallet_balance || 0);
       setWalletBalance(bal);
       setPendingPay(pRes.data?.pending || null);
@@ -223,11 +235,13 @@ export default function CheckoutScreen() {
   });
   const multiSeller = sellerGroups.length > 1;
 
-  // ── Delivery charges (Jun-2026) ──────────────────────────────────────
-  // Mirrors core/delivery_charges.py: priced per seller from that seller's
-  // own subtotal, then capped for the whole cart. The server recomputes
-  // and is authoritative — this is so the buyer sees the same figure.
-  const deliveryRows = sellerGroups.map((g) => {
+  // ── Delivery charges ────────────────────────────────────────────────
+  // Oct-2026 fix — the SERVER'S quote (same one the bag screen shows) is
+  // authoritative for display: it applies each seller's own
+  // delivery_charge_flat / delivery_free_threshold override. The local
+  // mirror below only knows the admin defaults and stays purely as a
+  // fallback for an older backend that doesn't return a quote.
+  const localDeliveryRows = sellerGroups.map((g) => {
     const allFree = g.lines.every((l) => !!l.product?.free_delivery);
     if (!moneyCfg.delivery_charge_enabled || allFree) return { key: g.key, charge: 0, free: true };
     if (moneyCfg.delivery_free_threshold > 0 && g.subTotal >= moneyCfg.delivery_free_threshold - 0.009) {
@@ -235,9 +249,15 @@ export default function CheckoutScreen() {
     }
     return { key: g.key, charge: moneyCfg.delivery_charge_flat, free: moneyCfg.delivery_charge_flat <= 0 };
   });
-  const deliveryRaw = Math.round(deliveryRows.reduce((a, r) => a + r.charge, 0) * 100) / 100;
-  const deliveryCapped = moneyCfg.delivery_cart_max > 0 && deliveryRaw > moneyCfg.delivery_cart_max;
-  const deliveryTotal = deliveryCapped ? moneyCfg.delivery_cart_max : deliveryRaw;
+  const localDeliveryRaw = Math.round(localDeliveryRows.reduce((a, r) => a + r.charge, 0) * 100) / 100;
+  const localDeliveryCapped = moneyCfg.delivery_cart_max > 0 && localDeliveryRaw > moneyCfg.delivery_cart_max;
+  const localDeliveryTotal = localDeliveryCapped ? moneyCfg.delivery_cart_max : localDeliveryRaw;
+
+  const serverBySeller: Record<string, any> = {};
+  (serverDelivery?.per_seller || []).forEach((s) => { serverBySeller[s.vendor_key] = s; });
+  const deliveryTotal = serverDelivery ? Math.round(Number(serverDelivery.total || 0) * 100) / 100 : localDeliveryTotal;
+  const deliveryCapped = serverDelivery ? !!serverDelivery.capped : localDeliveryCapped;
+  const deliveryCartMax = serverDelivery ? Number(serverDelivery.cart_max || 0) : moneyCfg.delivery_cart_max;
   // Cashback promised on this basket — paid after successful delivery.
   const cashbackTotal = Math.round(items.reduce((a, i) => a + cashbackAmount(
     i.line_total || (i.product?.price || 0) * (i.qty || 1),
@@ -594,7 +614,16 @@ export default function CheckoutScreen() {
                     <Text style={styles.sellerBadgeText}>ORDER {gi + 1}</Text>
                   </View>
                   <Text style={styles.sellerName} numberOfLines={1}>{g.name}</Text>
-                  <Text style={styles.sellerSub}>{formatINR(g.subTotal)}</Text>
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Text style={styles.sellerSub}>{formatINR(g.subTotal)}</Text>
+                    {serverBySeller[g.key] ? (
+                      <Text style={[styles.sellerDelivery, (serverBySeller[g.key].free || serverBySeller[g.key].charge <= 0) && { color: colors.success }]}>
+                        {serverBySeller[g.key].free || serverBySeller[g.key].charge <= 0
+                          ? "Free delivery"
+                          : `+ ${formatINR(serverBySeller[g.key].charge)} delivery`}
+                      </Text>
+                    ) : null}
+                  </View>
                 </View>
               ) : null}
               {g.lines.map((it) => {
@@ -672,7 +701,7 @@ export default function CheckoutScreen() {
           ) : null}
           <View style={styles.breakdownRow} testID="checkout-delivery-row">
             <Text style={styles.breakdownLabel}>
-              Delivery{deliveryCapped ? ` (capped at ${formatINR(moneyCfg.delivery_cart_max)})` : ""}
+              Delivery{deliveryCapped ? ` (capped at ${formatINR(deliveryCartMax)})` : ""}
             </Text>
             <Text style={[styles.breakdownValue, deliveryTotal <= 0 && { color: colors.success }]}>
               {deliveryTotal <= 0 ? "FREE" : formatINR(deliveryTotal)}
@@ -1040,6 +1069,7 @@ const styles = StyleSheet.create({
   sellerBadgeText: { fontSize: 9.5, fontWeight: "900", color: colors.primaryFg, letterSpacing: 0.6 },
   sellerName: { flex: 1, fontSize: 12, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
   sellerSub: { fontSize: 12, fontWeight: "800", color: colors.primary },
+  sellerDelivery: { fontSize: 11, fontWeight: "700", color: colors.textMuted, marginTop: 1 },
 
   lineItem: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
   thumb: { width: 68, height: 68, borderRadius: 12, backgroundColor: colors.surfaceMuted },

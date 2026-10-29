@@ -638,7 +638,7 @@ const styles = StyleSheet.create({
   confirmBtnGhostText: { fontSize: 14, fontWeight: "800", color: colors.textMain },
   confirmBtnText: { fontSize: 14, fontWeight: "800", color: colors.primaryFg },
 
-  bannerWrap: { marginBottom: 14 },
+  bannerWrap: { marginBottom: 16 },
   banner: {
     flexDirection: "row", alignItems: "center", gap: 12, borderRadius: 18, padding: 14,
     overflow: "hidden",

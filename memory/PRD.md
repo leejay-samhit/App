@@ -2869,3 +2869,26 @@ that set `number_verified` MUST restore it or real users lose chat.
 - Note for the owner: if edits were made on the DEPLOYED app while viewing
   the PREVIEW app (or vice versa), the two use different databases — save
   and view in the same environment.
+
+### Oct-2026 — Buy Now delivery price + shop spacing fixes
+1. **Buy Now delivery price**: `app/checkout.tsx` used to recompute delivery
+   locally from the ADMIN defaults only, ignoring per-vendor overrides
+   (`delivery_charge_flat` / `delivery_free_threshold` on the vendor doc).
+   Buy Now lands directly on checkout, so customers saw the platform default
+   instead of the vendor's configured charge; the cart page looked right
+   because it displays the server quote. Checkout now renders the server's
+   `/cart` delivery quote (same vendor-wise engine, `compute_cart_delivery`,
+   that the bag screen and order placement use), with the old local mirror
+   kept only as a fallback for older backends. Multi-seller checkouts also
+   show a per-seller "Free delivery" / "+ ₹X delivery" line. Verified live:
+   vendor override ₹25 vs admin default ₹40 — checkout now shows ₹25.
+2. **One-format shop spacing**: every vertical gap between sections is now
+   the single 16 dp section gap (ContentContainer). Fixed outliers:
+   NoVendorsHero compact mode dropped its extra 12 dp top padding (the huge
+   banner→"not live yet" gap), the category grid wrapper dropped its extra
+   2 dp + heading 10 dp top margins, banner dots tightened (8→6), subscribe
+   banner wrap 14→16, and the category page adds the same 16 dp top gap
+   itself only when the admin has built no layout blocks (tracked via
+   onBlocksResolved). Files: app/checkout.tsx, app/(tabs)/shop-category/[name].tsx,
+   src/no-vendors-hero.tsx, src/shop-layout-renderer.tsx, src/subscription.tsx,
+   src/shop-home.tsx.
