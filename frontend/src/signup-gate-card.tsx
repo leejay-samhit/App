@@ -21,6 +21,11 @@ import {
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { api, formatApiError } from "./api";
+import {
+  isTruecallerModuleAvailable,
+  isTruecallerUsable,
+  requestTruecallerCode,
+} from "../modules/truecaller";
 import { useAuth } from "./auth";
 import { colors, radii } from "./theme";
 
@@ -48,6 +53,12 @@ export function SignupGateCard({ onPassed }: Props) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [conflict, setConflict] = useState<Conflict | null>(null);
+  // Truecaller one-tap — only offered when the module is in this build AND
+  // the backend says a client ID is configured AND the SDK reports itself
+  // usable on this handset. Any "no" simply shows the manual form instead.
+  const [tcAvailable, setTcAvailable] = useState(false);
+  const [tcBusy, setTcBusy] = useState(false);
+  const [method, setMethod] = useState<string>("");
 
   const load = useCallback(async () => {
     try {
@@ -55,17 +66,77 @@ export function SignupGateCard({ onPassed }: Props) {
       setRequired(!!data.required);
       if (data.phone) setPhone(String(data.phone));
       if (data.referral_code_used) setCode(String(data.referral_code_used));
+      setMethod(data.phone_verified ? String(data.phone_verified_method || "") : "");
       if (!data.required) onPassed();
     } catch {
-      // Never hard-block the screen on a status read — the confirm call is
-      // the real gate and it re-validates everything server-side.
-      setRequired(false);
-      onPassed();
+      // A failed status read must NOT unlock the screen: the confirm call is
+      // the real gate, and leaving it open would let both options through on
+      // a flaky connection.
+      setRequired(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Decide once whether the Truecaller button can be shown at all.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!isTruecallerModuleAvailable()) return;
+      try {
+        const { data } = await api.get("/auth/truecaller/availability");
+        if (!data?.configured) return;
+        const usable = await isTruecallerUsable();
+        if (alive) setTcAvailable(usable);
+      } catch {
+        /* leave the manual form as the only option */
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const onTruecaller = async () => {
+    setError("");
+    setNotice("");
+    setConflict(null);
+    setTcBusy(true);
+    try {
+      // The SERVER mints the state + PKCE challenge and keeps the verifier,
+      // so a tapped button alone can never produce a verified number.
+      const { data: started } = await api.post("/auth/truecaller/start", { purpose: "registration" });
+      const res = await requestTruecallerCode(started.state, started.code_challenge);
+      const { data } = await api.post("/auth/truecaller/verify", {
+        state: started.state,
+        authorization_code: res.authorizationCode,
+        referral_code: code.trim() || undefined,
+      });
+      setPhone(String(data.phone || ""));
+      setCode(data.invite_code || code);
+      setMethod("truecaller");
+      setNotice("Mobile number verified with Truecaller.");
+      await refresh();
+      setRequired(false);
+      onPassed();
+    } catch (e: any) {
+      const reason = String(e?.message || "");
+      if (reason === "unavailable" || reason === "oauth_unavailable") {
+        setTcAvailable(false);
+        setError("Truecaller isn't available on this phone. Please enter your number below.");
+      } else if (reason === "verification_required" || reason === "state_mismatch") {
+        setError("That didn't complete. Please enter your number below instead.");
+      } else if (reason === "timeout" || reason === "already_in_progress") {
+        setError("Verification timed out. Tap the button again, or enter your number below.");
+      } else if (e?.response) {
+        // A real server answer (duplicate number, expired attempt, etc.)
+        setError(formatApiError(e));
+      } else {
+        setError("Truecaller was cancelled or unavailable. You can enter your number below.");
+      }
+    } finally {
+      setTcBusy(false);
+    }
+  };
 
   const onConfirm = async () => {
     setError("");
@@ -118,9 +189,12 @@ export function SignupGateCard({ onPassed }: Props) {
           <Feather name="check" size={14} color={colors.primaryFg} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.doneTitle}>Mobile confirmed</Text>
+          <Text style={styles.doneTitle}>
+            {method === "truecaller" ? "Mobile verified" : "Mobile number saved"}
+          </Text>
           <Text style={styles.doneSub}>
-            {phone ? `+91 ${phone}` : "Verified"}
+            {phone ? `+91 ${phone}` : "Saved"}
+            {method === "truecaller" ? " · verified with Truecaller" : ""}
             {code ? ` · invited by ${code}` : ""}
           </Text>
         </View>
@@ -132,15 +206,46 @@ export function SignupGateCard({ onPassed }: Props) {
     <View style={styles.card} testID="signup-gate-card">
       <View style={styles.badge}>
         <Feather name="lock" size={11} color={colors.accentFg} />
-        <Text style={styles.badgeText}>ONE STEP TO UNLOCK</Text>
+        <Text style={styles.badgeText}>STEP 1 · VERIFY YOUR MOBILE NUMBER</Text>
       </View>
 
-      <Text style={styles.title}>Confirm your mobile number</Text>
+      <Text style={styles.title}>Verify your mobile number</Text>
       <Text style={styles.sub}>
-        We need a mobile number on your account before you choose a plan. Your
-        invite code is optional — leave it blank and you&apos;ll join under the
-        official Slangcart code.
+        {tcAvailable
+          ? "One tap with Truecaller confirms the number is really yours — no SMS code to wait for. "
+          : "We need a mobile number on your account before you choose how to continue. "}
+        Your invite code is optional: leave it blank and you&apos;ll join under the official
+        Slangcart code.
       </Text>
+
+      {tcAvailable && (
+        <>
+          <TouchableOpacity
+            onPress={onTruecaller}
+            disabled={tcBusy || busy}
+            style={[styles.tcBtn, (tcBusy || busy) && { opacity: 0.6 }]}
+            testID="gate-truecaller-button"
+          >
+            {tcBusy ? (
+              <ActivityIndicator color={colors.primaryFg} size="small" />
+            ) : (
+              <>
+                <Feather name="shield" size={16} color={colors.primaryFg} />
+                <Text style={styles.tcBtnText}>Verify with Truecaller</Text>
+              </>
+            )}
+          </TouchableOpacity>
+          <Text style={styles.tcHint}>
+            Needs the Truecaller app on this phone. You&apos;ll see Truecaller&apos;s own consent
+            screen — we never see your Truecaller password.
+          </Text>
+          <View style={styles.orRow}>
+            <View style={styles.orLine} />
+            <Text style={styles.orText}>OR ENTER IT MANUALLY</Text>
+            <View style={styles.orLine} />
+          </View>
+        </>
+      )}
 
       <Text style={styles.label}>
         MOBILE NUMBER <Text style={styles.req}>· required</Text>
@@ -329,4 +434,19 @@ const styles = StyleSheet.create({
   },
   doneTitle: { fontSize: 13, fontWeight: "900", color: colors.textMain },
   doneSub: { fontSize: 11.5, color: colors.textMuted, marginTop: 1 },
+  tcBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    minHeight: 48,
+    borderRadius: radii.button,
+    backgroundColor: colors.primary,
+    marginTop: 4,
+  },
+  tcBtnText: { color: colors.primaryFg, fontSize: 15, fontWeight: "800" },
+  tcHint: { fontSize: 11.5, color: colors.textMuted, lineHeight: 17, marginTop: 6 },
+  orRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 14, marginBottom: 4 },
+  orLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  orText: { fontSize: 10, fontWeight: "900", color: colors.textMuted, letterSpacing: 0.6 },
 });

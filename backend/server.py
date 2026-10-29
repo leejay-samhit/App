@@ -1016,6 +1016,22 @@ async def _trigger_referral_commissions(user: Dict[str, Any]) -> None:
 
 
 
+
+async def _assert_signup_gate_passed(user: Dict[str, Any]) -> None:
+    """Oct-2026 — the mobile-number gate is enforced HERE, not only in the UI.
+
+    Both registration choices ("Pay ₹118" and "Continue Without Fee") require a
+    mobile number on the account first. The screen locks them, but a direct
+    API call used to sail straight through.
+    """
+    if user.get("signup_gate_confirmed_at") or user.get("phone_verified"):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Verify your mobile number before choosing how to continue.",
+    )
+
+
 @api_router.post("/payment/skip-subscription")
 async def skip_subscription(user: Dict[str, Any] = Depends(get_current_user)):
     """Free entry — "Continue without subscription" (Aug-2026).
@@ -1028,6 +1044,7 @@ async def skip_subscription(user: Dict[str, Any] = Depends(get_current_user)):
     """
     if user.get("registration_paid"):
         return {"ok": True, "already_paid": True, "subscription_skipped": False}
+    await _assert_signup_gate_passed(user)
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
@@ -1038,36 +1055,11 @@ async def skip_subscription(user: Dict[str, Any] = Depends(get_current_user)):
     return {"ok": True, "subscription_skipped": True}
 
 
-@api_router.post("/payment/register-fee")
-async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user)):
-    """BACKWARD-COMPAT: Instant mock registration fee payment. Marks account paid.
-    New flows should prefer /payment/create-order + /payment/verify (Razorpay-compatible).
-    Note: referral commissions are NOT triggered here anymore — they trigger only after
-    admin approves the user via /admin/approvals/{id}/approve."""
-    if user.get("registration_paid"):
-        raise HTTPException(status_code=400, detail="Registration fee already paid")
-
-    settings = await get_settings()
-    fee = settings["registration_fee"]
-
-    txn_id = str(uuid.uuid4())
-    await db.users.update_one({"id": user["id"]}, {"$set": {"registration_paid": True}})
-    await db.transactions.insert_one({
-        "id": txn_id,
-        "user_id": user["id"],
-        "type": "registration_fee",
-        "amount": fee,
-        "status": "paid",
-        "description": "Registration fee (legacy mock)",
-        "created_at": now_utc().isoformat(),
-    })
-    await _create_notification(
-        user["id"],
-        "welcome",
-        "Account activated — pending approval",
-        "Thanks! Your registration is paid. An admin will review your profile shortly.",
-    )
-    return {"ok": True, "transaction_id": txn_id, "amount": fee, "approval_status": "pending"}
+# REMOVED Oct-2026 — `POST /payment/register-fee` was a legacy "instant mock
+# payment" endpoint that marked ANY logged-in account registration_paid=true
+# and wrote a fake ₹118 "paid" transaction, which then earned the ₹50 cashback
+# at admin approval. It bypassed Razorpay entirely. Registration payment now
+# has exactly one route: /payment/create-order -> /payment/verify.
 
 
 # ------------------ Razorpay-compatible payment flow (mock fallback) ------------------
@@ -1082,6 +1074,13 @@ async def pay_registration_fee(user: Dict[str, Any] = Depends(get_current_user))
 RAZORPAY_ENV_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "").strip()
 RAZORPAY_ENV_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
 MAX_PAYMENT_ATTEMPTS = 3
+
+# Mock/sandbox Razorpay settlement is a DEVELOPMENT convenience: the gateway
+# is simulated, so the client signs its own callback and the backend has no
+# real signature to verify. Allowed in preview, must be switched off (or made
+# irrelevant by adding live Razorpay keys) before taking real money.
+ALLOW_MOCK_PAYMENTS = (os.environ.get("ALLOW_MOCK_PAYMENTS", "true").strip().lower()
+                       not in ("0", "false", "no", "off"))
 
 
 async def get_razorpay_creds() -> Dict[str, Any]:
@@ -1140,6 +1139,9 @@ async def payment_config(user: Dict[str, Any] = Depends(get_current_user)):
     return {
         "key_id": creds["key_id"] or "rzp_test_MOCK",
         "is_mock": creds["is_mock"],
+        # False when the gateway is simulated AND mock settlement is switched
+        # off — the UI then offers only "Continue Without Fee".
+        "payment_enabled": bool(not creds["is_mock"] or ALLOW_MOCK_PAYMENTS),
         "amount": fee,  # rupees
         "amount_paise": int(round(fee * 100)),
         "currency": "INR",
@@ -1162,6 +1164,7 @@ async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user))
     """Create a Razorpay order (or mock order in dev). Returns order_id for checkout."""
     if user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Registration fee already paid")
+    await _assert_signup_gate_passed(user)
 
     attempts = int(user.get("payment_attempts") or 0)
     if attempts >= MAX_PAYMENT_ATTEMPTS:
@@ -1234,13 +1237,38 @@ async def payment_create_order(user: Dict[str, Any] = Depends(get_current_user))
 async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = Depends(get_current_user)):
     """Verify Razorpay payment signature, cross-check with Razorpay server (UTR/amount/status),
     and auto-approve the user if `settings.auto_approve_on_payment` is True (default)."""
+    # Idempotency FIRST: a gateway/app retry of the same order must get a calm
+    # "already done", not "already paid" — and must never re-credit anything.
+    settled = await db.transactions.find_one({
+        "user_id": user["id"],
+        "type": "registration_fee",
+        "razorpay_order_id": payload.razorpay_order_id,
+        "status": {"$in": ["success", "paid", "completed"]},
+    })
+    if settled:
+        return {
+            "status": "success",
+            "already_processed": True,
+            "order_id": payload.razorpay_order_id,
+        }
     if user.get("registration_paid"):
         raise HTTPException(status_code=400, detail="Registration fee already paid")
+    await _assert_signup_gate_passed(user)
 
     if not payload.razorpay_signature or not payload.razorpay_payment_id or not payload.razorpay_order_id:
         raise HTTPException(status_code=400, detail="Missing Razorpay fields")
 
     creds = await get_razorpay_creds()
+    if creds["is_mock"] and not ALLOW_MOCK_PAYMENTS:
+        # Oct-2026 hardening. In mock mode the gateway is simulated, so the
+        # client supplies its own "signature" and there is nothing real to
+        # check. That is fine for development, and a disaster if a build ever
+        # ships without live Razorpay keys. Refuse to settle rather than hand
+        # out a paid registration on the client's word.
+        raise HTTPException(
+            status_code=503,
+            detail="Online payment is not configured yet. Please use 'Continue Without Fee' or try again later.",
+        )
     if not creds["is_mock"]:
         import hmac
         import hashlib
@@ -1255,6 +1283,22 @@ async def payment_verify(payload: VerifyPaymentRequest, user: Dict[str, Any] = D
     settings = await get_settings()
     fee = settings["registration_fee"]
     expected_paise = int(round(fee * 100))
+
+    # ── Oct-2026 — the order must be one WE created for THIS user and still
+    # be awaiting payment. Without this, a caller could post any order id and
+    # (in sandbox, where the gateway itself is simulated) be marked paid for
+    # an order that never existed. Also closes repeated callbacks: the row is
+    # only "created" once, so a replay finds nothing to settle.
+    pending = await db.transactions.find_one({
+        "user_id": user["id"],
+        "type": "registration_fee",
+        "razorpay_order_id": payload.razorpay_order_id,
+    })
+    if not pending:
+        raise HTTPException(
+            status_code=400,
+            detail="We couldn't match this payment to your registration order. Please start again.",
+        )
 
     # ---------------- Cross-check with Razorpay server (live mode only) ----------------
     rzp_payment = await _fetch_razorpay_payment(payload.razorpay_payment_id, creds)
@@ -7575,6 +7619,13 @@ async def on_startup():
         # challenges, audit lookups, unique device-link codes.
         from core import sim_binding as _sim_binding
         await _sim_binding.ensure_indexes()
+        # Truecaller one-tap: single-use OAuth states with a TTL.
+        from routes import truecaller_auth as _tc_auth
+        await _tc_auth.ensure_indexes()
+        # Unique index on the normalised phone — the real guard against two
+        # accounts confirming the same number in a race.
+        from routes import signup_gate as _signup_gate
+        await _signup_gate.ensure_indexes()
         # Push diagnostics (Sep 2026): the send log is evidence, not data —
         # keep 30 days of it and index the lookups the admin screen uses.
         try:
@@ -10869,6 +10920,9 @@ app.include_router(subscription_router.router, prefix="/api")
 
 from routes import sim_binding as sim_binding_router  # noqa: E402
 app.include_router(sim_binding_router.router, prefix="/api")
+
+from routes import truecaller_auth as truecaller_auth_router  # noqa: E402
+app.include_router(truecaller_auth_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

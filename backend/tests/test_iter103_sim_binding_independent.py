@@ -134,14 +134,18 @@ def test_sim_present_never_sets_number_verified(ctx):
     assert not doc.get("number_verified")
 
 
-def test_number_proof_dormant_503(ctx):
+def test_number_proof_never_self_asserts(ctx):
     ch = _ch(ctx["uh"], ctx)
     r = S.post(f"{BASE}/sim-binding/number-proof", headers=ctx["uh"], json={
         "challenge_id": ch["challenge_id"], "nonce": ch["nonce"], "provider": "truecaller",
         "code": "FAKE-CODE-123", "code_verifier": "v" * 50})
-    assert r.status_code == 503
+    # 503 before a provider is configured, 401 after (Truecaller rejects the
+    # fake code). Never 200.
+    assert r.status_code in (401, 503)
     st = S.get(f"{BASE}/sim-binding/status", headers=ctx["uh"]).json()
-    assert st["number_verified"] is False and st["number_proof_available"] is False
+    # The number must stay unverified whatever happens; whether a provider is
+    # configured depends on the deployment (Truecaller Client ID present).
+    assert st["number_verified"] is False
 
 
 def test_revalidate_blocks_chat_then_recheck_unblocks(ctx):
@@ -274,7 +278,11 @@ def test_admin_only_and_clamp(ctx):
     assert S.get(f"{BASE}/admin/sim-binding/overview", headers=uh).status_code == 403
     assert S.patch(f"{BASE}/admin/sim-binding/policy", headers=uh, json={"enforce_chat": False}).status_code == 403
     p = S.patch(f"{BASE}/admin/sim-binding/policy", headers=ah, json={"required_level": "number_verified"}).json()
-    assert p["required_level"] == "sim_presence" and p["clamped_to_sim_presence"] is True
+    if p["number_proof_available"]:
+        assert p["required_level"] == "number_verified" and p["clamped_to_sim_presence"] is False
+    else:
+        assert p["required_level"] == "sim_presence" and p["clamped_to_sim_presence"] is True
+    S.patch(f"{BASE}/admin/sim-binding/policy", headers=ah, json={"required_level": "sim_presence"})
     assert S.patch(f"{BASE}/admin/sim-binding/policy", headers=ah, json={"required_level": "god"}).status_code == 400
     p = S.patch(f"{BASE}/admin/sim-binding/policy", headers=ah, json={"enforce_chat": False, "required_level": "sim_presence"}).json()
     assert p["enforce_chat"] is False

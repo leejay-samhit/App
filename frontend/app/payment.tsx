@@ -17,6 +17,7 @@ type PayMethod = "upi" | "card" | "netbanking";
 type PayConfig = {
   key_id: string;
   is_mock: boolean;
+  payment_enabled?: boolean;
   amount: number;
   amount_paise: number;
   currency: string;
@@ -49,7 +50,6 @@ export default function Payment() {
   // Oct-2026 owner rule — BOTH payment options stay locked until the mobile
   // number (mandatory) and invite code (optional) are confirmed.
   const [gatePassed, setGatePassed] = useState(false);
-
   // Native WebView Razorpay checkout state
   const [rzpVisible, setRzpVisible] = useState(false);
   const [rzpHtml, setRzpHtml] = useState<string>("");
@@ -70,6 +70,23 @@ export default function Payment() {
 
   const onStartCheckout = () => {
     if (!config) return;
+    // Belt and braces: the button is already disabled in both of these
+    // states, but a stale render must never start a checkout the backend
+    // will refuse anyway.
+    if (!gatePassed) {
+      Alert.alert(
+        "Verify your mobile number first",
+        "Please confirm your mobile number in Step 1, then choose how to continue.",
+      );
+      return;
+    }
+    if (config.payment_enabled === false) {
+      Alert.alert(
+        "Online payment unavailable",
+        "Online payment is being set up. You can continue free for now and pay later from your profile.",
+      );
+      return;
+    }
     if (config.attempts_remaining <= 0) {
       Alert.alert(
         "Maximum attempts reached",
@@ -301,6 +318,9 @@ export default function Payment() {
 
   const attemptsLeft = config.attempts_remaining;
   const attemptsWarn = attemptsLeft <= 1;
+  // Online payment is only offered when the gateway can really take money:
+  // live Razorpay keys, or sandbox with mock settlement still switched on.
+  const payEnabled = config.payment_enabled !== false;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -322,13 +342,28 @@ export default function Payment() {
           </TouchableOpacity>
         </View>
 
+        {/* Oct-2026 — the owner's registration wording, shown before the
+            membership pitch so the purpose of the screen is unmistakable. */}
+        <Text style={styles.regTitle}>Complete Your Registration</Text>
+        <Text style={styles.regSub}>
+          Verify your mobile number to continue setting up your {app_name} account.
+        </Text>
+
         {/* Membership hero + the member benefits + where the money goes */}
-        <SubscriptionHero amount={config.amount} appName={app_name} />
-        <SubscriptionBenefits />
+        <SubscriptionHero amount={config.amount} appName={app_name} />        <SubscriptionBenefits />
         <SubscriptionSplit />
 
-        {/* Mandatory mobile + optional invite code — gates both options */}
+        {/* Step 1 — mandatory mobile verification (Truecaller or manual) */}
         <SignupGateCard onPassed={() => setGatePassed(true)} />
+
+        {gatePassed && (
+          <View style={styles.stepTwo} testID="payment-step-two">
+            <Text style={styles.stepTwoLabel}>STEP 2 · CHOOSE HOW TO CONTINUE</Text>
+            <Text style={styles.stepTwoSub}>
+              Pay once for the member benefits, or continue free — both open your account.
+            </Text>
+          </View>
+        )}
 
         <View style={styles.amountCard}>
           <Text style={styles.amountLabel}>AMOUNT TO PAY</Text>
@@ -365,12 +400,17 @@ export default function Payment() {
         <TouchableOpacity
           testID="payment-pay-button"
           onPress={onStartCheckout}
-          disabled={attemptsLeft <= 0 || !gatePassed}
-          style={[styles.payBtn, (attemptsLeft <= 0 || !gatePassed) && { opacity: 0.5 }]}
+          disabled={attemptsLeft <= 0 || !gatePassed || !payEnabled}
+          style={[styles.payBtn, (attemptsLeft <= 0 || !gatePassed || !payEnabled) && { opacity: 0.5 }]}
         >
-          <Feather name={gatePassed ? "zap" : "lock"} size={18} color={colors.accentFg} />
+          <Feather name={gatePassed && payEnabled ? "zap" : "lock"} size={18} color={colors.primaryFg} />
           <Text style={styles.payBtnText}> Pay {formatINR(config.amount)}</Text>
         </TouchableOpacity>
+        {!payEnabled && (
+          <Text style={styles.payDisabledNote}>
+            Online payment is being set up. You can continue free for now and pay later from your profile.
+          </Text>
+        )}
 
         {/* Free entry — the ₹118 is a subscription, not a wall. Locked until
             the mobile number is confirmed, same as the paid option. */}
@@ -380,7 +420,7 @@ export default function Payment() {
           <View style={styles.lockedSkip} testID="payment-skip-locked">
             <Feather name="lock" size={13} color={colors.textMuted} />
             <Text style={styles.lockedSkipText}>
-              Confirm your mobile number above to unlock both options
+              Verify your mobile number above to unlock both options
             </Text>
           </View>
         )}
@@ -455,7 +495,7 @@ export default function Payment() {
                   {stage === "processing-payment" && "Processing your payment…"}
                   {stage === "verifying" && "Verifying payment…"}
                 </Text>
-                <Text style={styles.rzpStageBody}>Please don't close this screen.</Text>
+                <Text style={styles.rzpStageBody}>Please don&apos;t close this screen.</Text>
               </View>
             ) : (
               <>
@@ -565,8 +605,9 @@ const styles = StyleSheet.create({
   rowValueMono: { color: colors.textMain, fontSize: 13, fontWeight: "700", letterSpacing: 1 },
   warnBox: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#FFF4E5", borderRadius: 14, padding: 14, marginBottom: 12 },
   warnText: { color: "#7A4A0E", fontSize: 12, fontWeight: "600", flex: 1 },
-  payBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.accent, borderRadius: radii.button, paddingVertical: 16, marginTop: 4 },
-  payBtnText: { color: colors.accentFg, fontWeight: "800", fontSize: 16 },
+  payBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: colors.primary, borderRadius: radii.button, paddingVertical: 16, marginTop: 4 },
+  payBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 16 },
+  payDisabledNote: { color: colors.textMuted, fontSize: 12, textAlign: "center", marginTop: 8, lineHeight: 17 },
   // Locked stand-in for the "continue without subscription" button, shown
   // until the signup gate passes.
   lockedSkip: {
@@ -576,6 +617,11 @@ const styles = StyleSheet.create({
     borderStyle: "dashed", backgroundColor: colors.surfaceMuted,
   },
   lockedSkipText: { flex: 1, fontSize: 12, color: colors.textMuted, fontWeight: "700" },
+  regTitle: { fontSize: 22, fontWeight: "900", color: colors.textMain, marginTop: 4 },
+  regSub: { fontSize: 14, color: colors.textMuted, lineHeight: 20, marginTop: 6, marginBottom: 14 },
+  stepTwo: { marginTop: 14, gap: 4 },
+  stepTwoLabel: { fontSize: 10.5, fontWeight: "900", color: colors.primary, letterSpacing: 0.6 },
+  stepTwoSub: { fontSize: 13, color: colors.textMuted, lineHeight: 19 },
   note: { textAlign: "center", color: colors.textMuted, fontSize: 12, marginTop: 16 },
 
   // Razorpay-style modal

@@ -235,10 +235,27 @@ async def main():
             f"{BASE}/admin/sim-binding/policy", json={"required_level": "number_verified"}, headers=ah
         )
         clamped = r.json() if r.status_code == 200 else {}
-        check(
-            "policy clamped when no number provider",
-            clamped.get("required_level") == "sim_presence" and clamped.get("clamped_to_sim_presence") is True,
-            str(clamped.get("required_level")),
+        if clamped.get("number_proof_available"):
+            # A provider IS configured, so demanding confirmed numbers is a
+            # real option and must be accepted as asked.
+            check(
+                "number_verified accepted when a provider is configured",
+                clamped.get("required_level") == "number_verified"
+                and clamped.get("clamped_to_sim_presence") is False,
+                str(clamped.get("required_level")),
+            )
+        else:
+            check(
+                "policy clamped when no number provider",
+                clamped.get("required_level") == "sim_presence"
+                and clamped.get("clamped_to_sim_presence") is True,
+                str(clamped.get("required_level")),
+            )
+        # Put the live policy back to the owner's setting before the chat
+        # tests below — leaving "number_verified" behind would lock every real
+        # user out of chat until they ran Truecaller.
+        await c.patch(
+            f"{BASE}/admin/sim-binding/policy", json={"required_level": "sim_presence"}, headers=ah
         )
         r = await c.patch(f"{BASE}/admin/sim-binding/policy", json={"required_level": "nonsense"}, headers=ah)
         check("unknown level refused", r.status_code == 400, f"HTTP {r.status_code}")

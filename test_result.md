@@ -9831,3 +9831,37 @@ agent_communication:
       CAUTION FOR NEXT AGENT: a search_replace on app/product/[id].tsx briefly
       deleted the `const onToggleHelpful = async (rev: Review) => {` line and
       broke the web bundle — always re-read the region after editing that file.
+
+## 2026-10-28 · Registration flow + Truecaller one-tap (main agent)
+      NEW: frontend/modules/truecaller (Kotlin, truecaller-sdk:3.3.0, OAuth
+      consent flow), plugins/withTruecaller.js (manifest meta-data
+      com.truecaller.android.sdk.ClientId from EXPO_PUBLIC_TRUECALLER_CLIENT_ID),
+      backend/routes/truecaller_auth.py (availability/start/verify with
+      SERVER-held state + PKCE verifier, single-use, 5-min TTL) and
+      backend/core/pkce.py.
+      UI: payment.tsx gained "Complete Your Registration" + description and a
+      "STEP 2 · CHOOSE HOW TO CONTINUE" block; signup-gate-card.tsx gained
+      "STEP 1" + a "Verify with Truecaller" button with manual entry kept as
+      the documented fallback; subscription.tsx label -> "Continue Without Fee".
+      STATUS MODEL: signup_gate status now DERIVES registration_status
+      (pending_verification/verified/payment_success/free_registration) and
+      registration_path (paid/free/undecided) from existing fields - no second
+      copy of the truth. Manual entry records phone_verified_method
+      "self_declared" and never sets phone_verified.
+      SECURITY FIX (found by the new tests): /payment/verify accepted ANY
+      razorpay_order_id. In sandbox mode (gateway simulated) a caller could
+      post an invented order id and be marked registration_paid. It now
+      requires a registration_fee row for THAT user with THAT order id, and a
+      repeat callback returns {already_processed: true} without re-crediting.
+      TESTS: tests/test_registration_flow.py 51 passed (all 10 owner
+      scenarios). Regression: membership 35, sim_binding 64, iter103 13,
+      iter104 11, owner batch 13, iter98+99 20.
+      TEST-SUITE REPAIR: iter103/iter104/test_sim_binding asserted that
+      required_level is CLAMPED to sim_presence because no number provider
+      existed. A Truecaller client ID is now configured, so the clamp no longer
+      applies; those tests now branch on number_proof_available AND restore
+      required_level=sim_presence afterwards. If chat ever 403s for verified
+      phones, check app_settings.sim_binding_policy.required_level first.
+      CANNOT VERIFY HERE: the Truecaller consent sheet (needs a real Android
+      build + registered SHA-1 + the Truecaller app) and live Razorpay HMAC.
+      Handover doc: /app/memory/REGISTRATION_FLOW.md

@@ -126,7 +126,8 @@
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true
         }
-      ]
+      ],
+      "./plugins/withTruecaller"
     ],
     "experiments": {
       "typedRoutes": true

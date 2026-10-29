@@ -306,8 +306,16 @@ export function SkipSubscriptionButton({ amount }: { amount: number }) {
       await api.post("/payment/skip-subscription");
       await refresh();
       router.replace("/(tabs)/shop" as any);
-    } catch {
-      Alert.alert("Could not continue", "Please check your connection and try again.");
+    } catch (e: any) {
+      // Surface the real reason (e.g. the mobile-verification gate returning
+      // 403) instead of blaming the connection.
+      const detail = e?.response?.data?.detail || e?.data?.detail || e?.message;
+      Alert.alert(
+        "Could not continue",
+        typeof detail === "string" && detail
+          ? detail
+          : "Please check your connection and try again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -324,7 +332,7 @@ export function SkipSubscriptionButton({ amount }: { amount: number }) {
         {busy ? <ActivityIndicator color={colors.primary} size="small" /> : (
           <>
             <Feather name="arrow-right-circle" size={16} color={colors.primary} />
-            <Text style={styles.skipBtnText}>Continue without membership</Text>
+            <Text style={styles.skipBtnText}>Continue Without Fee</Text>
           </>
         )}
       </TouchableOpacity>
@@ -335,7 +343,7 @@ export function SkipSubscriptionButton({ amount }: { amount: number }) {
             <View style={styles.confirmIcon}>
               <Feather name="info" size={22} color={colors.primary} />
             </View>
-            <Text style={styles.confirmTitle}>Continue without membership?</Text>
+            <Text style={styles.confirmTitle}>Continue without the fee?</Text>
             <Text style={styles.confirmBody}>
               You can browse and shop for free. The {formatINR(config.member_cashback)} instant
               cashback, free service-provider numbers, zero ads, priority support, referral

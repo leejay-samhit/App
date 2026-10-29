@@ -2802,3 +2802,47 @@ its fixture seller 6700 instead of 4700.
 
 Test state: test_sim_binding 64, iter103 13, iter104 11, receivables 13,
 partial-return 21, iter96-99 green, vendor ledger balanced.
+
+## Registration flow + Truecaller one-tap (Oct 2026)
+
+Owner brief: keep BOTH "Create an account" and "Continue with Google"; the
+payment screen becomes "Complete Your Registration" with Step 1 = verify
+mobile (Truecaller, Client ID supplied) and Step 2 = "Pay ₹118" or "Continue
+Without Fee"; never fake a payment; never mark verified on a button tap.
+
+Shipped: local Expo module `frontend/modules/truecaller` (SDK 3.3.0, OAuth
+flow), config plugin injecting `com.truecaller.android.sdk.ClientId`, backend
+`routes/truecaller_auth.py` (server-held state + PKCE verifier, single use,
+5-min TTL) + `core/pkce.py`, derived registration_status/registration_path in
+signup_gate status, Step 1/Step 2 UI, "Continue Without Fee" label.
+
+Security fix found while testing: `/payment/verify` accepted ANY
+razorpay_order_id — in sandbox that marked an account paid for an order that
+never existed. It now requires a matching registration_fee order for that user
+and is idempotent on repeat callbacks.
+
+Tests: tests/test_registration_flow.py 51 passed (all ten owner scenarios).
+Full handover (files, Truecaller console setup, env vars, build steps,
+blockers): /app/memory/REGISTRATION_FLOW.md
+
+Note: existing SIM-binding policy `required_level` must stay `sim_presence`;
+now that a Truecaller client ID exists the clamp no longer forces it, so tests
+that set `number_verified` MUST restore it or real users lose chat.
+
+### Iteration 106 — registration flow re-verified after external review
+- Legacy `/api/payment/register-fee` (no-gateway-proof mock) DELETED.
+- `users.phone` partial unique index + 409 on both confirm routes; proven
+  race-safe with 5 parallel claims and with +91/0/spaced format variants.
+- Signup gate enforced server-side on skip-subscription, create-order and
+  verify (403 without a confirmed number).
+- `/payment/verify` idempotent before the already-paid guard; money moves
+  exactly once on a retried callback.
+- New env switch `ALLOW_MOCK_PAYMENTS` (default true in preview). When off
+  and no live Razorpay keys exist, verify returns 503 and
+  `/payment/config.payment_enabled` is false so the UI greys out Pay.
+  OWNER ACTION before going live: add live Razorpay keys.
+- Gate card fails closed; "Mobile number saved" vs "verified (Truecaller)"
+  labels are honest; Pay CTA is dark green.
+- New suite `backend/tests/test_iter106_adversarial.py` — 12 passed.
+  Full regression green; vendor ledger reconciliation balanced.
+  Details: /app/memory/REGISTRATION_FLOW.md

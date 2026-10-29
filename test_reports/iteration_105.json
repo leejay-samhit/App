@@ -1,0 +1,73 @@
+{
+  "summary": "Iteration 105: adversarial testing of the registration, Truecaller and payment-choice flow. Backend probe suite: 21 tests, 17 pass, 4 fail. Two extra ad-hoc probes confirmed 2 CRITICAL holes. (1) The legacy POST /api/payment/register-fee still marks any account registration_paid=true without any payment and writes a fake ₹118 'paid' registration_fee row. After admin approval, a 'Continue Without Fee' account then gets the ₹50 cashback. (2) A cross-account race in /api/auth/signup-gate/confirm: duplicate phone ownership in 8 of 10 rounds, with up to 5 accounts holding the same number. HIGH: the backend does not enforce the gate (skip-subscription and create-order both return 200 with no phone). HIGH: an account with phone_verified=true can swap its number through /signup-gate/confirm and keep phone_verified=true and method 'truecaller'. HIGH: the UI shows 'Mobile verified' after a self-declared manual entry. Kotlin review found 3 correctness bugs that will likely keep the Truecaller button hidden on real devices. The things that held: state/PKCE handling (the verifier is never returned; client-supplied state, verifier and verified flags are ignored; forged, other-user, expired, replayed and fake-code attempts are all refused and phone_verified stays false). Also held: parallel x6 /payment/verify gives exactly 1 settlement, 1 fee row and 1 ₹50 cashback; skip creates 0 transactions; the money split is 118 → 50 cashback / 18 GST / 50 revenue; config 118/11800; order ids are unique. The main agent's test_registration_flow.py was re-run: 51/51 pass. Regression smoke: 17/17 pass. Frontend: welcome screen shows both 'Continue with Google' (redirects to accounts.google.com) and 'Create an account'. Register leads to /payment with the exact title and description and the Step 1 card. Both options are locked and the pay button is disabled (aria-disabled). The Truecaller button is hidden on web with no console error. The conflict card names 'Test Vendor'. The Step 2 block appears after confirm. The 'Continue without the fee?' dialog leads to /shop. Pay ₹118 (sandbox) leads to /dashboard with a ₹50 wallet. No deprecated Expo packages detected.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/payment/register-fee", "issue": "Legacy 'instant mock' endpoint is still live in all modes. Any authenticated user (including one who chose Continue Without Fee) gets registration_paid=true plus a ₹118 status=paid registration_fee transaction with no gateway, no bank row and no verification. signup-gate/status then reports payment_success/paid. After admin approval the account receives ₹50 subscription_cashback (reproduced: tests/iter105_legacy_fee_probe.py). Reference: server.py:1041-1070", "priority": "CRITICAL"},
+      {"endpoint": "POST /api/auth/signup-gate/confirm (and /auth/truecaller/verify)", "issue": "TOCTOU race: the duplicate check (find_one) and the write (update_one) are not atomic, and there is no unique index on users.phone. 6 accounts confirming the same new number at once produced 2-5 owners in 8 of 10 rounds (tests/iter105_race_and_split.py). The Truecaller verify path has the same check-then-write shape.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/payment/skip-subscription, /api/payment/create-order, /api/payment/verify", "issue": "HIGH: the mobile-verification gate is only enforced in the UI. A fresh account with no phone and no signup_gate_confirmed_at gets 200 from skip-subscription and create-order (and can complete verify). The owner requires both options to stay locked until verification."},
+      {"endpoint": "POST /api/auth/signup-gate/confirm", "issue": "HIGH, account-takeover shape: when the user already has phone_verified=true (method truecaller), confirm with a DIFFERENT number overwrites phone and leaves phone_verified=true and phone_verified_method='truecaller'. An unverified number ends up labelled Truecaller-verified. truecaller/verify blocks this swap; the manual gate does not. Reference: routes/signup_gate.py:216-232"},
+      {"endpoint": "POST /api/payment/verify", "issue": "A repeat callback for a settled order returns 400 'Registration fee already paid', not already_processed. The idempotency branch checks status == 'success', but settled rows are written with status 'paid', and the registration_paid guard runs first, so that branch is dead code. No extra rows or credits were created (safe), but the response contract differs from the review claim. Reference: server.py:1237, 1274"},
+      {"endpoint": "POST /api/auth/register + signup-gate", "issue": "Squatting: register stores payload.phone raw (no normalisation, no duplicate check). A self_declared (unverified) claim on a number blocks its genuine owner from both the manual gate and Truecaller verify (409). Consider letting a Truecaller-verified owner take precedence over an unverified self-declared claim (with an admin/notify flow)."},
+      {"endpoint": "Razorpay mock mode", "issue": "When no keys are configured, verify accepts any signature for a server-created order. This is expected in the preview, but production must refuse mock mode (deployment risk)."},
+      {"endpoint": "GET /api/vendor/me/stats, /api/vendor/me/questions", "issue": "The buyer dashboard calls vendor-only endpoints, which give 403 console errors for buyers (pre-existing noise)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "SignupGateCard done strip", "issue": "Shows 'Mobile verified' with a check icon after a manual (self_declared, phone_verified=false) entry. It should say e.g. 'Mobile number added' unless phone_verified_method==='truecaller'. Reference: src/signup-gate-card.tsx:189-191", "testID": "signup-gate-done", "priority": "HIGH"},
+      {"component": "SignupGateCard copy", "issue": "On web, or where Truecaller is unavailable, the card still says 'One tap with Truecaller confirms the number is really yours — no SMS code' even though only manual entry is shown.", "testID": "signup-gate-card", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Gate status read failure", "issue": "Code review: load() catch sets required=false and calls onPassed(), which is fail-open. Combined with the missing server-side gate enforcement, this would unlock both options. Not reproduced in the UI within 7s when the status request was aborted (the screen stayed locked), so please verify. Reference: src/signup-gate-card.tsx:69-74", "affected_testIDs": ["payment-step-two", "skip-subscription", "payment-pay-button"]}
+    ],
+    "design_issues": [
+      {"screen": "/payment", "issues": ["The Step 1 label reads 'STEP 1 · VERIFY YOUR MOBILE NUMBER' (pill). The owner wording is 'Step 1: Verify Your Mobile Number'.", "Error paths in subscription.tsx use Alert.alert, which does nothing on web, so failures there are silent on web."]}
+    ],
+    "react_native_issues": [
+      {"component": "TruecallerModule.registerForActivityResult", "issue": "activity.registerForActivityResult(...) is called lazily inside an AsyncFunction while the activity is already RESUMED. AndroidX throws IllegalStateException ('LifecycleOwner is attempting to register while current state is RESUMED'). isUsable swallows it and returns false, so the Truecaller button would never show on real devices. Use activity.activityResultRegistry.register(key, StartActivityForResult()) { ... } (the keyed, lifecycle-free variant) and unregister() in OnDestroy. Reference: modules/truecaller/android/src/main/java/com/slangcart/truecaller/TruecallerModule.kt:135"},
+      {"component": "TruecallerModule.initAsync readiness", "issue": "TcSdk.initAsync(options) is followed immediately by TcSdk.getInstance().isOAuthFlowUsable. SDK 3.3.0 docs say to wait for the onSdkReady()/onFailure() callback after initAsync. The first isUsable call can therefore see an uninitialised SDK (false or an exception). Await onSdkReady (for example, a CompletableDeferred resolved in the callback) before checking. Reference: TruecallerModule.kt:80-81,144"},
+      {"component": "TruecallerModule threading", "issue": "Expo AsyncFunctions run off the main thread by default. registerForActivityResult and getAuthorizationCode (which launches UI) must run on the main thread: add .runOnQueue(Queues.MAIN) to requestVerification, or post to the main looper. Only initAsync belongs on a background thread. Reference: TruecallerModule.kt:93-110"}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter105_registration_probe.py",
+    "/app/backend/tests/test_iter105_regression_smoke.py",
+    "/app/backend/tests/iter105_race_and_split.py",
+    "/app/backend/tests/iter105_legacy_fee_probe.py",
+    "/app/test_reports/pytest/iter105_probe.xml",
+    "/app/test_reports/pytest/iter105_smoke.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Remove /payment/register-fee, or restrict it to admin plus explicit dev mode. It must never set registration_paid without a verified gateway payment.",
+    "CRITICAL: Add a unique partial index on the normalised phone (e.g. users.phone where phone is a non-empty string; backfill and normalise legacy '+91…' rows first). Make signup-gate/confirm and truecaller/verify catch DuplicateKeyError and return 409. Alternatively, do the claim with a conditional atomic write in a phone_claims collection.",
+    "HIGH: Enforce the gate server-side. skip-subscription, create-order and verify should return 403/409 when signup_gate_confirmed_at is missing (and when phone_verified is false, if Truecaller-only is ever required).",
+    "HIGH: In signup-gate/confirm, if user.phone_verified and the normalised new phone differs from the stored one, return 409 'contact support'. Otherwise, when the phone changes, reset phone_verified=false and phone_verified_method='self_declared'.",
+    "HIGH: The SignupGateCard done strip must not say 'Mobile verified' for self_declared numbers.",
+    "Fix the TruecallerModule.kt issues: keyed activityResultRegistry.register, await onSdkReady after initAsync, and run UI calls on Queues.MAIN.",
+    "Minor: in /payment/verify, compare the pending status against 'paid' (and check it before the registration_paid guard) so a repeat callback returns already_processed with 200.",
+    "Minor: make the load() catch in SignupGateCard fail closed (keep the form shown) rather than calling onPassed().",
+    "Minor: hide the 'One tap with Truecaller' copy when tcAvailable is false.",
+    "Ledger note: test runs (yours and mine) leave auto-heal rows (fee_residual ₹32/₹50, legacy_reconcile_inflow ₹136) on the admin account after test users are deleted. I deleted all rows sourced from deleted test users (25 txns, 6 bank rows); please re-run your platform ledger reconcile check."
+  ],
+  "critical_code_review_comments": [
+    "truecaller_auth.py: state is single-use and bound to the user with a TTL; the verifier is server-only; S256 is correct; client extras are ignored. This is solid.",
+    "core/truecaller.py: token/userinfo hosts are 'noneu' only, which is fine for India. The phone_number_verified check is good. The subject (sub) is stored but not checked for uniqueness across accounts (one Truecaller identity could verify multiple accounts with different numbers over time; low risk).",
+    "signup_gate.py: an unanchored-at-start regex '{phone}$' on users.phone means a full collection scan on every check; use a normalised field plus an index.",
+    "withTruecaller.js: the meta-data key com.truecaller.android.sdk.ClientId matches the SDK docs, and a missing ID degrades gracefully. OK.",
+    "server.py is 10.9k lines and should be split by domain."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter105_registration_probe.py",
+    "/app/backend/tests/test_iter105_regression_smoke.py",
+    "/app/backend/tests/iter105_race_and_split.py",
+    "/app/backend/tests/iter105_legacy_fee_probe.py"
+  ],
+  "success_rate": {"backend": "81% (17/21 probe) + 51/51 main suite + 17/17 smoke", "frontend": "90% (all requested UI flows work; 1 HIGH labelling bug)"},
+  "seed_data_creation": "None kept. All regflow.it105.* accounts and their transactions, bank rows and truecaller_states were deleted. testbuyer registration_paid is still false. sim_binding_policy.required_level is still 'sim_presence' (never modified).",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "/auth/register is rate-limited to 5/min per IP; make_user() in test_iter105_registration_probe.py retries on 429. Run the race probe with python3 tests/iter105_race_and_split.py. Paid test flows create admin-side direct_signup_credit/gst_collected rows keyed by source_user_id, so clean those too. The Truecaller consent sheet cannot run in the preview.",
+  "rca_of_issue": "Race: the check-then-write has no DB-level uniqueness. Takeover shape: gate_confirm only guards phone_verified_method and never resets phone_verified when the phone changes. Payment bypass: the legacy register-fee endpoint predates the Razorpay flow and was never removed. Idempotency response: the status literal mismatch ('success' vs 'paid')."
+}

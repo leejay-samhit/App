@@ -221,11 +221,19 @@ def test_core_rules_and_attestation_hook(ctx):
     r = S.post(f"{BASE}/sim-binding/verify", headers=uh, json={**base, "challenge_id": ch4["challenge_id"], "nonce": ch4["nonce"], "number_verified": True, "level": "number_verified"})
     assert r.json()["level"] == "sim_presence"
     nch = S.post(f"{BASE}/sim-binding/challenge", headers=uh, json={}).json()
-    assert S.post(f"{BASE}/sim-binding/number-proof", headers=uh, json={"challenge_id": nch["challenge_id"], "nonce": nch["nonce"], "code": "x", "code_verifier": "y"}).status_code == 503
+    # 503 while no provider is configured; 401 once one is, because
+    # Truecaller itself rejects the bogus code. Never 200 either way.
+    assert S.post(f"{BASE}/sim-binding/number-proof", headers=uh, json={"challenge_id": nch["challenge_id"], "nonce": nch["nonce"], "code": "x", "code_verifier": "y"}).status_code in (401, 503)
     assert S.get(f"{BASE}/admin/sim-binding/overview", headers=uh).status_code == 403
     assert S.patch(f"{BASE}/admin/sim-binding/policy", headers=uh, json={"enforce_chat": False}).status_code == 403
     p = S.patch(f"{BASE}/admin/sim-binding/policy", headers=ah, json={"required_level": "number_verified"}).json()
-    assert p["required_level"] == "sim_presence" and p["clamped_to_sim_presence"] is True
+    if p["number_proof_available"]:
+        # A provider is configured, so the stricter level is a real choice.
+        assert p["required_level"] == "number_verified" and p["clamped_to_sim_presence"] is False
+    else:
+        assert p["required_level"] == "sim_presence" and p["clamped_to_sim_presence"] is True
+    # Restore the owner's live setting so chat is not locked to Truecaller.
+    S.patch(f"{BASE}/admin/sim-binding/policy", headers=ah, json={"required_level": "sim_presence"})
     S.patch(f"{BASE}/admin/sim-binding/policy", headers=ah, json={"required_level": "sim_presence"})
     b = MDB.sim_bindings.find_one({"user_id": ctx["uid"]}, {"_id": 0})
     for k in ("imei", "imsi", "iccid", "sim_serial", "mcc", "mnc", "play_integrity_token"):

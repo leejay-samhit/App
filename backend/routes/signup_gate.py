@@ -31,11 +31,39 @@ from core.security import get_current_user
 from core.config import ADMIN_EMAIL
 from core.db import db
 from core.utils import now_utc, serialize_user
+from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 FALLBACK_INVITE_CODE = "EARN"   # the super admin's own referral code
+
+PHONE_TAKEN_MESSAGE = (
+    "That mobile number is already registered to another account. "
+    "Sign in with that account's email, or use a different number."
+)
+
+
+async def ensure_indexes() -> None:
+    """Unique index on the normalised phone — the real race guard.
+
+    Oct-2026: check-then-write let several accounts confirm the SAME number
+    when they raced each other (6 parallel confirms → up to 5 owners). The
+    duplicate check stays for the friendly conflict card; this index is what
+    actually makes it impossible.
+
+    Partial on purpose: accounts without a phone yet must not collide on null,
+    and legacy rows with a non-10-digit phone are left alone.
+    """
+    try:
+        await db.users.create_index(
+            "phone",
+            unique=True,
+            name="uniq_user_phone",
+            partialFilterExpression={"phone": {"$type": "string", "$gt": ""}},
+        )
+    except Exception as e:
+        logger.warning(f"signup-gate phone index not applied ({e}) — duplicates stay possible")
 
 
 class GateCheck(BaseModel):
@@ -94,11 +122,33 @@ async def resolve_sponsor(code: Optional[str]) -> Dict[str, Any]:
 @router.get("/auth/signup-gate/status")
 async def gate_status(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     """Does this account still have to pass the gate?"""
+    from core import truecaller as _tc
+
+    phone_verified = bool(user.get("phone_verified"))
+    paid = bool(user.get("registration_paid"))
+    free_path = bool(user.get("subscription_skipped"))
+    # Oct-2026 — a single, DERIVED status so there is never a second copy of
+    # the truth to drift. Nothing new is stored: every value below is read
+    # from the fields that already decide behaviour.
+    if not (phone_verified or user.get("signup_gate_confirmed_at")):
+        registration_status = "pending_verification"
+    elif paid:
+        registration_status = "payment_success"
+    elif free_path:
+        registration_status = "free_registration"
+    else:
+        registration_status = "verified"
     return {
         "required": not bool(user.get("signup_gate_confirmed_at")),
         "phone": user.get("phone") or "",
+        "phone_verified": phone_verified,
+        "phone_verified_method": user.get("phone_verified_method"),
         "referral_code_used": user.get("referred_by") or "",
-        "registration_paid": bool(user.get("registration_paid")),
+        "registration_paid": paid,
+        "registration_status": registration_status,
+        "registration_path": "paid" if paid else ("free" if free_path else "undecided"),
+        "auth_provider": user.get("auth_provider") or "password",
+        "truecaller_available": _tc.is_enabled(),
         "fallback_code": FALLBACK_INVITE_CODE,
     }
 
@@ -195,6 +245,20 @@ async def gate_confirm(
         "phone": phone,
         "signup_gate_confirmed_at": now_utc().isoformat(),
     }
+    # A number CHANGE on an account whose number was verified by Truecaller is
+    # refused outright: silently keeping `phone_verified: true` against a
+    # brand-new number is exactly the takeover shape this gate exists to stop.
+    current = normalise_phone(user.get("phone") or "")
+    if user.get("phone_verified") and current and current != phone:
+        raise HTTPException(
+            status_code=409,
+            detail="This account already has a verified mobile number. Contact support to change it.",
+        )
+    # Manual entry is the documented ALTERNATIVE to Truecaller, so it records
+    # how the number was obtained without ever claiming it was verified by a
+    # third party. A Truecaller pass later upgrades this to "truecaller".
+    if not user.get("phone_verified"):
+        update["phone_verified_method"] = "self_declared"
     # Never move an existing member off the sponsor who already earned on
     # them — the upline cascade is paid on `referred_by`, so rewriting it
     # after the fact would silently reassign someone else's commission.
@@ -202,7 +266,11 @@ async def gate_confirm(
         update["referred_by"] = sponsor.get("referral_code")
         update["sponsor_id"] = sponsor.get("id")
 
-    await db.users.update_one({"id": user["id"]}, {"$set": update})
+    try:
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+    except DuplicateKeyError:
+        # Lost the race against another account confirming the same number.
+        raise HTTPException(status_code=409, detail=PHONE_TAKEN_MESSAGE)
     fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     return {
         "ok": True,
