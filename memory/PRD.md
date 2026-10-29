@@ -2846,3 +2846,26 @@ that set `number_verified` MUST restore it or real users lose chat.
 - New suite `backend/tests/test_iter106_adversarial.py` — 12 passed.
   Full regression green; vendor ledger reconciliation balanced.
   Details: /app/memory/REGISTRATION_FLOW.md
+
+### Oct-2026 — Admin legal pages: save-visibility bug + top-button alignment
+- Root causes fixed: (1) `Alert.alert` is a no-op on the web preview, so a
+  failed save (e.g. expired session) showed NOTHING and the page kept the
+  default content — replaced with an inline success/error notice bar that
+  works on web and native; (2) concurrent upserts could create duplicate
+  `legal_pages` rows per kind, making readers show a stale copy — added a
+  startup `ensure_indexes()` that dedupes and enforces a unique index on
+  `kind`; (3) "Reset to default" never actually reset — it overwrote custom
+  content with the default text, so the "using system default" banner could
+  never return. New `DELETE /api/admin/legal/{kind}` truly removes the
+  custom copy.
+- Editor now updates its own state immediately on save (no flash of old
+  content), the 5 page tabs render as an aligned 3+2 grid of equal-width
+  pills (previously a cropped horizontal scroller), customized pages show a
+  green dot, and the clean button reads "Up to date" instead of "Saved".
+- Verified end-to-end in the browser: save → green "saved" notice → public
+  `/api/legal/{kind}` returns the custom text; DELETE → public page falls
+  back to the default; banner returns. Files: app/admin/legal-pages.tsx,
+  backend/routes/legal_pages.py, backend/server.py (startup index hook).
+- Note for the owner: if edits were made on the DEPLOYED app while viewing
+  the PREVIEW app (or vice versa), the two use different databases — save
+  and view in the same environment.

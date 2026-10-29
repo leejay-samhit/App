@@ -17,7 +17,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
-import { colors, radii, spacing } from "../../src/theme";
+import { colors, spacing } from "../../src/theme";
 
 type Kind = "contact_us" | "refund" | "privacy" | "terms" | "about";
 type Page = {
@@ -29,11 +29,11 @@ type Page = {
 };
 
 const TABS: { kind: Kind; label: string; icon: any }[] = [
-  { kind: "about",      label: "About us",               icon: "info" },
-  { kind: "contact_us", label: "Contact Us",              icon: "phone" },
-  { kind: "refund",     label: "Refund / Cancellation",   icon: "rotate-ccw" },
-  { kind: "privacy",    label: "Privacy Policy",          icon: "shield" },
-  { kind: "terms",      label: "Terms & Conditions",      icon: "file-text" },
+  { kind: "about",      label: "About us",     icon: "info" },
+  { kind: "contact_us", label: "Contact",      icon: "phone" },
+  { kind: "refund",     label: "Refunds",      icon: "rotate-ccw" },
+  { kind: "privacy",    label: "Privacy",      icon: "shield" },
+  { kind: "terms",      label: "T&C",          icon: "file-text" },
 ];
 
 export default function AdminLegalEditor() {
@@ -43,6 +43,9 @@ export default function AdminLegalEditor() {
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Inline feedback that works on web AND native — Alert.alert() is a no-op
+  // in the web preview, which made failed saves look successful there.
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = async () => {
     try {
@@ -54,7 +57,7 @@ export default function AdminLegalEditor() {
       setDraft((first || {}).content_text || "");
       setDirty(false);
     } catch (e) {
-      Alert.alert("Failed", formatApiError(e));
+      setNotice({ ok: false, text: formatApiError(e) });
     } finally {
       setLoading(false);
     }
@@ -87,16 +90,31 @@ export default function AdminLegalEditor() {
 
   const save = async () => {
     if (draft.trim().length < 10) {
-      Alert.alert("Too short", "Content must be at least 10 characters.");
+      setNotice({ ok: false, text: "Content must be at least 10 characters." });
       return;
     }
     setSaving(true);
+    setNotice(null);
     try {
       await api.put(`/admin/legal/${activeKind}`, { content_text: draft });
-      Alert.alert("Saved", `${TABS.find((t) => t.kind === activeKind)?.label} updated.`);
-      await load();
+      // Update the local copy immediately — the editor must show the saved
+      // state at once, not wait for (or be rolled back by) a slow reload.
+      const savedText = draft.trim();
+      setPages((prev: any) => ({
+        ...prev,
+        [activeKind]: {
+          ...(prev[activeKind] || { kind: activeKind }),
+          content_text: savedText,
+          is_default: false,
+          updated_at: new Date().toISOString(),
+        },
+      }));
+      setDirty(false);
+      const label = TABS.find((t) => t.kind === activeKind)?.label;
+      setNotice({ ok: true, text: `${label} saved — customers see it immediately.` });
+      load(); // reconcile with the server in the background
     } catch (e) {
-      Alert.alert("Failed", formatApiError(e));
+      setNotice({ ok: false, text: `Save failed: ${formatApiError(e)}` });
     } finally {
       setSaving(false);
     }
@@ -112,16 +130,14 @@ export default function AdminLegalEditor() {
           text: "Reset",
           style: "destructive",
           onPress: async () => {
-            // Reset by deleting via API — fall back to overwriting with the default.
+            setNotice(null);
             try {
-              // We don't have a DELETE endpoint, but we can fetch the default
-              // via public GET (no auth) and then save it. That keeps the
-              // active page editable but marked as customized — close enough.
-              const { data } = await api.get(`/legal/${activeKind}`);
-              await api.put(`/admin/legal/${activeKind}`, { content_text: data.content_text });
+              // The DELETE endpoint truly removes the custom copy, so the
+              // page falls back to the built-in default everywhere.
+              await api.delete(`/admin/legal/${activeKind}`);
+              setNotice({ ok: true, text: "Default content restored." });
               await load();
-              Alert.alert("Reset", "Default content restored.");
-            } catch (e) { Alert.alert("Failed", formatApiError(e)); }
+            } catch (e) { setNotice({ ok: false, text: formatApiError(e) }); }
           },
         },
       ],
@@ -142,10 +158,13 @@ export default function AdminLegalEditor() {
           <View style={{ width: 40 }} />
         </View>
 
-        {/* Tab strip */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabStrip}>
+        {/* Page picker — a fixed two-row grid (3 + 2) of equal-width buttons
+            so the top controls line up cleanly on every screen width. The old
+            horizontally-scrolling strip cropped tabs and looked misaligned. */}
+        <View style={styles.tabGrid}>
           {TABS.map((t) => {
             const active = t.kind === activeKind;
+            const customized = pages[t.kind] && !pages[t.kind].is_default;
             return (
               <TouchableOpacity
                 key={t.kind}
@@ -153,14 +172,22 @@ export default function AdminLegalEditor() {
                 style={[styles.tab, active && styles.tabActive]}
                 testID={`legal-tab-${t.kind}`}
               >
-                <Feather name={t.icon} size={13} color={active ? "#fff" : colors.textMain} />
+                <Feather name={t.icon} size={14} color={active ? "#fff" : colors.textMain} />
                 <Text style={[styles.tabLabel, active && { color: "#fff" }]} numberOfLines={1}>{t.label}</Text>
+                {customized && !active ? <View style={styles.tabDot} /> : null}
               </TouchableOpacity>
             );
           })}
-        </ScrollView>
+        </View>
 
         <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 140 }}>
+          {notice ? (
+            <View style={[styles.notice, notice.ok ? styles.noticeOk : styles.noticeErr]} testID="legal-notice">
+              <Feather name={notice.ok ? "check-circle" : "alert-triangle"} size={14} color={notice.ok ? colors.primary : "#B3261E"} />
+              <Text style={[styles.noticeText, { color: notice.ok ? colors.primary : "#B3261E" }]}>{notice.text}</Text>
+            </View>
+          ) : null}
+
           {activePage?.is_default ? (
             <View style={styles.defaultBanner}>
               <Feather name="info" size={13} color="#0B66C2" />
@@ -195,7 +222,7 @@ export default function AdminLegalEditor() {
               testID="legal-save"
             >
               <Feather name="save" size={16} color="#fff" />
-              <Text style={styles.saveBtnText}>{saving ? "Saving…" : dirty ? "Save changes" : "Saved"}</Text>
+              <Text style={styles.saveBtnText}>{saving ? "Saving…" : dirty ? "Save changes" : "Up to date"}</Text>
             </TouchableOpacity>
             {!activePage?.is_default ? (
               <TouchableOpacity onPress={resetToDefault} style={styles.resetBtn} testID="legal-reset">
@@ -227,10 +254,15 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   backBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
   title: { fontSize: 16, fontWeight: "800", color: colors.textMain },
-  tabStrip: { paddingHorizontal: 12, gap: 6, paddingVertical: 10 },
-  tab: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  tabGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingHorizontal: spacing.screen, paddingVertical: 10 },
+  tab: { flexGrow: 1, flexBasis: "29%", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 10, borderRadius: 999, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, minHeight: 40 },
   tabActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   tabLabel: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+  tabDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.success },
+  notice: { flexDirection: "row", alignItems: "center", gap: 8, padding: 10, borderRadius: 10, borderWidth: 1, marginBottom: 10 },
+  noticeOk: { backgroundColor: "#E8F5EE", borderColor: "#2E7D5233" },
+  noticeErr: { backgroundColor: "#FDECEA", borderColor: "#B3261E33" },
+  noticeText: { flex: 1, fontSize: 12, fontWeight: "700" },
   defaultBanner: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#E0F2FE", borderWidth: 1, borderColor: "#0B66C244", padding: 10, borderRadius: 10 },
   defaultBannerText: { flex: 1, fontSize: 12, color: "#0B66C2", fontWeight: "700" },
   metaLine: { fontSize: 11, color: colors.textMuted, fontWeight: "700" },

@@ -7626,6 +7626,8 @@ async def on_startup():
         # accounts confirming the same number in a race.
         from routes import signup_gate as _signup_gate
         await _signup_gate.ensure_indexes()
+        from routes import legal_pages as _legal_pages
+        await _legal_pages.ensure_indexes()
         # Push diagnostics (Sep 2026): the send log is evidence, not data —
         # keep 30 days of it and index the lookups the admin screen uses.
         try:

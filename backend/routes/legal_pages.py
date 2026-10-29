@@ -109,6 +109,30 @@ class LegalUpdate(BaseModel):
     content_text: str = Field(..., min_length=10, max_length=50000)
 
 
+async def ensure_indexes() -> None:
+    """One row per kind, forever.
+
+    Older builds allowed two simultaneous upserts to create duplicate rows
+    for the same kind; the readers use find_one() and could then keep
+    showing the older copy after a save. Keep the newest copy of each kind
+    and make repeats impossible.
+    """
+    keep: Dict[str, Any] = {}
+    dup_ids = []
+    async for d in db.legal_pages.find({}, {"kind": 1, "updated_at": 1}):
+        k = d.get("kind")
+        prev = keep.get(k)
+        if prev is None or (d.get("updated_at") or "") > (prev.get("updated_at") or ""):
+            if prev is not None:
+                dup_ids.append(prev["_id"])
+            keep[k] = d
+        else:
+            dup_ids.append(d["_id"])
+    if dup_ids:
+        await db.legal_pages.delete_many({"_id": {"$in": dup_ids}})
+    await db.legal_pages.create_index("kind", unique=True)
+
+
 @router.get("/legal/{kind}")
 async def get_legal_page(kind: str):
     if kind not in VALID_KINDS:
@@ -160,3 +184,16 @@ async def upsert_legal_page(
     }
     await db.legal_pages.update_one({"kind": kind}, {"$set": update_doc}, upsert=True)
     return {"ok": True, "kind": kind, "updated_at": now_iso}
+
+
+@router.delete("/admin/legal/{kind}")
+async def reset_legal_page(
+    kind: str,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """Delete the custom copy so the page falls back to the system default
+    (and the editor's 'using system default' banner comes back)."""
+    if kind not in VALID_KINDS:
+        raise HTTPException(status_code=404, detail="Unknown legal page")
+    await db.legal_pages.delete_one({"kind": kind})
+    return {"ok": True, "kind": kind, "is_default": True}
