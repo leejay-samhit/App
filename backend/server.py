@@ -3693,6 +3693,10 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
 
     zone_conflicts: List[str] = []
     cod_blocked: List[str] = []
+    # Nov-2026 — money owed for the prepaid-only items, so a MIXED bag can be
+    # placed by settling just that part up-front instead of being refused.
+    cod_prepay_due = 0.0
+    cod_ok_lines = 0
     _vendor_name_cache: Dict[str, str] = {}
     # Jun-2026 — "Everyone" vendors (admin-approved ship-anywhere sellers)
     # keep normal COD inside their own pincode / km radius, but a far-away
@@ -3727,7 +3731,7 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
     for it in items:
         prod = await db.products.find_one(
             {"id": it["product_id"]},
-            {"_id": 0, "name": 1, "vendor_id": 1, "delivery_available": 1, "cod_available": 1},
+            {"_id": 0, "name": 1, "vendor_id": 1, "delivery_available": 1, "cod_available": 1, "price": 1},
         )
         if not prod:
             continue
@@ -3739,8 +3743,12 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         # one item in the bag is prepaid-only the whole COD checkout is
         # refused with the item names, so the app can show exactly what to
         # remove (or tell the buyer to pay online).
-        if payment_method in ("cod", "wallet_cod") and prod.get("cod_available") is False:
-            cod_blocked.append(prod.get("name") or "A product")
+        if payment_method in ("cod", "wallet_cod"):
+            if prod.get("cod_available") is False:
+                cod_blocked.append(prod.get("name") or "A product")
+                cod_prepay_due += float(prod.get("price") or 0) * int(it.get("qty") or 1)
+            else:
+                cod_ok_lines += 1
         vid = prod.get("vendor_id")
         if not vid:
             # Legacy product with no vendor — allow through (matches
@@ -3752,6 +3760,8 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
             and await _is_far_away(vid)
         ):
             cod_blocked.append(prod.get("name") or "A product")
+            cod_prepay_due += float(prod.get("price") or 0) * int(it.get("qty") or 1)
+            cod_ok_lines = max(0, cod_ok_lines - 1)
         if vid in eligible_vids:
             continue  # ✅ Shop said "yes", checkout says "yes".
         vn = await _vendor_name(vid)
@@ -3771,18 +3781,36 @@ async def checkout(payload: Dict[str, Any] = Body(default={}), user: Dict[str, A
         )
     if cod_blocked:
         names = ", ".join(cod_blocked[:4]) + ("…" if len(cod_blocked) > 4 else "")
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "cod_not_available",
-                "message": (
-                    f"This item can't be delivered as Cash on Delivery. "
-                    f"Please make the payment for the item and delivery to continue."
-                ),
-                "items": cod_blocked,
-                "names": names,
-            },
-        )
+        cod_prepay_due = round(cod_prepay_due, 2)
+        # Nov-2026 — a MIXED bag is no longer refused outright. If some items
+        # do accept cash, the buyer can place the whole order by settling the
+        # prepaid-only part from the wallet up-front ("wallet_cod" with a
+        # wallet_amount that covers it); the rest is still collected in cash.
+        # A bag where NOTHING accepts cash still has to be paid in full.
+        wallet_up_front = 0.0
+        if payment_method == "wallet_cod":
+            try:
+                wallet_up_front = float((payload or {}).get("wallet_amount") or 0)
+            except (TypeError, ValueError):
+                wallet_up_front = 0.0
+        if not (cod_ok_lines > 0 and wallet_up_front >= cod_prepay_due - 0.009):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "cod_partial_prepay_required" if cod_ok_lines > 0 else "cod_not_available",
+                    "message": (
+                        f"Cash on Delivery isn't available on {names}. "
+                        f"Pay ₹{cod_prepay_due:,.0f} now and the rest stays cash on delivery."
+                        if cod_ok_lines > 0 else
+                        "Cash on Delivery isn't available for these items. "
+                        "Please pay for the items and delivery to continue."
+                    ),
+                    "items": cod_blocked,
+                    "names": names,
+                    "prepay_due": cod_prepay_due,
+                    "cod_item_count": cod_ok_lines,
+                },
+            )
     enriched = []
     total = 0.0
     settings = await get_settings()
@@ -9079,6 +9107,14 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
                 )
         except Exception:
             pass
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
+    # Nov-2026 — bust the public shop caches on a VENDOR edit too (the admin
+    # path already did). Without this a reclassified product kept showing
+    # under its old category for up to a minute.
     try:
         from routes.products_public import bust_products_public_caches
         bust_products_public_caches()

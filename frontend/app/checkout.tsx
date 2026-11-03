@@ -20,6 +20,7 @@ import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../src
 import { notify } from "../src/notify";
 import OutOfZoneModal from "../src/OutOfZoneModal";
 import CodUnavailableNote from "../src/cod-unavailable-note";
+import CodPrepaySheet, { type CodBlockedItem } from "../src/cod-prepay-sheet";
 import { useDeliveryLocation } from "../src/use-delivery-location";
 import { openRazorpayCheckout, buildRazorpayHtml, RazorpayResult } from "../src/razorpay";
 
@@ -48,6 +49,14 @@ export default function CheckoutScreen() {
   // Oct-2026 — a seller can mark a product prepaid-only. The server refuses
   // the COD checkout with detail.code="cod_not_available" and the item names.
   const [codBlockedItems, setCodBlockedItems] = useState<string[]>([]);
+  // Nov-2026 — the bag's COD state, computed by the SERVER from each item's
+  // cod_available flag. Drives whether Cash on Delivery is offered at all and
+  // the prepaid-part explainer for a mixed bag.
+  const [codInfo, setCodInfo] = useState<{
+    available: boolean; partial: boolean; prepay_due: number;
+    blocked_items: CodBlockedItem[]; blocked_count: number; cod_item_count: number;
+  } | null>(null);
+  const [showCodSheet, setShowCodSheet] = useState(false);
   // Address fields
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -165,13 +174,14 @@ export default function CheckoutScreen() {
   const load = useCallback(async () => {
     try {
       const [cRes, meRes, pRes] = await Promise.all([
-        api.get<{ items: CartItem[]; gst_summary?: any; delivery?: any }>("/cart"),
+        api.get<{ items: CartItem[]; gst_summary?: any; delivery?: any; cod?: any }>("/cart"),
         api.get<any>("/auth/me"),
         api.get<any>("/orders/payment/pending").catch(() => ({ data: { pending: null } })),
       ]);
       setItems(cRes.data?.items || []);
       setGstSummary(cRes.data?.gst_summary || null);
       setServerDelivery(cRes.data?.delivery || null);
+      setCodInfo((cRes.data as any)?.cod || null);
       const bal = Number(meRes.data?.wallet_balance || 0);
       setWalletBalance(bal);
       setPendingPay(pRes.data?.pending || null);
@@ -273,6 +283,21 @@ export default function CheckoutScreen() {
   // buyer can drag it down to ₹0 to pay more in cash.
   const maxWalletUsable = Math.min(walletBalance, total);
   const comboMode = paymentMethod === "wallet_cod" || paymentMethod === "wallet_online";
+
+  // ── Nov-2026 — Cash-on-Delivery availability for this bag ─────────────
+  // `codInfo` comes from the server (each item's cod_available flag). Until
+  // it arrives we assume COD is offered, so the option never flickers away
+  // on a slow bag load; Place Order is still gated by the backend.
+  const codOffered = codInfo ? codInfo.available : true;
+  const codPartial = !!codInfo?.partial;
+  const codPrepayDue = Number(codInfo?.prepay_due || 0);
+  const codPrepayItems: CodBlockedItem[] = codInfo?.blocked_items || [];
+
+  /** Picking a cash method on a MIXED bag explains the prepaid part first. */
+  const onPickCod = (method: "cod" | "wallet_cod") => {
+    if (codPartial) { setShowCodSheet(true); return; }
+    setPaymentMethod(method);
+  };
   // In the ONLINE combo the gateway must have at least ₹1 left to collect —
   // otherwise the wallet covers everything and there is nothing to pay
   // online (that's just the plain Wallet option).
@@ -804,24 +829,43 @@ export default function CheckoutScreen() {
             </View>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            onPress={() => setPaymentMethod("cod")}
-            style={[styles.paymentOption, paymentMethod === "cod" && styles.paymentOptionActive]}
-            testID="pay-cod"
-          >
-            <View style={styles.radio}>{paymentMethod === "cod" ? <View style={styles.radioDot} /> : null}</View>
-            <Feather name="tag" size={20} color={colors.primary} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.paymentTitle}>Cash on Delivery</Text>
-              <Text style={styles.paymentSub}>Pay cash to the delivery agent on arrival</Text>
+          {/* Nov-2026 — Cash on Delivery is only offered when at least one
+              seller in the bag accepts cash. When nothing does, the option is
+              hidden outright (a slim note explains why) instead of letting the
+              buyer pick it and fail at Place Order. */}
+          {codOffered ? (
+            <TouchableOpacity
+              onPress={() => onPickCod("cod")}
+              style={[styles.paymentOption, paymentMethod === "cod" && styles.paymentOptionActive]}
+              testID="pay-cod"
+            >
+              <View style={styles.radio}>{paymentMethod === "cod" ? <View style={styles.radioDot} /> : null}</View>
+              <Feather name="tag" size={20} color={colors.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.paymentTitle}>Cash on Delivery</Text>
+                <Text style={styles.paymentSub}>
+                  {codPartial
+                    ? `${formatINR(codPrepayDue)} payable now · rest in cash`
+                    : "Pay cash to the delivery agent on arrival"}
+                </Text>
+              </View>
+              {codPartial ? <Feather name="info" size={16} color={colors.accent} /> : null}
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.codOffRow} testID="cod-unavailable-row">
+              <Feather name="info" size={14} color={colors.textMuted} />
+              <Text style={styles.codOffText}>
+                Cash on Delivery isn&apos;t available for the items in this bag.
+              </Text>
             </View>
-          </TouchableOpacity>
+          )}
 
           {/* Jun 2026 — Wallet + Cash combo. Slider starts at the max
               usable wallet amount (auto-max) and can be dragged down so
               the buyer decides how much cash to hand over on delivery. */}
+          {codOffered ? (
           <TouchableOpacity
-            onPress={() => setPaymentMethod("wallet_cod")}
+            onPress={() => onPickCod("wallet_cod")}
             disabled={maxWalletUsable <= 0}
             style={[
               styles.paymentOption,
@@ -837,10 +881,13 @@ export default function CheckoutScreen() {
               <Text style={styles.paymentSub}>
                 {maxWalletUsable <= 0
                   ? "Add wallet money to use this option"
-                  : "Use part of your wallet, pay the rest in cash"}
+                  : codPartial
+                    ? `Covers the ${formatINR(codPrepayDue)} prepaid part`
+                    : "Use part of your wallet, pay the rest in cash"}
               </Text>
             </View>
           </TouchableOpacity>
+          ) : null}
 
           {/* Jun 2026 — Razorpay online payment (UPI / Card / Netbanking). */}
           <TouchableOpacity
@@ -943,6 +990,27 @@ export default function CheckoutScreen() {
             onPayOnline={() => { setPaymentMethod("online"); setCodBlockedItems([]); }}
           />
         ) : null}
+
+        {/* Nov-2026 — MIXED bag: explain the prepaid part and offer the two
+            ways to place the order in one go. Shown when the buyer picks a
+            cash method, and re-opened from the Cash on Delivery row. */}
+        <CodPrepaySheet
+          visible={showCodSheet}
+          items={codPrepayItems}
+          prepayDue={codPrepayDue}
+          walletBalance={walletBalance}
+          onClose={() => setShowCodSheet(false)}
+          onPayPartFromWallet={() => {
+            // Wallet settles exactly the prepaid-only part; the rest of the
+            // bag (and delivery) is still collected in cash.
+            setPaymentMethod("wallet_cod");
+            setSplitTouched(true);
+            setWalletSplit(Math.ceil(codPrepayDue));
+            setShowCodSheet(false);
+          }}
+          onPayAllOnline={() => { setPaymentMethod("online"); setShowCodSheet(false); }}
+          onTopUp={() => { setShowCodSheet(false); router.push("/wallet" as any); }}
+        />
 
         {/* Sticky Place Order */}
         <View style={styles.stickyCta}>
@@ -1135,6 +1203,13 @@ const styles = StyleSheet.create({
   radioDot: { width: 11, height: 11, borderRadius: 6, backgroundColor: colors.primary },
   paymentTitle: { fontSize: 14, fontWeight: "900", color: colors.textMain, letterSpacing: -0.2 },
   paymentSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  codOffRow: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    paddingVertical: 12, paddingHorizontal: 14,
+    borderRadius: radii.card, backgroundColor: colors.surfaceMuted,
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
+  },
+  codOffText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 17, fontWeight: "600" },
   paymentWarn: { fontSize: 11, fontWeight: "700", color: "#B91C1C", marginTop: 2 },
   // Sticky CTA
   stickyCta: { position: "absolute", left: 0, right: 0, bottom: 0, flexDirection: "row", alignItems: "center", paddingHorizontal: spacing.screen, paddingTop: 12, paddingBottom: 20, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border, gap: 14 },

@@ -2920,3 +2920,9 @@ that set `number_verified` MUST restore it or real users lose chat.
 - BLOCKER for AI artwork only: the Emergent Universal Key reports "API key is
   inactive" — owner must top up the balance. Drawn decorations are unaffected.
 - Details: /app/memory/FESTIVAL_THEMES.md
+
+## Status Update — 2026-11-03 (fork continuation)
+- All 4 critical fixes (Recharge removal, shop layout block isolation, product category/sub-category saving, mixed COD prepay sheet) remain complete; backend suite `test_nov2026_layout_classification_cod.py` re-verified green (20 passed).
+- User opted to self-verify frontend flows; testing_agent skipped per explicit user choice.
+- Expo restarted; smoke screenshot confirms app healthy with Deepavali theme.
+- Pending: user verification of the 4 fixes; remaining 9 festival themes (P1 backlog).

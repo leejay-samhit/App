@@ -1524,6 +1524,17 @@ export function RichProductEditor({
       const extras: Record<string, string> = {};
       extraAttrs.forEach((e) => { if (e.key.trim()) extras[e.key.trim()] = e.value; });
 
+      // Nov-2026 — never publish a sub-category that doesn't belong to the
+      // selected main category (rule 4). When the admin tree lists
+      // sub-categories for this category, the saved value must be one of
+      // them; otherwise it is dropped rather than silently kept.
+      const rawSub = (subCategory || "").trim();
+      const cleanSub =
+        rawSub && subcategoryChips.length > 0
+          && !subcategoryChips.some((c) => c.trim().toLowerCase() === rawSub.toLowerCase())
+          ? ""
+          : rawSub;
+
       const payload: any = {
         name: name.trim(),
         price: priceN,
@@ -1546,7 +1557,14 @@ export function RichProductEditor({
         // Sizes / RAM-ROM. The server recomputes `stock` as the sum of the
         // options and `price` as the cheapest buyable one.
         ...variantPayload(variantState),
-        category: category.trim() || undefined,
+        // Nov-2026 BUGFIX — ALWAYS send the classification as a string.
+        // `|| undefined` meant a cleared sub-category was dropped from the
+        // JSON body entirely, so the backend kept the previous value and the
+        // product could never leave its old sub-category. An empty string
+        // clears it. `cleanSub` also drops a sub-category that doesn't belong
+        // to the selected main category.
+        category: category.trim(),
+        sub_category: cleanSub,
         brand: brand.trim(),
         sub_features: subFeatures.filter((s) => s.trim()),
         images: galleryImages,
@@ -1565,7 +1583,6 @@ export function RichProductEditor({
           .map((t) => ({ name: t.name.trim(), rows: t.rows.filter((r) => r.label.trim() || r.value.trim()) }))
           .filter((t) => t.name || t.rows.length),
         whats_in_box: whatsInBox.filter((b) => b.name.trim() || b.image_data_url),
-        sub_category: (subCategory || "").trim() || undefined,
         clothing_size: isClothes ? (clothingSize || undefined) : undefined,
         // Recharge (Jun 2026) — circle only; kind + operator are derived from
         // the sub-category server-side (core/taxonomy.py).
@@ -1984,10 +2001,14 @@ export function RichProductEditor({
                           // keep current text if present
                         } else {
                           setCustomCategory(false);
+                          // Nov-2026 BUGFIX — changing the MAIN category must
+                          // always clear the sub-category. It used to clear
+                          // only when leaving "Clothes", so e.g. Electronics →
+                          // Mobiles kept the old Electronics sub-category and
+                          // the product stayed listed under it forever.
+                          if (opt !== category) setSubCategory("");
                           setCategory(opt);
-                          // Reset clothes-only fields when switching away
                           if (opt.toLowerCase() !== "clothes") {
-                            setSubCategory("");
                             setClothingSize("");
                           }
                         }

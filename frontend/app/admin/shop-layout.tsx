@@ -186,12 +186,18 @@ export default function AdminShopLayoutScreen() {
     });
     // Also include any legacy scope_category currently in use by blocks
     // but not present in the tree (so admin can still edit / migrate them).
+    // Nov-2026 — except recharge: it is sold through its own flow and is no
+    // longer offerable as a layout scope.
+    const isRecharge = (n: string) => /recharge/i.test(n);
     items.forEach((b: any) => {
       const sc = b?.scope_category;
-      if (b?.scope === "category" && typeof sc === "string" && sc && !map.has(sc)) {
+      if (b?.scope === "category" && typeof sc === "string" && sc && !map.has(sc) && !isRecharge(sc)) {
         map.set(sc, { name: sc, label: sc, depth: 0 });
       }
     });
+    for (const key of Array.from(map.keys())) {
+      if (isRecharge(map.get(key)!.label)) map.delete(key);
+    }
     // Sort: depth first (parents at top), then alphabetical by label
     return Array.from(map.values()).sort((a, b) => a.depth - b.depth || a.label.localeCompare(b.label));
   }, [shopCats, items]);
@@ -202,7 +208,7 @@ export default function AdminShopLayoutScreen() {
         api.get<{ items: Block[] }>("/admin/shop-layout"),
         api.get<any>("/admin/products", { params: { limit: 500 } }),
         api.get<{ blocks: Record<string, { impressions: number; clicks: number; ctr: number }> }>("/admin/shop-layout/analytics", { params: { days: 7 } }).catch(() => ({ data: { blocks: {} } as any })),
-        api.get<{ items: { id?: string; name: string; active: boolean; parent_id?: string | null; depth?: number }[] }>("/admin/shop-categories").catch(() => ({ data: { items: [] } as any })),
+        api.get<{ items: { id?: string; name: string; active: boolean; parent_id?: string | null; depth?: number }[] }>("/admin/shop-categories?exclude_recharge=true").catch(() => ({ data: { items: [] } as any })),
       ]);
       setItems(bRes.data?.items || []);
       const pData = pRes.data;

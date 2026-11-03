@@ -306,10 +306,19 @@ export default function ShopCategoryScreen() {
             ShopLayoutRenderer manages its own section-level padding just
             like the Shop home screen does.  refreshTick propagates the
             parent's pull-to-refresh into the renderer so admin changes
-            appear live without app close/reopen. */}
+            appear live without app close/reopen.
+
+            Nov-2026 BUGFIX — block isolation. This used to always request
+            the PARENT category's layout, so selecting a sub-category chip
+            kept showing the parent's blocks and a sub-category's own blocks
+            were never fetched at all. The scope now follows the active chip:
+            the parent's blocks belong to the parent view only, and each
+            sub-category shows exactly the blocks assigned to it (none, if
+            the admin hasn't made any — no inherited fallback). */}
         <ShopLayoutRenderer
           scope="category"
-          category={category}
+          category={selectedSub || category}
+          key={`layout-${selectedSub || category}`}
           pincode={deliveryPincode || undefined}
           lat={deliveryCoords?.lat}
           lng={deliveryCoords?.lng}

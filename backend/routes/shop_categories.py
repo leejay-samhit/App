@@ -232,6 +232,45 @@ class CategoryUpdate(BaseModel):
 
 
 # ── Public ───────────────────────────────────────────────────────────
+RECHARGE_ROOT_NAMES = {"recharge", "recharges", "mobile recharge", "dth tv recharge"}
+
+
+async def _recharge_category_ids() -> set:
+    """Ids of the Recharge root and everything under it.
+
+    Nov-2026 — Recharge is sold through its own flow (plans, operators,
+    circles), not as a shop product, so it must not appear in the Shop Layout
+    pickers or in the customer-facing category lists. The categories stay in
+    the database: the recharge services, plans, transactions and payment
+    flows are untouched.
+    """
+    roots = await db.shop_categories.find(
+        {"$or": [
+            {"name": {"$in": [n.title() for n in RECHARGE_ROOT_NAMES]}},
+            {"recharge_group": {"$nin": [None, ""]}},
+            {"recharge_kind": {"$nin": [None, ""]}},
+        ]},
+        {"_id": 0, "id": 1, "name": 1, "parent_id": 1},
+    ).to_list(200)
+    ids = {r["id"] for r in roots if (r.get("name") or "").strip().lower() in RECHARGE_ROOT_NAMES
+           or r.get("parent_id") is None}
+    ids |= {r["id"] for r in roots}
+    if not ids:
+        return set()
+    # Walk down: every descendant of a recharge root is a recharge category.
+    frontier = set(ids)
+    for _ in range(6):  # depth guard
+        kids = await db.shop_categories.find(
+            {"parent_id": {"$in": list(frontier)}}, {"_id": 0, "id": 1},
+        ).to_list(500)
+        new = {k["id"] for k in kids} - ids
+        if not new:
+            break
+        ids |= new
+        frontier = new
+    return ids
+
+
 @router.get("/shop-categories")
 async def list_public_categories(root_only: bool = True):
     """PUBLIC — returns ACTIVE categories.
@@ -239,6 +278,8 @@ async def list_public_categories(root_only: bool = True):
     Default: only ROOT (top-level) categories so the customer Shop tab
     stays clean.  Pass `?root_only=false` to include children (flat
     list, still ordered by `sort_order → name`).
+
+    Recharge categories are excluded — see `_recharge_category_ids`.
     """
     await _ensure_seeded()
     q: Dict[str, Any] = {"active": True}
@@ -247,17 +288,23 @@ async def list_public_categories(root_only: bool = True):
         q["$or"] = [{"parent_id": None}, {"parent_id": {"$exists": False}}]
     cursor = db.shop_categories.find(q).sort([("sort_order", 1), ("name", 1)])
     docs = await cursor.to_list(length=500)
-    return {"items": [_serialize(d) for d in docs]}
+    skip = await _recharge_category_ids()
+    return {"items": [_serialize(d) for d in docs if d.get("id") not in skip]}
 
 
 @router.get("/shop-categories/tree")
 async def list_category_tree():
     """PUBLIC — full nested category tree.  Response shape:
-    [{ ...category, children: [{ ...category, children: [...] }] }]"""
+    [{ ...category, children: [{ ...category, children: [...] }] }]
+
+    Recharge categories are excluded — see `_recharge_category_ids`."""
     await _ensure_seeded()
     docs = await db.shop_categories.find({"active": True}).sort([("sort_order", 1), ("name", 1)]).to_list(2000)
+    skip = await _recharge_category_ids()
     by_id: Dict[str, Dict[str, Any]] = {}
     for d in docs:
+        if d.get("id") in skip:
+            continue
         node = _serialize(d)
         node["children"] = []
         by_id[node["id"]] = node
@@ -291,11 +338,22 @@ async def list_descendants(cat_id: str):
 
 # ── Admin ────────────────────────────────────────────────────────────
 @router.get("/admin/shop-categories")
-async def admin_list_categories(_: Dict[str, Any] = Depends(require_admin)):
+async def admin_list_categories(
+    exclude_recharge: bool = False,
+    _: Dict[str, Any] = Depends(require_admin),
+):
+    """Admin category list.
+
+    `exclude_recharge=true` is used by the Shop Layout screen: recharge is
+    sold through its own flow, so it must not be offerable as a layout
+    scope. Category MANAGEMENT still sees everything (default false), so
+    recharge categories remain editable where they belong.
+    """
     await _ensure_seeded()
     cursor = db.shop_categories.find({}).sort([("sort_order", 1), ("name", 1)])
     docs = await cursor.to_list(length=1000)
-    return {"items": [_serialize(d) for d in docs]}
+    skip = await _recharge_category_ids() if exclude_recharge else set()
+    return {"items": [_serialize(d) for d in docs if d.get("id") not in skip]}
 
 
 @router.post("/admin/shop-categories")

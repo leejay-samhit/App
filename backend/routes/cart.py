@@ -398,10 +398,43 @@ async def cart_get(user: Dict[str, Any] = Depends(get_current_user)):
         hint = f"Add ₹{gap_total:,.0f} more to your bag to get free delivery."
     else:
         hint = "Delivery is charged on this bag."
+    # ── Nov-2026 — Cash-on-Delivery state for the bag ────────────────────
+    # The seller marks each item COD-able or prepaid-only. The checkout needs
+    # to know this BEFORE the buyer picks a method, so it can hide Cash on
+    # Delivery entirely when nothing in the bag supports it, and explain the
+    # prepaid part when only some items do. Order placement re-checks this
+    # server-side (it also refuses COD for far-away sellers), so this block is
+    # for the UI, not a substitute for that check.
+    cod_blocked_items: List[Dict[str, Any]] = []
+    cod_ok_count = 0
+    for _i in enriched:
+        _p = _i.get("product") or {}
+        if _p.get("cod_available") is False:
+            cod_blocked_items.append({
+                "product_id": _p.get("id"),
+                "name": _p.get("name") or "Item",
+                "qty": int(_i.get("qty") or 0),
+                "amount": round(float(_i.get("line_total") or 0), 2),
+                "vendor_name": _p.get("vendor_name") or "",
+            })
+        else:
+            cod_ok_count += 1
+    cod_prepay_due = round(sum(float(b["amount"]) for b in cod_blocked_items), 2)
+
     return {
         "items": enriched,
         "total": total,
         "count": sum(int(i.get("qty", 0)) for i in items),
+        "cod": {
+            # False → the checkout must not offer Cash on Delivery at all.
+            "available": cod_ok_count > 0,
+            # True → mixed bag: the prepaid part must be settled up-front.
+            "partial": cod_ok_count > 0 and len(cod_blocked_items) > 0,
+            "prepay_due": cod_prepay_due,
+            "blocked_items": cod_blocked_items,
+            "blocked_count": len(cod_blocked_items),
+            "cod_item_count": cod_ok_count,
+        },
         "delivery": {
             "enabled":      bool(quote.get("enabled")),
             "total":        delivery_total,

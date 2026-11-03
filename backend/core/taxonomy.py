@@ -38,17 +38,46 @@ async def normalize_product_taxonomy(
     update (pass the stored product so a category-only edit still resolves).
     """
     base = existing or {}
+    sent_sub = "subcategory" in fields or "sub_category" in fields
     sub = (
         _clean(fields.get("subcategory"))
         or _clean(fields.get("sub_category"))
         or (_clean(base.get("subcategory")) or _clean(base.get("sub_category"))
-            if ("subcategory" not in fields and "sub_category" not in fields) else "")
+            if not sent_sub else "")
     )
     if sub:
         fields["subcategory"] = sub
         fields["sub_category"] = sub
+    elif sent_sub:
+        # Nov-2026 BUGFIX — an EXPLICIT clear must wipe BOTH spellings.
+        # The product carries `subcategory` and `sub_category`; clearing only
+        # the one the client happened to send left the other in place, so the
+        # product stayed listed under its old sub-category.
+        fields["subcategory"] = ""
+        fields["sub_category"] = ""
 
     category = _clean(fields.get("category")) or _clean(base.get("category"))
+
+    # Nov-2026 — the sub-category must belong to the selected main category.
+    # When the admin tree knows children for this category, a sub-category
+    # from somewhere else (typically left over from a previous category) is
+    # dropped instead of being saved. Categories without a managed child list
+    # keep accepting free-form sub-categories.
+    if sub and category:
+        parent = await db.shop_categories.find_one(
+            {"name": {"$regex": f"^{re.escape(category)}$", "$options": "i"}},
+            {"_id": 0, "id": 1},
+        )
+        if parent:
+            kids = await db.shop_categories.find(
+                {"parent_id": parent["id"]}, {"_id": 0, "name": 1},
+            ).to_list(500)
+            names = {(k.get("name") or "").strip().lower() for k in kids}
+            if names and sub.strip().lower() not in names:
+                sub = ""
+                fields["subcategory"] = ""
+                fields["sub_category"] = ""
+
     if not category or category.lower() != "recharge":
         return fields
 
