@@ -28,6 +28,7 @@ import { api, formatApiError, resolveImageUrl } from "./api";
 import { colors, spacing } from "./theme";
 import { SubscribeBanner } from "./subscription";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
+import { FestivalBanner } from "./festival-decor";
 import {
   checkLocationPermission,
 } from "./location";
@@ -652,6 +653,8 @@ export function ShopHome({
         }
       >
         <LocationBanner />
+        {/* Festival banner — renders only while a festival theme is live. */}
+        <FestivalBanner />
         {/* Free-tier upsell — hidden automatically for subscribed users. */}
         <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
           <SubscribeBanner compact />

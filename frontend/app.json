@@ -127,7 +127,8 @@
           "isAndroidForegroundServiceEnabled": true
         }
       ],
-      "./plugins/withTruecaller"
+      "./plugins/withTruecaller",
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true

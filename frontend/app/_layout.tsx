@@ -1,5 +1,5 @@
 import { Stack, router as expoRouter } from "expo-router";
-import { useEffect } from "react";
+import React, { useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
 import { Text, TextInput, Platform, View, useWindowDimensions } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -11,7 +11,7 @@ import * as Linking from "expo-linking";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { notify } from "../src/notify";
 import { AuthProvider, useAuth } from "../src/auth";
-import { BrandingProvider, useFontFamily } from "../src/branding";
+import { BrandingProvider, useFontFamily, useThemeEpoch } from "../src/branding";
 import { ChatSettingsProvider } from "../src/chat-settings";
 import { LocationGate } from "../src/location-gate";
 import TamperBlockedScreen from "../src/tamper-blocked-screen";
@@ -254,6 +254,12 @@ function PushReRegister() {
   return null;
 }
 
+/** Remounts its children whenever the live theme version changes. */
+function ThemeSwitchGate({ children }: { children: React.ReactNode }) {
+  const epoch = useThemeEpoch();
+  return <View key={`theme-${epoch}`} style={{ flex: 1 }}>{children}</View>;
+}
+
 export default function RootLayout() {
   // First commit is done → drop the OS launch screen straight away.
   useEffect(() => {
@@ -300,7 +306,7 @@ function RootLayoutInner() {
   }, []);
 
   return (
-    <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#143D2E" }}>
+    <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.primary }}>
       <SafeAreaProvider>
         <BrandingProvider>
           <AuthProvider>
@@ -318,6 +324,11 @@ function RootLayoutInner() {
                   renders pages on the user's phone. */}
               <StatusBar style="dark" />
               <TabletContainer>
+                {/* ThemeSwitchGate — Oct 2026. Remounts the navigator when an
+                    admin applies/clears a festival theme so every open app
+                    repaints with the new palette instead of waiting for a
+                    restart. Key change only; no data is refetched. */}
+                <ThemeSwitchGate>
                 {/* LocationGate: blocks all non-admin authenticated users
                     until location permission is granted. Once granted it
                     silently pings the backend with coords every 5s while
@@ -348,6 +359,7 @@ function RootLayoutInner() {
                     />
                   </TamperGate>
                 </LocationGate>
+                </ThemeSwitchGate>
               </TabletContainer>
             </GlobalFont>
             </ChatSettingsProvider>

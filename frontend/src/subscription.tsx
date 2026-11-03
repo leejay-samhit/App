@@ -20,9 +20,15 @@ import { LinearGradient } from "expo-linear-gradient";
 import { api } from "./api";
 import { useAuth } from "./auth";
 import { colors, radii, formatINR } from "./theme";
+import { useBranding, useFestival } from "./branding";
 
 // ── crystal palette (subscription surfaces only — the rest of the app keeps
 // the house green from theme.ts) ───────────────────────────────────────────
+// Oct-2026 — the membership card's emerald/gold "crystal" look is part of the
+// Slangcart brand, so it stays put on the default theme. Under a festival
+// theme the gradient follows the festival's hero colours instead, otherwise a
+// bright green slab sits in the middle of a Deepavali home screen. The glass
+// highlights, gold and ice tints are shared by both looks.
 export const CRYSTAL = {
   g1: "#10B981",
   g2: "#0B6B4F",
@@ -35,6 +41,16 @@ export const CRYSTAL = {
   ice: "#D1FAE5",
   iceDim: "#A7F3D0",
 };
+
+/** Hook: the three gradient stops for the membership card. */
+function useCrystalGradient(): [string, string, string] {
+  const { gradient } = useBranding();
+  const festival = useFestival();
+  if (festival && gradient?.start && gradient?.middle && gradient?.end) {
+    return [gradient.middle, gradient.start, gradient.end];
+  }
+  return [CRYSTAL.g1, CRYSTAL.g2, CRYSTAL.g3];
+}
 
 export type Benefit = {
   key: string;
@@ -157,9 +173,10 @@ export function SubscriptionHero({
   const { config } = useSubscription();
   const price = amount ?? config.price;
   const member = variant === "member";
+  const grad = useCrystalGradient();
   return (
     <LinearGradient
-      colors={[CRYSTAL.g1, CRYSTAL.g2, CRYSTAL.g3]}
+      colors={grad}
       start={{ x: 0, y: 0 }}
       end={{ x: 1, y: 1 }}
       style={styles.hero}
@@ -377,6 +394,7 @@ export function SkipSubscriptionButton({ amount }: { amount: number }) {
 export function SubscribeBanner({ compact }: { compact?: boolean }) {
   const router = useRouter();
   const { config, showUpsell } = useSubscription();
+  const grad = useCrystalGradient();
   if (!showUpsell) return null;
   return (
     <TouchableOpacity
@@ -386,7 +404,7 @@ export function SubscribeBanner({ compact }: { compact?: boolean }) {
       testID="subscribe-banner"
     >
       <LinearGradient
-        colors={[CRYSTAL.g1, CRYSTAL.g2, CRYSTAL.g3]}
+        colors={grad}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={styles.banner}
@@ -416,6 +434,7 @@ export function SubscribeBanner({ compact }: { compact?: boolean }) {
 export function MembershipCard() {
   const router = useRouter();
   const { config, isMember, isAdmin } = useSubscription();
+  const grad = useCrystalGradient();
   if (isAdmin) return null;
   if (!isMember) {
     return (
@@ -442,7 +461,7 @@ export function MembershipCard() {
   }
   return (
     <LinearGradient
-      colors={[CRYSTAL.g1, CRYSTAL.g2, CRYSTAL.g3]}
+      colors={grad}
       start={{ x: 0, y: 0 }}
       end={{ x: 1, y: 1 }}
       style={styles.memberCard}

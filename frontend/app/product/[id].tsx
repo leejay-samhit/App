@@ -22,7 +22,7 @@ import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
 import { useContentWidth } from "../../src/content-width";
 import { getProductPreview } from "../../src/product-preview";
-import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { colors, radii, spacing, formatINR, withAlpha } from "../../src/theme";
 import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../../src/cashback";
 import { ProductRail, type Rail } from "../../src/product-rail";
 import { useRechargePay, RazorpayWebViewModal, accountIsValid } from "../../src/recharge-pay";
@@ -1184,7 +1184,7 @@ const styles = StyleSheet.create({
   },
   heroDot: {
     width: 6, height: 6, borderRadius: 3,
-    backgroundColor: "rgba(20,61,46,0.25)",
+    backgroundColor: withAlpha(colors.primary, 0.25),
   },
   heroDotActive: {
     width: 18, height: 6, borderRadius: 3,

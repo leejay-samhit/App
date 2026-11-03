@@ -2,6 +2,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { View, Text, StyleSheet, ViewStyle, StyleProp } from "react-native";
 import { ReactNode } from "react";
 import { colors, radii } from "./theme";
+import { useBranding, useFestival } from "./branding";
 
 export type GradientCardProps = {
   children: ReactNode;
@@ -21,7 +22,17 @@ const GRADIENTS: Record<NonNullable<GradientCardProps["variant"]>, [string, stri
 };
 
 export function GradientCard({ children, style, variant = "primary", rounded, withDecor = true }: GradientCardProps) {
-  const grads = GRADIENTS[variant];
+  // Oct-2026 — under a festival theme the two brand variants follow the
+  // festival's hero gradient, so headers and hero cards match the rest of the
+  // app. The three decorative variants (sunset / royal / midnight) are chosen
+  // per-card for contrast and are left alone.
+  const { gradient } = useBranding();
+  const festival = useFestival();
+  const brandVariant = variant === "primary" || variant === "emerald";
+  const grads: [string, string, string] =
+    festival && brandVariant && gradient?.start && gradient?.middle && gradient?.end
+      ? [gradient.start, gradient.middle, gradient.end]
+      : GRADIENTS[variant];
   return (
     <LinearGradient
       colors={grads as any}

@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 // (Platform / StyleSheet no longer needed — system font only.)
 // Preload @expo/vector-icons fonts at boot — Expo SDK 54 + new-arch can race
 // the runtime font loader and surface "Font file for feather is empty"
@@ -15,7 +15,7 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 // the first frame. Only the icon fonts are preloaded now.
 import { useFonts } from "expo-font";
 import { api } from "./api";
-import { colors as defaultColors } from "./theme";
+import { colors as defaultColors, persistPalette } from "./theme";
 
 export type BrandingTab = { key: string; label: string; icon: string; visible: boolean };
 
@@ -56,6 +56,26 @@ export type Branding = {
   };
   button_style?: "rounded" | "pill" | "square";
   home_banner_b64?: string | null;
+  // ─── Festival themes (Oct-2026) ───
+  /** Null / absent = the normal Slangcart theme. */
+  festival?: {
+    id: string;
+    name: string;
+    subtitle?: string;
+    icon?: string;
+    decor?: {
+      pattern?: string;
+      sparkles?: boolean;
+      rangoli?: boolean;
+      glow_color?: string;
+      decor_tint?: string;
+      banner_title?: string;
+      banner_subtitle?: string;
+    };
+    artwork?: { banner?: string };
+  } | null;
+  /** Bumped by the backend on every theme change — open apps poll it. */
+  theme_version?: number;
 };
 
 const DEFAULT_BRANDING: Branding = {
@@ -92,9 +112,12 @@ type Ctx = {
   setBranding: (b: Branding) => void;
   refresh: () => Promise<void>;
   loading: boolean;
+  /** Increments whenever the live theme changes; used as a remount key. */
+  themeEpoch: number;
 };
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { AppState, View } from "react-native";
 
 // Persisted last-good branding response. Hydrated synchronously-ish on
 // BrandingProvider mount so the very first paint already shows the LIVE
@@ -107,6 +130,12 @@ const BrandingContext = createContext<Ctx | undefined>(undefined);
 export function BrandingProvider({ children }: { children: React.ReactNode }) {
   const [branding, setBrandingState] = useState<Branding>(DEFAULT_BRANDING);
   const [loading, setLoading] = useState(true);
+  // Oct-2026 festival themes — bumped when the live theme_version moves so the
+  // tree below can remount and repaint with the new palette.
+  const [themeEpoch, setThemeEpoch] = useState(0);
+  // Gates the first render until the cached palette has been applied.
+  const [hydrated, setHydrated] = useState(false);
+  const seenVersion = useRef<number>(0);
 
   // Load the trimmed weights so they're ready when the user picks a font.
   useFonts({
@@ -121,6 +150,9 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
     // Mutate the singleton colors object so existing screens that import { colors } pick up
     // the new values on their next render.
     Object.assign(defaultColors, next);
+    // ...and mirror it into synchronous storage so the NEXT launch builds every
+    // StyleSheet from this palette instead of the factory one.
+    persistPalette(next);
   };
 
   const setBranding = useCallback((b: Branding) => {
@@ -138,6 +170,11 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
         tabs: Array.isArray(data?.tabs) && data.tabs.length ? data.tabs : DEFAULT_BRANDING.tabs,
       };
       setBranding(merged);
+      // Festival/theme change detection — a moved theme_version means an admin
+      // applied or cleared a theme, so repaint the tree below.
+      const v = Number(merged.theme_version || 0);
+      if (seenVersion.current && v > seenVersion.current) setThemeEpoch((n) => n + 1);
+      seenVersion.current = v;
       // Persist for next launch so first paint already shows LIVE branding.
       try { await AsyncStorage.setItem(BRANDING_CACHE_KEY, JSON.stringify(merged)); } catch { /* quota */ }
     } catch {
@@ -148,24 +185,68 @@ export function BrandingProvider({ children }: { children: React.ReactNode }) {
   }, [setBranding]);
 
   useEffect(() => {
-    // Hydrate from cache synchronously-ish so the very first paint already
-    // shows the LIVE app_name / tagline / colors. Then refresh from the API
-    // in parallel — by the time the request resolves, we silently swap to
-    // the freshest values (usually identical, so no visual change).
+    // Hydrate from cache BEFORE rendering any screen. Screen modules build
+    // their StyleSheets from `colors` the first time they are required, and
+    // a StyleSheet snapshots the colour values it reads — so anything that
+    // mounts before the live palette is applied keeps the factory green for
+    // the rest of the session (visible as stray green buttons under a
+    // festival theme). Gating the first render on this read is a few ms and
+    // the splash overlay already covers the launch frames.
     (async () => {
+      let hadCache = false;
       try {
         const cached = await AsyncStorage.getItem(BRANDING_CACHE_KEY);
         if (cached) {
           const parsed = JSON.parse(cached) as Branding;
-          if (parsed && parsed.app_name) setBranding(parsed);
+          if (parsed && parsed.app_name) { setBranding(parsed); hadCache = true; }
         }
       } catch { /* cache miss / parse error – fall back to DEFAULT_BRANDING */ }
-      refresh();
+
+      if (hadCache) {
+        // Palette already applied — paint now, reconcile in the background.
+        setHydrated(true);
+        refresh();
+      } else {
+        // First-ever launch: there is no cached palette, so wait briefly for
+        // the live one. Without this the screens mount on the factory colours
+        // and keep them for the session. Capped so an offline first launch
+        // still reaches the app.
+        await Promise.race([
+          refresh(),
+          new Promise((res) => setTimeout(res, 2500)),
+        ]);
+        setHydrated(true);
+      }
     })();
   }, [refresh, setBranding]);
 
-  const value = useMemo<Ctx>(() => ({ branding, setBranding, refresh, loading }), [branding, setBranding, refresh, loading]);
-  return <BrandingContext.Provider value={value}>{children}</BrandingContext.Provider>;
+  // ── Live theme propagation (Oct-2026) ──────────────────────────────────
+  // Poll the tiny /festival-theme/active payload so an applied festival theme
+  // reaches already-open apps, and re-check whenever the app comes back to
+  // the foreground. Only a changed version triggers the full /branding fetch.
+  useEffect(() => {
+    let alive = true;
+    const check = async () => {
+      try {
+        const { data } = await api.get<{ theme_version?: number }>("/festival-theme/active");
+        const v = Number(data?.theme_version || 0);
+        if (alive && v && v !== seenVersion.current) refresh();
+      } catch { /* offline — try again on the next tick */ }
+    };
+    const timer = setInterval(check, 45000);
+    const sub = AppState.addEventListener("change", (s) => { if (s === "active") check(); });
+    return () => { alive = false; clearInterval(timer); sub.remove(); };
+  }, [refresh]);
+
+  const value = useMemo<Ctx>(
+    () => ({ branding, setBranding, refresh, loading, themeEpoch }),
+    [branding, setBranding, refresh, loading, themeEpoch],
+  );
+  return (
+    <BrandingContext.Provider value={value}>
+      {hydrated ? children : <View style={{ flex: 1, backgroundColor: branding.colors.background }} />}
+    </BrandingContext.Provider>
+  );
 }
 
 export function useBranding(): Branding {
@@ -177,6 +258,17 @@ export function useBrandingActions() {
   const ctx = useContext(BrandingContext);
   if (!ctx) throw new Error("useBrandingActions must be inside BrandingProvider");
   return { setBranding: ctx.setBranding, refresh: ctx.refresh, loading: ctx.loading };
+}
+
+/** Remount key — changes whenever the live theme changes. */
+export function useThemeEpoch(): number {
+  return useContext(BrandingContext)?.themeEpoch ?? 0;
+}
+
+/** The active festival theme, or null for the normal Slangcart look. */
+export function useFestival(): NonNullable<Branding["festival"]> | null {
+  const { festival } = useBranding();
+  return festival && festival.id ? festival : null;
 }
 
 /** Returns the active font-family string (or undefined for system default). */

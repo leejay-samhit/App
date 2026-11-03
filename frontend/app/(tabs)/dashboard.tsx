@@ -19,7 +19,7 @@ import { api } from "../../src/api";
 import { cachedGet } from "../../src/cachedGet";
 import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
-import { colors, formatINR, radii, spacing } from "../../src/theme";
+import { colors, formatINR, radii, spacing, withAlpha } from "../../src/theme";
 import { SubscribeBanner } from "../../src/subscription";
 import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
@@ -485,7 +485,7 @@ export default function DashboardScreen() {
               </View>
             </View>
             <View style={{ marginTop: 14 }}>
-              <Sparkline data={data.cashback_per_day} width={300} height={88} strokeColor={colors.primary} fillFrom="rgba(20,61,46,0.28)" fillTo="rgba(20,61,46,0.0)" />
+              <Sparkline data={data.cashback_per_day} width={300} height={88} strokeColor={colors.primary} fillFrom={withAlpha(colors.primary, 0.28)} fillTo={withAlpha(colors.primary, 0)} />
               <View style={styles.dayLabelsRow}>
                 {(data.day_labels || []).map((d, i) => (
                   <Text key={i} style={styles.dayLabel}>{d}</Text>

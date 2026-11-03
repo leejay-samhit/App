@@ -13,7 +13,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
 import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
-import { colors, radii, spacing } from "../../src/theme";
+import { colors, radii, spacing, withAlpha } from "../../src/theme";
 import { ChatShopCard, type ShopCard } from "../../src/chat-shop-card";
 import { useChatSocket } from "../../src/use-chat-socket";
 import { useChatSettings, wallpaperStyle } from "../../src/chat-settings";
@@ -531,7 +531,7 @@ export default function ChatThreadScreen() {
                         {reactions && Object.keys(reactions).length > 0 ? (
                           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
                             {Object.entries(reactions).map(([emo, list]) => (
-                              <View key={emo} style={{ backgroundColor: mine ? "rgba(255,255,255,0.18)" : "rgba(20,61,46,0.08)", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, flexDirection: "row", gap: 3 }}>
+                              <View key={emo} style={{ backgroundColor: mine ? "rgba(255,255,255,0.18)" : withAlpha(colors.primary, 0.08), paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, flexDirection: "row", gap: 3 }}>
                                 <Text style={{ fontSize: 12 }}>{emo}</Text>
                                 <Text style={{ fontSize: 10, fontWeight: "800", color: mine ? "#fff" : colors.textMain }}>{list.length}</Text>
                               </View>

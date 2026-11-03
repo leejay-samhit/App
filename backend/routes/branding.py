@@ -9,6 +9,7 @@ Endpoints (mounted at /api by server.py):
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -55,9 +56,18 @@ async def admin_update_branding(
                 if re.match(r"^#[0-9A-Fa-f]{3,8}$", v):
                     clean[k] = v
         if clean:
-            existing = (await get_branding_doc()).get("colors") or {}
+            stored_doc = await get_branding_doc()
+            existing = stored_doc.get("colors") or {}
             existing.update(clean)
             update["colors"] = existing
+            # Oct-2026 — if a festival theme is live, these edits ARE the
+            # admin's own brand colours, so they belong in the stash that
+            # "restore default" reads. Without this, a colour edited during a
+            # festival silently reverts when the festival is cleared.
+            if (stored_doc.get("festival") or {}).get("id"):
+                stash = dict(stored_doc.get("pre_festival_colors") or {})
+                stash.update(clean)
+                update["pre_festival_colors"] = stash
     # ─── Support WhatsApp number (Oct-2026) ───
     # Admin types it in any format; we normalise to digits and assume +91
     # when a bare 10-digit Indian number is entered.
@@ -146,9 +156,16 @@ async def admin_update_branding(
                 if re.match(r"^#[0-9A-Fa-f]{3,8}$", v):
                     clean_g[k] = v
         if clean_g:
-            existing_g = (await get_branding_doc()).get("gradient") or {}
+            stored_g = await get_branding_doc()
+            existing_g = stored_g.get("gradient") or {}
             existing_g.update(clean_g)
             update["gradient"] = existing_g
+            # Same reasoning as the colours above — keep the restore stash in
+            # step with the admin's own gradient edits.
+            if (stored_g.get("festival") or {}).get("id"):
+                stash_g = dict(stored_g.get("pre_festival_gradient") or {})
+                stash_g.update(clean_g)
+                update["pre_festival_gradient"] = stash_g
     # ─── Premium theme: button style ───
     if payload.button_style is not None:
         bs = (payload.button_style or "").strip().lower()
@@ -175,7 +192,16 @@ async def admin_update_branding(
 
 @router.post("/admin/branding/reset")
 async def admin_reset_branding(admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
-    await db.settings.update_one({"id": "branding"}, {"$set": dict(DEFAULT_BRANDING)}, upsert=True)
+    # A full reset also drops any festival theme — otherwise the festive
+    # decorations would keep rendering on top of the factory green palette.
+    await db.settings.update_one(
+        {"id": "branding"},
+        {
+            "$set": {**dict(DEFAULT_BRANDING), "festival": None, "theme_version": int(time.time())},
+            "$unset": {"pre_festival_colors": "", "pre_festival_gradient": ""},
+        },
+        upsert=True,
+    )
     await audit_log(admin, "branding.reset", "branding", "global")
     stored = await get_branding_doc()
     return merge_branding(stored)

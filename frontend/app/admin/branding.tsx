@@ -5,6 +5,7 @@ import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useBranding, useBrandingActions, type Branding } from "../../src/branding";
+import { FestivalThemesSection } from "../../src/admin-festival-themes";
 import { colors, radii, spacing } from "../../src/theme";
 
 const COLOR_FIELDS: { key: keyof Branding["colors"]; label: string }[] = [
@@ -130,6 +131,10 @@ export default function AdminBranding() {
               <Text style={[styles.previewBtnText, { color: draft.colors.accentFg }]}>Accent CTA</Text>
             </View>
           </View>
+
+          {/* Festival themes (Oct-2026) — one-tap seasonal re-skin. */}
+          <SectionHeader icon="sun" label="Festival Themes" />
+          <FestivalThemesSection />
 
           {/* Text */}
           <SectionHeader icon="type" label="App text" />

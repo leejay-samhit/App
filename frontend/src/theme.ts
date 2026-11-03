@@ -1,5 +1,21 @@
 // Centralized theme based on design_guidelines.json (Organic & Earthy)
-export const colors = {
+//
+// Oct-2026 — festival themes. `colors` is the single palette object the whole
+// app builds its StyleSheets from, and a StyleSheet snapshots the colour
+// values it reads at module-evaluation time. Expo Router evaluates every route
+// module at bundle start, long before an async storage read could resolve, so
+// an async palette could never reach those styles.
+//
+// The live palette is therefore mirrored into SYNCHRONOUS storage and read
+// back here, at import time, before any screen builds its styles (localStorage
+// on web, expo-sqlite's kv-store on native — see src/sync-store*.ts). Result:
+// the first frame after a launch is already in the active festival palette.
+import { syncGet, syncSet } from "./sync-store";
+
+/** Mirror of the branding cache, kept in sync by BrandingProvider. */
+export const PALETTE_CACHE_KEY = "@app/paletteV1";
+
+const BASE_COLORS = {
   background: "#FAF9F6",
   surface: "#FFFFFF",
   surfaceMuted: "#F3F1EC",
@@ -16,6 +32,50 @@ export const colors = {
   brand500: "#2C6B50",
   brand100: "#DDE8E2",
 };
+
+function bootPalette(): typeof BASE_COLORS {
+  try {
+    const raw = syncGet(PALETTE_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        const clean: Record<string, string> = {};
+        for (const k of Object.keys(BASE_COLORS)) {
+          const v = (parsed as any)[k];
+          if (typeof v === "string" && /^#[0-9A-Fa-f]{3,8}$/.test(v)) clean[k] = v;
+        }
+        return { ...BASE_COLORS, ...clean };
+      }
+    }
+  } catch { /* first launch, or storage unavailable — use the base palette */ }
+  return BASE_COLORS;
+}
+
+export const colors = bootPalette();
+
+/** Persist the live palette so the NEXT launch paints in it from frame one. */
+export function persistPalette(next: Partial<typeof BASE_COLORS>): void {
+  try {
+    syncSet(PALETTE_CACHE_KEY, JSON.stringify({ ...colors, ...next }));
+  } catch { /* storage full / unavailable — the in-memory palette still applies */ }
+}
+
+/** Restore the factory palette (used when a theme is cleared). */
+export const BASE_PALETTE = BASE_COLORS;
+
+/**
+ * Translucent version of a palette colour.
+ *
+ * Use this instead of writing `rgba(20,61,46,0.25)` by hand — a hand-written
+ * rgba is frozen at the factory green and cannot follow a festival theme.
+ */
+export function withAlpha(hex: string, alpha: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  // eslint-disable-next-line no-bitwise
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
 
 export const radii = {
   card: 20,
@@ -81,7 +141,7 @@ export const TABLET_MIN_WIDTH = 900;
 // so it doesn't stretch edge-to-edge on iPads, foldables, and large tablets.
 export const READABLE_MAX_WIDTH = 480;
 
-import { useWindowDimensions, ViewStyle } from "react-native";
+import { useWindowDimensions, type ViewStyle } from "react-native";
 
 /** Returns true when the viewport is tablet-sized (>= 900 px). */
 export function useIsTablet(): boolean {

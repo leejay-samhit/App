@@ -135,6 +135,7 @@ from core.danger import (  # noqa: E402
 # `from server import _create_notification` call-sites in routes/*.py).
 from core.notifications import create_notification as _create_notification  # noqa: E402,F401
 from routes import branding as branding_router  # noqa: E402
+from routes import festival_themes as festival_themes_router  # noqa: E402
 from routes import notifications as notifications_router  # noqa: E402
 from routes import products_public as products_public_router  # noqa: E402
 from routes import products_master as products_master_router  # noqa: E402
@@ -10855,6 +10856,7 @@ app.include_router(api_router)
 # Phase 2B refactor: extracted routers, mounted at /api so URLs are unchanged
 # from the client's perspective.
 app.include_router(branding_router.router, prefix="/api")
+app.include_router(festival_themes_router.router, prefix="/api")
 app.include_router(notifications_router.router, prefix="/api")
 app.include_router(products_public_router.router, prefix="/api")
 app.include_router(products_master_router.router, prefix="/api")

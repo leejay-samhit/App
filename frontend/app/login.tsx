@@ -20,6 +20,7 @@ import { useBranding } from "../src/branding";
 import { colors, radii, spacing, useResponsiveContainer } from "../src/theme";
 import { formatApiError } from "../src/api";
 import { GradientCard } from "../src/gradient-card";
+import { FestivalStrip } from "../src/festival-decor";
 import { GoogleSignInButton } from "../src/google-signin-button";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
@@ -188,6 +189,8 @@ export default function Login() {
               <Text style={styles.heroOverline}>WELCOME BACK</Text>
               <Text style={styles.heroH1}>{login_subtitle}</Text>
               <Text style={styles.heroTagline}>{tagline}</Text>
+              {/* Festive decoration — nothing renders on the normal theme. */}
+              <FestivalStrip compact />
             </GradientCard>
           </Animated.View>
 

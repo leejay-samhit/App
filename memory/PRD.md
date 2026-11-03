@@ -2892,3 +2892,31 @@ that set `number_verified` MUST restore it or real users lose chat.
    onBlocksResolved). Files: app/checkout.tsx, app/(tabs)/shop-category/[name].tsx,
    src/no-vendors-hero.tsx, src/shop-layout-renderer.tsx, src/subscription.tsx,
    src/shop-home.tsx.
+
+### Oct-2026 — Festival Themes (Branding & Themes upgrade)
+- Admin → Branding → **Festival Themes**: 10 festival cards (name, artwork
+  gradient, palette swatches, inline Preview Theme, Apply Theme), an active-
+  theme row with **Restore default**, and an AI banner-artwork button.
+- **Deepavali is fully designed and applicable**; the other 9 ship as preview
+  cards with their real palettes and a COMING SOON badge (backend refuses to
+  apply them). Adding a festival later needs no screen changes.
+- Applying writes the palette into the existing branding doc, so every screen
+  re-skins with no per-screen work: home, shop, product, services, cart,
+  checkout, wallet, profile, chat, vendor screens, headers, buttons, cards,
+  tab bar. Festive diyas/rangoli/banner are drawn in-app (react-native-svg),
+  so nothing extra downloads.
+- Key engineering fix: the palette is now read from SYNCHRONOUS storage at
+  theme.ts import time (localStorage on web, expo-sqlite kv-store on native),
+  because StyleSheet.create snapshots colours before any async read resolves.
+  Without it, stray factory-green controls stayed on a purple theme.
+- Open apps poll /api/festival-theme/active every 45 s + on foreground and
+  repaint; full fidelity on next app open.
+- Super-admin only. Restore returns the ADMIN'S own colours (stashed), and
+  colour edits made during a festival now update that stash. A full branding
+  reset also clears the festival.
+- Tests: backend/tests/test_festival_themes.py — 15 passed. Full regression
+  green (registration 51, SIM 64, membership 35, adversarial 12, smoke 17,
+  ledger balanced). Browser-verified apply + restore.
+- BLOCKER for AI artwork only: the Emergent Universal Key reports "API key is
+  inactive" — owner must top up the balance. Drawn decorations are unaffected.
+- Details: /app/memory/FESTIVAL_THEMES.md
