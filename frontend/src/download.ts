@@ -2,9 +2,57 @@ import { Platform, Alert } from "react-native";
 // Use legacy API for cacheDirectory/writeAsStringAsync/EncodingType — still supported in v55.
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
-import { getAuthToken } from "./api";
+import { getAuthToken, api } from "./api";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+
+/**
+ * Nov 2026 — pack the backup ON THE SERVER, then download the finished file.
+ *
+ * Packing a whole-app backup can take many minutes on a large Atlas database;
+ * holding the screen open while it streams means a minimized app pauses the
+ * download. This helper instead:
+ *   1. starts a server-side pack job (POST /admin/backup/file/prepare),
+ *   2. polls it until the file is ready (calling `onProgress` along the way),
+ *   3. downloads the packed file in seconds.
+ * The server keeps packing even if the app is closed — reopening the app and
+ * tapping again starts a fresh pack if the old one expired.
+ */
+export async function downloadPackedBackup(opts: {
+  scope: "app" | "account";
+  userId?: string;
+  filename: string;
+  onProgress?: (msg: string) => void;
+}): Promise<{ ok: boolean; path?: string; bytes?: number }> {
+  const { scope, userId, filename, onProgress } = opts;
+  const { data: job } = await api.post<any>("/admin/backup/file/prepare", {
+    scope,
+    user_id: scope === "account" ? userId : undefined,
+  });
+  let status: any = null;
+  for (let tries = 0; tries < 600; tries++) { // ~20 min of polling
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const { data } = await api.get<any>(`/admin/backup/file/jobs/${job.job_id}`);
+      status = data;
+      const mb = (Number(data.bytes_written || 0) / 1024 / 1024).toFixed(1);
+      onProgress?.(
+        `Packing on the server… ${data.collections_done || 0}/${data.collections_total || "?"} tables · ${mb} MB`,
+      );
+      if (data.status === "ready" || data.status === "failed") break;
+    } catch {
+      // transient network blip while polling — keep waiting
+    }
+  }
+  if (!status || status.status !== "ready") {
+    throw new Error(status?.error || "The server could not finish the pack. Please try again.");
+  }
+  onProgress?.("Downloading the packed file…");
+  return downloadServerFile({
+    path: `/admin/backup/file/jobs/${job.job_id}/download`,
+    filename,
+  });
+}
 
 /**
  * Save a LARGE server-generated file (e.g. the full-app backup) without ever

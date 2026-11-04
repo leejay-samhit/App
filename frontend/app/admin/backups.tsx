@@ -83,15 +83,38 @@ const swipe = useTabSwipe(["file", "snapshots"] as const, tab, setTab);
     }
     setBusy(restoreFor.id);
     try {
-      const { data } = await api.post(`/admin/backups/${restoreFor.id}/restore`, {
+      // Nov 2026 — the restore now runs as a server-side JOB: a full replay
+      // can outlive the request timeout (which surfaced as a bare "500"),
+      // so we start the job, then poll until it reports done.
+      const { data: started } = await api.post(`/admin/backups/${restoreFor.id}/restore`, {
         danger_pin: restorePin,
       });
+      let job: any = null;
+      for (let tries = 0; tries < 600; tries++) { // up to ~20 min
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const { data } = await api.get(`/admin/backups/restore-jobs/${started.job_id}`);
+          job = data;
+          if (data.status === "done" || data.status === "failed") break;
+        } catch {
+          // transient blip — keep polling
+        }
+      }
       setRestoreFor(null);
       setRestorePin("");
       await load();
+      if (!job || job.status !== "done") {
+        Alert.alert("Restore failed", job?.error || "The restore did not finish. Please try again.");
+        return;
+      }
+      const restoredLines = Object.entries((job.restored || {}) as Record<string, number>)
+        .slice(0, 12).map(([k, v]) => `• ${k}: ${v}`).join("\n");
+      const failed = Object.entries((job.failed || {}) as Record<string, string>);
       Alert.alert(
-        "Restore complete",
-        `Restored:\n${Object.entries(data.restored as Record<string, number>).map(([k, v]) => `• ${k}: ${v}`).join("\n")}\n\nYou may need to refresh other screens.`,
+        failed.length ? "Restore finished with warnings" : "Restore complete",
+        `Restored ${Object.keys(job.restored || {}).length} tables` +
+        (failed.length ? `, ${failed.length} failed:\n${failed.slice(0, 5).map(([k, v]) => `⚠️ ${k}: ${v}`).join("\n")}` : "") +
+        `\n\n${restoredLines}\n\nYou may need to refresh other screens.`,
       );
     } catch (e) {
       Alert.alert("Restore failed", formatApiError(e));
@@ -188,7 +211,7 @@ const swipe = useTabSwipe(["file", "snapshots"] as const, tab, setTab);
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.cardTime}>{new Date(item.created_at).toLocaleString()}</Text>
-                  {item.note ? <Text style={styles.cardNote} numberOfLines={2}>"{item.note}"</Text> : null}
+                  {item.note ? <Text style={styles.cardNote} numberOfLines={2}>{'“'}{item.note}{'”'}</Text> : null}
                 </View>
                 <Text style={styles.totalRows}>{totalRows(item).toLocaleString("en-IN")} rows</Text>
               </View>

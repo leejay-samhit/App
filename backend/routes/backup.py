@@ -26,11 +26,12 @@ Design notes
   price / stock before anything hits the public shop. Publishing stays
   admin-only, exactly like a manually created product.
 """
+import asyncio
 import base64
 import json
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from bson import ObjectId
@@ -580,12 +581,34 @@ def _doc_json(doc: Dict[str, Any]) -> str:
     return json.dumps(_json_safe(doc), default=str, ensure_ascii=False)
 
 
-async def _stream_backup(
+#: How many docs a single cursor getMore fetches. Atlas shared clusters kill
+#: a getMore that takes too long ("Executor error during getMore :: operation
+#: exceeded time limit", MaxTimeMSExpired) — the production failure that made
+#: full backups hang at "Packing on the server…" forever. A dead cursor used
+#: to kill the whole streamed response; now each collection is fault-tolerant
+#: and image-heavy collections fetch just a few big docs per round-trip.
+_STREAM_BATCH = 25
+_STREAM_BATCH_BIGDOCS = 3   # product_image_files etc. — multi-MB documents
+
+#: Collections whose documents can be several MB apiece (raw bytes / base64).
+_BIGDOC_COLLECTIONS = {"product_image_files", "image_assets", "backup_file_chunks"}
+
+
+async def _backup_json_bytes(
     names: List[str],
     query_for,
     envelope: Dict[str, Any],
 ) -> AsyncIterator[bytes]:
-    """Yield one complete backup JSON document, a few documents at a time."""
+    """Yield one complete backup JSON document, a few documents at a time.
+
+    Nov 2026 hardening:
+      * small cursor batches so Atlas can't kill a getMore on big collections;
+      * a collection whose cursor dies mid-stream no longer kills the whole
+        file — it contributes an empty array and is listed under `warnings`
+        at the end of the document;
+      * the client therefore ALWAYS receives a complete, valid JSON file.
+    """
+    warnings: List[str] = []
     head = {k: v for k, v in envelope.items()}
     opening = json.dumps(head, ensure_ascii=False)[:-1]  # drop the closing brace
     yield (opening + (", " if head else "") + '"collections": {').encode()
@@ -593,16 +616,27 @@ async def _stream_backup(
         yield (("," if i else "") + json.dumps(name) + ":[").encode()
         first = True
         buf: List[str] = []
-        async for doc in db[name].find(query_for(name)).sort("_id", 1):
-            buf.append(("" if first else ",") + _doc_json(doc))
-            first = False
-            if len(buf) >= 50:
+        batch = _STREAM_BATCH_BIGDOCS if name in _BIGDOC_COLLECTIONS else _STREAM_BATCH
+        try:
+            cursor = db[name].find(query_for(name)).sort("_id", 1).batch_size(batch)
+            async for doc in cursor:
+                buf.append(("" if first else ",") + _doc_json(doc))
+                first = False
+                if len(buf) >= 50:
+                    yield "".join(buf).encode()
+                    buf = []
+            if buf:
                 yield "".join(buf).encode()
-                buf = []
-        if buf:
-            yield "".join(buf).encode()
+        except Exception as e:
+            # A mid-stream cursor failure (Atlas maxTimeMS, transient network)
+            # used to abort the ENTIRE download with a half-written file.
+            log.error("backup stream: %s failed after some rows: %s", name, e)
+            warnings.append(f"{name}: export stopped early — {e}")
         yield b"]"
-    yield b"}}"
+    yield b"}"
+    if warnings:
+        yield b', "warnings": ' + json.dumps(warnings, ensure_ascii=False).encode()
+    yield b"}"
 
 
 def _attachment(name: str) -> Dict[str, str]:
@@ -628,7 +662,7 @@ async def admin_backup_file(
         "exported_at": now_utc().isoformat(),
     }
     return StreamingResponse(
-        _stream_backup(names, lambda _n: {}, envelope),
+        _backup_json_bytes(names, lambda _n: {}, envelope),
         media_type="application/json",
         headers=_attachment(f"slangcart-full-backup-{stamp}.json"),
     )
@@ -654,9 +688,164 @@ async def account_backup_file(
         "exported_at": now_utc().isoformat(),
     }
     return StreamingResponse(
-        _stream_backup(names, lambda n: scope_query(user_id, email, n), envelope),
+        _backup_json_bytes(names, lambda n: scope_query(user_id, email, n), envelope),
         media_type="application/json",
         headers=_attachment(f"slangcart-account-backup-{label}-{stamp}.json"),
+    )
+
+
+# ══════════════════ 4E — SERVER-PACKED BACKUP FILES ═══════════════════
+#
+# Nov 2026 — the app used to hold a screen open while the server STREAMED a
+# full backup; on Atlas the pack can take tens of minutes, a minimized app
+# paused the JS side, and a dead cursor left the download hanging at
+# "Packing on the server…" forever. Now the server packs the file in a
+# BACKGROUND task (bytes kept in `backup_file_chunks`), the phone polls for
+# progress and only downloads once the file is finished — fast, and immune
+# to the app being closed in between.
+
+_PREPARED_TTL_HOURS = 24
+_FILE_CHUNK_BYTES = 4 * 1024 * 1024  # keep Mongo docs comfortably under 16 MB
+
+
+async def _pack_backup_file(job_id: str, names: List[str], query_for, envelope: Dict[str, Any]) -> None:
+    """Background task: run the same JSON stream into Mongo chunks."""
+    buf = bytearray()
+    seq = 0
+    done = 0
+    total_bytes = 0
+    try:
+        async def _flush(final: bool = False) -> None:
+            nonlocal seq
+            while len(buf) >= _FILE_CHUNK_BYTES or (final and buf):
+                take = min(len(buf), _FILE_CHUNK_BYTES)
+                await db.backup_file_chunks.insert_one(
+                    {"job_id": job_id, "seq": seq, "data": bytes(buf[:take])},
+                )
+                del buf[:take]
+                seq += 1
+                if len(buf) < _FILE_CHUNK_BYTES and not final:
+                    break
+
+        # Track which collection the stream is on by watching the emitted
+        # "name":[ markers — a cheap way to report progress.
+        import re as _re
+        marker = _re.compile(rb'"([^"\\]+)":\[$')
+        async for part in _backup_json_bytes(names, query_for, envelope):
+            m = marker.search(part.rstrip())
+            if m:
+                nm = m.group(1).decode("utf-8", "ignore")
+                if nm in names:
+                    done = names.index(nm) + 1
+            buf.extend(part)
+            total_bytes += len(part)
+            await _flush()
+            await db.backup_file_jobs.update_one(
+                {"id": job_id},
+                {"$set": {"bytes_written": total_bytes, "collections_done": done}},
+            )
+        await _flush(final=True)
+        await db.backup_file_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "ready", "finished_at": now_utc().isoformat(),
+                      "collections_done": len(names)}},
+        )
+    except Exception as e:
+        log.exception("backup pack %s failed", job_id)
+        await db.backup_file_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "failed", "error": str(e), "finished_at": now_utc().isoformat()}},
+        )
+
+
+@router.post("/admin/backup/file/prepare")
+async def prepare_backup_file(
+    payload: Dict[str, Any] = Body(default={}),
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Start packing a backup file on the server. Returns a job id the app
+    polls; the finished file downloads in seconds. Works even if the app is
+    closed while packing."""
+    scope = (payload.get("scope") or "app").lower()
+    user_id = payload.get("user_id")
+    if scope == "account":
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id required for an account backup")
+        u = await _scope_target(user_id)
+        email = (u.get("email") or "").lower() or None
+        names = await _exportable_collections(False)
+        query_for = lambda n: scope_query(user_id, email, n)
+        envelope = {
+            "format": APP_EXPORT_FORMAT, "version": 1, "scope": "account",
+            "account": {"id": u["id"], "email": u.get("email"), "name": u.get("name")},
+            "exported_at": now_utc().isoformat(),
+        }
+        filename = f"slangcart-account-backup-{(u.get('email') or user_id).replace('@', '-at-')}-{now_utc().strftime('%Y%m%d-%H%M')}.json"
+    else:
+        names = await _exportable_collections(bool(payload.get("include_reference")))
+        query_for = lambda _n: {}
+        envelope = {
+            "format": APP_EXPORT_FORMAT, "version": 1, "scope": "app",
+            "exported_at": now_utc().isoformat(),
+        }
+        filename = f"slangcart-full-backup-{now_utc().strftime('%Y%m%d-%H%M')}.json"
+
+    # Retention: prepared files are a cache, not history — drop anything old.
+    cutoff = (now_utc() - timedelta(hours=_PREPARED_TTL_HOURS)).isoformat()
+    old = await db.backup_file_jobs.find({"created_at": {"$lt": cutoff}}, {"_id": 0, "id": 1}).to_list(100)
+    if old:
+        old_ids = [o["id"] for o in old]
+        await db.backup_file_jobs.delete_many({"id": {"$in": old_ids}})
+        await db.backup_file_chunks.delete_many({"job_id": {"$in": old_ids}})
+
+    job_id = str(uuid.uuid4())
+    await db.backup_file_jobs.insert_one({
+        "id": job_id,
+        "status": "packing",
+        "scope": scope,
+        "filename": filename,
+        "collections_total": len(names),
+        "collections_done": 0,
+        "bytes_written": 0,
+        "created_by": admin["id"],
+        "created_at": now_utc().isoformat(),
+    })
+    asyncio.create_task(_pack_backup_file(job_id, names, query_for, envelope))
+    return {"job_id": job_id, "status": "packing", "collections_total": len(names)}
+
+
+@router.get("/admin/backup/file/jobs/{job_id}")
+async def backup_file_job_status(
+    job_id: str,
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    job = await db.backup_file_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="No such backup job")
+    return job
+
+
+@router.get("/admin/backup/file/jobs/{job_id}/download")
+async def download_prepared_backup(
+    job_id: str,
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Stream the finished file from its Mongo chunks — fast, because the
+    packing already happened."""
+    job = await db.backup_file_jobs.find_one({"id": job_id})
+    if not job:
+        raise HTTPException(status_code=404, detail="No such backup job")
+    if job.get("status") != "ready":
+        raise HTTPException(status_code=409, detail=f"Still packing ({job.get('status')})")
+
+    async def _chunks() -> AsyncIterator[bytes]:
+        async for ch in db.backup_file_chunks.find({"job_id": job_id}).sort("seq", 1):
+            yield bytes(ch["data"])
+
+    return StreamingResponse(
+        _chunks(),
+        media_type="application/json",
+        headers=_attachment(job.get("filename") or f"slangcart-backup-{job_id}.json"),
     )
 
 
@@ -699,6 +888,15 @@ async def admin_backup_restore(
     # `settings` empties the very row it lives in.
     live_pin = await get_danger_pin_hash() if collection == "settings" else None
 
+    # Same for the acting admin's sessions: restoring `users` would otherwise
+    # roll back `active_session_ids` and log the admin out mid-restore.
+    live_sessions: Optional[Dict[str, Any]] = None
+    if collection == "users":
+        live_sessions = await db.users.find_one(
+            {"id": admin["id"]},
+            {"_id": 0, "active_session_ids": 1, "active_session_id": 1},
+        )
+
     wiped = 0
     if mode == "wipe" and first_chunk:
         res = await db[collection].delete_many({})
@@ -708,6 +906,12 @@ async def admin_backup_restore(
     # bytes.  `_id` is KEPT (it is the key behind `/api/img/<key>`), so a
     # restore can upsert on it and bring the permanent image store back.
     cleaned = [_json_revive(d) for d in docs if isinstance(d, dict)]
+
+    if collection == "users":
+        # The file's session data must not clobber whoever is logged in now.
+        for d in cleaned:
+            d.pop("active_session_ids", None)
+            d.pop("active_session_id", None)
 
     # The Danger PIN lives in `settings`, and the admin had to type it to get
     # here. Restoring a file from another deployment (or one taken before the
@@ -832,6 +1036,17 @@ async def admin_backup_restore(
         # next collection in the walk still authenticates.
         await db.settings.update_one(
             {"id": "global"}, {"$set": {"danger_pin_hash": live_pin}}, upsert=True,
+        )
+
+    if collection == "users" and live_sessions:
+        # Re-attach the acting admin's live sessions — ReplaceOne/wipe would
+        # otherwise leave them logged out of the very restore they're running.
+        await db.users.update_one(
+            {"id": admin["id"]},
+            {"$set": {
+                "active_session_ids": live_sessions.get("active_session_ids") or [],
+                "active_session_id": live_sessions.get("active_session_id"),
+            }},
         )
 
     await db.audit_logs.insert_one({

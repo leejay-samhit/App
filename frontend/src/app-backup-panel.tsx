@@ -23,7 +23,7 @@ import { Feather } from "@expo/vector-icons";
 
 import { api, formatApiError } from "./api";
 import { colors, radii, spacing } from "./theme";
-import { downloadServerFile } from "./download";
+import { downloadPackedBackup } from "./download";
 import { notify } from "./notify";
 import { BackupRestoreCard } from "./backup-restore-card";
 
@@ -53,17 +53,18 @@ export function AppBackupPanel() {
   useEffect(() => { loadManifest(); }, [loadManifest]);
 
   // ── Download the whole app ──────────────────────────────────────────────
-  // The server streams the finished .json straight to disk (see
-  // downloadServerFile) — building it page-by-page in JS used to blow up
-  // Android with an OutOfMemoryError on a ~120 MB backup.
+  // Nov 2026 — packed on the SERVER in the background (see
+  // downloadPackedBackup): no more holding the screen open while a big
+  // catalogue streams, and no OutOfMemoryError from stitching ~120 MB in JS.
   const onDownload = useCallback(async () => {
     if (!manifest) return;
     setBusy("download"); setResult(""); setProgress("Packing on the server…");
     try {
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-      const res = await downloadServerFile({
-        path: "/admin/backup/file",
+      const res = await downloadPackedBackup({
+        scope: "app",
         filename: `slangcart-app-backup-${stamp}.json`,
+        onProgress: setProgress,
       });
       if (res.ok) {
         const mb = res.bytes ? ` (${(res.bytes / 1024 / 1024).toFixed(1)} MB)` : "";

@@ -7287,6 +7287,10 @@ async def _snapshot_collections() -> List[str]:
     # properly. Every other collection still snapshots fully.
     skip = set(NEVER_EXPORT) | set(REFERENCE_COLLECTIONS) | {
         "db_snapshots", "db_snapshot_chunks", "product_image_files",
+        # Runtime job state, not business data — a restore must never wipe
+        # the very job the admin is watching (it did: status polling 404'd
+        # mid-restore), and snapshots must not carry them.
+        "backup_restore_jobs", "backup_file_jobs", "backup_file_chunks",
     }
     return sorted(n for n in names if n not in skip)
 
@@ -7330,7 +7334,14 @@ async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
                     "rows": batch,
                 })
 
-            async for doc in db[coll].find({}, {"_id": 0}):
+            # Small cursor batches: Atlas shared clusters kill a getMore that
+            # runs too long (MaxTimeMSExpired) on image-heavy collections,
+            # which used to abort the whole auto-backup.
+            # `_id` is KEPT (Nov 2026): the restore wipes each collection
+            # before re-inserting, so keeping the real `_id` gives a true
+            # point-in-time restore — and stops destroying named counters
+            # (`shortid:order` …), whose `_id` IS the counter name.
+            async for doc in db[coll].find({}).batch_size(20):
                 rows.append(doc)
                 n += 1
                 approx += len(str(doc))
@@ -7380,48 +7391,121 @@ async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
             await db.db_snapshots.update_many(
                 {"id": {"$in": stale}}, {"$set": {"archived": True}},
             )
+    # Archived snapshots are kept restorable for a short grace window, then
+    # their chunk payloads are purged — WITHOUT this the chunks accumulate
+    # forever and fill the disk (this exact failure filled the sandbox DB
+    # volume at 100% and crash-looped mongod). These are the app's own backup
+    # copies, not user data; the retention purge IS the designed lifecycle.
+    grace_cutoff = (now_utc() - timedelta(days=3)).isoformat()
+    expired = await db.db_snapshots.find(
+        {"archived": True, "created_at": {"$lt": grace_cutoff}},
+        {"_id": 0, "id": 1},
+    ).to_list(500)
+    if expired:
+        expired_ids = [e["id"] for e in expired]
+        await db.db_snapshot_chunks.delete_many({"snapshot_id": {"$in": expired_ids}})
+        await db.db_snapshots.update_many(
+            {"id": {"$in": expired_ids}}, {"$set": {"purged": True}},
+        )
     doc.pop("_id", None)
     return {"id": snap_id, "counts": counts, "created_at": doc["created_at"], "skipped": skipped}
 
 
-async def _restore_snapshot(snap_id: str) -> Dict[str, Any]:
+async def _restore_snapshot(snap_id: str, job_id: Optional[str] = None,
+                            keep_session_user_id: Optional[str] = None) -> Dict[str, Any]:
     """Put the database back exactly as the snapshot captured it.
 
     Reads the chunked format written above, and still understands the legacy
     single-document `data` field so older snapshots stay restorable.
+
+    Nov 2026 — runs as a background job (see admin_restore_backup): on Atlas a
+    full replay can exceed the request timeout, which surfaced to the admin as
+    a bare "500". Per-collection failures are now recorded and skipped instead
+    of aborting the whole restore, and progress is written to the job doc.
+
+    Session preservation: restoring `users` used to roll back
+    `active_session_ids`, which REVOKED the session of the very admin running
+    the restore (401 session_revoked on the next poll). The acting admin's
+    live sessions are captured before the wipe and re-attached after.
     """
     snap = await db.db_snapshots.find_one({"id": snap_id})
     if not snap:
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
+    live_sessions: Optional[Dict[str, Any]] = None
+    if keep_session_user_id:
+        live_sessions = await db.users.find_one(
+            {"id": keep_session_user_id},
+            {"_id": 0, "active_session_ids": 1, "active_session_id": 1},
+        )
+
     legacy_data = snap.get("data") or {}
     restored: Dict[str, int] = {}
+    failed: Dict[str, str] = {}
     collections = [c for c, n in (snap.get("counts") or {}).items()] or list(legacy_data.keys())
+    total = len(collections)
+    done = 0
+
+    async def _progress(current: str) -> None:
+        if not job_id:
+            return
+        try:
+            await db.backup_restore_jobs.update_one(
+                {"id": job_id},
+                {"$set": {"collections_done": done, "collections_total": total,
+                          "current_collection": current,
+                          "restored": restored, "failed": failed}},
+            )
+        except Exception:
+            pass
 
     for coll in collections:
-        if coll in ("db_snapshots", "db_snapshot_chunks"):
+        if coll in ("db_snapshots", "db_snapshot_chunks",
+                    "backup_restore_jobs", "backup_file_jobs", "backup_file_chunks"):
+            # Runtime job state is not business data — and wiping it mid-job
+            # deletes the job doc the admin is polling.
             continue
-        rows: List[Dict[str, Any]] = list(legacy_data.get(coll) or [])
-        if not rows:
-            async for ch in db.db_snapshot_chunks.find(
-                {"snapshot_id": snap_id, "collection": coll}, {"_id": 0, "rows": 1, "seq": 1},
-            ).sort("seq", 1):
-                rows.extend(ch.get("rows") or [])
-        # A collection captured as EMPTY must end up empty — that's what the
-        # snapshot recorded.
-        await db[coll].delete_many({})
-        if rows:
-            cleaned = [{k: v for k, v in r.items() if k != "_id"} for r in rows]
-            for i in range(0, len(cleaned), 500):
-                await db[coll].insert_many(cleaned[i:i + 500])
-        restored[coll] = len(rows)
+        try:
+            rows: List[Dict[str, Any]] = list(legacy_data.get(coll) or [])
+            if not rows:
+                async for ch in db.db_snapshot_chunks.find(
+                    {"snapshot_id": snap_id, "collection": coll}, {"_id": 0, "rows": 1, "seq": 1},
+                ).sort("seq", 1).batch_size(10):
+                    rows.extend(ch.get("rows") or [])
+            # A collection captured as EMPTY must end up empty — that's what the
+            # snapshot recorded. The wipe-first means keeping the original
+            # `_id` is safe AND desirable (named counters like `shortid:order`
+            # survive the round-trip; ObjectId references stay valid).
+            await db[coll].delete_many({})
+            if rows:
+                for i in range(0, len(rows), 500):
+                    await db[coll].insert_many(rows[i:i + 500])
+            restored[coll] = len(rows)
+            if coll == "users" and keep_session_user_id and live_sessions:
+                # Re-attach the acting admin's live sessions so the restore
+                # doesn't log them out of their own running job.
+                await db.users.update_one(
+                    {"id": keep_session_user_id},
+                    {"$set": {
+                        "active_session_ids": live_sessions.get("active_session_ids") or [],
+                        "active_session_id": live_sessions.get("active_session_id"),
+                    }},
+                )
+        except Exception as e:
+            logging.error(f"snapshot restore: {coll} failed: {e}")
+            failed[coll] = str(e)[:300]
+        done += 1
+        await _progress(coll)
+        # Let the event loop breathe between collections so /health and other
+        # requests keep answering during a long restore.
+        await asyncio.sleep(0)
 
     try:
         from routes.products_public import bust_products_public_caches
         bust_products_public_caches()
     except Exception:
         pass
-    return {"ok": True, "restored": restored, "snapshot_id": snap_id}
+    return {"ok": not failed, "restored": restored, "failed": failed, "snapshot_id": snap_id}
 
 
 async def _backup_scheduler():
@@ -7433,6 +7517,20 @@ async def _backup_scheduler():
             await _take_snapshot(kind="auto", note="Automatic snapshot")
         except Exception as e:
             logging.warning(f"Auto-backup failed: {e}")
+        try:
+            # Housekeeping (Nov 2026): prepared download files are a 24-hour
+            # cache — purge them here too, not only when a new pack starts,
+            # so they can't accumulate and fill the disk.
+            cutoff = (now_utc() - timedelta(hours=24)).isoformat()
+            old = await db.backup_file_jobs.find(
+                {"created_at": {"$lt": cutoff}}, {"_id": 0, "id": 1},
+            ).to_list(100)
+            if old:
+                ids = [o["id"] for o in old]
+                await db.backup_file_jobs.delete_many({"id": {"$in": ids}})
+                await db.backup_file_chunks.delete_many({"job_id": {"$in": ids}})
+        except Exception as e:
+            logging.warning(f"backup housekeeping failed: {e}")
         await asyncio.sleep(BACKUP_INTERVAL_SECONDS)
 
 
@@ -7628,14 +7726,63 @@ async def admin_take_backup(payload: TakeBackupRequest,
 @api_router.post("/admin/backups/{snap_id}/restore")
 async def admin_restore_backup(snap_id: str, payload: RestoreBackupRequest,
                                admin: Dict[str, Any] = Depends(require_admin_role("super_admin"))):
-    """Restore the DB to a snapshot. super_admin only + Danger PIN gate."""
+    """Restore the DB to a snapshot. super_admin only + Danger PIN gate.
+
+    Nov 2026 — now a BACKGROUND JOB: a full replay on Atlas can take longer
+    than the ingress timeout, which showed the admin a bare "500" while the
+    restore half-ran. The endpoint starts the job and returns immediately;
+    the app polls GET /admin/backups/restore-jobs/{job_id} for live progress.
+    """
     if not await get_danger_pin_hash():
         raise HTTPException(status_code=400, detail="Danger PIN not set. Set it in Admin → Admin access.")
     if not await verify_danger_pin(payload.danger_pin):
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
-    res = await _restore_snapshot(snap_id)
-    await _audit_log(admin, "backup.restore", "snapshot", snap_id, res["restored"])
-    return res
+    snap = await db.db_snapshots.find_one({"id": snap_id}, {"_id": 0, "id": 1})
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    job_id = str(uuid.uuid4())
+    await db.backup_restore_jobs.insert_one({
+        "id": job_id,
+        "snapshot_id": snap_id,
+        "status": "running",
+        "started_by": admin["id"],
+        "created_at": now_utc().isoformat(),
+        "collections_total": 0,
+        "collections_done": 0,
+    })
+
+    async def _run() -> None:
+        try:
+            res = await _restore_snapshot(snap_id, job_id=job_id,
+                                          keep_session_user_id=admin["id"])
+            await _audit_log(admin, "backup.restore", "snapshot", snap_id,
+                             {"restored": res["restored"], "failed": res.get("failed", {})})
+            await db.backup_restore_jobs.update_one(
+                {"id": job_id},
+                {"$set": {"status": "done", "finished_at": now_utc().isoformat(),
+                          "restored": res["restored"], "failed": res.get("failed", {}),
+                          "ok": res["ok"]}},
+            )
+        except Exception as e:
+            logging.exception(f"snapshot restore job {job_id} failed")
+            await db.backup_restore_jobs.update_one(
+                {"id": job_id},
+                {"$set": {"status": "failed", "error": str(e)[:500],
+                          "finished_at": now_utc().isoformat()}},
+            )
+
+    asyncio.create_task(_run())
+    return {"ok": True, "job_id": job_id, "status": "running"}
+
+
+@api_router.get("/admin/backups/restore-jobs/{job_id}")
+async def admin_restore_job_status(job_id: str, _: Dict[str, Any] = Depends(require_admin_not_finance)):
+    """Live progress for a running snapshot restore."""
+    job = await db.backup_restore_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="No such restore job")
+    return job
 
 
 @api_router.delete("/admin/backups/{snap_id}")

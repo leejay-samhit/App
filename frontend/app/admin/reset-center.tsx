@@ -23,7 +23,7 @@ import { useRouter } from "expo-router";
 
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
-import { downloadServerFile } from "../../src/download";
+import { downloadPackedBackup } from "../../src/download";
 import { BackupRestoreCard } from "../../src/backup-restore-card";
 import { notify } from "../../src/notify";
 
@@ -84,20 +84,27 @@ export default function AdminResetCenter() {
   }, [mode, picked, loadManifest]);
 
   // ── Mandatory backup download ───────────────────────────────────────────
-  // The server streams the whole .json to the device (see downloadServerFile);
-  // stitching it in JS used to crash Android with an OutOfMemoryError once the
-  // backup passed ~100 MB of base64 product photos.
+  // Nov 2026 — the file is now PACKED ON THE SERVER as a background job
+  // (POST /admin/backup/file/prepare), so a big catalogue no longer means
+  // holding the screen open: the pack keeps running even if you leave the
+  // app, the progress text shows real collections + MB, and the finished
+  // file then downloads in seconds.
   const onDownload = useCallback(async () => {
     if (!manifest) return;
-    setBusy("download"); setProgress("Packing on the server…"); setResult("");
+    setBusy("download"); setResult("");
     try {
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
       const label = mode === "app"
         ? "app"
         : (picked?.email || picked?.id || "account").replace(/[^a-zA-Z0-9]/g, "-");
-      const res = await downloadServerFile({
-        path: mode === "app" ? "/admin/backup/file" : `/admin/backup/account/${picked?.id}/file`,
-        filename: `slangcart-${mode === "app" ? "full" : "account"}-backup-${label}-${stamp}.json`,
+      const filename = `slangcart-${mode === "app" ? "full" : "account"}-backup-${label}-${stamp}.json`;
+
+      setProgress("Starting the server-side pack…");
+      const res = await downloadPackedBackup({
+        scope: mode === "app" ? "app" : "account",
+        userId: mode === "app" ? undefined : picked?.id,
+        filename,
+        onProgress: (m) => setProgress(`${m}\n(you can leave the app — it keeps running)`),
       });
       if (res.ok) {
         setDownloaded(true);

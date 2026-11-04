@@ -2996,3 +2996,55 @@ browser-verified apply → whole-app re-skin → restore to default.
    (visible root vs hidden subtree); the 4 tests that pinned the old
    "hide everything" behaviour were rewritten to the new contract
    (33 layout/COD tests + 58 backup tests passing).
+
+## Nov 2026 (2) — Backup system reliability overhaul
+
+Owner report: full-app backup never downloads ("packing on the server…"
+forever), Reset Center one-account/one-shop downloads hang, snapshot restore
+returns bare "500", and everything stops when the app is minimized.
+
+Root causes found and fixed:
+
+1. **Atlas getMore timeouts killed the stream.** `count_documents` and cursors
+   over image-heavy collections exceed Atlas's operation time limit. The
+   manifest now uses `safe_count` (4 s budget → metadata estimate fallback),
+   and the backup stream uses small cursor batches (25 docs, 3 for the
+   multi-MB image store) with per-collection fault tolerance — a dead cursor
+   contributes an empty array + a `warnings` note instead of killing the file.
+
+2. **File backups are now packed SERVER-SIDE as a background job.**
+   `POST /admin/backup/file/prepare` → poll `GET …/jobs/{id}` (shows tables
+   done + MB) → `GET …/jobs/{id}/download` streams the finished file in
+   seconds. Packing continues while the app is closed; prepared files are a
+   24-hour cache purged by the backup scheduler. Used by both Data Backups →
+   File backup and the Reset Center.
+
+3. **Snapshot restore is now a background job too.** POST returns immediately
+   with a job id; the app polls `GET /admin/backups/restore-jobs/{id}` with
+   live per-collection progress. Per-collection failures are recorded and
+   skipped instead of aborting the whole restore with a 500.
+
+4. **Restore no longer logs the admin out mid-job.** Restoring `users` wiped
+   `active_session_ids`, revoking the acting admin's session (every poll then
+   401'd `session_revoked`). The acting admin's sessions are captured before
+   the wipe and re-attached after; file restores strip session fields from
+   incoming user docs for the same reason.
+
+5. **Snapshots now keep `_id`.** The old format stripped it, so a restore
+   destroyed named counters (`shortid:order` …) — new short IDs would have
+   restarted at 1 and collided with the unique index. Verified: named counters
+   survive a full restore round-trip and the sequence continues.
+
+6. **Job-state collections** (`backup_restore_jobs`, `backup_file_jobs`,
+   `backup_file_chunks`) are excluded from snapshots and restores — wiping
+   them mid-job deleted the very job doc the admin was polling (404).
+
+Incident note: the sandbox's 9.8 GB DB volume filled to 100% (snapshot chunk
+accumulation + test artifacts), crash-looping mongod. Recovered by offloading
+the journal, dropping test `backup_file_chunks` and archived snapshot payloads,
+compacting, and moving the journal back (volume now 41%). Prevention shipped:
+archived snapshot payloads are purged after a 3-day grace window, and the
+15-minute scheduler also purges expired prepared files.
+
+Tests: `test_nov2026_backup_jobs.py` (5 new) + all prior backup/image/layout
+suites — 129 backend tests passing.
