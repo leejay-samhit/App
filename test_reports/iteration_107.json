@@ -1,0 +1,51 @@
+{
+  "summary": "Backend-only retest of defect #5 (pagination + backup/restore). The paging fixes work: admin list (272/272, no duplicates), vendor list (265/265), filtered q and vendor_id paging (total = filtered count), vendor export (265 rows, all names distinct), and admin dump walks for products, users and orders are all complete and duplicate-free. Restore at scale (520 products in 25-row chunks) persisted everything and could be paged to the full count in the admin and vendor lists. Re-merging the same 520-row export reported updated=520, created=0, with no growth. Replace mode wiped exactly the prior count and restored only the new set. The previous regression suites still pass (iter106 + jun2026_permanent_images: 47 passed). test_iter54_cart_adjust also passed (5/5), so its test-data fragility did not show up this run and is not a regression. NEW defects: (1) the full-app backup file loses the permanent image store: product_image_files are exported without their _id (the /api/img/<key> key), and their bytes are written as a Python repr string \"b'\\\\xff...'\". Restored images therefore cannot be served. The paged dump of the same collection returns 500. (2) counters are exported without their _id names. (3) Name-keyed idempotent merge breaks two ways: two products with the same name collapse onto one product on a second merge, and the same name twice in one chunk creates two products.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/admin/backup/file (used by app-backup-panel.tsx and reset-center.tsx)", "issue": "The permanent image store cannot be restored from a full backup. backup.py _json_safe() drops `_id` from every document, but product_image_files uses `_id` as the image key (`<sha1>.<ext>`, read by image_store.read_permanent_image via find_one({_id:key})). The BSON Binary `data` field is also written through json.dumps(default=str) as the Python repr \"b'\\\\xff\\\\xd8...'\". Restoring this file (merge → plain insert_many, because there is no `id`) creates keyless docs holding string data, so every /api/img/ cover is blank after a restore into a fork or a fresh DB. That brings back P0 #1/#2 on the restore path. Verified on the live 21.6 MB file: 7/7 product_image_files docs have no key and repr data.", "priority": "CRITICAL"},
+      {"endpoint": "GET /api/admin/backup/dump?collection=product_image_files", "issue": "Returns 500: UnicodeDecodeError ('utf-8' codec can't decode byte 0xff) in FastAPI serialize_response, because _json_safe passes bson Binary/bytes through unchanged. Any paged backup client fails on this collection.", "priority": "HIGH"},
+      {"endpoint": "GET /api/admin/backup/file and /dump, collection counters", "issue": "counters docs are exported as [{seq:4},{seq:40},...] with the `_id` name (e.g. 'shortid:<kind>', 'txn_seq') stripped. A restore cannot rebuild sequences. After a wipe restore, the seq_ids/finance counters restart at 1, which collides with the unique short_ids.code index, so new orders or transactions can fail or get duplicate numbers. Other collections whose docs lack `id` are also not idempotent on a merge restore (plain insert_many again): short_ids (4392 docs, unique code index → DuplicateKeyError/500 on re-merge), image_assets (32), payout_keys (282), payment_reconciliations (102), audit_logs (77).", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/vendor/me/catalogue/import (merge)", "issue": "The name-keyed match uses find_one, so it is not one-to-one. If a shop has two products with the same name (e.g. sizes or colours listed separately), a second merge of its own export writes both rows onto the FIRST product. Reproduced: prices [111,222] became [222,222], and the report said updated=2."},
+      {"endpoint": "POST /api/vendor/me/catalogue/import (merge)", "issue": "Duplicate names inside ONE chunk are not de-duplicated: [A, A] creates 2 products (the lookup only sees the DB, not the pending insert batch)."},
+      {"endpoint": "POST /api/vendor/me/catalogue/import (merge, updated path)", "issue": "An update sets is_published=False on existing products. Re-restoring a backup over a live shop silently takes every matched LIVE product offline. Confirm with the owner that this is intended."},
+      {"endpoint": "GET /api/vendor/me/catalogue/export", "issue": "The docstring says 'images included', but products now carry only /api/img/<key> refs and the image bytes are not in the file. A vendor file restored into another deployment, or after an image-store purge, shows blank images."},
+      {"endpoint": "POST /api/admin/backup/restore (merge)", "issue": "upserted = upserted_count + modified_count, so re-restoring identical docs reports upserted=0 (matched but unmodified), which makes the restore report misleading."},
+      {"endpoint": "GET /api/vendor/me/products", "issue": "The docstring promises a 'legacy array fallback for older clients that pass no params', but the endpoint always returns {items,total,...}. Older installed APKs that expect an array will show an empty product list."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Vendor POS product load", "issue": "pos.tsx loops `offset < 10000` with limit 300, a hidden cap of 10,000 products (code review only; frontend not tested).", "affected_testIDs": []},
+      {"flow": "Admin products stats", "issue": "admin/products.tsx computes 'Out of stock', 'With interest' and 'pending review' counts from loaded pages only, not server totals. They undercount on big catalogues. The search placeholder says 'vendor', but q does not match vendor names (code review only).", "affected_testIDs": []}
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter107_pagination_backup_retest.py",
+    "/app/test_reports/pytest/iter107.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Make the full-app backup preserve product_image_files. Export `_id` (at least for collections whose key is _id: product_image_files, counters; arguably all, as `_id` → '__id' or an `$oid` wrapper) and base64-encode Binary/bytes, e.g. {'$binary': b64}. On restore, decode them and upsert by _id (ReplaceOne({'_id': key})) instead of plain insert_many.",
+    "Fix the 500 on /api/admin/backup/dump?collection=product_image_files by handling bytes/bson.Binary in _json_safe.",
+    "Fix counters export/restore (keep the _id names). Make the admin merge restore idempotent for collections without `id`: upsert by _id, or by natural key (short_ids.code, image_assets.source_url).",
+    "Vendor merge restore: match one-to-one. Track matched ids so each existing product is used once, de-duplicate names within the chunk (and across chunks of the same run), or put a hidden stable key (e.g. source_product_id) in the export and match on it before falling back to name.",
+    "Decide (owner) whether a merge UPDATE should unpublish live products. If not, keep the existing is_published value on update.",
+    "Optional: include image bytes (or a companion image pack) in the vendor export so the file can be restored across deployments."
+  ],
+  "critical_code_review_comments": [
+    "backup.py _json_safe strips `_id` recursively, including nested `_id` keys inside sub-documents, which is also lossy.",
+    "admin_backup_restore wipe mode + insert_many with no ordered=False: one bad doc aborts the chunk after the wipe has already run.",
+    "server.py is 11k lines and must be split (admin_list_products / vendor_my_products could move to routes/)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter107_pagination_backup_retest.py"],
+  "success_rate": {"backend": "78% (18/23 in the new suite; 47/47 prior regression suites)", "frontend": "not tested (backend only)"},
+  "seed_data_creation": "Created a throw-away approved vendor user TEST_iter107_<hex>@example.com directly in Mongo, plus ~580 TEST_iter107_* products on it, and 6 TEST_iter107_*_idem products on testvendor@test.com. All were removed at teardown by vendor_id and by tracked ids. Verified afterwards: 0 TEST_iter107 products, 0 TEST_iter107 users, catalogue back to 272 and testvendor back to 265. The pre-existing leftover 'TEST_aa1b75_Prod' (created 2026-11-03, not by this run) is still present. The buyer's wishlist and cart toggles were reverted.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run /app/backend/tests/test_iter107_pagination_backup_retest.py. The 5 failing tests map 1:1 to the new defects. Admin restore (/admin/backup/restore) needs the Danger PIN, which is NOT in test_credentials.md, so only the 401 path was tested. The vendor `replace` and the 520-row scale test run on a throw-away vendor; never run replace on testvendor@test.com.",
+  "rca_of_issue": "Paging RCA confirmed fixed: the {created_at,id} and _id sorts give a deterministic order. New RCA: _json_safe was written for collections keyed by a string `id`. product_image_files (the permanent image store introduced for P0 #1) and counters are keyed by Mongo `_id`, and product_image_files holds BSON Binary. Dropping _id and str()-ing the bytes makes those collections unrestorable. Repro: GET /api/admin/backup/dump?collection=product_image_files&limit=3 → 500. GET /api/admin/backup/file → collections.product_image_files[0] has no key and data starts with \"b'\\\\xff\"."
+}

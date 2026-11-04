@@ -59,6 +59,18 @@ def _shape_product(p: Dict[str, Any]) -> Dict[str, Any]:
     p["interested_count"] = len(interested) if isinstance(interested, list) else 0
     # Don't leak raw user-id list to the public endpoint — only the count.
     p.pop("interested_users", None)
+    # Jun 2026 — Shopify-converted imports store `images` as OBJECTS
+    # (`{"src": …, "position": 2}`).  Shipping those to the app made the
+    # product screen call `.startsWith` on an object, which crashed the
+    # Android release build the moment a shopper tapped the card.  Always
+    # hand the client a flat, ordered, de-duplicated array of strings —
+    # and make sure `image_url` is a string too.
+    if "images" in p:
+        from core.image_store import normalize_gallery
+        p["images"] = normalize_gallery(p.get("images"))
+    if "image_url" in p and not isinstance(p.get("image_url"), str):
+        from core.image_store import coerce_image_ref
+        p["image_url"] = coerce_image_ref(p.get("image_url"))
     return p
 
 
@@ -101,6 +113,10 @@ def _slim_list_item(p: Dict[str, Any]) -> Dict[str, Any]:
         # the sweet spot between perceptual quality and payload size.
         p["image_url"] = f"/api/products/{p.get('id')}/image?w=360&q=72"
         p["has_inline_image"] = True
+    elif isinstance(img, str) and img.startswith("/api/img/") and "?" not in img:
+        # Jun 2026 — permanently-stored photo: ask for the grid-sized
+        # variant so a 60-card screen isn't 12 MB of full-res JPEG.
+        p["image_url"] = f"{img}?w=360&q=72"
     # Jun 2026 — list cards need to know a product HAS sizes so the "+"
     # opens the size picker instead of blind-adding, and so the price can
     # read "from ₹499". The heavy `variants` array itself is dropped.
@@ -801,6 +817,20 @@ async def get_product(product_id: str):
     # Phase 2 §18 — customer-facing tax breakdown from the ONE GST engine.
     from core import gst as _gst
     p["gst_breakdown"] = _gst.public_pricing(p)["selling"]
+    # Jun 2026 — Lazy image repair. If this product still points at an
+    # external CDN, copy the photos into permanent storage in the
+    # background so the NEXT view (and the shop grid) is never blank.
+    # Fire-and-forget: the shopper's response is not delayed.
+    try:
+        from core.image_store import needs_persisting
+        if needs_persisting(p.get("image_url")) or any(
+            needs_persisting(x) for x in (p.get("images") or [])
+        ):
+            import asyncio as _aio
+            from routes.product_images_repair import maybe_repair_one
+            _aio.create_task(maybe_repair_one(product_id))
+    except Exception:
+        pass
     return _shape_product(p)
 
 

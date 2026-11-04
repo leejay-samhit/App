@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, RefreshControl, Alert, Modal, TextInput, ScrollView, Switch, Image, Platform, AppState } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshControl, Alert, Modal, TextInput, ScrollView, Platform, AppState } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api, formatApiError, resolveImageUrl } from "../../src/api";
+import { api, formatApiError } from "../../src/api";
 import { FadeSlideIn, ProductCardSkeleton } from "../../src/anim";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
 import { RichProductEditor } from "../../src/rich-product-editor";
+import { ProductImage } from "../../src/product-image";
+
+/** Products fetched per page by the admin catalogue list. */
+const PAGE_SIZE = 60;
 
 // Walkthrough steps shown on first visit (and via the "?" button) of
 // /admin/products. Keep these in plain language; admins are not engineers.
@@ -94,40 +98,123 @@ export default function AdminProducts() {
   const [vendorFilter, setVendorFilter] = useState<VendorLite | null>(null);
   const [vendorPickerOpen, setVendorPickerOpen] = useState(false);
   const [interestedFor, setInterestedFor] = useState<Product | null>(null);
-  // Jun 2026 — bulk publish / unpublish (whole catalog or one vendor).
+  // Jun 2026 — Bulk publish / unpublish (whole catalog or one vendor).
   const [bulkConfirm, setBulkConfirm] = useState<null | "publish" | "unpublish">(null);
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Jun 2026 — Real pagination.  The old screen asked for `limit: 200` and
+  // showed whatever came back, so a restored 1,509-product catalogue looked
+  // like it had lost 1,300 items.  We now page through the catalogue and
+  // search on the SERVER, so every product is reachable.
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Jun 2026 — Image repair (see backend routes/product_images_repair.py).
+  const [imgHealth, setImgHealth] = useState<{ needs_repair: number; failed: number; permanent: number } | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairNote, setRepairNote] = useState("");
+  // Debounced copy of `search` — what we actually send to the server.
+  const [appliedSearch, setAppliedSearch] = useState("");
+
+  const loadPage = useCallback(async (offset: number): Promise<{ items: Product[]; total: number; hasMore: boolean }> => {
+    const params: Record<string, string> = { limit: String(PAGE_SIZE), offset: String(offset) };
+    if (vendorFilter?.id) params.vendor_id = vendorFilter.id;
+    if (appliedSearch.trim()) params.q = appliedSearch.trim();
+    const r = await api.get<any>("/admin/products", { params });
+    const data = r.data || {};
+    const list: Product[] = Array.isArray(data) ? data : (data.items || []);
+    return {
+      items: list,
+      total: Number(data.total ?? list.length),
+      hasMore: Boolean(data.has_more ?? false),
+    };
+  }, [vendorFilter, appliedSearch]);
 
   const load = useCallback(async () => {
     try {
-      const params: Record<string, string> = { limit: "200" };
-      if (vendorFilter?.id) params.vendor_id = vendorFilter.id;
-      // /admin/products doesn't include interested_count yet; fetch from public
-      // /products too and merge for the count display. Admin keeps full access
-      // (incl. unpublished items via /admin/products).
-      const [admin, pub] = await Promise.all([
-        api.get<any>("/admin/products", { params }),
-        api.get<any>("/products").catch(() => ({ data: [] })),
-      ]);
-      // Jun 2026 — /admin/products now returns { items, total, ... }.
-      // Legacy fallback still handles the old array shape.
-      const adminList: Product[] = Array.isArray(admin.data)
-        ? admin.data
-        : (admin.data?.items || []);
-      const pubList: any[] = Array.isArray(pub.data) ? pub.data : (pub.data?.items || []);
-      const countMap = new Map<string, number>();
-      pubList.forEach((p: any) => countMap.set(p.id, p.interested_count || 0));
-      setItems(adminList.map((p) => ({ ...p, interested_count: countMap.get(p.id) || 0 })));
+      const page = await loadPage(0);
+      // `interested_count` lives on the public list; merge it in for the
+      // first page only so the badge still works without a second heavy call.
+      let countMap = new Map<string, number>();
+      try {
+        const pub = await api.get<any>("/products");
+        const pubList: any[] = Array.isArray(pub.data) ? pub.data : (pub.data?.items || []);
+        countMap = new Map(pubList.map((p: any) => [p.id, p.interested_count || 0]));
+      } catch { /* badge is cosmetic */ }
+      setItems(page.items.map((p) => ({ ...p, interested_count: countMap.get(p.id) || 0 })));
+      setTotal(page.total);
+      setHasMore(page.hasMore);
     } catch (e) {
       Alert.alert("Error", formatApiError(e));
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [vendorFilter]);
+  }, [loadPage]);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const page = await loadPage(items.length);
+      setItems((cur) => {
+        const seen = new Set(cur.map((p) => p.id));
+        return [...cur, ...page.items.filter((p) => !seen.has(p.id))];
+      });
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+    } catch (e) {
+      Alert.alert("Couldn't load more", formatApiError(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, hasMore, items.length, loadPage]);
+
+  // Debounce the search box, then reload page 1 from the server.
+  useEffect(() => {
+    const t = setTimeout(() => setAppliedSearch(search), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+  useEffect(() => { setLoading(true); load(); }, [appliedSearch, vendorFilter]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const refreshImageHealth = useCallback(async () => {
+    try {
+      const r = await api.get<any>("/admin/products/image-health");
+      setImgHealth({
+        needs_repair: Number(r.data?.needs_repair || 0),
+        failed: Number(r.data?.failed || 0),
+        permanent: Number(r.data?.permanent || 0),
+      });
+    } catch { /* non-fatal */ }
+  }, []);
+
+  const runImageRepair = useCallback(async (retryFailed: boolean) => {
+    setRepairBusy(true);
+    setRepairNote("Downloading product photos into permanent storage…");
+    try {
+      const r = await api.post<any>("/admin/products/repair-images", { limit: 50, retry_failed: retryFailed });
+      const d = r.data || {};
+      const lines = [
+        `✅ ${d.repaired || 0} product${(d.repaired || 0) === 1 ? "" : "s"} fixed`,
+        d.partial ? `· ${d.partial} partly fixed` : "",
+        d.failed ? `· ${d.failed} could not be fetched` : "",
+        `· ${d.imported || 0} photo${(d.imported || 0) === 1 ? "" : "s"} stored`,
+        d.images_failed ? `· ${d.images_failed} photo${d.images_failed === 1 ? "" : "s"} unavailable` : "",
+        d.remaining ? `\n${d.remaining} product${d.remaining === 1 ? "" : "s"} still to go — tap again to continue.` : "\nNothing left to fix.",
+      ].filter(Boolean);
+      setRepairNote(lines.join(" "));
+      await refreshImageHealth();
+      await load();
+    } catch (e) {
+      setRepairNote("");
+      Alert.alert("Image repair failed", formatApiError(e));
+    } finally {
+      setRepairBusy(false);
+    }
+  }, [refreshImageHealth, load]);
 
   useFocusEffect(useCallback(() => {
     load();
+    refreshImageHealth();
     // Dec 2026 — Silent auto-refresh every 15 s so new vendor products
     // & publish-toggle changes appear without a manual pull-to-refresh.
     // Interval is cleared on blur (useFocusEffect cleanup runs).
@@ -136,23 +223,7 @@ export default function AdminProducts() {
       load();
     }, 15000);
     return () => clearInterval(iv);
-  }, [load]));
-
-  const onDelete = (p: Product) => {
-    Alert.alert("Delete product?", `"${p.name}" will be removed permanently and from all open carts.`, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete", style: "destructive", onPress: async () => {
-          try {
-            await api.delete(`/admin/products/${p.id}`);
-            await load();
-          } catch (e) {
-            Alert.alert("Delete failed", formatApiError(e));
-          }
-        },
-      },
-    ]);
-  };
+  }, [load, refreshImageHealth]));
 
   const runBulkPublish = async () => {
     if (!bulkConfirm) return;
@@ -215,10 +286,13 @@ export default function AdminProducts() {
           <GradientCard variant="primary" style={{ marginBottom: 14, padding: 18 }}>
             <Text style={{ fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.85)", fontWeight: "700" }}>CATALOG</Text>
             <Text style={{ fontSize: 22, fontWeight: "900", color: "#fff", marginTop: 4, letterSpacing: -0.6 }}>
-              {items.length} product{items.length === 1 ? "" : "s"} live
+              {appliedSearch.trim()
+                ? `${total.toLocaleString("en-IN")} match${total === 1 ? "" : "es"}`
+                : `${total.toLocaleString("en-IN")} product${total === 1 ? "" : "s"} in catalogue`}
             </Text>
             <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
-              {items.filter(p => (p.stock || 0) === 0).length} sold-out · {items.filter(p => (p.interested_count || 0) > 0).length} with waitlist
+              {appliedSearch.trim() ? `for “${appliedSearch.trim()}” · ` : ""}
+              Showing {items.length.toLocaleString("en-IN")}{hasMore ? " — scroll down to load more" : ""}
             </Text>
           </GradientCard>
 
@@ -228,6 +302,7 @@ export default function AdminProducts() {
             <TextInput
               value={search}
               onChangeText={setSearch}
+              testID="products-search-input"
               placeholder="Search products, vendor, or category"
               placeholderTextColor={colors.textMuted}
               style={styles.searchInput}
@@ -293,16 +368,85 @@ export default function AdminProducts() {
           </View>
 
           <View style={styles.statsStrip}>
-            <Stat label="Total" value={String(items.length)} />
-            <Stat label="Live" value={String(items.filter(p => p.is_published !== false).length)} accent />
-            <Stat label="Out of stock" value={String(items.filter(p => (p.stock || 0) === 0).length)} warn />
-            <Stat label="With interest" value={String(items.filter(p => (p.interested_count || 0) > 0).length)} />
+            <Stat label="Total" value={total.toLocaleString("en-IN")} />
+            <Stat label="Loaded" value={String(items.length)} accent />
+            {/* These three can only count what has been loaded, so they say
+                "so far" until the last page is in — otherwise a 5,000-SKU
+                catalogue looks like it has only 3 out-of-stock items. */}
+            <Stat label={hasMore ? "No stock so far" : "Out of stock"} value={String(items.filter(p => (p.stock || 0) === 0).length)} warn />
+            <Stat label={hasMore ? "Interest so far" : "With interest"} value={String(items.filter(p => (p.interested_count || 0) > 0).length)} />
             <Stat
-              label="Needs approval"
+              label={hasMore ? "Approvals so far" : "Needs approval"}
               value={String(items.filter(p => p.review_status === "pending").length)}
               warn
             />
           </View>
+
+          {/* Jun 2026 — Product photo health + repair.
+              Catalogues imported before permanent image storage existed
+              still point at third-party CDNs that have started refusing
+              us, which is what makes cards go blank days after an import.
+              This downloads a permanent copy of each one. */}
+          {imgHealth && (imgHealth.needs_repair > 0 || imgHealth.failed > 0) ? (
+            <View style={styles.repairCard} testID="image-repair-card">
+              <View style={styles.repairHead}>
+                <Feather name="image" size={15} color={colors.warning} />
+                <Text style={styles.repairTitle}>
+                  {imgHealth.needs_repair > 0
+                    ? `${imgHealth.needs_repair.toLocaleString("en-IN")} product${imgHealth.needs_repair === 1 ? "" : "s"} still use outside photo links`
+                    : `${imgHealth.failed.toLocaleString("en-IN")} product${imgHealth.failed === 1 ? "" : "s"} are missing their photo`}
+                </Text>
+              </View>
+              <Text style={styles.repairBody}>
+                {imgHealth.needs_repair > 0
+                  ? "Those links can stop working without warning, which leaves blank squares in the shop. Storing our own copy fixes them permanently."
+                  : "The source website refused or no longer has these images, so the shop shows a placeholder instead. Retry if the source is back, or add a photo to the product."}
+                {imgHealth.needs_repair > 0 && imgHealth.failed
+                  ? ` ${imgHealth.failed} could not be fetched last time.`
+                  : ""}
+              </Text>
+              {repairNote ? <Text style={styles.repairNote}>{repairNote}</Text> : null}
+              <View style={styles.repairBtnRow}>
+                {imgHealth.needs_repair > 0 ? (
+                  <TouchableOpacity
+                    onPress={() => runImageRepair(false)}
+                    disabled={repairBusy}
+                    style={[styles.bulkBtn, styles.bulkBtnPrimary, repairBusy && { opacity: 0.6 }]}
+                    testID="image-repair-run"
+                  >
+                    {repairBusy
+                      ? <ActivityIndicator size="small" color={colors.primaryFg} />
+                      : <Feather name="download-cloud" size={13} color={colors.primaryFg} />}
+                    <Text style={[styles.bulkBtnText, { color: colors.primaryFg }]} numberOfLines={1}>
+                      Fix product photos
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                {imgHealth.failed ? (
+                  <TouchableOpacity
+                    onPress={() => runImageRepair(true)}
+                    disabled={repairBusy}
+                    style={[
+                      styles.bulkBtn,
+                      imgHealth.needs_repair === 0 && styles.bulkBtnPrimary,
+                      repairBusy && { opacity: 0.6 },
+                    ]}
+                    testID="image-repair-retry"
+                  >
+                    {repairBusy && imgHealth.needs_repair === 0
+                      ? <ActivityIndicator size="small" color={colors.primaryFg} />
+                      : <Feather name="refresh-cw" size={13} color={imgHealth.needs_repair === 0 ? colors.primaryFg : colors.textMain} />}
+                    <Text
+                      style={[styles.bulkBtnText, imgHealth.needs_repair === 0 && { color: colors.primaryFg }]}
+                      numberOfLines={1}
+                    >
+                      Retry failed photos
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            </View>
+          ) : null}
 
           {/* Jun-2026 — a seller's edit pulls a live product out of the shop
               until it is approved again. Surface that queue at the top. */}
@@ -321,14 +465,9 @@ export default function AdminProducts() {
 
           {/* Grid */}
           {(() => {
-            const q = search.trim().toLowerCase();
-            const base = reviewOnly ? items.filter(p => p.review_status === "pending") : items;
-            const filtered = q ? base.filter(p =>
-              p.name.toLowerCase().includes(q)
-              || (p.category || "").toLowerCase().includes(q)
-              || (p.vendor_name || "").toLowerCase().includes(q)
-              || (p.vendor_email || "").toLowerCase().includes(q)
-            ) : base;
+            // Search now happens on the SERVER (see `appliedSearch`), so the
+            // only client-side narrowing left is the approval queue toggle.
+            const filtered = reviewOnly ? items.filter(p => p.review_status === "pending") : items;
             if (filtered.length === 0) {
               return <Text style={styles.empty}>{search ? "No matches" : (vendorFilter ? `No products from ${vendorFilter.name} yet.` : "No products yet — tap the + to add one.")}</Text>;
             }
@@ -346,9 +485,14 @@ export default function AdminProducts() {
                       testID={`product-${item.id}`}
                     >
                       <View style={styles.gridImgWrap}>
-                        {item.image_url
-                          ? <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.gridImg} />
-                          : <View style={[styles.gridImg, { backgroundColor: colors.surfaceMuted }]} />}
+                        <ProductImage
+                          uri={item.image_url}
+                          name={item.name}
+                          style={styles.gridImg}
+                          containerStyle={{ width: "100%", height: "100%" }}
+                          resizeMode="cover"
+                          testID={`product-${item.id}-img`}
+                        />
                         {item.is_published === false && (
                           <View style={[styles.draftPillTop, item.review_status === "pending" && { backgroundColor: colors.warning }]}>
                             <Text style={styles.draftPillText}>
@@ -413,6 +557,31 @@ export default function AdminProducts() {
               </View>
             );
           })()}
+
+          {/* Jun 2026 — Load more. Replaces the old hardcoded 200-item cap. */}
+          {hasMore && !reviewOnly ? (
+            <TouchableOpacity
+              onPress={loadMore}
+              disabled={loadingMore}
+              style={[styles.loadMoreBtn, loadingMore && { opacity: 0.6 }]}
+              testID="products-load-more"
+              activeOpacity={0.85}
+            >
+              {loadingMore
+                ? <ActivityIndicator size="small" color={colors.primary} />
+                : <Feather name="chevron-down" size={16} color={colors.primary} />}
+              <Text style={styles.loadMoreText}>
+                {loadingMore
+                  ? "Loading…"
+                  : `Load ${Math.min(PAGE_SIZE, Math.max(0, total - items.length))} more (${items.length.toLocaleString("en-IN")} of ${total.toLocaleString("en-IN")})`}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+          {!hasMore && items.length > 0 && !reviewOnly ? (
+            <Text style={styles.endOfList} testID="products-end">
+              All {total.toLocaleString("en-IN")} products loaded
+            </Text>
+          ) : null}
           </FadeSlideIn>
         </ScrollView>
       )}
@@ -798,6 +967,24 @@ const styles = StyleSheet.create({
   },
   bulkBtnPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },
   bulkBtnText: { fontSize: 12, fontWeight: "800", color: colors.textMain },
+
+  // Jun 2026 — Photo health / repair card + pagination footer
+  repairCard: {
+    backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1,
+    borderColor: colors.warning, padding: 14, marginBottom: 12,
+  },
+  repairHead: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
+  repairTitle: { fontSize: 13, fontWeight: "800", color: colors.textMain, flexShrink: 1 },
+  repairBody: { fontSize: 12, color: colors.textMuted, lineHeight: 18, marginBottom: 10 },
+  repairNote: { fontSize: 12, color: colors.textMain, lineHeight: 18, marginBottom: 10, fontWeight: "600" },
+  repairBtnRow: { flexDirection: "row", gap: 8 },
+  loadMoreBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    marginTop: 4, marginBottom: 12, paddingVertical: 14, borderRadius: radii.button,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, minHeight: 48,
+  },
+  loadMoreText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  endOfList: { textAlign: "center", fontSize: 11.5, color: colors.textMuted, paddingVertical: 14 },
   bulkOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 24 },
   bulkCard: { backgroundColor: colors.surface, borderRadius: 18, padding: 20 },
   bulkTitle: { fontSize: 17, fontWeight: "900", color: colors.textMain },
@@ -825,86 +1012,4 @@ const modalStyles = StyleSheet.create({
   userAvatarText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
   userName: { fontSize: 13, fontWeight: "700", color: colors.textMain },
   userMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-});
-
-const sectionStyles = StyleSheet.create({
-  wrap: {
-    marginBottom: 10,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    overflow: "hidden",
-  },
-  head: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14 },
-  headIcon: {
-    width: 32, height: 32, borderRadius: 10,
-    backgroundColor: colors.primary + "12",
-    alignItems: "center", justifyContent: "center",
-  },
-  headTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
-  headSummary: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-  body: { paddingHorizontal: 14, paddingBottom: 14, paddingTop: 4 },
-
-  // Sub-feature rows
-  row: {
-    flexDirection: "row", alignItems: "center", gap: 10,
-    paddingVertical: 8, paddingHorizontal: 10,
-    backgroundColor: colors.surfaceMuted, borderRadius: 10, marginTop: 6,
-  },
-  rowText: { flex: 1, fontSize: 13, color: colors.textMain },
-  addBtn: {
-    width: 44, height: 44, borderRadius: 12,
-    backgroundColor: colors.primary,
-    alignItems: "center", justifyContent: "center",
-  },
-
-  // Outline / mini buttons
-  outlineBtn: {
-    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
-    paddingVertical: 10, borderRadius: 10,
-    borderWidth: 1, borderColor: colors.primary,
-    backgroundColor: colors.primary + "08",
-  },
-  outlineBtnText: { fontSize: 12, fontWeight: "800", color: colors.primary },
-  smallDangerBtn: {
-    width: 44, height: 44, borderRadius: 10,
-    backgroundColor: "#FCE9E5", alignItems: "center", justifyContent: "center",
-  },
-
-  // Style toolbar (bold/align/font-size)
-  toolRow: { flexDirection: "row", gap: 6, marginTop: 8, flexWrap: "wrap" },
-  toolBtn: {
-    paddingHorizontal: 10, paddingVertical: 8,
-    borderRadius: 8, borderWidth: 1, borderColor: colors.border,
-    backgroundColor: colors.surface, minWidth: 36, alignItems: "center", justifyContent: "center",
-  },
-  toolBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-
-  // Gallery
-  galleryGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  galleryItem: { width: 72, height: 72, borderRadius: 10, overflow: "hidden", position: "relative" },
-  galleryImg: { width: "100%", height: "100%" },
-  galleryRemove: {
-    position: "absolute", top: 4, right: 4,
-    width: 20, height: 20, borderRadius: 10,
-    backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center",
-  },
-  galleryAdd: {
-    width: 72, height: 72, borderRadius: 10,
-    borderWidth: 1, borderStyle: "dashed", borderColor: colors.primary,
-    alignItems: "center", justifyContent: "center", backgroundColor: colors.primary + "08",
-  },
-
-  // Spec tabs
-  specTabCard: {
-    backgroundColor: colors.surfaceMuted, borderRadius: 12,
-    padding: 10, marginBottom: 8,
-  },
-
-  // What's in the box
-  boxItemRow: {
-    flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6,
-  },
-  boxThumb: { width: 44, height: 44, borderRadius: 10, overflow: "hidden" },
 });

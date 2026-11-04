@@ -1,0 +1,76 @@
+{
+  "summary": "Third retest of the iter108 backup issues, backend only. All three issues are FIXED as specified. ISSUE 1: on a throw-away shop with IMPORT_PAGE=5 chunks, a name in row 1 and row 6 restores as 2 products (301/302). Replaying the file gives created=0, updated=6, with the same product ids and the same price per id. A name repeated across 3 chunks keeps all 3 rows, stable over 2 replays (created=0, updated=15). Requests with no restore_session or with an empty one return 200 and are idempotent within a chunk. ISSUE 2: merging a file doc whose id exists under a different _id returns 200, updates the row and keeps the DB _id. A merge of the real settings collection using a simulated foreign _id returns 200 with no duplicate rows and _ids unchanged. Settings was snapshotted and restored. ISSUE 3: retrying a wipe-mode first_chunk=false chunk returns 200 both times with 1 row. A 13-row wipe in 3 chunks on a private throw-away collection wiped 4 stale rows, inserted 13 rows exactly once (inserted total = 13, including one row with no _id), and a retried middle chunk left the count at 13. Regression suites: test_iter108 (15), test_iter107 (40), test_iter106_images_pagination_review (9) and test_jun2026_permanent_images (27) = 91 passed. test_iter66_app_backup.py (a script with no pytest tests) prints PASS. The two test-level fixes are confirmed: test_restored_image_actually_serves_again and test_counters_export_names both pass. NEW HIGH defect: a settings doc from a backup carrying a different danger_pin_hash (another deployment, or the PIN was changed after the backup) overwrites the live Danger PIN. The client sends the same PIN on every chunk, so the next collection gets 401 'Invalid Danger PIN' and the restore stops. With alphabetical order that skips shop_*, short_ids, sim_*, tickets, transactions, users, vendor_*, wallet_topups, wishlist and withdrawals. test_vendor_pos.py and test_vendor_publish_gating.py: all 45 are setup ERRORs at login (401 for test_alice_73dc7f@test.com); none of them ran. Those accounts are absent from the DB. With testvendor and the real admin swapped into a temporary copy, publish_gating gave 7 passed, 2 failed. Both failures are out-of-date test expectations from earlier deliberate changes, not from the backup work: the vendor-edit re-review flow sets is_published=False, and /admin/products now returns a paged object. No deprecated Expo packages were in scope (backend only).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/admin/backup/restore (collection=settings, then every later collection)",
+        "issue": "Restoring settings{id:'global'} replaces danger_pin_hash with the value from the backup file. If that hash differs from the live PIN (another deployment, or the PIN was changed after the backup), the next chunk returns 401 'Invalid Danger PIN'. backup-restore-card.tsx walks collections in alphabetical order and stops on the first error, so every collection after 'settings' is not restored, including users, transactions, vendor_*, wallet_topups and withdrawals. The admin's Danger PIN is also silently changed to the source deployment's PIN. Reproduced by tests/test_iter109_backup_retest.py::test_2d_settings_from_other_deployment_with_different_pin.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/vendor/me/catalogue/import (older client, no restore_session)",
+        "issue": "Without a session the old loss still happens. A name in row 1 and row 6 (different chunks) ends as ONE product (602); the 601 product is overwritten. It returns 200 as required, but any APK built before this client change will still lose same-name products split across chunks."
+      },
+      {
+        "endpoint": "POST /api/vendor/me/catalogue/import (same session retried)",
+        "issue": "Re-sending a chunk with the SAME restore_session (for example after a lost response) creates a duplicate row, because rows already stamped with that session are never matched. The current client never retries, so this is informational."
+      },
+      {
+        "endpoint": "GET /api/vendor/me/catalogue/export",
+        "issue": "An internal field leaks into vendor exports: 10/10 exported rows carry restore_session, because it is not in OWNERSHIP_FIELDS. An older client importing that file copies the stale session into the new rows."
+      },
+      {
+        "endpoint": "POST /api/admin/backup/restore (merge, new id)",
+        "issue": "When a doc with an `id` that is not yet in the DB is merged, the upsert body has `_id` removed, so Mongo assigns a fresh ObjectId and the file's `_id` is lost. Nothing breaks functionally, but a merge restore into an empty DB does not reproduce the original `_id` values. Could use UpdateOne with $setOnInsert {_id}, or insert when no row matches."
+      },
+      {
+        "endpoint": "POST /api/admin/backup/restore (wipe, retried chunk)",
+        "issue": "A retried wipe chunk reports inserted=1 again, because matched_count is counted as inserted. The client sums inserted+upserted into the done count, so a retry over-reports. Cosmetic."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Admin full-app restore (src/backup-restore-card.tsx)",
+        "issue": "The walk stops with 'Restore failed: Invalid Danger PIN' after 'settings' whenever the file's danger_pin_hash differs from the live one (server-side root cause above).",
+        "affected_testIDs": []
+      }
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter109_backup_retest.py",
+    "/app/test_reports/pytest/iter109_retest.xml",
+    "/app/test_reports/pytest/iter109_regression.xml"
+  ],
+  "action_items": [
+    "HIGH: in admin_backup_restore, when collection == 'settings', keep the live danger_pin_hash instead of the file's. Do this in both merge and wipe modes, for example by reading the current hash before the write and re-applying it to the id='global' body. Alternatively, have the client restore 'settings' last, or re-verify against the PIN that was valid at the start of the walk. Then make test_2d_settings_from_other_deployment_with_different_pin pass. Also consider wipe mode on a file whose settings list is empty: wiping settings removes the PIN, and every later chunk then returns 400 'Danger PIN not set'.",
+    "MEDIUM: decide how older APKs that send no restore_session should behave. Today they still lose same-name products split across chunks. Option: server-side fallback session keyed on vendor plus a short time window, or require an app update for restore.",
+    "LOW: add 'restore_session' to OWNERSHIP_FIELDS so it is not exported and not copied from files.",
+    "LOW: on a merge insert of a new `id`, keep the file's `_id` (UpdateOne with $setOnInsert, or replace with _id when no row exists).",
+    "LOW (tests): update test_vendor_pos.py and test_vendor_publish_gating.py to use accounts from /app/memory/test_credentials.md. Also update publish_gating's out-of-date expectations: a meaningful vendor edit now sends a product back to review (is_published=False), and /api/admin/products returns {items,total,...}, not an array."
+  ],
+  "critical_code_review_comments": [
+    "backup.py:233-239: name matching sorts candidate rows by random UUID `id`. Replay was stable in this test, but which file row updates which existing row is arbitrary. Sorting by created_at/_id would make the mapping deterministic.",
+    "backup.py:718: `id`-matched ReplaceOne strips `_id`, which fixes error 66. On upsert-insert a new ObjectId is created (see minor issue).",
+    "backup.py:697-707: wipe upsert on `_id` works. Rows with no `_id` are still a plain insert_many, so a retried chunk duplicates those rows (rare: exports always include `_id`).",
+    "settings carries deployment-bound secrets (danger_pin_hash, possibly others). A full-app restore should treat these as local, not restorable."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter109_backup_retest.py (new)"
+  ],
+  "success_rate": {
+    "backend": "iter109 retest 11/12 (the 1 failure is the new HIGH PIN defect); regression 91/91 + iter66 script PASS",
+    "frontend": "not tested (backend only)"
+  },
+  "seed_data_creation": "None kept. A throw-away vendor (TEST_iter109_*) and its products, TEST rows in products/shop_categories/shop_layout_blocks/short_ids, and a private collection test_iter109_wipe_* were all removed by id, or dropped for the private collection. settings was snapshotted (full docs, taken before the PIN swap) and re-written in teardown; verified 2 rows with the PIN set and no marker left. The temporary publish_gating run created TEST_pub_gate_/TEST_crud_ products on testvendor; the suite deleted them and 0 remain.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run tests/test_iter109_backup_retest.py; test_2d is the open HIGH defect. Lines printed by -s for the informational tests show older-client split loss, same-session retry duplication and restore_session leaking into exports. One session per account: do not run suites in parallel. tests/test_iter66_app_backup.py is a script, run it with `python`. Long pytest runs must use setsid/nohup or the tool kills them.",
+  "rca_of_issue": "Danger-PIN walk abort: core/danger.get_danger_pin_hash reads settings{id:'global'}.danger_pin_hash. A merge restore of settings does ReplaceOne({id:'global'}, file_body), which overwrites the hash with the backup's. The client then sends the user-typed (live) PIN with the next collection, verify_danger_pin fails, the server returns 401, and the try/catch in doRestore stops the whole loop. Repro: swap the PIN to a known hash, dump settings, set danger_pin_hash in the global doc to hash('246802'), merge it, then POST any later collection with the original PIN and get 401. Mitigation: preserve the live danger_pin_hash when restoring settings."
+}

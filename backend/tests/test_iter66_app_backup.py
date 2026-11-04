@@ -57,7 +57,10 @@ async def main():
                 break
             offset += 5
         print(f"dumped {len(rows)} {target}")
-        assert all("_id" not in r for r in rows), "_id leaked"
+        # Jun 2026 — `_id` is now EXPORTED on purpose. Stripping it destroyed
+        # the permanent image store (`product_image_files._id` is the key in
+        # every /api/img/<key> link) and left counters as bare {seq: N}.
+        assert all("_id" in r for r in rows), "_id missing — a restore cannot rebuild keys"
 
         # restore that dump back in merge mode — should be a no-op count-wise
         before = len(rows)

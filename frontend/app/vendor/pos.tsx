@@ -43,12 +43,17 @@ export default function VendorPOS() {
 
   const load = useCallback(async () => {
     try {
-      const [{ data: p }, s, inv] = await Promise.all([
-        api.get<Product[]>("/vendor/me/products"),
-        getPosSettings(),
-        peekInvoiceNo(),
-      ]);
-      setProducts((p as any).items || (p as any) || []);
+      const [s, inv] = await Promise.all([getPosSettings(), peekInvoiceNo()]);
+      // Jun 2026 — POS bills from the WHOLE catalogue, so page through the
+      // (now paginated) vendor product list instead of taking one slice.
+      const all: Product[] = [];
+      for (let offset = 0; offset < 10000; offset += 300) {
+        const r = await api.get<any>("/vendor/me/products", { params: { limit: 300, offset } });
+        const page: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
+        all.push(...page);
+        if (Array.isArray(r.data) || !r.data?.has_more || page.length === 0) break;
+      }
+      setProducts(all);
       setSettings(s);
       setGstIncl(s.gst_inclusive);
       setInvoiceNo(inv);

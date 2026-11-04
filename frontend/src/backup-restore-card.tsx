@@ -99,6 +99,10 @@ export function BackupRestoreCard({ onDone }: { onDone?: () => void }) {
           continue;
         }
         let done = 0;
+        let imgOk = 0;
+        let imgFail = 0;
+        let imgDeferred = 0;
+        const imgReasons: string[] = [];
         for (let i = 0; i < rows.length; i += limit) {
           const r = await api.post<any>("/admin/backup/restore", {
             collection: name,
@@ -109,9 +113,30 @@ export function BackupRestoreCard({ onDone }: { onDone?: () => void }) {
             danger_pin: pin,
           });
           done += (r.data?.inserted || 0) + (r.data?.upserted || 0);
+          imgOk += Number(r.data?.images_imported || 0);
+          imgFail += Number(r.data?.images_failed || 0);
+          imgDeferred += Number(r.data?.images_deferred || 0);
+          (r.data?.image_failures || []).forEach((f: any) => {
+            if (imgReasons.length < 8 && f?.url) {
+              imgReasons.push(`${f.product ? `${f.product}: ` : ""}${f.url} — ${f.reason || "unknown"}`);
+            }
+          });
           setProgress(`${name}: ${Math.min(i + limit, rows.length)} / ${rows.length}`);
         }
         summary.push(`${name}: ${done}/${count}`);
+        // Jun 2026 — images are reported SEPARATELY from documents, with the
+        // failing URLs listed, so a silent photo loss is impossible.
+        if (name === "products" && (imgOk || imgFail || imgDeferred)) {
+          summary.push(
+            `  photos stored: ${imgOk}` +
+            (imgFail ? ` · failed: ${imgFail}` : "") +
+            (imgDeferred ? ` · ${imgDeferred} product(s) queued, finishing in the background` : ""),
+          );
+          imgReasons.forEach((line) => summary.push(`  ⚠️ ${line}`));
+          if (imgFail > imgReasons.length) {
+            summary.push(`  …and ${imgFail - imgReasons.length} more. Use Products → Fix product photos to retry.`);
+          }
+        }
       }
       const applied = file.scope === "account" ? "merged back" : (mode === "wipe" ? "wiped & replaced" : "merged");
       setResult(`✅ Restore complete (${applied}).\n${summary.join("\n")}`);

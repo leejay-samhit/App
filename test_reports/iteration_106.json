@@ -1,0 +1,48 @@
+{
+  "summary": "I checked the permanent-image and pagination fix on its own terms, using the public API (new pytest file, 10/14 pass) and Playwright on a mobile viewport. Working: copying external images to permanent storage, the /api/img contract, flattening, ordering and de-duplicating Shopify object galleries, failure reporting for dead URLs, base64 images left unchanged, image-health (returns 200, so the route ordering is fine, and 401/403 without auth), repair by id leaving business fields unchanged, lazy repair on first open (confirmed in Mongo), the detail endpoint never returning objects, the admin Load more / server-side search / repair card, the grey name placeholder, and the detail gallery with its 1/3 counter. CRITICAL, still broken: defect #5 (pagination / backup completeness). Every paged endpoint sorts only on created_at, and 48 of the vendor's products share one created_at value, so skip/limit pages overlap and some products never appear. The vendor UI shows 229 unique of 277 products while saying 'All 277 products loaded'. Vendor backup export gives 277 rows but only 262 distinct products, so 15 products are missing from the backup file. Walking the admin list 20 at a time returns 268 unique of 285. ALSO: a vendor restore re-run in merge mode duplicates every product. A vendor can make the server fetch internal URLs (SSRF). Partial products get re-picked by the background worker forever. I fixed 3 frontend bugs myself (details below).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/vendor/me/products, GET /api/admin/products, GET /api/vendor/me/catalogue/export", "issue": "Pages are sorted only on created_at, which is not unique (48 testvendor products share created_at 2026-10-09T10:59:26.618620). Skip/limit then returns overlapping pages and drops rows. Measured: vendor list walk gives 254 unique of 277; vendor export walk (limit 10) gives 262 distinct products of 277 (15 missing from the backup file, 15 duplicated); admin walk with limit 20 gives 268 unique of 285. So defect #5 'the whole backup must actually be restored' is NOT fixed. Fix: add a unique tiebreaker sort, e.g. {created_at:-1, id:1} (or _id), in all three endpoints. Also add sort('_id') to the admin full-app backup paging in routes/backup.py:327 and :418, which currently has no sort at all.", "priority": "CRITICAL"},
+      {"endpoint": "POST /api/vendor/me/catalogue/import (mode=merge)", "issue": "Running the same restore again duplicates every product (confirmed: 2 copies after 2 runs). No upsert or match on an existing key. The requirement 'allow retry without duplicating products' is NOT met. Fix: match on the exported product id (or on vendor_id + name + sku) and update instead of inserting.", "priority": "HIGH"},
+      {"endpoint": "core/image_store.py _download (any admin/vendor product create, update or import)", "issue": "SSRF: no check for private, loopback or link-local addresses. A vendor can make the server fetch http://127.0.0.1:27017/, and the failure reason leaks reachability ('content-type text/plain' for Mongo, 'application/json' for :8001, 'ConnectError' for closed ports). An internal endpoint that returns an image would be stored and served publicly. Fix: resolve the host and reject private, loopback, link-local or metadata IPs, including after redirects.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "routes/product_images_repair.py NEEDS_REPAIR_FILTER / _worker", "issue": "A 'partial' product (one live photo plus one dead photo) keeps its dead external URL and has status != 'failed', so it still matches the worker query. _worker loops 'while scanned>0', so it re-downloads the same partial products every 3s forever. If 10 or more partial products exist, they also crowd out all other products, because find() has no sort or cursor. Fix: exclude 'partial' as well as 'failed' (or exclude products with a recent image_import_at) in the worker query."},
+      {"endpoint": "GET /api/img/{key} via preview ingress", "issue": "The backend sends 'public, max-age=31536000, immutable' (checked on localhost), but the preview ingress replaces it with 'no-store, no-cache, must-revalidate'. This is environment-only; check it again in production."},
+      {"endpoint": "POST /vendor/me/catalogue/import mode=replace", "issue": "The wipe uses to_list(5000), so a vendor with more than 5000 products is only partly wiped."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "src/product-image.tsx", "issue": "FIXED BY T1: inline onLoadStart/onLoad arrows re-ran react-native-web's Image load effect on every render, an infinite setState loop. About 130 'Maximum update depth exceeded' errors on /product/{id}. Wrapped both callbacks in useCallback; now 0 errors.", "testID": "hero-img-*", "priority": "HIGH"},
+      {"component": "app/product/[id].tsx thumbnail strip", "issue": "FIXED BY T1: the ProductImage wrapper had no size (no containerStyle) and the image was 100% of a 0-height box, so thumbnails were blank. Added containerStyle={styles.thumbImg}.", "testID": "n/a", "priority": "HIGH"},
+      {"component": "admin/products.tsx grid, vendor/dashboard.tsx grid, wishlist.tsx", "issue": "FIXED BY T1: containerStyle={{width:'100%'}} without a height left the image at 0 height, so permanent photos showed as BLANK cards in the admin, vendor and wishlist grids (placeholders still rendered). Changed to {width:'100%', height:'100%'}. This is the same 'blank images' symptom the owner reported.", "testID": "product-{id}-img / vendor-product-{id}", "priority": "HIGH"},
+      {"component": "vendor/dashboard.tsx end note", "issue": "Says 'All 277 products loaded' when only 229 unique rows are shown (a result of the backend sort bug, hidden by client-side de-duplication). Also, offset=products.length after de-duplication drifts from the server offset.", "testID": "vendor-products-end", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin -> Products", "issues": ["While searching, the hero card reads '2 products in catalogue'. It should say '2 matches' or keep the catalogue total.", "The repair result line says '0 products still to go — tap again to continue.' even when nothing remains, which contradicts itself.", "The help tour sheet opens automatically on every visit and blocks the Load more button until it is closed."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iter106_images_pagination_review.py", "/app/test_reports/pytest/iter106.xml"],
+  "action_items": [
+    "CRITICAL: add a unique tiebreaker to the sort in admin_list_products (server.py ~2555), vendor_my_products (server.py:9014) and vendor_export_catalogue (routes/backup.py:91), e.g. {'created_at': -1, 'id': 1}. Add sort('_id') to the admin backup paging (backup.py:327, 418). Then check again that walking every page gives unique ids == total.",
+    "HIGH: make the vendor catalogue import idempotent in merge mode (upsert by source id or by vendor + name/sku).",
+    "HIGH: block private, loopback, link-local and metadata IPs in core/image_store._download, including after redirects.",
+    "MEDIUM: keep the background worker from re-picking 'partial' products forever (product_images_repair.py query + _worker loop).",
+    "LOW: fix the admin hero label while searching and the '0 still to go — tap again' copy."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 11k lines and admin/products.tsx and vendor/dashboard.tsx are over 1100 lines. They should be split.",
+    "vendor_my_products docstring mentions a 'legacy array fallback', but the code always returns a dict (pos.tsx and dashboard handle both, so it is harmless).",
+    "app.json is valid JSON and contains the -keep rules for com.facebook.drawee, imagepipeline and okhttp3. These can only be confirmed on a real release APK."
+  ],
+  "updated_files": ["/app/frontend/src/product-image.tsx", "/app/frontend/app/product/[id].tsx", "/app/frontend/app/admin/products.tsx (containerStyle + testID products-search-input)", "/app/frontend/app/vendor/dashboard.tsx", "/app/frontend/app/wishlist.tsx", "/app/backend/tests/test_iter106_images_pagination_review.py"],
+  "success_rate": {"backend": "71% (10/14)", "frontend": "about 85% after T1 fixes (vendor list completeness still fails)"},
+  "seed_data_creation": "Created TEST_iter106* products; deleted all of them by id (0 left). Side effects on existing data: 'Retry failed photos' (UI) and repair-images limit=2 retry_failed (pytest) re-attempted existing failed products and updated only their image_import_status/at fields, which is the intended feature behaviour. A vendor SSRF probe created 3 products, deleted through the API.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run tests/test_iter106_images_pagination_review.py. The 4 expected failures (sort tiebreaker, merge re-run, partial requeue, and the cache-control header rewritten by the preview ingress) should become 3 passes plus the env-only header failure. testvendor has 48 products sharing one created_at, which makes it a good test for paging. The admin products page auto-opens a help sheet; close it with testID help-close.",
+  "rca_of_issue": "Pagination: skip/limit over a non-unique sort key (created_at, identical for bulk-inserted restores) is not deterministic in MongoDB, so pages overlap and rows are skipped. Blank grid images: the ProductImage wrapper View got only a width, so the percentage-height Image collapsed to 0. Render loop: react-native-web Image useEffect depends on the callback identities."
+}

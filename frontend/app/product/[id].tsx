@@ -17,6 +17,8 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError, resolveImageUrl } from "../../src/api";
+import { ProductImage } from "../../src/product-image";
+import { sanitizeProduct } from "../../src/product-shape";
 import { notify } from "../../src/notify";
 import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
@@ -164,7 +166,13 @@ export default function ProductDetailScreen() {
         api.get<{ reviews: Review[]; stats: any }>(`/products/${id}/reviews`).catch(() => ({ data: { reviews: [], stats: { average: 0, total: 0, breakdown: {} } } as any })),
         api.get<{ items: any[] }>("/me/wishlist").catch(() => ({ data: { items: [] } })),
       ]);
-      const p: Product | null = (pRes.data && pRes.data.id) ? (pRes.data as Product) : null;
+      // Jun 2026 — Coerce the document into the shapes this screen was
+      // written for BEFORE it hits state. Imported catalogues (Shopify /
+      // DeoDap JSON) ship objects where strings are expected, which threw
+      // mid-render and closed the Android release build.
+      const p: Product | null = (pRes.data && pRes.data.id)
+        ? (sanitizeProduct(pRes.data) as Product)
+        : null;
       setProduct(p);
       setReviews(rRes.data?.reviews || []);
       // Best-effort — a rail failure must never blank the product page.
@@ -220,14 +228,31 @@ export default function ProductDetailScreen() {
   // the vendor chose.  Cover now leads; duplicates are de-duped; relative
   // `/api/products/.../image` paths are resolved against the backend base so
   // lazy-loaded thumbnails actually render.
+  //
+  // Jun 2026 (crash fix) — a Shopify-CSV→JSON import stores `images` as
+  // OBJECTS (`{"src": …, "position": 2}`).  Feeding one of those to
+  // `resolveImageUrl` threw `startsWith is not a function` while the hero
+  // card was rendering, which closed the Android release build the moment
+  // a shopper tapped an imported product.  Every entry is now flattened to
+  // a URL string first, and any entry that can't be is dropped.
+  const pickUrl = (entry: any): string => {
+    if (typeof entry === "string") return entry.trim();
+    if (entry && typeof entry === "object") {
+      for (const k of ["src", "url", "image_url", "image", "href", "data_url"]) {
+        if (typeof entry[k] === "string" && entry[k].trim()) return entry[k].trim();
+      }
+    }
+    return "";
+  };
+  const rawGallery: any[] = Array.isArray(product.images) ? product.images : [];
   const gallery: string[] = Array.from(new Set([
-    ...(product.image_url ? [product.image_url] : []),
-    ...(product.image_data_url ? [product.image_data_url] : []),
-    ...(product.images || []).filter(Boolean),
-  ]))
+    pickUrl(product.image_url),
+    pickUrl((product as any).image_data_url),
+    ...rawGallery.map(pickUrl),
+  ].filter(Boolean)))
     .map((u) => resolveImageUrl(u))
     .filter(Boolean)
-    .slice(0, 10);
+    .slice(0, 15);
   const breadcrumb = [product.category, product.brand || product.attrs_brand, vendor?.name].filter(Boolean) as string[];
 
   const onAddToCart = async (alsoBuy: boolean = false) => {
@@ -365,17 +390,21 @@ export default function ProductDetailScreen() {
                 onMomentumScrollEnd={(e: NativeSyntheticEvent<NativeScrollEvent>) => {
                   const w = e.nativeEvent.layoutMeasurement.width || heroW;
                   const idx = Math.round(e.nativeEvent.contentOffset.x / w);
-                  if (idx !== activeImageIdx) setActiveImageIdx(idx);
+                  const clamped = Math.max(0, Math.min(idx, gallery.length - 1));
+                  if (clamped !== activeImageIdx) setActiveImageIdx(clamped);
                 }}
                 scrollEventThrottle={16}
                 style={StyleSheet.absoluteFill}
               >
                 {gallery.map((src, i) => (
                   <View key={`hero-${i}`} style={{ width: heroW, height: "100%", padding: 14 }}>
-                    <Image
-                      source={{ uri: src }}
+                    <ProductImage
+                      uri={src}
+                      name={product.name}
                       style={{ width: "100%", height: "100%" }}
+                      containerStyle={{ width: "100%", height: "100%" }}
                       resizeMode="contain"
+                      testID={`hero-img-${i}`}
                     />
                   </View>
                 ))}
@@ -418,7 +447,7 @@ export default function ProductDetailScreen() {
                   }}
                   style={[styles.thumb, i === activeImageIdx && styles.thumbActive]}
                 >
-                  <Image source={{ uri: src }} style={styles.thumbImg} resizeMode="cover" />
+                  <ProductImage uri={src} compact style={styles.thumbImg} containerStyle={styles.thumbImg} resizeMode="cover" />
                 </TouchableOpacity>
               ))}
             </ScrollView>

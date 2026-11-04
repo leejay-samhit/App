@@ -14,6 +14,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import Slider from "@react-native-community/slider";
 import { WebView } from "react-native-webview";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
+import { ProductImage } from "../src/product-image";
 import { useAuth } from "../src/auth";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { useShopMoneyConfig, effectiveCashbackPct, cashbackAmount } from "../src/cashback";
@@ -653,19 +654,12 @@ export default function CheckoutScreen() {
               ) : null}
               {g.lines.map((it) => {
             const p = it.product || {} as any;
-            const img = resolveImageUrl(p.image_url);
             const nm = p.name || "Product";
             const price = p.price || 0;
             const line = it.line_total || price * (it.qty || 1);
             return (
               <View key={it.id} style={styles.lineItem}>
-                {img ? (
-                  <Image source={{ uri: img }} style={styles.thumb} resizeMode="cover" />
-                ) : (
-                  <View style={[styles.thumb, styles.thumbEmpty]}>
-                    <Feather name="image" size={20} color={colors.textMuted} />
-                  </View>
-                )}
+                <ProductImage uri={p.image_url} compact style={styles.thumb} resizeMode="cover" />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.lineName} numberOfLines={2}>{nm}</Text>
                   <View style={styles.lineMetaRow}>

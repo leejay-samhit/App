@@ -15,10 +15,11 @@
  * chip. Wrap a list of these in a <View style={productGridStyles.wrap}>.
  */
 import React, { memo } from "react";
-import { View, Text, Image, TouchableOpacity, StyleSheet } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
 import { Feather } from "@expo/vector-icons";
 
 import { resolveImageUrl } from "./api";
+import { ProductImage } from "./product-image";
 import { colors, formatINR } from "./theme";
 import { FadeSlideIn } from "./anim";
 import { useContentWidth } from "./content-width";
@@ -89,7 +90,13 @@ function ProductGridCardBase({ product: p, qty, onOpen, onAdd, onDecrement, inde
     >
       <View style={[styles.card, !inStock && { opacity: 0.55 }]}>
         <TouchableOpacity activeOpacity={0.85} onPress={open} testID={`product-open-${p.id}`}>
-          <Image source={{ uri: resolveImageUrl(p.image_url || "") }} style={styles.img} resizeMode="cover" />
+          <ProductImage
+            uri={p.image_url}
+            name={p.name}
+            style={styles.img}
+            resizeMode="cover"
+            testID={`product-img-${p.id}`}
+          />
         </TouchableOpacity>
         <View style={styles.body}>
           <TouchableOpacity activeOpacity={0.85} onPress={open}>

@@ -2926,3 +2926,39 @@ that set `number_verified` MUST restore it or real users lose chat.
 - User opted to self-verify frontend flows; testing_agent skipped per explicit user choice.
 - Expo restarted; smoke screenshot confirms app healthy with Deepavali theme.
 - Pending: user verification of the 4 fixes; remaining 9 festival themes (P1 backlog).
+
+
+## Jun 2026 — Permanent product images, APK image rendering & catalogue pagination
+Four owner-reported defects fixed. Full write-up: `/app/memory/PRODUCT_IMAGES.md`.
+- Smart Search / DeoDap / Shopify imports stored EXTERNAL CDN URLs; they now
+  download into permanent MongoDB-backed storage served at `/api/img/<sha1>.jpg`.
+- Android release APK showed no images because ProGuard/R8 stripped Fresco +
+  OkHttp; keeps added to `app.json`. **Needs a real release APK to confirm.**
+- Android APK crashed opening imported products because Shopify `images[]`
+  objects reached `resolveImageUrl`; normalised server-side and client-side.
+- Admin/vendor product lists capped at 200/1000 rows; both are now properly
+  paginated with server-side search and a true total.
+- Repair for existing broken products: admin button + background worker +
+  lazy repair on first open. Failures keep the source URL and are reported.
+- New: `core/image_store.py`, `routes/images.py`, `routes/product_images_repair.py`,
+  `src/product-image.tsx`, `src/product-shape.ts`,
+  `tests/test_jun2026_permanent_images.py` (22 passing).
+
+- Post-review hardening (same change-set): unstable skip/limit paging (duplicate
+  + missing rows) fixed by sorting on `{created_at,id}` / `_id`; vendor restore
+  made idempotent (keyed on product name, reports `updated`); `replace` mode no
+  longer capped at 5,000; SSRF guard added to the image downloader incl. every
+  redirect hop; background repair no longer loops on `partial` products.
+  `tests/test_jun2026_permanent_images.py` now 27 passing, plus
+  `tests/test_iter106_images_pagination_review.py` 9 passing (36 total green).
+- Backup round-trip completed: the full-app backup now carries `_id` and real
+  (base64) image bytes, so a restore rebuilds the permanent image store —
+  verified by wiping `product_image_files` and restoring it through the admin
+  API with all photos serving again. Vendor restore no longer loses a product
+  whose name spans two upload chunks (`restore_session` stamping), and the
+  admin restore no longer 500s on an `_id` clash or a retried chunk.
+  91 backend tests passing across the four image/backup suites.
+- Also fixed: restoring `settings` used to overwrite the live Danger PIN, which
+  made every collection after it fail 401 and silently abandoned the rest of the
+  restore (users, transactions, wallet, withdrawals). The admin's PIN is now
+  always preserved. 105 backend tests passing across the five image/backup suites.

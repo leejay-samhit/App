@@ -119,7 +119,13 @@ export default function VendorCatalogueBackup() {
   const runImport = useCallback(async (mode: "merge" | "replace") => {
     if (!parsed) return;
     setBusy("import"); setResult(""); setProgress("Starting…");
-    let created = 0; let wiped = 0; const skipped: string[] = [];
+    let created = 0; let wiped = 0; let updatedCount = 0; const skipped: string[] = [];
+    let imgOk = 0; let imgFail = 0; let imgDeferred = 0;
+    const imgReasons: string[] = [];
+    // One id for the whole file. The server stamps every row it creates or
+    // updates with it and never matches a stamped row again, so a product
+    // name that appears in two different chunks keeps both of its rows.
+    const restoreSession = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     try {
       for (let i = 0; i < parsed.products.length; i += IMPORT_PAGE) {
         const chunk = parsed.products.slice(i, i + IMPORT_PAGE);
@@ -127,15 +133,36 @@ export default function VendorCatalogueBackup() {
           products: chunk,
           mode,
           first_chunk: i === 0,
+          restore_session: restoreSession,
         });
         created += Number(r.data?.created || 0);
+        updatedCount += Number(r.data?.updated || 0);
         wiped += Number(r.data?.wiped || 0);
         skipped.push(...(r.data?.skipped || []));
+        imgOk += Number(r.data?.images_imported || 0);
+        imgFail += Number(r.data?.images_failed || 0);
+        imgDeferred += Number(r.data?.images_deferred || 0);
+        (r.data?.image_failures || []).forEach((f: any) => {
+          if (imgReasons.length < 6 && f?.url) {
+            imgReasons.push(`${f.product ? `${f.product}: ` : ""}${f.reason || "couldn't be fetched"}`);
+          }
+        });
         setProgress(`Restoring ${Math.min(i + IMPORT_PAGE, parsed.products.length)} of ${parsed.products.length}…`);
       }
       const lines = [
         `✅ Restored ${created} product${created === 1 ? "" : "s"} as hidden drafts.`,
+        // Jun 2026 — restoring the same file twice updates the matching
+        // product instead of creating a second copy of it.
+        updatedCount ? `🔁 Updated ${updatedCount} product${updatedCount === 1 ? "" : "s"} that were already in this shop.` : "",
         wiped ? `🗑 Removed ${wiped} existing product${wiped === 1 ? "" : "s"}.` : "",
+        // Jun 2026 — photos are counted separately from products so a
+        // silent image loss can't hide behind a green product count.
+        (imgOk || imgFail || imgDeferred)
+          ? `🖼 Photos saved permanently: ${imgOk}` +
+            (imgFail ? ` · couldn't fetch: ${imgFail}` : "") +
+            (imgDeferred ? ` · ${imgDeferred} still downloading in the background` : "")
+          : "",
+        ...imgReasons.map((r) => `   ⚠️ ${r}`),
         skipped.length ? `⚠️ Skipped ${skipped.length}: ${skipped.slice(0, 3).join(", ")}${skipped.length > 3 ? "…" : ""}` : "",
         "Open Products to edit price / stock. An admin publishes them to the shop.",
       ].filter(Boolean);

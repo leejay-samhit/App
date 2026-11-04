@@ -10,11 +10,25 @@ const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
  *  backend base.  List endpoints now return `/api/products/{id}/image`
  *  paths (see backend `_slim_list_item`) so the mobile client can lazy-
  *  load each thumbnail as a card scrolls into view.  Absolute URLs and
- *  base64 data URIs pass through untouched. */
-export function resolveImageUrl(url?: string | null): string {
+ *  base64 data URIs pass through untouched.
+ *
+ *  Jun 2026 — Hardened against non-string input.  Shopify-converted
+ *  catalogue imports store gallery entries as OBJECTS (`{src, position}`);
+ *  calling `.startsWith` on one threw a TypeError mid-render and closed
+ *  the Android release build as soon as a shopper tapped a product card.
+ *  Objects are now unwrapped, and anything else resolves to "". */
+export function resolveImageUrl(url?: unknown): string {
   if (!url) return "";
+  if (typeof url !== "string") {
+    if (typeof url === "object") {
+      const o = url as Record<string, unknown>;
+      for (const k of ["src", "url", "image_url", "image", "href", "data_url"]) {
+        if (typeof o[k] === "string" && o[k]) return resolveImageUrl(o[k]);
+      }
+    }
+    return "";
+  }
   if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) return url;
-  if (url.startsWith("/api/")) return `${BASE_URL}${url}`;
   if (url.startsWith("/")) return `${BASE_URL}${url}`;
   return url;
 }

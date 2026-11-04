@@ -10,6 +10,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
+import { ProductImage } from "../src/product-image";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 
 type Product = {
@@ -94,7 +95,6 @@ export default function WishlistScreen() {
           <View style={styles.grid}>
             {items.map((p) => {
               const oos = (p.stock || 0) === 0;
-              const cover = resolveImageUrl(p.image_url || (p as any).image_data_url || "");
               return (
                 <TouchableOpacity
                   key={p.id}
@@ -104,9 +104,13 @@ export default function WishlistScreen() {
                   testID={`wishlist-card-${p.id}`}
                 >
                   <View style={styles.imgWrap}>
-                    {cover
-                      ? <Image source={{ uri: cover }} style={styles.img} />
-                      : <View style={[styles.img, { backgroundColor: colors.surfaceMuted }]} />}
+                    <ProductImage
+                      uri={p.image_url || (p as any).image_data_url}
+                      name={p.name}
+                      style={styles.img}
+                      containerStyle={{ width: "100%", height: "100%" }}
+                      resizeMode="cover"
+                    />
                     {oos ? (
                       <View style={styles.oosOverlay} pointerEvents="none">
                         <Text style={styles.oosText}>SOLD OUT</Text>

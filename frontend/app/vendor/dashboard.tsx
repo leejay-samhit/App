@@ -9,6 +9,10 @@ import { GradientCard } from "../../src/gradient-card";
 import { RichProductEditor } from "../../src/rich-product-editor";
 import { FadeSlideIn, StatCardSkeleton, ListRowSkeleton } from "../../src/anim";
 import { useSwipePager } from "../../src/use-swipe-pager";
+import { ProductImage } from "../../src/product-image";
+
+/** Products fetched per page by the vendor dashboard list. */
+const PRODUCT_PAGE = 60;
 
 type Stats = {
   total_sales: number; total_earnings: number; today_earnings: number;
@@ -80,12 +84,16 @@ export default function VendorDashboard() {
   const [answeringQid, setAnsweringQid] = useState<string | null>(null);
   const [answerText, setAnswerText] = useState("");
   const [submittingAnswer, setSubmittingAnswer] = useState(false);
+  // Jun 2026 — paged product list (see /vendor/me/products).
+  const [productTotal, setProductTotal] = useState(0);
+  const [productsHasMore, setProductsHasMore] = useState(false);
+  const [loadingMoreProducts, setLoadingMoreProducts] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const [s, p, sl, pubResp, qa] = await Promise.all([
         api.get<Stats>("/vendor/me/stats"),
-        api.get<Product[]>("/vendor/me/products"),
+        api.get<any>("/vendor/me/products", { params: { limit: PRODUCT_PAGE, offset: 0 } }),
         api.get<{ items: Sale[] }>("/vendor/me/sales"),
         api.get<any>("/products").catch(() => ({ data: [] })),
         api.get<{ items: VendorQuestion[]; pending_count: number }>("/vendor/me/questions").catch(() => ({ data: { items: [], pending_count: 0 } as any })),
@@ -93,8 +101,16 @@ export default function VendorDashboard() {
       const pubList: any[] = Array.isArray(pubResp.data) ? pubResp.data : (pubResp.data?.items || []);
       const cMap = new Map<string, number>();
       pubList.forEach((x: any) => cMap.set(x.id, x.interested_count || 0));
+      // Jun 2026 — /vendor/me/products is now PAGED ({items,total,has_more}).
+      // The old hard cap silently dropped everything past the first 1,000
+      // rows, so a restored catalogue looked incomplete. Legacy array shape
+      // is still accepted for older builds.
+      const prodData = p.data;
+      const prodList: Product[] = Array.isArray(prodData) ? prodData : (prodData?.items || []);
       setStats(s.data);
-      setProducts(p.data.map((it) => ({ ...it, interested_count: cMap.get(it.id) || 0 })));
+      setProducts(prodList.map((it) => ({ ...it, interested_count: cMap.get(it.id) || 0 })));
+      setProductTotal(Number(Array.isArray(prodData) ? prodList.length : (prodData?.total ?? prodList.length)));
+      setProductsHasMore(Boolean(Array.isArray(prodData) ? false : prodData?.has_more));
       setSales(sl.data.items || []);
       setQuestions(qa.data?.items || []);
       setPendingCount(qa.data?.pending_count || 0);
@@ -106,6 +122,27 @@ export default function VendorDashboard() {
     }
     finally { setLoading(false); setRefreshing(false); }
   }, [router]);
+
+  const loadMoreProducts = useCallback(async () => {
+    if (loadingMoreProducts || !productsHasMore) return;
+    setLoadingMoreProducts(true);
+    try {
+      const r = await api.get<any>("/vendor/me/products", {
+        params: { limit: PRODUCT_PAGE, offset: products.length },
+      });
+      const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
+      setProducts((cur) => {
+        const seen = new Set(cur.map((x) => x.id));
+        return [...cur, ...list.filter((x) => !seen.has(x.id))];
+      });
+      setProductTotal(Number(r.data?.total ?? productTotal));
+      setProductsHasMore(Boolean(r.data?.has_more));
+    } catch (e) {
+      Alert.alert("Couldn't load more", formatApiError(e));
+    } finally {
+      setLoadingMoreProducts(false);
+    }
+  }, [loadingMoreProducts, productsHasMore, products.length, productTotal]);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
 
@@ -434,7 +471,7 @@ export default function VendorDashboard() {
               <Feather name="hard-drive" size={16} color={colors.primary} />
               <View style={{ flex: 1 }}>
                 <Text style={styles.backupRowTitle}>Backup / restore catalogue</Text>
-                <Text style={styles.backupRowHint}>Download all {products.length} products, or restore them into another shop login</Text>
+                <Text style={styles.backupRowHint}>Download all {productTotal || products.length} products, or restore them into another shop login</Text>
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
@@ -451,9 +488,14 @@ export default function VendorDashboard() {
                     testID={`vendor-product-${item.id}`}
                   >
                     <View style={styles.vendorImgWrap}>
-                      {item.image_url
-                        ? <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.vendorImg} />
-                        : <View style={[styles.vendorImg, { backgroundColor: "#F1F3F5" }]} />}
+                      <ProductImage
+                        uri={item.image_url}
+                        name={item.name}
+                        style={styles.vendorImg}
+                        containerStyle={{ width: "100%", height: "100%" }}
+                        resizeMode="cover"
+                        testID={`vendor-product-${item.id}-img`}
+                      />
                       {item.is_published === false && (
                         <View style={styles.vendorDraftPill}>
                           <Text style={styles.vendorDraftText}>
@@ -509,6 +551,30 @@ export default function VendorDashboard() {
                 );
               })}
             </View>
+            {/* Jun 2026 — Load more. The list used to stop at a hard 1,000
+                rows with no way to reach the rest of a restored catalogue. */}
+            {productsHasMore ? (
+              <TouchableOpacity
+                onPress={loadMoreProducts}
+                disabled={loadingMoreProducts}
+                style={[styles.vendorLoadMore, loadingMoreProducts && { opacity: 0.6 }]}
+                testID="vendor-products-load-more"
+                activeOpacity={0.85}
+              >
+                {loadingMoreProducts
+                  ? <ActivityIndicator size="small" color={colors.primary} />
+                  : <Feather name="chevron-down" size={16} color={colors.primary} />}
+                <Text style={styles.vendorLoadMoreText}>
+                  {loadingMoreProducts
+                    ? "Loading…"
+                    : `Load more (${products.length} of ${productTotal})`}
+                </Text>
+              </TouchableOpacity>
+            ) : products.length > 0 ? (
+              <Text style={styles.vendorEndNote} testID="vendor-products-end">
+                All {productTotal || products.length} products loaded
+              </Text>
+            ) : null}
           </ScrollView>
         )
       )}
@@ -922,6 +988,13 @@ const styles = StyleSheet.create({
   backupRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, marginBottom: 12, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   backupRowTitle: { fontSize: 13.5, fontWeight: "800", color: colors.textMain },
   backupRowHint: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+  vendorLoadMore: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    marginTop: 4, paddingVertical: 14, borderRadius: radii.button,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, minHeight: 48,
+  },
+  vendorLoadMoreText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  vendorEndNote: { textAlign: "center", fontSize: 11.5, color: colors.textMuted, paddingVertical: 14 },
 
   prodCard: { flexDirection: "row", alignItems: "center", padding: 10, backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, gap: 10 },
   prodImg: { width: 48, height: 48, borderRadius: 8 },

@@ -1614,10 +1614,27 @@ export function RichProductEditor({
       if (!hidePublishedToggle) {
         payload.is_published = published;
       }
+      let saveResp: any;
       if (existing?.id) {
-        await api.patch(endpoints.update(existing.id), payload);
+        saveResp = await api.patch(endpoints.update(existing.id), payload);
       } else {
-        await api.post(endpoints.create, payload);
+        saveResp = await api.post(endpoints.create, payload);
+      }
+      // Jun 2026 — The server copies every outside photo link into our own
+      // permanent storage on save (Smart Search hands back third-party CDN
+      // URLs that stop working days later).  Tell the user plainly when one
+      // of those photos could not be fetched, instead of letting the card
+      // silently turn blank later.
+      const st = saveResp?.data?.image_import_status;
+      const fails: any[] = saveResp?.data?.image_import_failures || [];
+      if ((st === "partial" || st === "failed") && fails.length) {
+        const reasons = Array.from(new Set(fails.map((f) => f?.reason).filter(Boolean))).slice(0, 2);
+        Alert.alert(
+          st === "failed" ? "Photos couldn't be saved" : "Some photos couldn't be saved",
+          `${fails.length} image${fails.length === 1 ? "" : "s"} could not be copied from the source website` +
+          `${reasons.length ? ` (${reasons.join("; ")})` : ""}.\n\n` +
+          `The product is saved. Add a photo from your gallery, or pick a different search result.`,
+        );
       }
       onSaved();
     } catch (e) {

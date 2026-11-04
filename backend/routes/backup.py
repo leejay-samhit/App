@@ -26,7 +26,9 @@ Design notes
   price / stock before anything hits the public shop. Publishing stays
   admin-only, exactly like a manually created product.
 """
+import base64
 import json
+import logging
 import uuid
 from datetime import date, datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -41,6 +43,8 @@ from core.db import db
 from core.security import get_current_user, require_admin_role
 from core.utils import now_utc
 
+log = logging.getLogger("backup")
+
 router = APIRouter()
 
 EXPORT_FORMAT = "slangcart.vendor-catalogue"
@@ -53,6 +57,8 @@ OWNERSHIP_FIELDS = {
     "store_pincode", "store_location", "store_city", "store_state", "store_district",
     "delivery_radius_km", "delivery_radius_mode", "delivery_available", "delivery_pincodes",
     "created_at", "updated_at", "is_published",
+    # Bookkeeping from a previous restore — meaningless in a new file.
+    "restore_session", "restored_at", "restored_from_backup",
     # Engagement / analytics counters belong to the original listing.
     "interested_count", "views", "orders_count", "rating", "rating_count",
 }
@@ -84,8 +90,12 @@ async def vendor_export_catalogue(
     `has_more` is false and writes ONE file at the end.
     """
     total = await db.products.count_documents({"vendor_id": vendor["id"]})
+    # Jun 2026 — `_id` is the unique tie-breaker. Sorting on `created_at`
+    # alone let pages overlap whenever products share a timestamp (a bulk
+    # import writes hundreds in the same second), so an exported file had
+    # duplicate rows AND silently missed products.
     docs = await db.products.find({"vendor_id": vendor["id"]}, {"_id": 0}) \
-        .sort("created_at", 1).skip(offset).limit(limit).to_list(limit)
+        .sort([("created_at", 1), ("id", 1)]).skip(offset).limit(limit).to_list(limit)
     return {
         "format": EXPORT_FORMAT,
         "version": EXPORT_VERSION,
@@ -118,10 +128,17 @@ async def vendor_import_catalogue(
       first_chunk: true on the first call — only then does "replace" wipe the
                    vendor's existing products, so a multi-chunk restore
                    doesn't delete what the previous chunk just inserted.
+      restore_session: an id the client keeps for the whole file. Every row
+                   this restore creates or updates is stamped with it, and
+                   stamped rows are never matched again — otherwise a file
+                   listing the same product name in two different chunks had
+                   its second chunk overwrite the row the first chunk had just
+                   created, silently losing a product.
     """
     products: List[Dict[str, Any]] = payload.get("products") or []
     mode = (payload.get("mode") or "merge").lower()
     first_chunk = bool(payload.get("first_chunk"))
+    session_id = str(payload.get("restore_session") or "").strip()[:64]
     if mode not in ("merge", "replace"):
         raise HTTPException(status_code=400, detail="mode must be 'merge' or 'replace'")
     if not isinstance(products, list):
@@ -129,19 +146,32 @@ async def vendor_import_catalogue(
 
     wiped = 0
     if mode == "replace" and first_chunk:
-        mine = await db.products.find({"vendor_id": vendor["id"]}, {"_id": 0, "id": 1}).to_list(5000)
-        ids = [m["id"] for m in mine if m.get("id")]
-        if ids:
-            await db.products.delete_many({"id": {"$in": ids}})
-            await db.cart_items.delete_many({"product_id": {"$in": ids}})
-            wiped = len(ids)
+        # Jun 2026 — delete by QUERY, not by a capped id list. The old code
+        # read the first 5,000 ids and deleted those, so a larger catalogue
+        # was only partly replaced.
+        mine = [m["id"] async for m in db.products.find(
+            {"vendor_id": vendor["id"]}, {"_id": 0, "id": 1},
+        ) if m.get("id")]
+        res = await db.products.delete_many({"vendor_id": vendor["id"]})
+        wiped = res.deleted_count
+        for i in range(0, len(mine), 500):
+            await db.cart_items.delete_many({"product_id": {"$in": mine[i:i + 500]}})
 
     from core.image_compress import compress_product_payload
+    from core.image_store import merge_reports, persist_product_images
     from core.variants import apply_variants_to_payload
 
     created = 0
+    updated = 0
     skipped: List[str] = []
+    #: name -> still-unclaimed existing product ids in this shop (see below).
+    name_matches: Dict[str, List[str]] = {}
+    stamped_at = now_utc().isoformat()
     docs: List[Dict[str, Any]] = []
+    image_report: Dict[str, Any] = {"imported": 0, "reused": 0, "failed": 0, "failures": [], "deferred": 0}
+    import time as _time
+    from core.image_store import normalize_gallery
+    deadline = _time.monotonic() + RESTORE_IMAGE_BUDGET_SECONDS
     for raw in products:
         if not isinstance(raw, dict):
             skipped.append("not an object")
@@ -156,10 +186,26 @@ async def vendor_import_catalogue(
             continue
         body = {k: v for k, v in raw.items() if k not in OWNERSHIP_FIELDS}
         body = compress_product_payload(body)
+        # Jun 2026 — copy every external image into permanent storage so a
+        # restored catalogue doesn't go blank when the source CDN rotates.
+        # Shape-normalise always; download within this request's budget and
+        # leave the rest to the background repair worker.
+        if "images" in body:
+            body["images"] = normalize_gallery(body.get("images"))
+        if _time.monotonic() > deadline:
+            body["image_import_status"] = "pending"
+            image_report["deferred"] += 1
+        else:
+            try:
+                rep = await persist_product_images(body)
+                for f in rep.get("failures", []):
+                    f.setdefault("product", name)
+                merge_reports(image_report, rep)
+            except Exception:
+                body["image_import_status"] = "pending"
+                image_report["deferred"] += 1
         body = apply_variants_to_payload(body, price)
-        docs.append({
-            "id": str(uuid.uuid4()),
-            **body,
+        ownership = {
             "vendor_id": vendor["id"],
             "vendor_email": vendor.get("email"),
             "store_pincode": vendor.get("pincode") or None,
@@ -171,23 +217,87 @@ async def vendor_import_catalogue(
             "delivery_radius_mode": vendor.get("delivery_radius_mode") or "pincode",
             "delivery_available": vendor.get("delivery_available", True),
             "delivery_pincodes": vendor.get("delivery_pincodes") or [],
+            "restored_from_backup": True,
+        }
+        # Jun 2026 — Idempotent merge. The export strips product ids (a
+        # restore can land in a different shop), so the shop's own product
+        # NAME is the natural key: restoring the same file twice must update
+        # the product, not create a second copy of it. "replace" wiped the
+        # catalogue on the first chunk, so there is nothing to match.
+        # A shop may legitimately hold two products with the SAME name, and a
+        # file may list that name twice. Each existing row is therefore
+        # claimed at most once: the 1st "Red Saree" in the file updates the 1st
+        # in the shop, the 2nd updates the 2nd, and a 3rd with no partner left
+        # is created. Rows already touched by THIS restore session are skipped,
+        # so a name split across two upload chunks no longer has the second
+        # chunk overwrite what the first chunk just created.
+        if mode == "merge":
+            if name not in name_matches:
+                q: Dict[str, Any] = {"vendor_id": vendor["id"], "name": name}
+                if session_id:
+                    q["restore_session"] = {"$ne": session_id}
+                # An APK installed before `restore_session` existed sends no
+                # id, so its chunks share no key and a name split across two
+                # chunks can still merge onto one row. There is no reliable
+                # server-side substitute (a time window would make a repeat
+                # restore duplicate the whole catalogue, which is worse), so
+                # the legacy path keeps its original behaviour and the real
+                # fix is for the owner to install the new build.
+                rows = await db.products.find(
+                    q, {"_id": 0, "id": 1},
+                ).sort("id", 1).to_list(500)
+                name_matches[name] = [r["id"] for r in rows]
+            pool = name_matches[name]
+            if pool:
+                target = pool.pop(0)
+                # Never take a live product offline: a restore over a running
+                # shop refreshes the data and leaves publishing as it was.
+                stamp = {"restored_at": stamped_at}
+                if session_id:
+                    stamp["restore_session"] = session_id
+                await db.products.update_one(
+                    {"id": target}, {"$set": {**body, **ownership, **stamp}},
+                )
+                updated += 1
+                continue
+        docs.append({
+            "id": str(uuid.uuid4()),
+            **body,
+            **ownership,
+            "restored_at": stamped_at,
+            **({"restore_session": session_id} if session_id else {}),
             "created_at": now_utc().isoformat(),
             # Owner's choice: restored items are drafts until reviewed, and
             # publishing remains an admin action.
             "is_published": False,
-            "restored_from_backup": True,
         })
 
-    if docs:
-        await db.products.insert_many(docs)
-        created = len(docs)
+    if docs or updated:
+        if docs:
+            await db.products.insert_many(docs)
+            created = len(docs)
         try:
             from routes.products_public import bust_products_public_caches
             bust_products_public_caches()
         except Exception:
             pass
+        if image_report.get("deferred"):
+            try:
+                import asyncio as _aio
+                from routes.product_images_repair import start_background_repair
+                _aio.create_task(start_background_repair(delay=5.0))
+            except Exception:
+                pass
 
-    return {"ok": True, "created": created, "wiped": wiped, "skipped": skipped, "mode": mode}
+    return {
+        "ok": True, "created": created, "updated": updated,
+        "wiped": wiped, "skipped": skipped, "mode": mode,
+        "images_imported": image_report["imported"],
+        "images_reused": image_report["reused"],
+        "images_failed": image_report["failed"],
+        "images_deferred": image_report.get("deferred", 0),
+        "image_failures": image_report["failures"][:25],
+    }
 
 
 # ══════════════════════ 4B — FULL APP BACKUP (admin) ══════════════════════
@@ -219,17 +329,52 @@ NEVER_EXPORT = {
 # ?include_reference=true.
 REFERENCE_COLLECTIONS = {"pincodes"}
 
+#: Jun 2026 — Per-chunk wall-clock budget for downloading product photos
+#: during a restore. Keeps every request comfortably inside the 60 s edge
+#: timeout; the remainder is finished by the background repair worker.
+RESTORE_IMAGE_BUDGET_SECONDS = 22.0
+
 
 def _json_safe(value: Any) -> Any:
-    """Make a Mongo document JSON-serialisable without losing information."""
+    """Make a Mongo document JSON-serialisable without losing information.
+
+    Jun 2026 — `_id` used to be stripped here.  That quietly destroyed the
+    permanent image store: in `product_image_files` the `_id` IS the key
+    behind every `/api/img/<key>` link, so a restored backup came back with
+    every photo blank.  `_id` is now kept, and raw image bytes are
+    base64-encoded instead of being str()'d into `"b'\\xff\\xd8...'"`.
+    """
     if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items() if k != "_id"}
+        return {k: _json_safe(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_json_safe(v) for v in value]
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, ObjectId):
-        return str(value)
+        # Flagged so a restore can put a real ObjectId back.
+        return {"$oid": str(value)}
+    if isinstance(value, (bytes, bytearray)):
+        return {"$b64": base64.b64encode(bytes(value)).decode("ascii")}
+    return value
+
+
+def _json_revive(value: Any) -> Any:
+    """Inverse of :func:`_json_safe` — run on every document being restored."""
+    if isinstance(value, dict):
+        if len(value) == 1:
+            if "$b64" in value and isinstance(value["$b64"], str):
+                try:
+                    return base64.b64decode(value["$b64"])
+                except Exception:
+                    return b""
+            if "$oid" in value and isinstance(value["$oid"], str):
+                try:
+                    return ObjectId(value["$oid"])
+                except Exception:
+                    return value["$oid"]
+        return {k: _json_revive(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_revive(v) for v in value]
     return value
 
 
@@ -279,7 +424,9 @@ async def admin_backup_dump(
     if collection not in names:
         raise HTTPException(status_code=404, detail="No such collection")
     total = await db[collection].count_documents({})
-    docs = await db[collection].find({}).skip(offset).limit(limit).to_list(limit)
+    # A skip/limit walk needs a STABLE order or pages overlap and rows are
+    # lost. `_id` is unique and always indexed.
+    docs = await db[collection].find({}).sort("_id", 1).skip(offset).limit(limit).to_list(limit)
     return {
         "collection": collection,
         "total": total,
@@ -370,7 +517,7 @@ async def account_backup_dump(
     email = (u.get("email") or "").lower() or None
     q = scope_query(user_id, email, collection)
     total = await db[collection].count_documents(q)
-    docs = await db[collection].find(q).skip(offset).limit(limit).to_list(limit)
+    docs = await db[collection].find(q).sort("_id", 1).skip(offset).limit(limit).to_list(limit)
     return {
         "collection": collection, "total": total, "offset": offset, "limit": limit,
         "has_more": (offset + len(docs)) < total,
@@ -403,7 +550,7 @@ async def _stream_backup(
         yield (("," if i else "") + json.dumps(name) + ":[").encode()
         first = True
         buf: List[str] = []
-        async for doc in db[name].find(query_for(name)):
+        async for doc in db[name].find(query_for(name)).sort("_id", 1):
             buf.append(("" if first else ",") + _doc_json(doc))
             first = False
             if len(buf) >= 50:
@@ -505,29 +652,117 @@ async def admin_backup_restore(
     if not await verify_danger_pin(pin):
         raise HTTPException(status_code=401, detail="Invalid Danger PIN")
 
+    # Read the live Danger PIN BEFORE anything is deleted — a `wipe` of
+    # `settings` empties the very row it lives in.
+    live_pin = await get_danger_pin_hash() if collection == "settings" else None
+
     wiped = 0
     if mode == "wipe" and first_chunk:
         res = await db[collection].delete_many({})
         wiped = res.deleted_count
 
-    cleaned = [{k: v for k, v in d.items() if k != "_id"} for d in docs if isinstance(d, dict)]
+    # Jun 2026 — revive what the export encoded: real ObjectIds and real image
+    # bytes.  `_id` is KEPT (it is the key behind `/api/img/<key>`), so a
+    # restore can upsert on it and bring the permanent image store back.
+    cleaned = [_json_revive(d) for d in docs if isinstance(d, dict)]
+
+    # The Danger PIN lives in `settings`, and the admin had to type it to get
+    # here. Restoring a file from another deployment (or one taken before the
+    # PIN was changed) used to overwrite the live hash, so the VERY NEXT
+    # collection came back 401 "Invalid Danger PIN" — the client walks
+    # collections alphabetically and stops on the first error, which meant
+    # `users`, `transactions`, `wallet_topups`, `withdrawals` and everything
+    # else after `settings` was never restored, and the admin was locked out
+    # of their own PIN. The live PIN is therefore always kept.
+    if collection == "settings":
+        for d in cleaned:
+            d.pop("danger_pin_hash", None)
+
+    # ── Jun 2026 — Permanent images on restore ────────────────────────────
+    # A Shopify-CSV→JSON file carries `image_url` plus a whole `images`
+    # array of Shopify-CDN links (sometimes as objects with an `Image
+    # Position`).  Those links are not ours and stop resolving, so every
+    # one is downloaded into permanent storage here, in file order, with
+    # duplicates removed.  Prices, stock, descriptions, variants, GST and
+    # categories are never touched.
+    #
+    # A chunk of 25 products can carry 300+ photos, which would blow past
+    # the 60 s edge timeout.  So each chunk gets a TIME BUDGET: whatever is
+    # downloaded inline is reported immediately, and anything left over is
+    # marked `pending` and handed to the background repair worker — it is
+    # never reported as restored and never silently dropped.
+    image_report: Dict[str, Any] = {"imported": 0, "reused": 0, "failed": 0, "failures": [], "deferred": 0}
+    if collection == "products" and cleaned:
+        import time as _time
+        from core.image_store import merge_reports, normalize_gallery, persist_product_images
+        deadline = _time.monotonic() + RESTORE_IMAGE_BUDGET_SECONDS
+        for d in cleaned:
+            # Shape-normalise ALWAYS (cheap, no network): flattens Shopify
+            # image objects, honours `Image Position`, drops duplicates.
+            if "images" in d:
+                d["images"] = normalize_gallery(d.get("images"))
+            if _time.monotonic() > deadline:
+                d["image_import_status"] = "pending"
+                image_report["deferred"] += 1
+                continue
+            try:
+                rep = await persist_product_images(d)
+            except Exception as exc:          # never abort a restore on images
+                log.warning("restore image persist failed for %s: %s", d.get("id"), exc)
+                d["image_import_status"] = "pending"
+                image_report["deferred"] += 1
+                continue
+            for f in rep.get("failures", []):
+                f.setdefault("product", d.get("name") or d.get("id"))
+            merge_reports(image_report, rep)
+
     inserted = 0
     upserted = 0
+    replayed = 0
     if cleaned:
         if mode == "wipe":
-            await db[collection].insert_many(cleaned)
-            inserted = len(cleaned)
+            # A client that retries a chunk (flaky mobile upload) used to hit a
+            # duplicate `_id` and get a 500 now that `_id` is restored. Upsert
+            # on `_id` so a retry is simply a no-op.
+            keyed = [d for d in cleaned if d.get("_id") is not None]
+            plain = [d for d in cleaned if d.get("_id") is None]
+            if keyed:
+                r = await db[collection].bulk_write(
+                    [ReplaceOne({"_id": d["_id"]}, d, upsert=True) for d in keyed],
+                    ordered=False,
+                )
+                inserted += (r.upserted_count or 0)
+                # A retried chunk matches rows already restored — counting
+                # those again over-reported the restore summary.
+                replayed += (r.matched_count or 0)
+            if plain:
+                await db[collection].insert_many(plain)
+                inserted += len(plain)
         else:
             ops = []
             plain = []
             for d in cleaned:
                 if d.get("id"):
-                    ops.append(ReplaceOne({"id": d["id"]}, d, upsert=True))
+                    # Mongo refuses to change an existing document's `_id`
+                    # (error 66), so a row already present under a different
+                    # `_id` made the whole restore 500 — and since the client
+                    # walks collections in order, everything after `settings`
+                    # was never restored. Match on `id`, leave `_id` alone.
+                    body = {k: v for k, v in d.items() if k != "_id"}
+                    ops.append(ReplaceOne({"id": d["id"]}, body, upsert=True))
+                elif d.get("_id") is not None:
+                    # Jun 2026 — collections with no `id` field (short_ids,
+                    # image_assets, payout_keys, product_image_files…) used to
+                    # be blind-inserted, so a second merge duplicated them or
+                    # tripped a unique index.  `_id` is unique by definition.
+                    ops.append(ReplaceOne({"_id": d["_id"]}, d, upsert=True))
                 else:
                     plain.append(d)
             if ops:
                 r = await db[collection].bulk_write(ops, ordered=False)
-                upserted = (r.upserted_count or 0) + (r.modified_count or 0)
+                # `modified_count` is 0 when the document is byte-identical, which
+                # made a re-restore look like it had done nothing. Count matches.
+                upserted = (r.upserted_count or 0) + (r.matched_count or 0)
             if plain:
                 await db[collection].insert_many(plain)
                 inserted = len(plain)
@@ -538,6 +773,23 @@ async def admin_backup_restore(
             bust_products_public_caches()
         except Exception:
             pass
+        # Anything we ran out of time for is picked up by the background
+        # repair worker, so the catalogue converges on permanent images
+        # without the admin having to do anything.
+        if image_report.get("deferred"):
+            try:
+                import asyncio as _aio
+                from routes.product_images_repair import start_background_repair
+                _aio.create_task(start_background_repair(delay=5.0))
+            except Exception:
+                pass
+
+    if collection == "settings" and live_pin:
+        # Put the admin's own PIN back whatever the file contained, so the
+        # next collection in the walk still authenticates.
+        await db.settings.update_one(
+            {"id": "global"}, {"$set": {"danger_pin_hash": live_pin}}, upsert=True,
+        )
 
     await db.audit_logs.insert_one({
         "id": str(uuid.uuid4()),
@@ -552,4 +804,14 @@ async def admin_backup_restore(
     return {
         "ok": True, "collection": collection, "mode": mode,
         "wiped": wiped, "inserted": inserted, "upserted": upserted,
+        # Rows a retried chunk found already restored — counted separately so
+        # the summary doesn't claim them as freshly inserted.
+        "replayed": replayed,
+        # Separate image success / failure counts so the restore report can
+        # show exactly which photos did not come across and why.
+        "images_imported": image_report["imported"],
+        "images_reused": image_report["reused"],
+        "images_failed": image_report["failed"],
+        "images_deferred": image_report.get("deferred", 0),
+        "image_failures": image_report["failures"][:25],
     }

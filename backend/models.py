@@ -79,7 +79,11 @@ class ProductCreate(BaseModel):
     # ── Rich detail-page fields (all optional for backward compat) ──
     brand: Optional[str] = ""
     sub_features: Optional[List[str]] = Field(default_factory=list)
-    images: Optional[List[str]] = Field(default_factory=list)  # up to 10 base64 / urls
+    # Jun 2026 — `Any`, not `str`: a Shopify-CSV→JSON catalogue ships each
+    # gallery entry as an object (`{"src": …, "Image Position": 2}`).
+    # Rejecting those with a 422 broke catalogue imports; they are flattened
+    # and ordered by `core.image_store.normalize_gallery` on write instead.
+    images: Optional[List[Any]] = Field(default_factory=list)  # base64 / urls / {src,position}
     # Styled marketing copy (each block has text + bold/size/align)
     price_summary: Optional[StyledText] = None
     protection_summary: Optional[StyledText] = None
@@ -163,7 +167,7 @@ class ProductUpdate(BaseModel):
     vendor_id: Optional[str] = None
     brand: Optional[str] = None
     sub_features: Optional[List[str]] = None
-    images: Optional[List[str]] = None
+    images: Optional[List[Any]] = None
     price_summary: Optional[StyledText] = None
     protection_summary: Optional[StyledText] = None
     warranty_summary: Optional[StyledText] = None

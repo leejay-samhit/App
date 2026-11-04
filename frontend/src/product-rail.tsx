@@ -21,6 +21,7 @@ import {
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { api, formatApiError, resolveImageUrl } from "./api";
+import { ProductImage } from "./product-image";
 import { notify } from "./notify";
 import { colors, radii, formatINR } from "./theme";
 
@@ -55,7 +56,6 @@ export type Rail = {
 function RailCard({ item, onAdded }: { item: RailItem; onAdded: () => void }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
-  const img = item.image_url ? resolveImageUrl(item.image_url) : "";
   const out = item.in_stock === false;
 
   const add = async () => {
@@ -79,13 +79,13 @@ function RailCard({ item, onAdded }: { item: RailItem; onAdded: () => void }) {
         activeOpacity={0.85}
       >
         <View style={styles.imgBox}>
-          {img ? (
-            <Image source={{ uri: img }} style={styles.img} resizeMode="cover" />
-          ) : (
-            <View style={styles.imgFallback}>
-              <Feather name="image" size={22} color={colors.textMuted} />
-            </View>
-          )}
+          <ProductImage
+            uri={item.image_url}
+            name={item.name}
+            style={styles.img}
+            containerStyle={{ width: "100%", height: "100%" }}
+            resizeMode="cover"
+          />
           {item.discount_pct ? (
             <View style={styles.offBadge}>
               <Text style={styles.offText}>{item.discount_pct}% OFF</Text>

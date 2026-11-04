@@ -13,6 +13,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useSwipePager } from "../src/use-swipe-pager";
 import { api, formatApiError, resolveImageUrl } from "../src/api";
+import { ProductImage } from "../src/product-image";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { OrderTimeline } from "../src/order-timeline";
 import { notify } from "../src/notify";
@@ -382,7 +383,7 @@ export default function OrdersScreen() {
                     {(item.items || []).slice(0, 3).map((it, idx) => (
                       <View key={idx} style={styles.thumbWrap}>
                         {it.image_url ? (
-                          <Image source={{ uri: resolveImageUrl(it.image_url) }} style={styles.thumb} />
+                          <ProductImage uri={it.image_url} name={it.name} compact style={styles.thumb} resizeMode="cover" />
                         ) : (
                           <View style={[styles.thumb, { alignItems: "center", justifyContent: "center" }]}>
                             <Feather name="image" size={12} color={colors.textMuted} />
@@ -673,7 +674,7 @@ export default function OrdersScreen() {
               renderItem={({ item, index }) => (
                 <View style={styles.lineRow}>
                   {item.image_url ? (
-                    <Image source={{ uri: resolveImageUrl(item.image_url) }} style={styles.lineImg} />
+                    <ProductImage uri={item.image_url} name={item.name} compact style={styles.lineImg} resizeMode="cover" />
                   ) : (
                     <View style={[styles.lineImg, { alignItems: "center", justifyContent: "center" }]}>
                       <Feather name="image" size={16} color={colors.textMuted} />

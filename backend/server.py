@@ -141,6 +141,8 @@ from routes import products_public as products_public_router  # noqa: E402
 from routes import products_master as products_master_router  # noqa: E402
 from routes import products_master_specs as products_master_specs_router  # noqa: E402
 from routes import products_master_images as products_master_images_router  # noqa: E402
+from routes import images as images_router  # noqa: E402
+from routes import product_images_repair as product_images_repair_router  # noqa: E402
 from routes import promo_banners as promo_banners_router  # noqa: E402
 from routes import shop_layout as shop_layout_router  # noqa: E402
 from routes import shop_layout_analytics as shop_layout_analytics_router  # noqa: E402
@@ -2461,8 +2463,13 @@ async def admin_stats(_: Dict[str, Any] = Depends(require_admin)):
 @api_router.post("/admin/products")
 async def admin_create_product(p: ProductCreate, admin: Dict[str, Any] = Depends(require_admin_not_finance)):
     from core.image_compress import compress_product_payload
+    from core.image_store import persist_product_images
     from core.variants import apply_variants_to_payload
     payload = compress_product_payload(p.dict())
+    # Jun 2026 — Any EXTERNAL image URL (Smart Search / Shopify CDN) is
+    # downloaded into permanent storage here, so the catalogue never
+    # depends on a third-party URL that can expire or start 403-ing.
+    await persist_product_images(payload)
     payload = apply_variants_to_payload(payload, float(payload.get("price") or 0))
     from core.taxonomy import normalize_product_taxonomy
     payload = await normalize_product_taxonomy(payload)
@@ -2545,7 +2552,11 @@ async def admin_list_products(
     # placeholder in the admin grid.
     items = await db.products.aggregate([
         {"$match": prod_query},
-        {"$sort": {"created_at": -1}},
+        # Jun 2026 — `id` is a UNIQUE tie-breaker. Sorting on `created_at`
+        # alone gave Mongo an unstable order whenever many products share a
+        # timestamp (bulk imports write hundreds in the same second), so
+        # paging overlapped and some products never appeared on any page.
+        {"$sort": {"created_at": -1, "id": 1}},
         {"$skip": offset},
         {"$limit": limit},
         {"$addFields": {"_gallery_n": {"$size": {"$ifNull": ["$images", []]}}}},
@@ -2561,6 +2572,8 @@ async def admin_list_products(
         if inline or (not img and gallery_n > 0):
             p["image_url"] = f"/api/products/{p.get('id')}/image?w=360&q=72"
             p["has_inline_image"] = True
+        elif isinstance(img, str) and img.startswith("/api/img/") and "?" not in img:
+            p["image_url"] = f"{img}?w=360&q=72"
 
     # Enrich with vendor name / email in a single batched lookup.
     vend_ids_present = [p.get("vendor_id") for p in items if p.get("vendor_id")]
@@ -2700,8 +2713,10 @@ async def admin_update_product(product_id: str, payload: ProductUpdate, admin: D
     if not update:
         raise HTTPException(status_code=400, detail="No fields provided")
     from core.image_compress import compress_product_payload, strip_managed_image_urls
+    from core.image_store import persist_product_images
     from core.variants import apply_variants_to_payload
     update = compress_product_payload(strip_managed_image_urls(update, target))
+    await persist_product_images(update)
     # Base price for "extra" mode = the price in THIS update if the vendor
     # changed it, otherwise the stored base/current price.
     _base = float(
@@ -8429,6 +8444,18 @@ async def _background_init():
             logger.warning(f"availability_status backfill failed: {str(_e)[:200]}")
 
         logger.info("Background init complete")
+
+        # ── Jun 2026 — Automatic product-image repair ────────────────────
+        # Catalogues imported before permanent image storage existed still
+        # reference external CDNs that have started refusing us.  Sweep
+        # them into our own storage in small paced batches.  Fully
+        # idempotent and safe to run on every boot: products that already
+        # have `/api/img/...` references are not matched by the query.
+        try:
+            from routes.product_images_repair import start_background_repair
+            asyncio.create_task(start_background_repair())
+        except Exception as _e:
+            logger.warning(f"auto image repair could not start: {str(_e)[:200]}")
     except Exception as _root_err:
         # Catch-all: never let the background init task die loudly.
         logger.warning(f"Background init crashed: {str(_root_err)[:300]}")
@@ -8948,7 +8975,12 @@ async def vendor_my_earnings(
 
 
 @api_router.get("/vendor/me/products")
-async def vendor_my_products(vendor: Dict[str, Any] = Depends(require_vendor)):
+async def vendor_my_products(
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+    q: Optional[str] = None,
+    vendor: Dict[str, Any] = Depends(require_vendor),
+):
     """Jun 2026 — SLIM list.
 
     This used to return every product document in full, including the
@@ -8960,14 +8992,42 @@ async def vendor_my_products(vendor: Dict[str, Any] = Depends(require_vendor)):
     We now drop `images` entirely and swap inline base64 covers for the
     on-demand thumbnail endpoint. The editor pulls the full document from
     GET /vendor/me/products/{id} when it opens a product.
+
+    Jun 2026 (pagination) — the old version had a hard `$limit: 1000` and
+    no offset, so a restored 1,500-SKU catalogue silently lost 500 rows.
+    Now properly paged; `{items, total, has_more}` with a legacy array
+    fallback for older clients that pass no params.
     """
+    # An APK installed before this change calls the endpoint with NO params and
+    # does `res.data.map(...)`. Returning the paged object to those builds
+    # showed an empty vendor panel, so they still get the plain array.
+    legacy = limit is None and offset is None
+    limit = max(1, min(300, int(limit if limit is not None else 60)))
+    offset = max(0, int(offset or 0))
+
+    match: Dict[str, Any] = {"vendor_id": vendor["id"]}
+    if q and q.strip():
+        import re as _re
+        needle = _re.escape(q.strip())
+        match = {"$and": [match, {"$or": [
+            {"name": {"$regex": needle, "$options": "i"}},
+            {"brand": {"$regex": needle, "$options": "i"}},
+            {"category": {"$regex": needle, "$options": "i"}},
+            {"sub_category": {"$regex": needle, "$options": "i"}},
+        ]}]}
+
+    total = await db.products.count_documents(match)
+    page_size = 1000 if legacy else limit
     items = await db.products.aggregate([
-        {"$match": {"vendor_id": vendor["id"]}},
-        {"$sort": {"created_at": -1}},
-        {"$limit": 1000},
+        {"$match": match},
+        # Unique tie-breaker — see admin_list_products. Without `id` a bulk
+        # import's shared timestamps made paging skip and repeat rows.
+        {"$sort": {"created_at": -1, "id": 1}},
+        {"$skip": offset},
+        {"$limit": page_size},
         {"$addFields": {"_gallery_n": {"$size": {"$ifNull": ["$images", []]}}}},
         {"$project": {"_id": 0, "images": 0, "image_data_url": 0}},
-    ]).to_list(1000)
+    ]).to_list(page_size)
     for p in items:
         img = p.get("image_url") or ""
         gallery_n = int(p.pop("_gallery_n", 0) or 0)
@@ -8975,7 +9035,17 @@ async def vendor_my_products(vendor: Dict[str, Any] = Depends(require_vendor)):
         if (isinstance(img, str) and img.startswith("data:")) or (not img and gallery_n > 0):
             p["image_url"] = f"/api/products/{p.get('id')}/image?w=240&q=70"
             p["has_inline_image"] = True
-    return items
+        elif isinstance(img, str) and img.startswith("/api/img/") and "?" not in img:
+            p["image_url"] = f"{img}?w=240&q=70"
+    if legacy:
+        return items
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + len(items)) < total,
+    }
 
 
 @api_router.get("/vendor/me/products/{product_id}")
@@ -8998,8 +9068,12 @@ async def vendor_create_product(p: ProductCreate, vendor: Dict[str, Any] = Depen
     if not (p.name or "").strip():
         raise HTTPException(status_code=400, detail="Name is required")
     from core.image_compress import compress_product_payload
+    from core.image_store import persist_product_images
     from core.variants import apply_variants_to_payload
     payload = compress_product_payload(p.dict())
+    # Jun 2026 — see admin_create_product: external image URLs become
+    # permanent `/api/img/...` references before the doc is written.
+    await persist_product_images(payload)
     # Jun 2026 — variants own the stock/price. `apply_variants_to_payload`
     # rewrites `stock` (sum of options) and `price` (cheapest buyable
     # option) so every existing badge / filter / POS screen keeps working.
@@ -9061,8 +9135,10 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
     # Dec 2026 — Compress any image fields present in the update
     # (Pillow, ≤1280 px, JPEG q=82).  Safe no-op for non-image updates.
     from core.image_compress import compress_product_payload, strip_managed_image_urls
+    from core.image_store import persist_product_images
     from core.variants import apply_variants_to_payload
     update = compress_product_payload(strip_managed_image_urls(update, target))
+    await persist_product_images(update)
     _base = float(
         update.get("price")
         if update.get("price") is not None
@@ -9077,7 +9153,8 @@ async def vendor_update_product(product_id: str, payload: ProductUpdate, vendor:
     # Now any change to a live product pulls it out of the shop and back
     # into the admin queue; stock-only / visibility-only touches are
     # exempt so a seller can still keep inventory accurate.
-    EXEMPT = {"stock", "variants", "is_active", "sold_count", "updated_at"}
+    EXEMPT = {"stock", "variants", "is_active", "sold_count", "updated_at",
+              "image_import_status", "image_import_failures", "image_import_at"}
     meaningful = sorted(k for k in update.keys() if k not in EXEMPT)
     needs_review = bool(meaningful) and bool(target.get("is_published"))
     if needs_review:
@@ -10886,6 +10963,11 @@ _AVAIL_STATUSES = {"available", "busy", "offline"}  # kept for any in-file refs
 
 
 # Include router
+# Jun 2026 — MUST be registered BEFORE api_router: its
+# `/admin/products/image-health` and `/admin/products/image-repair-status`
+# paths would otherwise be swallowed by api_router's
+# `/admin/products/{product_id}` and answer "Product not found".
+app.include_router(product_images_repair_router.router, prefix="/api")
 app.include_router(api_router)
 
 
@@ -10898,6 +10980,7 @@ app.include_router(products_public_router.router, prefix="/api")
 app.include_router(products_master_router.router, prefix="/api")
 app.include_router(products_master_specs_router.router, prefix="/api")
 app.include_router(products_master_images_router.router, prefix="/api")
+app.include_router(images_router.router, prefix="/api")
 app.include_router(promo_banners_router.router, prefix="/api")
 app.include_router(shop_layout_router.router, prefix="/api")
 app.include_router(shop_layout_analytics_router.router, prefix="/api")
