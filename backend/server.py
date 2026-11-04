@@ -7279,7 +7279,15 @@ async def _snapshot_collections() -> List[str]:
     """
     from routes.backup import NEVER_EXPORT, REFERENCE_COLLECTIONS
     names = await db.list_collection_names()
-    skip = set(NEVER_EXPORT) | set(REFERENCE_COLLECTIONS) | {"db_snapshots", "db_snapshot_chunks"}
+    # Jun 2026 — `product_image_files` holds the raw image bytes behind
+    # `/api/img/<key>`. Streaming the whole collection in a background snapshot
+    # trips MongoDB's maxTimeMS (Executor error during getMore) and aborts the
+    # whole 15-minute backup, so the chunky binary store is restored via the
+    # dedicated admin FILE backup (routes/backup.py) instead, which pages it
+    # properly. Every other collection still snapshots fully.
+    skip = set(NEVER_EXPORT) | set(REFERENCE_COLLECTIONS) | {
+        "db_snapshots", "db_snapshot_chunks", "product_image_files",
+    }
     return sorted(n for n in names if n not in skip)
 
 
@@ -7355,20 +7363,23 @@ async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
 
     # Retention (Jun 2026) — snapshots now cover the WHOLE database including
     # base64 product photos, so keeping 24 full copies could balloon storage.
-    # Auto snapshots are pruned harder than the ones an admin (or a Danger
-    # Zone action) deliberately took.
+    # Old snapshots are RETIRED by flagging them `archived` — never hard-
+    # deleted by a startup-triggered background task. Reads already ignore
+    # archived snapshots; a real purge stays an explicit admin action.
     for kinds, keep in (
         (["auto"], BACKUP_AUTO_RETENTION),
         (None, BACKUP_RETENTION),
     ):
         q = {"kind": {"$in": kinds}} if kinds else {}
+        q = {**q, "archived": {"$ne": True}}
         extras = await db.db_snapshots.find(
             q, {"_id": 0, "id": 1, "created_at": 1}
         ).sort("created_at", -1).skip(keep).to_list(1000)
         if extras:
             stale = [e["id"] for e in extras]
-            await db.db_snapshots.delete_many({"id": {"$in": stale}})
-            await db.db_snapshot_chunks.delete_many({"snapshot_id": {"$in": stale}})
+            await db.db_snapshots.update_many(
+                {"id": {"$in": stale}}, {"$set": {"archived": True}},
+            )
     doc.pop("_id", None)
     return {"id": snap_id, "counts": counts, "created_at": doc["created_at"], "skipped": skipped}
 
@@ -7539,12 +7550,17 @@ async def _money_flow_checker():
                     f"inflow ₹{snap['inflow']} | withdrawn ₹{snap['withdrawals_out']} | "
                     f"expected_held ₹{snap['expected_held']} | actual_held ₹{snap['held']}"
                 )
-                # Trim history — keep newest 50
+                # Trim history — keep newest 50 READABLE alerts by archiving
+                # the older ones. Audit rows are never hard-deleted by a
+                # background task; reads filter out archived entries.
                 old_ids = await db.ledger_alerts.find(
-                    {}, {"_id": 0, "id": 1}
+                    {"archived": {"$ne": True}}, {"_id": 0, "id": 1}
                 ).sort("created_at", -1).skip(50).to_list(1000)
                 if old_ids:
-                    await db.ledger_alerts.delete_many({"id": {"$in": [x["id"] for x in old_ids]}})
+                    await db.ledger_alerts.update_many(
+                        {"id": {"$in": [x["id"] for x in old_ids]}},
+                        {"$set": {"archived": True}},
+                    )
         except Exception as _err:
             logger.warning(f"Money flow checker iteration failed: {str(_err)[:200]}")
         await asyncio.sleep(MONEY_FLOW_CHECK_INTERVAL_SECONDS)
@@ -7864,9 +7880,9 @@ async def _background_init():
         # ---------- Backfill: collapse duplicate registration_fee rows ----------
         # Earlier code wrote one txn at /payment/create-order (status=created) AND
         # another at /payment/verify (status=paid) for the same razorpay_order_id.
-        # Now we update the pending row in place; clean up legacy doubles by
-        # deleting the orphaned `created` row when a `paid` sibling exists.
-        # MOVED HERE FROM on_startup() (May-2026) — same K8s probe reason.
+        # Now we update the pending row in place. Legacy doubles are RETIRED by
+        # flagging them `superseded` — we never hard-delete financial ledger
+        # records at startup (the read paths ignore superseded rows).
         try:
             pipeline = [
                 {"$match": {"type": "registration_fee", "razorpay_order_id": {"$exists": True, "$ne": None}}},
@@ -7878,16 +7894,18 @@ async def _background_init():
                 {"$match": {"count": {"$gt": 1}}},
             ]
             dupe_groups = await db.transactions.aggregate(pipeline).to_list(5000)
-            removed = 0
+            retired = 0
             for grp in dupe_groups:
                 statuses = {x["status"] for x in grp["ids"]}
                 if "paid" in statuses and "created" in statuses:
-                    # Drop the "created" rows; keep "paid"
                     created_ids = [x["id"] for x in grp["ids"] if x["status"] == "created"]
-                    res = await db.transactions.delete_many({"id": {"$in": created_ids}})
-                    removed += res.deleted_count
-            if removed:
-                logger.info(f"Reg-fee duplicate backfill: removed {removed} legacy 'created' rows")
+                    res = await db.transactions.update_many(
+                        {"id": {"$in": created_ids}},
+                        {"$set": {"superseded": True, "superseded_reason": "duplicate_registration_fee"}},
+                    )
+                    retired += res.modified_count
+            if retired:
+                logger.info(f"Reg-fee duplicate backfill: retired {retired} legacy 'created' rows")
         except Exception as _bf_err:
             logger.warning(f"Reg-fee duplicate backfill failed: {_bf_err}")
 
@@ -10969,6 +10987,24 @@ _AVAIL_STATUSES = {"available", "busy", "offline"}  # kept for any in-file refs
 # `/admin/products/{product_id}` and answer "Product not found".
 app.include_router(product_images_repair_router.router, prefix="/api")
 app.include_router(api_router)
+
+
+@app.get("/health")
+async def health():
+    """Deployment health probe.
+
+    Deliberately does NOT touch MongoDB or any other dependency: the ingress
+    times this request at ~10s, and a slow/initialising Atlas connection or a
+    busy event loop would otherwise be reported as the whole backend being
+    DOWN, which is what made every deploy fail. A real DB health signal would
+    belong on a separate, non-probed endpoint.
+    """
+    return {"status": "ok"}
+
+
+@app.head("/health")
+async def health_head():
+    return {"status": "ok"}
 
 
 # Phase 2B refactor: extracted routers, mounted at /api so URLs are unchanged

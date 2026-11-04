@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -195,6 +196,11 @@ async def repair_batch(
         "imported": 0, "reused": 0, "images_failed": 0, "failures": [],
     }
     for doc in docs:
+        # Yield between products — repair_one runs PIL image compression,
+        # which is CPU work on the event loop. Without this a single long
+        # batch starves the /health probe and the deployer reports the backend
+        # as down.
+        await asyncio.sleep(0)
         try:
             rep = await repair_one(doc)
         except Exception as exc:
@@ -265,9 +271,19 @@ async def _worker(batch: int, pause: float) -> None:
         _state["finished_at"] = time.time()
 
 
-async def start_background_repair(batch: int = 10, pause: float = 3.0, delay: float = 25.0) -> None:
-    """Kick the worker off shortly after boot (once per process)."""
-    await asyncio.sleep(delay)          # let the app finish warming up
+async def start_background_repair(batch: int = 10, pause: float = 3.0, delay: float = 120.0) -> None:
+    """Kick the worker off shortly after boot (once per process).
+
+    The delay is generous on purpose: the deployment health probe marks the
+    pod as READY within seconds, and a repair sweep starting while the probe
+    is still exercising /health can starve the single uvicorn worker and fail
+    the whole deploy. Two minutes of warm-up keeps the boot cheap; repair is
+    not time-critical.
+    """
+    await asyncio.sleep(delay)          # let the app finish warming up + the probe pass
+    if (os.environ.get("DISABLE_AUTO_IMAGE_REPAIR") or "").strip().lower() in ("1", "true", "yes"):
+        log.info("auto image repair disabled by DISABLE_AUTO_IMAGE_REPAIR")
+        return
     async with _lock:
         if _state["running"]:
             return
