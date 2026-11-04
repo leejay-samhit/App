@@ -387,6 +387,36 @@ async def _exportable_collections(include_reference: bool) -> List[str]:
     return out
 
 
+#: How long a single count is allowed to take before we fall back (ms).
+_COUNT_TIME_LIMIT_MS = 4000
+
+
+async def safe_count(name: str) -> int:
+    """Count a collection without ever failing the whole request.
+
+    Nov 2026 — `count_documents({})` runs a real aggregation, and on Atlas it
+    exceeded the operation time limit on `product_image_files` (which holds
+    multi-megabyte image binaries): "Executor error during getMore :: operation
+    exceeded time limit", MaxTimeMSExpired. That exception propagated out of
+    the manifest endpoint as a 500, which is why BOTH the File Backup &
+    Snapshots → Restore screen and the whole Reset Center showed
+    "Request failed with status code 500" — they each load the manifest first.
+
+    An exact count is nice but never worth a dead screen, so a slow collection
+    falls back to the instant metadata estimate, and a broken one reports 0.
+    """
+    try:
+        return await db[name].count_documents({}, maxTimeMS=_COUNT_TIME_LIMIT_MS)
+    except Exception as exc:
+        try:
+            est = await db[name].estimated_document_count()
+            log.warning("count fell back to an estimate for %s: %s", name, exc)
+            return int(est)
+        except Exception as exc2:
+            log.warning("could not count %s at all: %s", name, exc2)
+            return 0
+
+
 @router.get("/admin/backup/manifest")
 async def admin_backup_manifest(
     include_reference: bool = Query(False),
@@ -397,7 +427,7 @@ async def admin_backup_manifest(
     names = await _exportable_collections(include_reference)
     collections = []
     for n in names:
-        collections.append({"name": n, "count": await db[n].count_documents({})})
+        collections.append({"name": n, "count": await safe_count(n)})
     return {
         "format": APP_EXPORT_FORMAT,
         "version": 1,
@@ -423,7 +453,7 @@ async def admin_backup_dump(
     names = await db.list_collection_names()
     if collection not in names:
         raise HTTPException(status_code=404, detail="No such collection")
-    total = await db[collection].count_documents({})
+    total = await safe_count(collection)
     # A skip/limit walk needs a STABLE order or pages overlap and rows are
     # lost. `_id` is unique and always indexed.
     docs = await db[collection].find({}).sort("_id", 1).skip(offset).limit(limit).to_list(limit)
@@ -477,6 +507,19 @@ async def _scope_target(user_id: str) -> Dict[str, Any]:
     return u
 
 
+async def safe_count_q(name: str, query: Dict[str, Any]) -> int:
+    """`safe_count` for a filtered count — same MaxTimeMSExpired protection.
+
+    A filtered count has no metadata shortcut, so a slow collection reports 0
+    rather than killing the account manifest with a 500.
+    """
+    try:
+        return await db[name].count_documents(query, maxTimeMS=_COUNT_TIME_LIMIT_MS)
+    except Exception as exc:
+        log.warning("scoped count failed for %s: %s", name, exc)
+        return 0
+
+
 @router.get("/admin/backup/account/{user_id}/manifest")
 async def account_backup_manifest(
     user_id: str,
@@ -487,7 +530,7 @@ async def account_backup_manifest(
     email = (u.get("email") or "").lower() or None
     collections = []
     for name in await _exportable_collections(False):
-        n = await db[name].count_documents(scope_query(user_id, email, name))
+        n = await safe_count_q(name, scope_query(user_id, email, name))
         if n:
             collections.append({"name": name, "count": n})
     return {
@@ -516,7 +559,7 @@ async def account_backup_dump(
         raise HTTPException(status_code=400, detail=f"{collection} is not exportable")
     email = (u.get("email") or "").lower() or None
     q = scope_query(user_id, email, collection)
-    total = await db[collection].count_documents(q)
+    total = await safe_count_q(collection, q)
     docs = await db[collection].find(q).sort("_id", 1).skip(offset).limit(limit).to_list(limit)
     return {
         "collection": collection, "total": total, "offset": offset, "limit": limit,

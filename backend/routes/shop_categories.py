@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -235,40 +235,59 @@ class CategoryUpdate(BaseModel):
 RECHARGE_ROOT_NAMES = {"recharge", "recharges", "mobile recharge", "dth tv recharge"}
 
 
-async def _recharge_category_ids() -> set:
-    """Ids of the Recharge root and everything under it.
+async def _recharge_groups() -> Tuple[Optional[str], set]:
+    """Split the recharge categories into (visible_root_id, hidden_ids).
 
-    Nov-2026 — Recharge is sold through its own flow (plans, operators,
-    circles), not as a shop product, so it must not appear in the Shop Layout
-    pickers or in the customer-facing category lists. The categories stay in
-    the database: the recharge services, plans, transactions and payment
-    flows are untouched.
+    Owner's rule (Nov 2026): the "Recharge" ROOT category must be placeable
+    in Shop Layout and shown in the shopper's top categories — tapping it
+    opens the recharge flow (plans/operators), not a product list. Its
+    SUB-categories (Mobile Recharge, DTH TV Recharge, …) stay hidden
+    everywhere.
+
+    Returns (None, set()) when no recharge categories exist. If there is no
+    top-level category named exactly "Recharge", nothing becomes visible —
+    everything recharge-marked stays hidden, exactly as before.
     """
-    roots = await db.shop_categories.find(
+    rows = await db.shop_categories.find(
         {"$or": [
-            {"name": {"$in": [n.title() for n in RECHARGE_ROOT_NAMES]}},
+            {"name": {"$regex": "recharge", "$options": "i"}},
             {"recharge_group": {"$nin": [None, ""]}},
             {"recharge_kind": {"$nin": [None, ""]}},
         ]},
         {"_id": 0, "id": 1, "name": 1, "parent_id": 1},
-    ).to_list(200)
-    ids = {r["id"] for r in roots if (r.get("name") or "").strip().lower() in RECHARGE_ROOT_NAMES
-           or r.get("parent_id") is None}
-    ids |= {r["id"] for r in roots}
-    if not ids:
-        return set()
-    # Walk down: every descendant of a recharge root is a recharge category.
-    frontier = set(ids)
+    ).to_list(300)
+    if not rows:
+        return None, set()
+    # The single visible root: top-level and named exactly "Recharge".
+    root = next(
+        (r for r in rows
+         if (r.get("name") or "").strip().lower() == "recharge" and not r.get("parent_id")),
+        None,
+    )
+    visible = {root["id"]} if root else set()
+    hidden = {r["id"] for r in rows} - visible
+    # Walk down: every descendant of a recharge-marked row is hidden too.
+    frontier = hidden | visible
     for _ in range(6):  # depth guard
         kids = await db.shop_categories.find(
             {"parent_id": {"$in": list(frontier)}}, {"_id": 0, "id": 1},
         ).to_list(500)
-        new = {k["id"] for k in kids} - ids
+        new = {k["id"] for k in kids} - hidden - visible
         if not new:
             break
-        ids |= new
+        hidden |= new
         frontier = new
-    return ids
+    return (root["id"] if root else None), hidden
+
+
+async def _recharge_category_ids() -> set:
+    """Backward-compatible helper: every recharge-marked category id,
+    root included. Used where the WHOLE tree must stay out of scope."""
+    root_id, hidden = await _recharge_groups()
+    out = set(hidden)
+    if root_id:
+        out.add(root_id)
+    return out
 
 
 @router.get("/shop-categories")
@@ -279,7 +298,8 @@ async def list_public_categories(root_only: bool = True):
     stays clean.  Pass `?root_only=false` to include children (flat
     list, still ordered by `sort_order → name`).
 
-    Recharge categories are excluded — see `_recharge_category_ids`.
+    The Recharge ROOT is shown (tapping it opens the recharge flow); its
+    sub-categories stay hidden — see `_recharge_groups`.
     """
     await _ensure_seeded()
     q: Dict[str, Any] = {"active": True}
@@ -288,8 +308,8 @@ async def list_public_categories(root_only: bool = True):
         q["$or"] = [{"parent_id": None}, {"parent_id": {"$exists": False}}]
     cursor = db.shop_categories.find(q).sort([("sort_order", 1), ("name", 1)])
     docs = await cursor.to_list(length=500)
-    skip = await _recharge_category_ids()
-    return {"items": [_serialize(d) for d in docs if d.get("id") not in skip]}
+    _, hidden = await _recharge_groups()
+    return {"items": [_serialize(d) for d in docs if d.get("id") not in hidden]}
 
 
 @router.get("/shop-categories/tree")
@@ -297,13 +317,14 @@ async def list_category_tree():
     """PUBLIC — full nested category tree.  Response shape:
     [{ ...category, children: [{ ...category, children: [...] }] }]
 
-    Recharge categories are excluded — see `_recharge_category_ids`."""
+    The Recharge ROOT appears (without its sub-categories) — see
+    `_recharge_groups`."""
     await _ensure_seeded()
     docs = await db.shop_categories.find({"active": True}).sort([("sort_order", 1), ("name", 1)]).to_list(2000)
-    skip = await _recharge_category_ids()
+    _, hidden = await _recharge_groups()
     by_id: Dict[str, Dict[str, Any]] = {}
     for d in docs:
-        if d.get("id") in skip:
+        if d.get("id") in hidden:
             continue
         node = _serialize(d)
         node["children"] = []
@@ -344,15 +365,19 @@ async def admin_list_categories(
 ):
     """Admin category list.
 
-    `exclude_recharge=true` is used by the Shop Layout screen: recharge is
-    sold through its own flow, so it must not be offerable as a layout
-    scope. Category MANAGEMENT still sees everything (default false), so
-    recharge categories remain editable where they belong.
+    `exclude_recharge=true` is used by the Shop Layout screen. The Recharge
+    ROOT is offered (it can be placed in the shop view — tapping it opens the
+    recharge flow), but its sub-categories are not. Category MANAGEMENT still
+    sees everything (default false), so recharge categories remain editable
+    where they belong.
     """
     await _ensure_seeded()
     cursor = db.shop_categories.find({}).sort([("sort_order", 1), ("name", 1)])
     docs = await cursor.to_list(length=1000)
-    skip = await _recharge_category_ids() if exclude_recharge else set()
+    if exclude_recharge:
+        _, skip = await _recharge_groups()
+    else:
+        skip = set()
     return {"items": [_serialize(d) for d in docs if d.get("id") not in skip]}
 
 

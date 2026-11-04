@@ -224,9 +224,14 @@ def test_reclassification_preserves_everything_else(vendor_h, product, tree):
 
 # ───────────────────── Test I — Recharge removal ─────────────────────
 
-def test_recharge_is_gone_from_the_customer_category_lists():
+def test_recharge_root_shown_subs_hidden_in_customer_category_lists():
+    """Owner's rule (Nov 2026): the Recharge ROOT appears as a top category
+    (tapping it opens the recharge flow); its sub-categories stay hidden."""
     flat = requests.get(f"{BASE}/shop-categories", timeout=T).json()["items"]
-    assert not [c for c in flat if "recharge" in (c["name"] or "").lower()]
+    names = [(c["name"] or "").lower() for c in flat]
+    assert "recharge" in names, "the Recharge root must be visible to shoppers"
+    assert not [n for n in names if "recharge" in n and n != "recharge"], \
+        "only the bare 'Recharge' root is allowed, not its sub-categories"
 
     def walk(nodes):
         for n in nodes:
@@ -234,16 +239,20 @@ def test_recharge_is_gone_from_the_customer_category_lists():
             yield from walk(n.get("children") or [])
 
     tree_items = requests.get(f"{BASE}/shop-categories/tree", timeout=T).json()["items"]
-    names = [n["name"].lower() for n in walk(tree_items)]
-    assert not [n for n in names if "recharge" in n]
-    assert "airtel" not in names and "jio" not in names, "operator sub-categories must go too"
+    tnames = [n["name"].lower() for n in walk(tree_items)]
+    assert "recharge" in tnames
+    assert not [n for n in tnames if "recharge" in n and n != "recharge"]
+    assert "airtel" not in tnames and "jio" not in tnames, "operator sub-categories must stay hidden"
 
 
-def test_recharge_is_gone_from_the_shop_layout_picker(admin_h):
+def test_shop_layout_picker_offers_recharge_root_but_not_subs(admin_h):
     items = requests.get(f"{BASE}/admin/shop-categories?exclude_recharge=true",
                          headers=admin_h, timeout=T).json()["items"]
-    assert not [c for c in items if "recharge" in (c["name"] or "").lower()]
-    assert not [c for c in items if (c["name"] or "").lower() in ("airtel", "jio", "vi", "bsnl")]
+    names = [(c["name"] or "").lower() for c in items]
+    assert "recharge" in names, "the Recharge root must be placeable in Shop Layout"
+    assert not [n for n in names if "recharge" in n and n != "recharge"], \
+        "recharge sub-categories must not be offered"
+    assert not [n for n in names if n in ("airtel", "jio", "vi", "bsnl")]
 
 
 def test_recharge_categories_and_services_still_exist_in_the_database(admin_h):

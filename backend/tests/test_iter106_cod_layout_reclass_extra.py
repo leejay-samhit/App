@@ -194,11 +194,15 @@ def _walk(nodes):
         yield from _walk(n.get("children") or [])
 
 
-def test_public_tree_has_no_recharge_or_operators():
+def test_public_tree_shows_recharge_root_but_no_subs_or_operators():
+    """Nov 2026 — the owner asked for the Recharge ROOT back in the shop; its
+    sub-categories (operators, Mobile/DTH) stay hidden."""
     names = [n["name"].lower() for n in _walk(requests.get(f"{BASE}/shop-categories/tree", timeout=T).json()["items"])]
     flat = [c["name"].lower() for c in requests.get(f"{BASE}/shop-categories", timeout=T).json()["items"]]
     for lst in (names, flat):
-        assert not [n for n in lst if "recharge" in n]
+        assert "recharge" in lst, "the Recharge root must be visible"
+        assert not [n for n in lst if "recharge" in n and n != "recharge"], \
+            "recharge sub-categories must stay hidden"
         assert not OPERATORS & set(lst)
 
 
@@ -206,7 +210,10 @@ def test_admin_list_flag_vs_plain(admin_h):
     excl = [c["name"].lower() for c in requests.get(f"{BASE}/admin/shop-categories", params={"exclude_recharge": "true"},
                                                     headers=admin_h, timeout=T).json()["items"]]
     full = [c["name"].lower() for c in requests.get(f"{BASE}/admin/shop-categories", headers=admin_h, timeout=T).json()["items"]]
-    assert not [n for n in excl if "recharge" in n] and not OPERATORS & set(excl)
+    # The picker offers the Recharge ROOT only — subs and operators stay out.
+    assert "recharge" in excl
+    assert not [n for n in excl if "recharge" in n and n != "recharge"]
+    assert not OPERATORS & set(excl)
     assert [n for n in full if "recharge" in n]
     assert len(full) > len(excl)
 

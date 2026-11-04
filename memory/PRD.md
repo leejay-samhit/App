@@ -2972,3 +2972,27 @@ crescent, trishul, modak, tiranga, fireworks… instead of the same diya
 everywhere) and an AI artwork prompt. No screen changes — adding a future
 festival is one registry entry + one icon. 29 festival tests passing;
 browser-verified apply → whole-app re-skin → restore to default.
+
+## Nov 2026 — Backup/Reset 500s fixed + Recharge visible in shop again
+
+1. **500 on Data Backups → Restore and Reset Center (Atlas only).** Both
+   screens load `/admin/backup/manifest`, which ran 84 unguarded
+   `count_documents({})` calls. On Atlas the count over the multi-MB
+   `product_image_files` collection exceeded the operation time limit
+   ("MaxTimeMSExpired") and the exception became a 500 — killing both screens.
+   Fix: `safe_count()` / `safe_count_q()` in routes/backup.py — a 4s per-count
+   time budget, falling back to the instant metadata estimate (or 0) instead
+   of failing. Verified by forcing a 1ms budget and seeing the fallback absorb
+   the exact production error. Account-scoped manifest/dump got the same
+   protection.
+
+2. **Recharge in the shop (owner's revised rule).** The "Recharge" ROOT
+   category is visible again: shoppers see it in the top category row and
+   tapping it opens the recharge flow (verified in-browser: circle visible,
+   tap → Mobile Recharge / DTH TV Recharge chooser). It is offered in the
+   Shop Layout picker so it can be placed in the shop view. Its
+   SUB-categories (Mobile Recharge, DTH TV Recharge) stay hidden everywhere.
+   Implemented via `_recharge_groups()` in routes/shop_categories.py
+   (visible root vs hidden subtree); the 4 tests that pinned the old
+   "hide everything" behaviour were rewritten to the new contract
+   (33 layout/COD tests + 58 backup tests passing).
