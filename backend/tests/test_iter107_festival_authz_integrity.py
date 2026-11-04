@@ -64,7 +64,7 @@ def test_public_list():
     assert ids == {"deepavali", "ugadi", "independence_day", "ganesh_chaturthi", "dussehra",
                    "maha_shivaratri", "ramzan", "christmas", "new_year", "sankranti"}
     avail = [i["id"] for i in items if i.get("available")]
-    assert avail == ["deepavali"]
+    assert len(avail) == 10, f"all ten festivals should be applicable: {sorted(set(ids) - set(avail))}"
 
 
 def test_public_active():
@@ -94,9 +94,7 @@ def test_buyer_refused(buyer_h, path, body):
     assert r.status_code in (401, 403), r.text
 
 
-def test_placeholder_refused(admin_h):
-    r = requests.post(f"{API}/admin/festival-theme/apply", json={"festival_id": "christmas"}, headers=admin_h, timeout=30)
-    assert r.status_code == 400
+def test_unknown_festival_refused(admin_h):
     r = requests.post(f"{API}/admin/festival-theme/apply", json={"festival_id": "nope"}, headers=admin_h, timeout=30)
     assert r.status_code == 404
 

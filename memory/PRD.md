@@ -2962,3 +2962,13 @@ Four owner-reported defects fixed. Full write-up: `/app/memory/PRODUCT_IMAGES.md
   made every collection after it fail 401 and silently abandoned the rest of the
   restore (users, transactions, wallet, withdrawals). The admin's PIN is now
   always preserved. 105 backend tests passing across the five image/backup suites.
+
+## Nov 2026 — All nine remaining festival themes live
+Every festival (Ugadi, Independence Day, Ganesh Chaturthi, Dussehra, Maha
+Shivaratri, Ramzan, Christmas, New Year, Sankranti) is now fully designed and
+appliable from Admin → Branding → Festival Themes: complete palette, hero
+gradient, its OWN drawn decoration (new `src/festival-icons.tsx` — tree, kite,
+crescent, trishul, modak, tiranga, fireworks… instead of the same diya
+everywhere) and an AI artwork prompt. No screen changes — adding a future
+festival is one registry entry + one icon. 29 festival tests passing;
+browser-verified apply → whole-app re-skin → restore to default.

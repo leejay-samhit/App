@@ -143,3 +143,41 @@ screen. Upstream HTML blobs are collapsed to a short sentence by `_short()`.
 Tests: `test_festival_themes.py` 15 + `test_iter107_festival_authz_integrity.py`
 11 = 26 passed, in both file orders (both files snapshot and replace the whole
 branding document, so they never leave the owner's theme or text changed).
+
+
+## Nov 2026 — all ten festivals are live
+
+The nine placeholders are gone. Every festival now ships a complete design in
+`core/festival_themes.py` (`_theme(...)`): a full palette, a dark festive hero
+gradient, a drawn decoration and an AI artwork prompt. The backend no longer
+has any `available: False` card, so the admin can preview and apply all ten.
+
+Drawn decorations (`src/festival-icons.tsx`) — the strip, banner and corner
+mark no longer repeat the same diya everywhere; each festival gets its own
+react-native-svg icon mapped from `decor.pattern`:
+
+  deepavali=diya · ugadi=mango-leaf kalasha · independence_day=tiranga shield
+  with chakra · ganesh_chaturthi=modak · dussehra=bow & arrows ·
+  maha_shivaratri=trishul · ramzan=crescent & star · christmas=tree & star ·
+  new_year=fireworks · sankranti=kite
+
+Palettes per festival (primary): Ugadi mango green, Independence Day navy with
+saffron accent, Ganesh Chaturthi vermilion, Dussehra royal red, Maha
+Shivaratri moonlit indigo, Ramzan emerald, Christmas pine, New Year midnight,
+Sankranti harvest gold.
+
+Tests: `test_festival_themes.py` now asserts every festival is applicable,
+carries a complete palette + gradient + decor, has a DISTINCT decoration
+pattern, applies with the right palette and restores cleanly, and that
+A→B→restore still returns the admin's own colour. The two tests that encoded
+the old "only Deepavali" contract were rewritten (unknown ids are still 404).
+`test_festival_themes.py` (17) + `test_iter107_festival_authz_integrity.py`
+(12) = **29 passed**.
+
+Browser-verified end to end: all 10 cards render, Christmas applies (the whole
+chrome re-skins: pine header, snow surfaces, berry-red CTA, LIVE chip), and
+Restore default returns the standard Slangcart green. Branding doc left in the
+default state (no active festival, tagline intact).
+
+Known limitation (unchanged): AI banner artwork still needs the Emergent
+Universal Key topped up — the drawn decorations work without it.

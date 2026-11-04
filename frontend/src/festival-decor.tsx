@@ -14,9 +14,10 @@
 import React from "react";
 import { Image, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import Svg, { Circle, Ellipse, G, Path } from "react-native-svg";
+import Svg, { Circle, G, Path } from "react-native-svg";
 import Constants from "expo-constants";
 import { useBranding, useFestival } from "./branding";
+import { FestivalIcon } from "./festival-icons";
 import { colors, radii, spacing } from "./theme";
 
 const API_BASE =
@@ -30,20 +31,9 @@ function artworkUrl(path?: string): string | null {
   return API_BASE ? `${API_BASE.replace(/\/$/, "")}${path}` : null;
 }
 
-/** A single lit clay diya, drawn to scale. */
-function Diya({ size = 34, tint, glow }: { size?: number; tint: string; glow: string }) {
-  return (
-    <Svg width={size} height={size} viewBox="0 0 64 64">
-      {/* flame glow */}
-      <Ellipse cx="32" cy="22" rx="11" ry="14" fill={glow} opacity={0.22} />
-      {/* flame */}
-      <Path d="M32 10c5 7 7 10 7 15a7 7 0 0 1-14 0c0-5 2-8 7-15z" fill={glow} />
-      <Path d="M32 18c2.4 3.4 3.4 5 3.4 7.3a3.4 3.4 0 0 1-6.8 0c0-2.3 1-3.9 3.4-7.3z" fill="#FFF7E0" opacity={0.9} />
-      {/* clay bowl */}
-      <Path d="M12 42h40c0 8-9 13-20 13S12 50 12 42z" fill={tint} />
-      <Path d="M12 42h40a3 3 0 0 1-3 3H15a3 3 0 0 1-3-3z" fill="#FFFFFF" opacity={0.25} />
-    </Svg>
-  );
+/** A single drawn decoration for the active festival. */
+function Diya({ size = 34, tint, glow, pattern }: { size?: number; tint: string; glow: string; pattern?: string }) {
+  return <FestivalIcon pattern={pattern} size={size} tint={tint} glow={glow} />;
 }
 
 /** Decorative rangoli arc used behind headers. */
@@ -85,7 +75,7 @@ export function FestivalStrip({ compact }: { compact?: boolean }) {
       ) : null}
       <View style={stripStyles.diyas}>
         {Array.from({ length: count }).map((_, i) => (
-          <Diya key={i} size={compact ? 22 : 28} tint={tint} glow={glow} />
+          <Diya key={i} size={compact ? 22 : 28} tint={tint} glow={glow} pattern={decor.pattern} />
         ))}
       </View>
     </View>
@@ -130,7 +120,7 @@ export function FestivalBanner() {
         </View>
         <View style={bannerStyles.diyaRow} pointerEvents="none">
           {Array.from({ length: diyaCount }).map((_, i) => (
-            <Diya key={i} size={30} tint={tint} glow={glow} />
+            <Diya key={i} size={30} tint={tint} glow={glow} pattern={decor.pattern} />
           ))}
         </View>
       </LinearGradient>
@@ -148,7 +138,7 @@ export function FestivalMark({ size = 22 }: { size?: number }) {
   const decor = festival.decor || {};
   return (
     <View pointerEvents="none" testID="festival-mark">
-      <Diya size={size} tint={decor.decor_tint || colors.accent} glow={decor.glow_color || colors.warning} />
+      <Diya size={size} tint={decor.decor_tint || colors.accent} glow={decor.glow_color || colors.warning} pattern={decor.pattern} />
     </View>
   );
 }

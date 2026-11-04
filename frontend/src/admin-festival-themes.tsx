@@ -1,9 +1,8 @@
 /**
  * Admin → Branding & Themes → Festival Themes (Oct-2026).
  *
- * Lists the ten festivals as preview cards. Deepavali is fully designed and
- * can be previewed + applied; the rest show their palette and are marked as
- * coming soon until their artwork lands.
+ * Lists the ten festivals as preview cards. All ten are fully designed and
+ * can be previewed + applied.
  *
  * Applying a theme only rewrites branding colours — no business logic, user
  * data or permissions are touched.
@@ -73,7 +72,7 @@ export function FestivalThemesSection() {
 
   const confirmApply = (f: FestivalCard) => {
     if (!f.available) {
-      setNotice({ ok: false, text: `The ${f.name} theme isn't ready yet — Deepavali is available now.` });
+      setNotice({ ok: false, text: `The ${f.name} theme isn't ready yet.` });
       return;
     }
     if (Platform.OS === "web") { applyTheme(f); return; }
@@ -287,8 +286,8 @@ function ThemePreview({ f }: { f: FestivalCard }) {  const c = f.colors || {};
       </View>
       {!f.available ? (
         <Text style={[styles.helper, { marginTop: 10 }]}>
-          This is the planned palette. {f.name} artwork and decorations arrive in a
-          later round — only Deepavali can be applied right now.
+          This is the planned palette — {f.name} artwork and decorations are
+          still being finished.
         </Text>
       ) : null}
     </View>

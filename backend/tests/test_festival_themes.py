@@ -75,21 +75,29 @@ def test_all_ten_festivals_are_listed():
         assert len(i["swatches"]) >= 3, f"{i['id']} needs a colour preview"
 
 
-def test_only_deepavali_is_applicable_this_round():
+def test_all_ten_festivals_are_applicable():
     items = requests.get(f"{BASE}/festival-themes", timeout=TIMEOUT).json()["items"]
-    available = [i["id"] for i in items if i["available"]]
-    assert available == ["deepavali"]
+    unavailable = [i["id"] for i in items if not i["available"]]
+    assert unavailable == [], f"themes still marked as coming soon: {unavailable}"
 
 
-def test_deepavali_carries_a_complete_design():
+def test_every_festival_carries_a_complete_design():
     items = requests.get(f"{BASE}/festival-themes", timeout=TIMEOUT).json()["items"]
-    d = next(i for i in items if i["id"] == "deepavali")
-    for key in ("primary", "accent", "background", "surface", "textMain", "textMuted", "border"):
-        assert d["colors"].get(key, "").startswith("#"), f"missing colour: {key}"
-    for key in ("start", "middle", "end", "glow"):
-        assert d["gradient"].get(key, "").startswith("#"), f"missing gradient stop: {key}"
-    assert d["decor"].get("banner_title")
-    assert d["decor"].get("pattern") == "diya"
+    for d in items:
+        for key in ("primary", "accent", "background", "surface", "textMain", "textMuted", "border"):
+            assert d["colors"].get(key, "").startswith("#"), f"{d['id']} missing colour: {key}"
+        for key in ("start", "middle", "end", "glow"):
+            assert d["gradient"].get(key, "").startswith("#"), f"{d['id']} missing gradient stop: {key}"
+        assert d["decor"].get("banner_title"), f"{d['id']} missing a banner title"
+        assert d["decor"].get("pattern"), f"{d['id']} missing a decoration pattern"
+
+
+def test_each_festival_has_its_own_decoration():
+    """Distinct festivals must not all show the same diya."""
+    items = requests.get(f"{BASE}/festival-themes", timeout=TIMEOUT).json()["items"]
+    patterns = {i["id"]: (i["decor"] or {}).get("pattern") for i in items}
+    assert len(set(patterns.values())) == len(patterns), \
+        f"two festivals share a decoration: {patterns}"
 
 
 # ───────────────────────────── authorisation ─────────────────────────────
@@ -110,15 +118,10 @@ def test_theme_listing_is_public_but_changing_it_is_not(buyer_h):
         assert r.status_code in (401, 403), f"{path} ({'anon' if not headers else 'buyer'}) -> {r.status_code}"
 
 
-def test_unknown_and_unavailable_festivals_are_refused(admin_h):
+def test_unknown_festivals_are_refused(admin_h):
     r = requests.post(f"{BASE}/admin/festival-theme/apply",
                       json={"festival_id": "holi-not-a-thing"}, headers=admin_h, timeout=TIMEOUT)
     assert r.status_code == 404
-
-    r = requests.post(f"{BASE}/admin/festival-theme/apply",
-                      json={"festival_id": "christmas"}, headers=admin_h, timeout=TIMEOUT)
-    assert r.status_code == 400
-    assert "ready" in r.text.lower()
 
 
 # ─────────────────────────── apply / restore ───────────────────────────
@@ -178,6 +181,47 @@ def test_applying_twice_is_safe_and_keeps_one_stash(admin_h):
     assert (stored.get("pre_festival_colors") or {}).get("primary") != "#4C1D95"
 
 
+def test_switching_between_festivals_never_loses_the_stash(admin_h):
+    """Festival A -> festival B -> restore must still bring back the ADMIN'S
+    own colours, not festival A's."""
+    custom = "#0B3D2C"
+    requests.put(f"{BASE}/admin/branding", json={"colors": {"primary": custom}},
+                 headers=admin_h, timeout=TIMEOUT)
+    try:
+        requests.post(f"{BASE}/admin/festival-theme/apply", json={"festival_id": "ugadi"},
+                      headers=admin_h, timeout=TIMEOUT)
+        requests.post(f"{BASE}/admin/festival-theme/apply", json={"festival_id": "christmas"},
+                      headers=admin_h, timeout=TIMEOUT)
+        after = requests.get(f"{BASE}/branding", timeout=TIMEOUT).json()
+        assert after["colors"]["primary"] == "#14532D", "Christmas palette not applied"
+        assert (after.get("festival") or {}).get("id") == "christmas"
+
+        r = requests.post(f"{BASE}/admin/festival-theme/clear", headers=admin_h, timeout=TIMEOUT)
+        assert r.json()["colors"]["primary"] == custom, \
+            "restore after switching festivals must return the admin's own colour"
+    finally:
+        requests.put(f"{BASE}/admin/branding", json={"colors": {"primary": "#143D2E"}},
+                     headers=admin_h, timeout=TIMEOUT)
+
+
+def test_every_festival_applies_and_restores(admin_h):
+    """The full catalogue, end to end: each festival's palette must reach the
+    public branding payload, and a final clear must restore the default."""
+    registry = {i["id"]: i for i in requests.get(f"{BASE}/festival-themes", timeout=TIMEOUT).json()["items"]}
+    for fid, meta in registry.items():
+        r = requests.post(f"{BASE}/admin/festival-theme/apply", json={"festival_id": fid},
+                          headers=admin_h, timeout=TIMEOUT)
+        assert r.status_code == 200, f"{fid}: {r.text[:200]}"
+        doc = r.json()
+        assert doc["colors"]["primary"] == meta["colors"]["primary"], f"{fid} palette mismatch"
+        assert (doc.get("festival") or {}).get("id") == fid
+        assert doc["gradient"]["glow"] == meta["gradient"]["glow"]
+
+    r = requests.post(f"{BASE}/admin/festival-theme/clear", headers=admin_h, timeout=TIMEOUT)
+    assert r.status_code == 200
+    assert not r.json().get("festival"), "festival should be gone after restore"
+
+
 def test_theme_change_does_not_touch_user_data_or_money(admin_h, buyer_h):
     me_before = requests.get(f"{BASE}/auth/me", headers=buyer_h, timeout=TIMEOUT).json()
     w_before = requests.get(f"{BASE}/wallet/summary", headers=buyer_h, timeout=TIMEOUT)
@@ -224,11 +268,18 @@ def test_artwork_route_rejects_unknown_festival_or_slot():
     assert requests.get(f"{BASE}/festival-artwork/deepavali/sidebar", timeout=TIMEOUT).status_code == 404
 
 
-def test_artwork_generation_is_refused_for_a_festival_without_a_prompt(admin_h):
+def test_every_festival_has_an_artwork_prompt(admin_h):
+    """The banner-artwork button must never fail for a missing prompt."""
     r = requests.post(f"{BASE}/admin/festival-theme/artwork",
-                      json={"festival_id": "ugadi", "slot": "banner"}, headers=admin_h, timeout=TIMEOUT)
-    assert r.status_code == 400
-    assert "prompt" in r.text.lower()
+                      json={"festival_id": "nope", "slot": "banner"}, headers=admin_h, timeout=TIMEOUT)
+    assert r.status_code == 404
+
+    items = requests.get(f"{BASE}/festival-themes", timeout=TIMEOUT).json()["items"]
+    for i in items:
+        # The listing strips prompts, so check the registry directly.
+        from core.festival_themes import get_festival
+        f = get_festival(i["id"])
+        assert f and len(f.get("artwork_prompt") or "") > 80, f"{i['id']} has no artwork prompt"
 
 
 def test_artwork_generation_rejects_a_bad_slot(admin_h):

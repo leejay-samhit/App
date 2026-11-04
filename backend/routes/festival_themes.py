@@ -97,7 +97,7 @@ async def apply_festival_theme(
     if not fest.get("available"):
         raise HTTPException(
             status_code=400,
-            detail=f"The {fest['name']} theme isn't ready yet — only Deepavali can be applied right now.",
+            detail=f"The {fest['name']} theme isn't ready yet.",
         )
 
     stored = await get_branding_doc()
