@@ -204,12 +204,22 @@ async def generate_festival_artwork(
         _text, images = await chat.send_message_multimodal_response(UserMessage(text=prompt))
     except Exception as e:  # noqa: BLE001 — surface a readable reason to the admin
         log.exception("festival artwork generation failed")
+        msg = str(e)
+        # Nov 2026 — the raw litellm chain ("litellm.AuthenticationError:
+        # OpenAIException - API key is inactive") meant nothing to the admin.
+        # Translate the known failure modes into plain instructions.
+        if "api key is inactive" in msg.lower() or "authenticationerror" in msg.lower():
+            detail = (
+                "The AI artwork service needs balance: open Profile → Manage plan → "
+                "Universal Key → Add balance (or enable auto top-up), then try again."
+            )
+        elif "quota" in msg.lower() or "rate" in msg.lower():
+            detail = "The AI service is rate-limited right now. Wait a minute and try again."
+        else:
+            detail = f"Artwork generation failed: {_short(e)}"
         # 424, not 502: the ingress replaces 5xx bodies with a generic HTML
         # error page, so a 5xx would hide this message from the admin screen.
-        raise HTTPException(
-            status_code=424,
-            detail=f"Artwork generation failed: {_short(e)}",
-        ) from e
+        raise HTTPException(status_code=424, detail=detail) from e
 
     if not images:
         raise HTTPException(status_code=424, detail="The model returned no image. Please try again.")

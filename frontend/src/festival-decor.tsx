@@ -155,13 +155,18 @@ const bannerStyles = StyleSheet.create({
     borderRadius: radii.card,
     overflow: "hidden",
   },
-  grad: { minHeight: 132, justifyContent: "flex-end" },
+  // Nov 2026 — the text block used to be pushed to the bottom with the
+  // decorations stacked under it, leaving a big empty band across the top.
+  // Now the text is vertically centered and the decoration row is pinned to
+  // the bottom edge, so the banner fills evenly at any width.
+  grad: { height: 132, justifyContent: "center" },
   art: { ...StyleSheet.absoluteFillObject, opacity: 0.55 },
-  inner: { paddingHorizontal: spacing.cardPad, paddingTop: spacing.cardPad },
+  inner: { paddingHorizontal: spacing.cardPad, paddingBottom: 26 },
   title: { fontSize: 20, fontWeight: "900", letterSpacing: 0.3 },
   sub: { color: "#F3E8FF", fontSize: 13, fontWeight: "600", marginTop: 2, lineHeight: 18 },
   diyaRow: {
+    position: "absolute", bottom: 6, left: 0, right: 0,
     flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around",
-    paddingHorizontal: 8, paddingTop: 6,
+    paddingHorizontal: 8,
   },
 });

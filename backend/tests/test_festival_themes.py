@@ -5,11 +5,17 @@ admin-only mutation, applying/restoring, palette stashing, version bumping and
 the artwork proxy. UI verification is done in the browser.
 """
 import os
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 import requests
 from pymongo import MongoClient
+
+# The artwork-prompt check below reads the backend's festival registry directly.
+# pytest doesn't add the backend root to sys.path on its own, so do it here.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = os.environ.get("PROBE_BASE", "http://localhost:8001/api")
 TIMEOUT = 30

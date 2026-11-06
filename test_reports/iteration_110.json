@@ -1,0 +1,47 @@
+{
+  "summary": "Festival-theme bug-fix verification (both bugs FIXED) plus festival regression. BUG 1 (friendly artwork error): POST /api/admin/festival-theme/artwork (deepavali/banner) as admin returns HTTP 424 with plain-language detail 'The AI artwork service needs balance: open Profile → Manage plan → Universal Key → Add balance (or enable auto top-up), then try again.' — contains 'Universal Key', and does NOT contain 'litellm', 'OpenAIException' or 'failed to generate multimodal' (verified both via curl on the public URL and via the admin UI notice box [data-testid=festival-notice]). Note: generation itself fails in this environment because the Universal Key really is inactive — only the message matters here, and it is correct. BUG 2 (banner layout): shopper home Deepavali banner is 132px tall, title 'Happy Deepavali' sits 31.5px from the banner TOP (no empty band), subtitle 'Festive picks, lit-up prices' directly under it at 56.5px, and the diya row is pinned at the bottom edge (verified visually in screenshot + computed bounding boxes; diyaRow is position:absolute bottom:6 in code). REGRESSION: apply christmas → deepavali → clear via API works end to end (primary #14532D → #4C1D95 → restored admin's own #143D2E); Deepavali re-applied afterwards to restore pre-test state. REGRESSION SUITE: tests/test_festival_themes.py now passes 18/18 — it initially failed 1 test (test_every_festival_has_an_artwork_prompt) with ModuleNotFoundError: No module named 'core'; this was a TEST-FILE bug (missing sys.path setup, pytest doesn't put the backend root on sys.path), fixed by adding sys.path.insert to the test file. Preview Theme toggle on the Deepavali card also verified working. Console warnings observed (not blocking): 'shadow* style props deprecated', 'props.pointerEvents deprecated' (web), expo-notifications listener unsupported on web.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {
+        "component": "Web console warnings",
+        "issue": "'shadow* style props are deprecated. Use boxShadow' and 'props.pointerEvents is deprecated. Use style.pointerEvents' warnings appear in the web preview console (RN-web dev warnings, cosmetic, not blocking). Reference: festival-decor.tsx:70,121 use pointerEvents prop style; theme.ts shadow styles."
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_festival_themes.py",
+    "/app/test_reports/pytest/iter110_festival_regression.xml",
+    "/app/test_reports/iter110_shop_home.png",
+    "/app/test_reports/iter110_banner.png",
+    "/app/test_reports/iter110_artwork_error.png",
+    "/app/test_reports/iter110_preview_panel.png"
+  ],
+  "action_items": [
+    "OPTIONAL/LOW: replace deprecated RN-web props ('shadow*' style props -> boxShadow, pointerEvents prop -> style.pointerEvents) across src/ — currently only console warnings in the web preview.",
+    "No functional fixes needed for this iteration; both reported bugs verified FIXED."
+  ],
+  "critical_code_review_comments": [
+    "test_festival_themes.py relied on cwd for the 'core' import; added explicit sys.path.insert(0, backend root) so the suite passes regardless of invocation directory. Claim by main agent that the suite was 18/18 green could not be reproduced before this fix (ModuleNotFoundError: No module named 'core').",
+    "festival_themes.py:205-222 — error translation correctly checks 'api key is inactive'/'authenticationerror' before falling back to _short(e), and 424 (not 5xx) is the right choice given the ingress replaces 5xx bodies. Good.",
+    "festival-decor.tsx:162-171 — banner fix is sound: grad height:132 justifyContent:center, inner paddingBottom:26 reserves space for the absolutely pinned diyaRow (bottom:6). Title measured at 31.5px from top on a 390px viewport; banner exactly 132px."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_festival_themes.py (test-only fix: sys.path setup for core import)"
+  ],
+  "success_rate": {
+    "backend": "100% (artwork 424 message verified, apply/clear cycle verified, 18/18 festival tests pass after test-file fix)",
+    "frontend": "100% (banner layout verified with screenshots+metrics, admin error notice verified, preview toggle verified)"
+  },
+  "seed_data_creation": "None. Branding was cycled christmas → deepavali → clear → deepavali; final state is Deepavali active with the admin's own palette stashed, same as pre-test. The festival suite's own autouse fixture snapshots and restores the full branding doc.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "EMERGENT_LLM_KEY is inactive in this environment, so /api/admin/festival-theme/artwork will always fail with 424 — that is expected; only the message text matters. test_festival_themes.py must be run from /app/backend (uses relative .env path and now sets sys.path itself). Shop home needs geolocation granted (chromium permission + set_geolocation) or the location gate blocks the banner.",
+  "rca_of_issue": "test_every_festival_has_an_artwork_prompt failure: pytest rootdir is /app/backend but pytest (rootdir-based sys.path handling with no ini) does not add /app/backend to sys.path, so 'from core.festival_themes import get_festival' inside the test raised ModuleNotFoundError. Direct python import from /app/backend worked. Mitigation: sys.path.insert(0, Path(__file__).resolve().parents[1]) at the top of the test file."
+}

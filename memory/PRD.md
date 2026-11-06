@@ -3048,3 +3048,13 @@ archived snapshot payloads are purged after a 3-day grace window, and the
 
 Tests: `test_nov2026_backup_jobs.py` (5 new) + all prior backup/image/layout
 suites — 129 backend tests passing.
+
+## Nov 2026 (3) — Festival polish fixes
+- AI artwork failure no longer shows the raw litellm chain; admins now see a
+  plain instruction to top up the Universal Key (Profile → Manage plan →
+  Universal Key → Add balance). Rate-limit errors also get a friendly message.
+- Home festival banner layout fixed: title sits at the top, decorations pinned
+  to the bottom edge — no more huge empty band (banner is a compact 132px).
+- Verified by testing agent (iter110): friendly error in API + admin UI, banner
+  geometry measured, festival apply/switch/restore regression green, 18/18
+  festival tests pass.
