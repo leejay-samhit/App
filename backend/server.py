@@ -191,7 +191,12 @@ logger = logging.getLogger(__name__)
 
 
 # ------------------ FastAPI App ------------------
-app = FastAPI(title="Referral & E-commerce API")
+app = FastAPI(
+    title="Slangcart API",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 api_router = APIRouter(prefix="/api")
 
 # Performance / Security middleware ────────────────────────────────────────
