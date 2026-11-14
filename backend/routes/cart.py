@@ -601,16 +601,8 @@ async def chat_vendor_for_order(order_id: str, request: Request, user: Dict[str,
     buyer and the order's vendor. Returns `{ thread_id }`.
     """
     # Chat gate — opening a seller thread is a chat write.
-    from core.sim_binding import chat_gate as _chat_gate
-    _g = await _chat_gate(
-        user,
-        platform_header=request.headers.get("x-client-platform") or "",
-        user_agent=request.headers.get("user-agent") or "",
-    )
-    if not _g.get("allowed"):
-        raise HTTPException(status_code=403, detail={
-            "code": _g["code"], "message": _g["message"], "sim_status": _g.get("status"),
-        })
+    # Nov 2026 — the SIM-binding gate went with Truecaller; mobile numbers are
+    # now verified by the WhatsApp OTP at sign-in, so chat needs no extra gate.
     o = await db.orders.find_one({"id": order_id, "user_id": user["id"]}, {"_id": 0})
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")

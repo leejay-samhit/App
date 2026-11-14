@@ -290,6 +290,11 @@ async def _recharge_category_ids() -> set:
     return out
 
 
+async def recharge_category_ids() -> set:
+    """Public alias of `_recharge_category_ids` for other modules."""
+    return await _recharge_category_ids()
+
+
 @router.get("/shop-categories")
 async def list_public_categories(root_only: bool = True):
     """PUBLIC — returns ACTIVE categories.
@@ -361,6 +366,7 @@ async def list_descendants(cat_id: str):
 @router.get("/admin/shop-categories")
 async def admin_list_categories(
     exclude_recharge: bool = False,
+    exclude_recharge_root: bool = False,
     _: Dict[str, Any] = Depends(require_admin),
 ):
     """Admin category list.
@@ -370,11 +376,17 @@ async def admin_list_categories(
     recharge flow), but its sub-categories are not. Category MANAGEMENT still
     sees everything (default false), so recharge categories remain editable
     where they belong.
+
+    `exclude_recharge_root=true` additionally drops the Recharge root — used
+    by screens that pick a PRODUCT shelf (e.g. bulk sub-category mapping),
+    where nothing recharge-related is a valid target.
     """
     await _ensure_seeded()
     cursor = db.shop_categories.find({}).sort([("sort_order", 1), ("name", 1)])
     docs = await cursor.to_list(length=1000)
-    if exclude_recharge:
+    if exclude_recharge_root:
+        skip = await _recharge_category_ids()
+    elif exclude_recharge:
         _, skip = await _recharge_groups()
     else:
         skip = set()

@@ -1,0 +1,54 @@
+{
+  "summary": "Tested the 4 owner-reported bugs. Backend: 12/12 pytest pass. Admin, vendor and public paging return every product exactly once with correct has_more (admin 250+53=303, vendor 250+15=265, public returns 187 and accepts limit=500, rejects 501). exclude_recharge offers Recharge and leaks no operators, and the plain list still has all 10 operators. bulk-category sets the category and returns the right shape, its validation works (400 for empty ids, blank category or more than 2000 ids; 401/403 without auth), and price, stock, vendor and image are left alone. UI: admin numbered pager works (page 2 shows the next 53, no overlap, union 303). The page is kept after the 15s poll, after a simulated background/foreground and after the editor closes, so the old 60/120/180 reset is FIXED. Multi-select works: long-press selects, a tap toggles while items are selected, the circle toggles, the clear X works, and with nothing selected a tap opens the editor. 'Map to shelf' opens the sheet and saves to the DB. Shop Layout category circles show Recharge with no operators. The product picker shows the full catalogue (301 shown, not capped at 300), hides products saved in another block (299 in a new block), and an edited block still shows its own products. Regression: server search, vendor filter, publish-all confirm, shopper shop view (183 products near the vendor) and the Recharge circle (goes to /recharge) all work. Problems found: (1) changing the search or vendor filter while on page 2 shows 'Page 2 of 1 · showing 0 · No matches'; (2) the vendor product list still uses 'Load more', not pages, and resets on focus; (3) the shop layout renderer and category pages are still capped at limit=240; (4) the shopper-side 'hide block-mapped products from the overall list' is not implemented. No deprecated Expo packages found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/admin/products/bulk-category", "issue": "Only sets `subcategory` (server.py:2681-2684). Most products (218 of 303) use the legacy `sub_category` field, and the public filter matches EITHER field (routes/products_public.py:190-196). So a product that has an old sub_category value keeps showing on its OLD sub-shelf after mapping. Fix: also $set sub_category to the same value."},
+      {"endpoint": "POST /api/admin/products/bulk-category", "issue": "No check that the category or subcategory exists in shop_categories, or that the subcategory belongs to the category. Any string is accepted."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "admin/products.tsx search / vendor filter", "issue": "REPRODUCED: go to page 2, then type in search -> banner shows '31 matches · Page 2 of 1 · showing 0', the grid shows 'No matches' and the pager is hidden, so the admin is stuck. Root cause: products.tsx:219 `useEffect(() => { setLoading(true); load(); }, [appliedSearch, vendorFilter])`. load() with no argument reuses the current `page` (line 142). Fix: call load(0) there and also clear `picked`.", "testID": "products-search-input / products-vendor-filter-chip", "priority": "HIGH"},
+      {"component": "vendor/dashboard.tsx product list", "issue": "Still the old 'Load more (250 of 265)' accumulator (dashboard.tsx:126-145, 554-570). The owner asked to replace Load More with pages 'at the same vendor also'. The same reset-on-refocus pattern that caused the admin bug is still here: useFocusEffect at line 147 calls load(), which fetches offset 0 (line 96) and replaces the list. Port the admin numbered pager.", "testID": "vendor-products-load-more", "priority": "HIGH"},
+      {"component": "admin/products.tsx selection", "issue": "`picked` is only cleared by goToPage and by mapping. It survives search or vendor-filter changes, so 'N selected on this page' can count products that are no longer visible, and mapping would move them without the admin seeing them.", "testID": "products-map-bar", "priority": "MEDIUM"},
+      {"component": "admin/products.tsx alerts (web)", "issue": "The success alert 'Products shelved' (line 204) and the other alerts use react-native Alert.alert. That does nothing on react-native-web, so in the web preview the admin gets no confirmation after mapping (verified: no dialog fired, but the DB did change). The product editor's 'Cover image required' validation is also silent on web, so Save seems to do nothing for image-less products. src/notify.ts already has a web fallback.", "testID": "products-map-open", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Shopper shop view and category page still capped at 240", "issue": "src/shop-layout-renderer.tsx:1166 still requests /products with limit 240. Manual layout blocks resolve product_ids from this map (line 1401), so any block product outside the newest 240 in the area silently disappears from the shop. app/(tabs)/shop-category/[name].tsx:89 also uses limit: 240. Seen in the network log: 'limit=240&lat=..&strict_location=true'. Use fetchAllPages, or fetch block product_ids by id.", "affected_testIDs": ["product-open<id>"]},
+      {"flow": "BUG 3 shopper half: block-mapped products are not hidden from the overall list", "issue": "Owner: 'for user if any product is mapped in the block and don't show it in the overall products'. Not implemented. shop-home.tsx:298-305 shows every /products item in 'All products near you', and the public API still returns block products (checked: 2 of the 3 products in the home blocks are in /api/products). Only the ADMIN picker exclusion was done.", "affected_testIDs": []}
+    ],
+    "design_issues": [
+      {"screen": "Admin Products -> Map to shelf sheet", "issues": [
+        "Recharge and its sub-shelves (DTH TV Recharge, Mobile Recharge) are offered as mapping targets, so physical products can be shelved under Recharge. The sheet uses /admin/shop-categories without exclude_recharge (products.tsx:186). Exclude the Recharge tree here.",
+        "Only 2 levels are rendered (root + direct children, products.tsx:712-713). Deeper categories and orphaned subs whose parent was deleted (e.g. TESTUIA1/TESTUIB1) never appear.",
+        "In the current data every real shelf (Mobiles, Laptop, etc.) is a ROOT with no non-recharge sub-shelves, so the 'nested' view only ever nests Recharge items. Mapping to a root sends subcategory '' and clears the sub-shelf.",
+        "testID map-sub-<name> is not unique if two parents have a sub-shelf with the same name."
+      ]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_nov2026_pagination_bulkcat.py", "/app/test_reports/pytest/pytest_iter111.xml"],
+  "action_items": [
+    "HIGH: admin/products.tsx:219 - reset to page 0 (load(0)) and clear `picked` when appliedSearch or vendorFilter changes.",
+    "HIGH: vendor/dashboard.tsx - replace the Load-more accumulator (126-145, 554-570) with the numbered 250/page pager, and stop useFocusEffect (line 147) from resetting to offset 0.",
+    "HIGH: src/shop-layout-renderer.tsx:1166 and app/(tabs)/shop-category/[name].tsx:89 - remove the limit:240 cap (use fetchAllPages, or fetch block product_ids directly).",
+    "MEDIUM: Implement the shopper-side rule from BUG 3: products placed in a manual layout block should be excluded from 'All products near you' (shop-home.tsx:298-305).",
+    "MEDIUM: server.py:2684 bulk-category - also set `sub_category` so the old sub-shelf stops matching.",
+    "LOW: Map-to-shelf sheet - exclude the Recharge tree (pass exclude_recharge=true or filter it out) and render deeper levels.",
+    "LOW: Use the notify helper (src/notify.ts) instead of Alert.alert for the mapping success/failure messages so web shows feedback."
+  ],
+  "critical_code_review_comments": [
+    "admin/products.tsx: `load` depends on `page`, so every page change re-creates `load`, re-runs useFocusEffect (an extra load() + image-health call) and restarts the 15s poll. That is a double fetch on every page tap.",
+    "admin/products.tsx:149: interested_count is merged from /products with the default limit (60), so the badge is missing for every product outside the newest 60. This was already the case before this change.",
+    "admin/products.tsx is 1230 lines and shop-layout.tsx is 2010 lines (over the 700-line guideline).",
+    "fetchAllPages caps at 20000 items / 400 pages, which is fine. shop-layout.tsx loads the whole admin catalogue (slim projection) on every focus, which gets heavy at 100k SKUs."
+  ],
+  "updated_files": ["/app/frontend/app/admin/shop-layout.tsx (testIDs only: block-type-<type>, block-editor-save, block-editor-close, block-edit-<id>)", "/app/backend/tests/test_nov2026_pagination_bulkcat.py (new)"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "~80% - pager, multi-select, mapping sheet, picker exclusion and category circles pass; search-on-page-2, vendor pager, the 240 cap in the renderer/category page and the shopper-side exclusion fail or are missing"},
+  "seed_data_creation": "None kept. Created and deleted Shop Layout block 'TEST_T1 picker grid' (id f4b3a21a-9ea2-481c-9f07-b75edb353787). Category changes, all restored: (a) UI mapping moved products e54af4b8-7d53-4600-add2-bf2804d9a4b2 and e99876e6-0bc4-401d-b2b6-303f03783da8 to 'Books'; both were restored in Mongo to Electronics/Mobiles with their original updated_at. (b) pytest moved the first 2 products that have a `sub_category` field to TEST_Cat/TEST_Sub and restored category/subcategory/sub_category/updated_at in its finally block (verified 0 products left on TEST_Cat). bulk-category audit_log entries remain.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Every new browser session auto-opens a help-guide sheet; close it with [data-testid=help-close]. Logging in (CLI or browser) revokes other sessions for the same user. Shopper needs geolocation at the vendor location (lat 13.7484, lng 79.7027); Tirupati 13.6288/79.4192 has no vendors. The Alert.alert dialogs do not fire on web, so check side effects in Mongo instead. The 3 products 401f3c2b/9c6bb05d/409e52af are shared by the existing home blocks, so a new block's picker shows 303 minus the used products. Run the backend suite from /app/backend.",
+  "rca_of_issue": "Search-on-page-2: products.tsx:219 calls load() with no page, and load (line 142) defaults to the current `page` state, so the new query is fetched at offset page*250. Repro: /admin/products -> tap products-page-2 -> type 'TEST_iter109' -> 'Page 2 of 1 · showing 0'. Mitigation: load(0) on filter change."
+}

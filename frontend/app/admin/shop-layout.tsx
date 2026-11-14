@@ -14,6 +14,7 @@ import { useRouter, useFocusEffect } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError, resolveImageUrl } from "../../src/api";
+import { useAdminProductSearch } from "../../src/use-admin-product-search";
 import { colors, radii, spacing } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
@@ -162,6 +163,19 @@ export default function AdminShopLayoutScreen() {
   // when creating a scoped shop-layout block.  Storage remains
   // `scope_category = leaf name` so it still matches the customer's
   // `/shop-category/{name}` URL exactly.
+  // Nov 2026 — every product id already placed in a block, EXCLUDING the one
+  // being edited. The picker hides these so the same SKU can't be shelved in
+  // two different blocks (the owner's rule: once mapped, it leaves the pool).
+  const usedElsewhere = useMemo(() => {
+    const s = new Set<string>();
+    for (const b of items) {
+      if (editing && b.id === editing.id) continue;
+      for (const pid of (((b as any).product_ids || []) as string[])) s.add(pid);
+    }
+    return s;
+  }, [items, editing]);
+
+
   const categories = useMemo(() => {
     // Build a map: id → cat for parent-path resolution
     const byId = new Map<string, any>();
@@ -204,16 +218,27 @@ export default function AdminShopLayoutScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [bRes, pRes, aRes, cRes] = await Promise.all([
+      const [bRes, aRes, cRes] = await Promise.all([
         api.get<{ items: Block[] }>("/admin/shop-layout"),
-        api.get<any>("/admin/products", { params: { limit: 500 } }),
         api.get<{ blocks: Record<string, { impressions: number; clicks: number; ctr: number }> }>("/admin/shop-layout/analytics", { params: { days: 7 } }).catch(() => ({ data: { blocks: {} } as any })),
         api.get<{ items: { id?: string; name: string; active: boolean; parent_id?: string | null; depth?: number }[] }>("/admin/shop-categories?exclude_recharge=true").catch(() => ({ data: { items: [] } as any })),
       ]);
       setItems(bRes.data?.items || []);
-      const pData = pRes.data;
-      const list: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
-      setProducts(list);
+      // Nov 2026 — the screen used to download the WHOLE catalogue here (23
+      // sequential pages at 5.7k SKUs → the app froze and the picker opened
+      // empty). It only needs the products its own blocks reference, so we
+      // resolve just those by id; the picker itself searches server-side.
+      const blocks = bRes.data?.items || [];
+      const refIds = Array.from(new Set(
+        blocks.flatMap((b: any) => [...(b.product_ids || []), ...(b.product_id ? [b.product_id] : [])])
+          .filter(Boolean) as string[],
+      ));
+      if (refIds.length) {
+        const pr = await api.get<any>("/admin/products", { params: { ids: refIds.join(",") } });
+        setProducts(pr.data?.items || []);
+      } else {
+        setProducts([]);
+      }
       setAnalytics(aRes.data?.blocks || {});
       setShopCats(cRes.data?.items || []);
     } catch (e) { Alert.alert("Failed to load", formatApiError(e)); }
@@ -564,6 +589,7 @@ export default function AdminShopLayoutScreen() {
         categories={categories}
         defaultScope={scope}
         defaultScopeCategory={scopeCategory}
+        usedElsewhere={usedElsewhere}
         onClose={() => setShowForm(false)}
         onSaved={() => { setShowForm(false); load(); }}
       />
@@ -669,7 +695,7 @@ function BlockCard({
               ))}
             </View>
           ) : null}
-          <TouchableOpacity onPress={onEdit} style={styles.actionBtn}>
+          <TouchableOpacity onPress={onEdit} style={styles.actionBtn} testID={`block-edit-${b.id}`}>
             <Feather name="edit-2" size={12} color={colors.primary} />
             <Text style={styles.actionText}>Edit</Text>
           </TouchableOpacity>
@@ -701,10 +727,12 @@ function BlockCard({
 /* ─────────────────────────── Block Form Modal ─────────────────────────── */
 
 function BlockFormModal({
-  visible, block, products, categories, defaultScope, defaultScopeCategory, onClose, onSaved,
+  visible, block, products, categories, defaultScope, defaultScopeCategory, usedElsewhere, onClose, onSaved,
 }: {
   visible: boolean; block: Block | null; products: Product[]; categories: { name: string; label: string; depth: number }[];
   defaultScope: "home" | "category"; defaultScopeCategory: string;
+  /** Product ids already placed in OTHER blocks — hidden from the picker. */
+  usedElsewhere: Set<string>;
   onClose: () => void; onSaved: () => void;
 }) {
   const router = useRouter();
@@ -771,9 +799,27 @@ function BlockFormModal({
   // Jun 2026 — multi-picker search + vendor filter state
   const [pickSearch, setPickSearch] = useState("");
   const [pickVendor, setPickVendor] = useState("");
+  // Nov 2026 — the picker asks the SERVER for products (paged + searched)
+  // instead of waiting on a full-catalogue download, so it opens instantly at
+  // any catalogue size.
+  const pool = useAdminProductSearch({
+    enabled: showMultiPicker,
+    search: pickSearch,
+    vendorId: pickVendor,
+  });
+  // Nov 2026 — the single picker keeps its OWN search, otherwise a search
+  // left in the multi picker made it open showing one product.
+  const [singleSearch, setSingleSearch] = useState("");
+  const singlePool = useAdminProductSearch({
+    enabled: showProductPicker,
+    search: singleSearch,
+  });
   const pickerVendors = useMemo(() => {
+    // Nov 2026 — derived from the rows currently loaded in the picker (the
+    // catalogue is no longer downloaded in full). Enough to jump between the
+    // vendors you can see; search narrows the rest.
     const m = new Map<string, { id: string; name: string; count: number }>();
-    products.forEach((p) => {
+    pool.items.forEach((p) => {
       const id = p.vendor_id || "";
       if (!id) return;
       const cur = m.get(id);
@@ -781,15 +827,24 @@ function BlockFormModal({
       else m.set(id, { id, name: p.vendor_name || "Vendor", count: 1 });
     });
     return Array.from(m.values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  }, [products]);
+  }, [pool.items]);
   const pickerFiltered = useMemo(() => {
-    const q = pickSearch.trim().toLowerCase();
-    return products.filter((p) => {
-      if (pickVendor && (p.vendor_id || "") !== pickVendor) return false;
-      if (!q) return true;
-      return `${p.name} ${p.category || ""} ${p.vendor_name || ""}`.toLowerCase().includes(q);
+    // Search + vendor filtering happen on the SERVER (useAdminProductSearch),
+    // so only the block-level exclusion is local.
+    return pool.items.filter((p) => {
+      // Nov 2026 — a product already placed in ANOTHER block is hidden here,
+      // so the same SKU can't be shelved twice across the shop. Products in
+      // the block being edited stay visible (they're the current selection).
+      if (usedElsewhere.has(p.id) && !productIds.includes(p.id)) return false;
+      return true;
     });
-  }, [products, pickSearch, pickVendor]);
+  }, [pool.items, usedElsewhere, productIds]);
+  // Nov 2026 — names for products the admin just picked. The screen only
+  // pre-loads the products its blocks reference, so a freshly picked product
+  // isn't in `products` yet and used to render as a raw UUID.
+  const nameOf = useCallback((id: string) => (
+    products.find((p) => p.id === id)?.name || pool.items.find((p) => p.id === id)?.name || ""
+  ), [products, pool.items]);
   const [editingItemIdx, setEditingItemIdx] = useState<number | null>(null);
 
   useEffect(() => {
@@ -803,6 +858,12 @@ function BlockFormModal({
         : ((block as any)?.scope_pincode ? [String((block as any).scope_pincode)] : []),
     );
     setPincodeDraft("");
+    // Nov 2026 — a stale picker search / vendor filter used to carry over into
+    // the next block, so "New Block → Products" could open showing
+    // "0 shown — No products match this search" and look empty.
+    setPickSearch("");
+    setPickVendor("");
+    setSingleSearch("");
     setTitle(block?.title || "");
     setSubtitle(block?.subtitle || "");
     setBody(block?.body || "");
@@ -840,7 +901,12 @@ function BlockFormModal({
     let cancelled = false;
     (async () => {
       try {
-        const r = await api.get<{ items: any[] }>("/admin/shop-categories");
+        // `exclude_recharge=true` offers the Recharge ROOT (so it can be
+        // placed in the shop) while hiding every operator sub-shelf —
+        // Vi / Jio / Airtel / BSNL / Dish TV / Tata Play / Sun Direct /
+        // Airtel Digital TV — which are served by the recharge flow, not
+        // by a product grid. Without this flag they leaked into the picker.
+        const r = await api.get<{ items: any[] }>("/admin/shop-categories?exclude_recharge=true");
         if (cancelled) return;
         const items = (r.data?.items || []) as any[];
         // Sort by sort_order then name so the picker matches the admin
@@ -983,11 +1049,11 @@ function BlockFormModal({
       <View style={styles.modalOverlay}>
         <View style={styles.modalSheet}>
           <View style={styles.modalHeader}>
-            <TouchableOpacity onPress={onClose} style={styles.iconBtn}>
+            <TouchableOpacity onPress={onClose} style={styles.iconBtn} testID="block-editor-close">
               <Feather name="x" size={20} color={colors.textMain} />
             </TouchableOpacity>
             <Text style={styles.modalTitle}>{block ? "Edit block" : "New block"}</Text>
-            <TouchableOpacity onPress={onSave} disabled={saving} style={[styles.iconBtn, styles.iconBtnPrimary, saving && { opacity: 0.5 }]}>
+            <TouchableOpacity onPress={onSave} disabled={saving} style={[styles.iconBtn, styles.iconBtnPrimary, saving && { opacity: 0.5 }]} testID="block-editor-save">
               {saving ? <ActivityIndicator size="small" color={colors.primaryFg} /> : <Feather name="check" size={20} color={colors.primaryFg} />}
             </TouchableOpacity>
           </View>
@@ -1083,7 +1149,7 @@ function BlockFormModal({
                 const meta = TYPE_META[t];
                 const isActive = type === t;
                 return (
-                  <TouchableOpacity key={t} style={[styles.typeChoice, isActive && styles.typeChoiceActive]} onPress={() => setType(t)}>
+                  <TouchableOpacity key={t} style={[styles.typeChoice, isActive && styles.typeChoiceActive]} onPress={() => setType(t)} testID={`block-type-${t}`}>
                     <Feather name={meta.icon} size={14} color={isActive ? colors.primaryFg : colors.primary} />
                     <Text style={[styles.typeChoiceText, isActive && { color: colors.primaryFg }]}>{meta.label}</Text>
                   </TouchableOpacity>
@@ -1296,7 +1362,7 @@ function BlockFormModal({
                 <Text style={styles.label}>{type === "content_box" ? "Linked product (required)" : "Link to product (optional)"}</Text>
                 <TouchableOpacity style={styles.input} onPress={() => setShowProductPicker(true)} testID="single-product-picker">
                   <Text style={{ color: productId ? colors.textMain : colors.textMuted }}>
-                    {productId ? (products.find((p) => p.id === productId)?.name || productId) : "Tap to pick a product"}
+                    {productId ? (nameOf(productId) || productId) : "Tap to pick a product"}
                   </Text>
                 </TouchableOpacity>
                 {productId ? (
@@ -1490,7 +1556,7 @@ function BlockFormModal({
                           setEditingItemIdx(idx); setShowProductPicker(true);
                         }}>
                           <Text style={{ fontSize: 11, color: it.link_value ? colors.textMain : colors.textMuted }}>
-                            {it.link_value ? (products.find((p) => p.id === it.link_value)?.name || "—") : "Pick a product"}
+                            {it.link_value ? (nameOf(it.link_value) || "—") : "Pick a product"}
                           </Text>
                         </TouchableOpacity>
                       ) : null}
@@ -1567,15 +1633,56 @@ function BlockFormModal({
               <Text style={styles.modalTitle}>Pick a product</Text>
               <View style={{ width: 40 }} />
             </View>
-            <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 32 }}>
-              {products.length === 0 ? (
-                <Text style={{ color: colors.textMuted, textAlign: "center", padding: 20 }}>No products yet</Text>
-              ) : products.map((p) => {
+            {/* Nov 2026 — search box: at 6k+ SKUs an admin can't scroll to
+                find one product. Queries the server as you type. */}
+            <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
+              <View style={styles.pickerSearchWrap}>
+                <Feather name="search" size={16} color={colors.textMuted} />
+                <TextInput
+                  value={singleSearch}
+                  onChangeText={setSingleSearch}
+                  placeholder="Search products…"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.pickerSearchInput}
+                  testID="single-picker-search"
+                  returnKeyType="search"
+                />
+                {singleSearch ? (
+                  <TouchableOpacity
+                    onPress={() => setSingleSearch("")}
+                    style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
+                    testID="single-picker-search-clear"
+                  >
+                    <Feather name="x" size={15} color={colors.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+              <Text style={styles.hint}>
+                {singlePool.loading ? "Loading…" : `${singlePool.items.length} shown of ${singlePool.total.toLocaleString("en-IN")}`}
+              </Text>
+            </View>
+            <ScrollView
+              contentContainerStyle={{ padding: 16, paddingBottom: 32 }}
+              scrollEventThrottle={64}
+              onScroll={(e) => {
+                const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+                if (contentOffset.y + layoutMeasurement.height >= contentSize.height - 200) singlePool.loadMore();
+              }}
+            >
+              {singlePool.loading ? (
+                <View style={{ padding: 24, alignItems: "center" }}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                </View>
+              ) : singlePool.items.length === 0 ? (
+                <Text style={{ color: colors.textMuted, textAlign: "center", padding: 20 }} testID="single-picker-empty">
+                  {singleSearch ? "No products match this search" : "No products yet"}
+                </Text>
+              ) : singlePool.items.map((p) => {
                 const isSelected = editingItemIdx !== null
                   ? items[editingItemIdx]?.link_value === p.id
                   : productId === p.id;
                 return (
-                  <TouchableOpacity key={p.id} style={[styles.productRow, isSelected && { borderColor: colors.primary, backgroundColor: colors.brand100 }]}
+                  <TouchableOpacity key={p.id} testID={`single-pick-${p.id}`} style={[styles.productRow, isSelected && { borderColor: colors.primary, backgroundColor: colors.brand100 }]}
                     onPress={() => {
                       if (editingItemIdx !== null) {
                         updateItem(editingItemIdx, { link_value: p.id });
@@ -1590,6 +1697,11 @@ function BlockFormModal({
                   </TouchableOpacity>
                 );
               })}
+              {singlePool.loadingMore ? (
+                <View style={{ padding: 16, alignItems: "center" }}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                </View>
+              ) : null}
             </ScrollView>
           </View>
         </View>
@@ -1644,7 +1756,9 @@ function BlockFormModal({
               ) : null}
 
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: 6 }}>
-                <Text style={styles.hint}>{pickerFiltered.length} shown · {productIds.length} selected</Text>
+                <Text style={styles.hint}>
+                  {pool.loading ? "Loading…" : `${pickerFiltered.length} shown of ${pool.total.toLocaleString("en-IN")} · ${productIds.length} selected`}
+                </Text>
                 <View style={{ flexDirection: "row", gap: 6 }}>
                   <TouchableOpacity
                     onPress={() => setProductIds((prev) => Array.from(new Set([...prev, ...pickerFiltered.map((p) => p.id)])))}
@@ -1660,10 +1774,22 @@ function BlockFormModal({
               </View>
             </View>
 
-            <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 4, paddingBottom: 32 }}>
-              {pickerFiltered.length === 0 ? (
+            <ScrollView
+              contentContainerStyle={{ padding: 16, paddingTop: 4, paddingBottom: 32 }}
+              scrollEventThrottle={64}
+              onScroll={(e) => {
+                const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+                if (contentOffset.y + layoutMeasurement.height >= contentSize.height - 200) pool.loadMore();
+              }}
+            >
+              {pool.loading ? (
+                <View style={{ padding: 28, alignItems: "center" }}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Text style={[styles.hint, { marginTop: 8 }]}>Loading products…</Text>
+                </View>
+              ) : pickerFiltered.length === 0 ? (
                 <Text style={{ color: colors.textMuted, textAlign: "center", padding: 20 }}>
-                  {products.length === 0 ? "No products yet" : "No products match this search / vendor"}
+                  {pool.total === 0 ? "No products yet" : "No products match this search / vendor"}
                 </Text>
               ) : pickerFiltered.map((p) => {
                 const selected = productIds.includes(p.id);
@@ -1693,6 +1819,11 @@ function BlockFormModal({
                   </TouchableOpacity>
                 );
               })}
+              {pool.loadingMore ? (
+                <View style={{ padding: 16, alignItems: "center" }}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                </View>
+              ) : null}
             </ScrollView>
           </View>
         </View>
@@ -1857,6 +1988,12 @@ const styles = StyleSheet.create({
   label: { fontSize: 11, fontWeight: "800", color: colors.textMuted, letterSpacing: 1.2, marginTop: 14, marginBottom: 6 },
   miniLabel: { fontSize: 10, fontWeight: "700", color: colors.textMuted, letterSpacing: 0.8, marginTop: 8, marginBottom: 4 },
   hint: { fontSize: 11, color: colors.textMuted, marginTop: 6, fontStyle: "italic" },
+  pickerSearchWrap: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    borderWidth: 1, borderColor: colors.border, borderRadius: radii.button,
+    backgroundColor: colors.surfaceMuted, paddingHorizontal: 12, minHeight: 44,
+  },
+  pickerSearchInput: { flex: 1, fontSize: 13.5, color: colors.textMain, paddingVertical: 10 },
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: colors.textMain },
   // Jun 2026 — Multi-pincode targeting controls
   pinAddBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 16, borderRadius: 12, backgroundColor: colors.primary, minHeight: 46, justifyContent: "center" },

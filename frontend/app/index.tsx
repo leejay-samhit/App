@@ -26,11 +26,10 @@ export default function Index() {
       // Oct-2026 — Shop and Services are hidden for approved sellers, so
       // their home is the Vendor panel, not the buyer-side shop.
       router.replace("/vendor/dashboard" as any);
-    } else if (!user.registration_paid && !(user as any).subscription_skipped) {
-      // Subscription upsell first (Aug-2026). Once the user chooses
-      // "Continue without subscription" we never wall them again — they
-      // land on Shop like everyone else, with the upgrade banner shown.
-      router.replace("/payment");
+    } else if (!user.phone) {
+      // Nov-2026 — registration is free; the only remaining step for a new
+      // Google/email account is proving the mobile number over WhatsApp.
+      router.replace("/verify-mobile" as any);
     } else {
       // Approved users land directly on the Shop tab so they can start
       // browsing immediately. Dashboard is one tap away via bottom nav.

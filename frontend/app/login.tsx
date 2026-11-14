@@ -22,6 +22,7 @@ import { formatApiError } from "../src/api";
 import { GradientCard } from "../src/gradient-card";
 import { FestivalStrip } from "../src/festival-decor";
 import { GoogleSignInButton } from "../src/google-signin-button";
+import { MobileOtpCard } from "../src/mobile-otp-card";
 import Animated, { FadeInDown } from "react-native-reanimated";
 
 /** Failed fingerprint scans allowed before the password form opens itself. */
@@ -30,6 +31,7 @@ const MAX_BIO_TRIES = 3;
 export default function Login() {
   const {
     login,
+    setSession,
     sessionEndReason,
     clearSessionEnd,
     biometricAvailable,
@@ -46,6 +48,8 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [bioLoading, setBioLoading] = useState(false);
   const [error, setError] = useState("");
+  // Nov-2026 — mobile sign-in with a WhatsApp code.
+  const [otpOpen, setOtpOpen] = useState(false);
   // When biometric is enabled the password form is hidden. User can tap
   // "Use a different account" to force-disable biometric and unlock the
   // password fields. Tracked separately from biometricReady so we don't
@@ -87,13 +91,25 @@ export default function Login() {
       ? "Your session has expired. Please log in again."
       : null;
 
+  // Signs the session returned by /auth/otp/verify into the app.
+  const applySession = async (data: any) => {
+    if (!data?.token || !data?.user) return;
+    await setSession(data.token, data.user, data.refresh_token ?? null);
+    // A brand-new mobile account still has the placeholder name — ask for the
+    // real one once before dropping them into the shop.
+    if (data.needs_profile) router.replace("/complete-profile" as any);
+    else navigateAfter(data.user);
+  };
+
   const navigateAfter = (u: any) => {
     if (u.role === "admin") router.replace(isScopedAdmin(u) ? "/admin/manager-home" : "/admin/home");
     else if (u.is_delivery_partner_approved) router.replace("/delivery/dashboard" as any);
     // Oct-2026 — a seller's Shop/Services tabs are hidden, so his home is
     // the Vendor panel rather than the buyer-side shop.
     else if (u.is_vendor && u.is_vendor_approved) router.replace("/vendor/dashboard" as any);
-    else if (!u.registration_paid && !u.subscription_skipped) router.replace("/payment");
+    // Nov-2026 — the ₹118 gate is gone. A customer with no mobile number yet
+    // verifies it once over WhatsApp; everyone else goes straight to the shop.
+    else if (!u.phone) router.replace("/verify-mobile" as any);
     // Approved customers land directly on the Shop tab so they can start
     // browsing immediately. Dashboard is one tap away via the bottom nav.
     else router.replace("/(tabs)/shop");
@@ -261,6 +277,38 @@ export default function Login() {
             <GoogleSignInButton onError={setError} />
           ) : null}
 
+          {/* Nov-2026 — mobile sign-in with a WhatsApp code (OTPly). Replaces
+              the Truecaller one-tap button that used to sit here. */}
+          {showPasswordForm ? (
+            otpOpen ? (
+              <View style={{ marginTop: 12 }}>
+                <MobileOtpCard
+                  mode="login"
+                  onVerified={async (data: any) => {
+                    await applySession(data);
+                  }}
+                />
+                <TouchableOpacity
+                  onPress={() => setOtpOpen(false)}
+                  style={styles.otpToggleBtn}
+                  testID="login-otp-close"
+                >
+                  <Text style={styles.otpToggleText}>Use email or Google instead</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <TouchableOpacity
+                onPress={() => { setError(""); setOtpOpen(true); }}
+                style={styles.otpBtn}
+                testID="login-otp-open"
+                activeOpacity={0.85}
+              >
+                <Feather name="message-circle" size={18} color={colors.primary} />
+                <Text style={styles.otpBtnText}>Continue with Mobile Number</Text>
+              </TouchableOpacity>
+            )
+          ) : null}
+
           {/* Biometric login — when enabled, this is the PRIMARY login. The
               password form is hidden above. User must explicitly tap "Use a
               different account" below to switch accounts. */}
@@ -366,6 +414,15 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: colors.textMain,
   },
+  otpBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
+    minHeight: 50, borderRadius: radii.button, marginTop: 12,
+    borderWidth: 1.5, borderColor: colors.primary, backgroundColor: colors.surface,
+  },
+  otpBtnText: { fontSize: 14.5, fontWeight: "900", color: colors.primary },
+  otpToggleBtn: { minHeight: 44, alignItems: "center", justifyContent: "center", marginTop: 4 },
+  otpToggleText: { fontSize: 12.5, fontWeight: "800", color: colors.textMuted },
+
   primaryBtn: {
     backgroundColor: colors.primary,
     borderRadius: radii.button,

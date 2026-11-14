@@ -20,7 +20,6 @@ import { api, formatApiError, resolveImageUrl } from "../../src/api";
 import { ProductImage } from "../../src/product-image";
 import { sanitizeProduct } from "../../src/product-shape";
 import { notify } from "../../src/notify";
-import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
 import { useContentWidth } from "../../src/content-width";
 import { getProductPreview } from "../../src/product-preview";
@@ -305,7 +304,6 @@ export default function ProductDetailScreen() {
         );
       }
     } catch (e) {
-      if (handleChatGateError(e, (p) => router.push(p as any))) return;
       notify("Failed", formatApiError(e));
     }
   };

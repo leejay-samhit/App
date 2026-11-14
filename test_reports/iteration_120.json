@@ -1,0 +1,50 @@
+{
+  "summary": "Retest of iteration_119 items 1-9. Backend: 32/33 pytest pass (new tests/test_otp_retest_iter120.py 9/10 + test_otp_free_reveal_nov2026.py 23/23). Three new mobile signups in a row all created=true with distinct ids and referral codes, no email key, registration_paid false, approved, no sponsor. Duplicate email register returns 400. A stale referral_code is ignored and no sponsor is set. Takeover guard: 409 with masked email and no session; signs in after phone_verified; mobile-only unverified account signs in. complete-profile: 1-char name returns 400, email clash 409 (case-insensitive), save works and needs_profile then turns false. Logs show no OTP, api_key or full URL after a real send. Financials unchanged before and after the run: wallets 287525.91, txns 2827, +2138810.55 / -94998.68, invoices 2. Frontend (390x844): /login has email, Google and Mobile Number options and no Truecaller. /register has no invite field and reads 'Create my account', and signup lands on /verify-mobile. /complete-profile renders, shows the 409 error and navigates to /shop. Profile has no SIM, Chat-verification or INVITE CODE entries and no Unmatched Route. The dashboard has no invite card, stats and Quick Actions render, and the bank/UPI row shows for admin (payout-eligible). Free reveal at ₹0 shows the number, writes no transaction and leaves the wallet unchanged. Chat sends with no SIM gate. The shop lists 6,183 products. The admin System Wallet / Net-worth screen matches the /admin/finance/net-worth API (user wallets 25,423.44, vendor 8,699, GST 744.40). The admin Products pager changes offset. New issues: the ₹118 'Become a member' banner and card are still on Shop, Dashboard and Profile, and tapping Join loops back to /shop. A typed (unverified) phone on /register can permanently lock the real number owner out of OTP sign-up (409). complete-profile accepts a malformed email. The /register hero still says 'Refer 4 friends'. No deprecated Expo packages detected.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/auth/otp/verify + POST /api/auth/register", "issue": "Phone squatting / lockout: /auth/register accepts any self-declared `phone` (no uniqueness, no verification). If someone registers an email+password account with a victim's number, the real owner can never create or enter an OTP account: /auth/otp/verify finds the squatter's row and returns 409 'This number is already on TEST_Squatter (te***@example.com)...'. Reproduced with 9999912311. The message also says 'verify this number from your profile', but Profile has no such option, and /verify-mobile redirects away when user.phone is already set.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/auth/otp/complete-profile", "issue": "The email format is not validated: 'notanemail' is accepted and saved (200). Use EmailStr. A race could also cause an uncaught DuplicateKeyError on update_one, which would return 500."},
+      {"endpoint": "POST /api/auth/otp/verify (409/403 detail)", "issue": "_mask_email pads one '*' per hidden character, so the masked email reveals the exact length of the local part (te****************@example.com). Use a fixed number of stars."},
+      {"endpoint": "POST /api/auth/register", "issue": "Email signups still get approval_status 'pending', while mobile signups get 'approved'. The two paths are inconsistent now that signup is free."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "SubscribeBanner / MembershipCard (src/subscription.tsx:404,441)", "issue": "'Become a member · ₹118 … unlimited service numbers free' banner still shows on Shop, Dashboard and Profile. Profile also shows a 'FREE ACCOUNT … ₹118 one time / Become a member' card. Tapping Join opens /payment, which now just redirects to /shop, where the same banner shows again: a dead CTA loop. The 'service numbers free' perk is also wrong now that numbers are free for everyone.", "testID": "subscribe-banner, membership-card-free, membership-upgrade", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/register", "issues": ["The hero subtitle still says 'Refer 4 friends to unlock recurring rewards.' (app/register.tsx:78), but referrals were removed."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_otp_retest_iter120.py",
+    "/app/backend/tests/test_otp_free_reveal_nov2026.py",
+    "/app/backend/tests/iter120_ui_seed.py",
+    "/app/test_reports/pytest/iter120_retest.xml",
+    "/app/test_reports/pytest/iter120_nov2026.xml"
+  ],
+  "action_items": [
+    "Remove or rework the ₹118 SubscribeBanner and MembershipCard on the shop, dashboard and profile screens (src/subscription.tsx). The Join button currently loops /payment -> /shop.",
+    "Stop phone squatting. Either drop the free-text phone from /auth/register, or store it as unverified in a separate field so it is not matched by /auth/otp/verify. Also add a real 'verify my number' path for logged-in users whose phone is already set, or change the 409 text, which points to a Profile option that does not exist.",
+    "Validate the email format in /auth/otp/complete-profile (EmailStr) and catch DuplicateKeyError there.",
+    "Use a fixed-length mask in _mask_email.",
+    "Change the /register hero copy 'Refer 4 friends…' (app/register.tsx:78).",
+    "Optional: decide whether email signups should also be approval_status 'approved'."
+  ],
+  "critical_code_review_comments": [
+    "otp_auth.py: the regex fallback {'phone': {'$regex': mobile+'$'}} is unindexed, so it scans the whole collection on every new-number sign-in.",
+    "server.py is 11,404 lines and should be split further.",
+    "/services/{id}/reveal-phone still writes a ₹0 phone_reveal_invoices row and notifies the provider on every first reveal. There are no money rows, but invoices keep growing."
+  ],
+  "updated_files": ["/app/backend/tests/test_otp_retest_iter120.py (new)", "/app/backend/tests/iter120_ui_seed.py (new)"],
+  "success_rate": {"backend": "97% (32/33; the one failure is complete-profile accepting a malformed email)", "frontend": "90% (all retest items pass; the ₹118 banner dead loop and the register copy are new findings)"},
+  "seed_data_creation": "Seeded db.otp_codes rows for 9999912305-9999912311 (no WhatsApp sends except the one in the existing suite, to 9999912301). All TEST users, invoices, chat threads/messages, provider notifications, login_history and otp rows were deleted by id. 3 pre-existing test_dup_*@test.com users from 2026-11-03 were left alone (not mine). Financial totals were identical before and after.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Mint OTP sessions without sending by running tests/iter120_ui_seed.py <mobile>; it writes /tmp/ui_<mobile>.json. Inject the session with localStorage auth_token / auth_refresh_token. Shop needs geolocation: grant it and use 13.7484, 79.7027. testbuyer has no phone, so login routes to /verify-mobile. Provider used for reveals: 22c44148-... (phone 9999900000). Baseline: wallets 287525.91, txns 2827, invoices 2.",
+  "rca_of_issue": "Phone lockout: register() stores payload.phone verbatim, and otp_auth.verify_login_otp matches users by phone before applying the takeover guard. The guard (unverified phone + password) then returns 409 forever, so the real owner has no way to claim the number. Repro: POST /auth/register {phone: X} -> seed an OTP for X -> POST /auth/otp/verify -> 409."
+}

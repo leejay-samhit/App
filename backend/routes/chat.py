@@ -34,39 +34,11 @@ from pydantic import BaseModel, Field
 from core.config import JWT_SECRET, JWT_ALGORITHM
 from core.db import db
 from core.security import get_current_user
-from core.sim_binding import chat_gate
 from routes.push import send_push
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-
-async def _assert_sim_verified(user: Dict[str, Any], request: Optional[Request] = None) -> None:
-    """SIM-binding gate for chat WRITES (Oct 2026).
-
-    Applied to: starting a thread, sending/accepting a chat request, opening a
-    support chat and posting a message. NOT applied to reading threads or
-    history — existing conversations stay readable so nothing is ever lost,
-    and nothing outside chat is touched.
-
-    Enforced server-side on purpose: the Android screen also checks, but a
-    modified client or a stale session hits exactly this 403.
-    """
-    gate = await chat_gate(
-        user,
-        platform_header=(request.headers.get("x-client-platform") if request else "") or "",
-        user_agent=(request.headers.get("user-agent") if request else "") or "",
-    )
-    if gate.get("allowed"):
-        return
-    raise HTTPException(
-        status_code=403,
-        detail={
-            "code": gate["code"],
-            "message": gate["message"],
-            "sim_status": gate.get("status"),
-        },
-    )
 
 EDIT_WINDOW_MIN = 15
 
@@ -347,7 +319,6 @@ async def start_thread(body: Dict[str, Any], request: Request, user: Dict[str, A
     created instantly so the customer can message the provider without
     leaving the screen. Returns the thread doc.
     """
-    await _assert_sim_verified(user, request)
     other_user_id = (body or {}).get("other_user_id") or ""
     if not other_user_id:
         raise HTTPException(status_code=400, detail="other_user_id is required")
@@ -400,7 +371,6 @@ async def start_thread(body: Dict[str, Any], request: Request, user: Dict[str, A
 
 @router.post("/chat/request")
 async def send_chat_request(body: ChatRequestIn, request: Request, user: Dict[str, Any] = Depends(get_current_user)):
-    await _assert_sim_verified(user, request)
     if body.to_user_id == user["id"]:
         raise HTTPException(status_code=400, detail="Can't send a request to yourself.")
     target = await db.users.find_one({"id": body.to_user_id}, {"_id": 0})
@@ -455,7 +425,6 @@ async def list_my_requests(user: Dict[str, Any] = Depends(get_current_user)):
 
 @router.post("/chat/request/{req_id}/accept")
 async def accept_request(req_id: str, request: Request, user: Dict[str, Any] = Depends(get_current_user)):
-    await _assert_sim_verified(user, request)
     r = await db.chat_requests.find_one({"id": req_id, "to_user_id": user["id"], "status": "pending"})
     if not r:
         raise HTTPException(status_code=404, detail="Request not found.")
@@ -493,7 +462,6 @@ async def contact_support(request: Request, body: Dict[str, Any] = {}, user: Dic
     Returns the list of thread IDs created/found so the caller can navigate to
     one of them (typically the first super_admin).
     """
-    await _assert_sim_verified(user, request)
     msg = (body.get("message") if isinstance(body, dict) else "") or ""
     msg = str(msg).strip()[:1000]
     admin_filter = {"role": "admin", "admin_role": {"$in": ["super_admin", "support"]}}
@@ -643,7 +611,6 @@ async def list_messages(thread_id: str, before: Optional[str] = None, limit: int
 
 @router.post("/chat/{thread_id}/messages")
 async def post_message(thread_id: str, body: MessageInExt, request: Request, user: Dict[str, Any] = Depends(get_current_user)):
-    await _assert_sim_verified(user, request)
     t = await _assert_thread_member(thread_id, user["id"])
     text = (body.text or "").strip()
     img = body.image_data_url or ""
@@ -820,7 +787,6 @@ async def post_message(thread_id: str, body: MessageInExt, request: Request, use
 
 @router.patch("/chat/messages/{msg_id}")
 async def edit_message(msg_id: str, body: MessagePatch, request: Request, user: Dict[str, Any] = Depends(get_current_user)):
-    await _assert_sim_verified(user, request)
     m = await db.chat_messages.find_one({"id": msg_id})
     if not m:
         raise HTTPException(status_code=404, detail="Message not found.")

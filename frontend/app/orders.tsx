@@ -17,7 +17,6 @@ import { ProductImage } from "../src/product-image";
 import { colors, radii, spacing, formatINR } from "../src/theme";
 import { OrderTimeline } from "../src/order-timeline";
 import { notify } from "../src/notify";
-import { handleChatGateError } from "../src/sim-verification";
 import { FadeSlideIn, ListRowSkeleton } from "../src/anim";
 
 type OrderItem = { name: string; price: number; image_url: string; qty: number };
@@ -162,7 +161,6 @@ export default function OrdersScreen() {
       if (data?.thread_id) router.push(`/chat/${data.thread_id}` as any);
       else notify("Couldn't open chat", "Try again in a moment.");
     } catch (e) {
-      if (handleChatGateError(e, (p) => router.push(p as any))) return;
       notify("Couldn't open chat", formatApiError(e));
     } finally { setChatBusy(null); }
   }, [router]);

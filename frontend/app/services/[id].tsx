@@ -21,7 +21,6 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { Feather, MaterialIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
-import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
 import { useSubscription } from "../../src/subscription";
@@ -155,15 +154,31 @@ export default function ProviderProfileScreen() {
       return;
     }
     if (!p) return;
-    // Already revealed earlier → just open dialer
+    // Already fetched earlier → just open the dialer.
     if (revealedPhone) {
       Linking.openURL(`tel:${revealedPhone}`).catch(() => Alert.alert("Cannot open dialer"));
       return;
     }
-    // Show confirm sheet with fee + GST breakdown + T&C
-    setPayIntent("call");
-    setTermsAccepted(false);
-    setConfirmOpen(true);
+    // Nov-2026 — getting the number is FREE: no fee sheet, no T&C gate, no
+    // wallet debit. One tap fetches it and opens the dialer.
+    setRevealing(true);
+    try {
+      const { data } = await api.post<{
+        provider_phone: string;
+        invoice?: { id: string };
+      }>(`/services/${id}/reveal-phone`, { accept_terms: true });
+      setRevealedPhone(data.provider_phone);
+      setRevealedInvoiceId(data.invoice?.id || null);
+      if (data.provider_phone) {
+        setTimeout(() => {
+          Linking.openURL(`tel:${data.provider_phone}`).catch(() => {});
+        }, 300);
+      }
+    } catch (e) {
+      Alert.alert("Couldn't get the number", formatApiError(e));
+    } finally {
+      setRevealing(false);
+    }
   };
 
   /** Create/reuse the thread and navigate. Assumes access is allowed. */
@@ -174,34 +189,19 @@ export default function ProviderProfileScreen() {
       const r = await api.post<{ id: string }>("/chat/threads", { other_user_id: p.id });
       router.push(`/chat/${r.data.id}` as any);
     } catch (e) {
-      if (handleChatGateError(e, (path) => router.push(path as any))) return;
       Alert.alert("Couldn't open chat", formatApiError(e));
     } finally {
       setChatOpening(false);
     }
   };
 
-  /**
-   * Sep 2026 — "Start Chat" for a service provider.
-   * Free when the admin sets the unlock fee to ₹0, otherwise it runs the
-   * SAME pay sheet as the phone reveal and enters the thread right after
-   * the payment succeeds.
-   */
+  /** Nov-2026 — chatting with a provider is free; open the thread directly. */
   const openChat = async () => {
     if (!user) {
       Alert.alert("Login required", "Please log in to chat with this provider.");
       return;
     }
-    const alreadyUnlocked = !!revealedPhone
-      || (revealConfig?.revealed_provider_ids || []).includes(String(p?.id));
-    const fee = Number(revealConfig?.total ?? 0);
-    if (alreadyUnlocked || fee <= 0) {
-      openChatThread();
-      return;
-    }
-    setPayIntent("chat");
-    setTermsAccepted(false);
-    setConfirmOpen(true);
+    openChatThread();
   };
 
   const confirmRevealAndPay = async () => {
@@ -429,31 +429,13 @@ export default function ProviderProfileScreen() {
             <>
               <Feather name="phone-call" size={14} color={colors.primary} />
               <Text style={styles.ctaPhone} numberOfLines={1}>{revealedPhone}</Text>
-              <Text style={styles.ctaSub}>UNLOCKED</Text>
-            </>
-          ) : isMember ? (
-            /* Jun-2026 — a member gets every provider's number free, unlimited. */
-            <>
-              <Feather name="award" size={14} color={colors.success} />
-              <Text style={[styles.ctaPrice, { color: colors.success }]} numberOfLines={1}>FREE</Text>
-              <Text style={styles.ctaSub} numberOfLines={1}>unlimited numbers · member</Text>
             </>
           ) : (
+            /* Nov-2026 — every customer gets the number free. */
             <>
-              <Feather name="lock" size={13} color={colors.textMuted} />
-              <Text style={styles.ctaPrice} numberOfLines={1}>
-                {revealConfig ? formatINR(revealConfig.total) : "₹1 + GST"}
-              </Text>
-              <TouchableOpacity
-                onPress={() => router.push("/payment" as any)}
-                style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 6 }}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                testID="reveal-upsell"
-              >
-                <Text style={[styles.ctaSub, { textDecorationLine: "underline", fontWeight: "800" }]} numberOfLines={1}>
-                  free for members · join for {formatINR(subConfig.price)}
-                </Text>
-              </TouchableOpacity>
+              <Feather name="check-circle" size={14} color={colors.success} />
+              <Text style={[styles.ctaPrice, { color: colors.success }]} numberOfLines={1}>FREE</Text>
+              <Text style={styles.ctaSub} numberOfLines={1}>no charge to call or chat</Text>
             </>
           )}
         </View>
@@ -468,13 +450,9 @@ export default function ProviderProfileScreen() {
               ? <ActivityIndicator color="#fff" size="small" />
               : <Feather name={revealedPhone ? "phone-call" : "phone"} size={15} color="#fff" />}
             <Text style={styles.ctaBtnText} numberOfLines={1}>
-              {revealing ? "Processing…" : revealedPhone ? "Call now" : "Get number"}
+              {revealing ? "Getting…" : revealedPhone ? "Call now" : "Get Phone Number"}
             </Text>
           </TouchableOpacity>
-          {/* Sep 2026 — Chat is ALWAYS offered. If this provider hasn't been
-              unlocked yet, tapping it runs the same pay-and-unlock sheet (or
-              opens straight away when the admin has set the unlock fee to ₹0)
-              and then drops the customer into the thread. */}
           {p?.id ? (
             <TouchableOpacity
               onPress={openChat}

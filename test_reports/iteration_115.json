@@ -1,0 +1,47 @@
+{
+  "summary": "Retest of the iter114 action items at 6,303 products. Backend: the new test_iter115_retest.py passed 10 tests and skipped 1; the test_iter114_scale_retest.py regression suite passed 11 and skipped 2. Every p95 is between 0.08s and 0.26s, so nothing is near 1s. UI checks ran at 375x667. Items 1-6 PASS. Item 7 PASS after load, with 2 minor caveats. Item 8 had a HIGH regression on shop-home, which I fixed and verified. The admin Products part of item 8 has 2 new bugs (page change fetches twice; a search started on page N shows page N of the results). No deprecated Expo packages were found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/products/subcategory-counts", "issue": "Groups by `sub_category` only. Products that carry only the legacy `subcategory` field (for example 2 Electronics rows with subcategory='Mobiles') match the sub-chip filter on /api/products but are counted in the '' bucket, so their badge can under-count. Suggested fix: group on $ifNull[sub_category, subcategory]. The pincode branch also skips the delivery_radius_mode condition that /api/products applies to store_pincode, so the two totals can drift for legacy vendors."},
+      {"endpoint": "GET /api/products?q= and GET /api/admin/products?q=", "issue": "The ix_prod_text text index was added, but both endpoints still use $regex across 5-7 fields, so the index is never used. Search is fine at 6k rows (p95 0.11s and 0.26s) but will collection-scan at 1M rows. Use $text, or a prefix-anchored regex on an indexed field."},
+      {"endpoint": "admin Products load()", "issue": "Every admin page load also calls GET /api/products (60 public rows) just to merge interested_count, so the INTEREST badge is 0 for any product outside the first 60 public rows. It costs an extra request on every page change and every 15s refresh."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "shop-home load() de-dupe (fix 8)", "issue": "FIXED BY TESTING AGENT. In about 2 of 3 cold opens or reloads, shop-home showed the 'No stores serving your area yet' hero even though page 1 returned 60 of 6,183 rows. Cause: load() ran ++loadSeq BEFORE the identical-key check. A duplicate call therefore invalidated the in-flight first request, then returned early, so products stayed []. I moved the key check ahead of the loadSeq bump and cleared lastLoadKey on error. Verified: 4 of 4 reloads show the grid, with exactly 1 page-1 request each time.", "testID": "product-open-*", "priority": "HIGH"},
+      {"component": "admin/products.tsx page change", "issue": "Each Next or page-N tap fires /admin/products?offset=X twice (plus /api/products twice). `load` depends on `page`, so useFocusEffect([load]) re-runs and calls load() again; this also resets the 15s interval.", "testID": "products-page-next", "priority": "MEDIUM"},
+      {"component": "admin/products.tsx search while on page N", "issue": "On page 3, typing 'PERFTEST Product 05' fires offset=0 and offset=500 for the search, and the offset=500 response wins. The screen shows 'Page 3 of 4' of the results instead of page 1. Cause: the focus-effect load() (stale page, declared later, higher reqId) overrides the appliedSearch effect's load(0).", "testID": "products-pager", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Shop layout product resolution", "issue": "On one shop open, /api/products?ids=<same ids> fires 4 times, and /api/shop-layout and /shop-layout/analytics fire twice each. resolveBlockProducts runs both in cachedGet onFresh and after the await (2 per effect run), and the effect runs twice (lat/lng/currentUserId settle).", "affected_testIDs": ["grid-card-*"]},
+      {"flow": "Deleted-product block skip (fix 7)", "issue": "This works when at least one curated product resolves. But `resolved` is `Object.keys(productsById).length > 0`, so if EVERY referenced product was deleted the map stays {} and the dead blocks render as empty white cards forever. Also, while the ids request is in flight, a content_box whose product is deleted shows briefly as an empty cream card. Use an explicit productsResolved flag that is set after the ids fetch.", "affected_testIDs": ["content-box-*", "grid-card-*"]}
+    ],
+    "design_issues": [
+      {"screen": "Admin Shop Layout - Pick a product", "issues": ["single-picker-search-clear is an icon of about 23px (15px + padding 4), under the 44px minimum; add hitSlop as the multi-picker clear does"]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iter115_retest.py", "/app/backend/tests/ui_prep_iter115_sub.py", "/app/test_reports/pytest/iter115.xml"],
+  "action_items": [
+    "Review the shop-home.tsx load() de-dupe fix I applied (key check before ++loadSeq; lastLoadKey cleared on error) and keep it.",
+    "admin/products.tsx: stop useFocusEffect re-running when `load` changes, for example by holding load in a ref (loadRef.current = load) and depending on []. This removes the double fetch per page change and the stale-page search override.",
+    "shop-layout-renderer.tsx: call resolveBlockProducts once per effect run (only in onFresh when the cache was cold, or de-dupe by ids key), and replace the `Object.keys(productsById).length > 0` check with a productsResolved boolean.",
+    "subcategory-counts: group by $ifNull[$sub_category, $subcategory] and use the same store_pincode/delivery_radius_mode clause as /api/products.",
+    "Use the text index for q (use $text, or drop the index), and drop the extra /api/products call in admin Products, or fetch interested_count for the current page ids.",
+    "Add hitSlop to single-picker-search-clear."
+  ],
+  "critical_code_review_comments": [
+    "shop-layout-renderer.tsx (1,655 lines), shop-home.tsx (1,560), admin/shop-layout.tsx (2,108) and admin/products.tsx (1,252) are all over the 700-line limit and should be split.",
+    "Category screen header uses totalProducts, the server total, which includes curated products that `filtered` hides. The header can exceed the visible rows by the number of curated items on that shelf (3 for pincode 517644).",
+    "shop-home de-dupe: when load is re-created only because `shape` (currentUserId) changed, the skipped call keeps the first response, which was shaped with the old closure. That doesn't matter for buyers, but a vendor shopper may see their own products until refresh."
+  ],
+  "updated_files": ["/app/frontend/src/shop-home.tsx (load de-dupe race fix)", "/app/frontend/app/admin/shop-layout.tsx (added testID single-pick-<id> on single-picker rows)", "/app/backend/tests/test_iter115_retest.py", "/app/backend/tests/ui_prep_iter115_sub.py"],
+  "success_rate": {"backend": "100% (21 passed, 3 skipped across iter115 + iter114 suites)", "frontend": "about 80% (items 1-6 pass; item 7 passes with caveats; item 8: shop-home was broken and is now fixed, admin Products has 2 bugs)"},
+  "seed_data_creation": "Temporary only, all restored. I created TEST_115_Shirts, TEST_115_A and TEST_115_B sub-categories under Men and mapped 40, 75 and 40 perftest products to them; the original category/sub_category values were restored from a snapshot and the categories deleted. I also created 3 TEST_115 layout blocks scoped to 517644 and then deleted them; curated-product-ids for 517644 is back to its original 3 ids.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Shopper testbuyer@test.com / Test@1234 with geolocation 13.7484,79.7027. To see pincode layout blocks, fulfil **/api/geo/resolve with pincode 517644 and pincode_valid true. Product cards use testID product-open-<id>. For sub-chip tests run `python backend/tests/ui_prep_iter115_sub.py setup` and `teardown` afterwards; it writes /tmp/iter115_sub_state.json. In Playwright route handlers, match the URL inside the handler because param order varies (offset comes before subcategory). Admin bottom sheets need dispatch_event('click'). Vendor pager is still untested because no vendor password is known.",
+  "rca_of_issue": "Shop-home empty grid: load() did setLoading(true) and ++loadSeq before the duplicate-key check. Sequence: call #1 sets lastLoadKey and awaits the request; `load` is re-created with identical params; call #2 bumps loadSeq to 2, sees the same key and returns; call #1's response sees reqId 1 != 2 and is discarded; products stay [] and the NoVendorsHero renders. Repro: log in as testbuyer and reload /shop a few times. Fix applied and verified 4 of 4."
+}

@@ -257,24 +257,18 @@ async def register(request: Request, payload: RegisterRequest):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # ─── INVITE CODE (MLM cutover, Jun-2026) ──────────────────────────
-    # The code is now nothing more than an attribution tag. There is no
-    # matrix, no spillover BFS placement, no L1..L10 cascade and no payout
-    # of any kind — the inviter simply shows up as the referrer on the
-    # roster. An unknown code is rejected so typos are caught at signup.
+    # ─── NO INVITE CODES (Nov-2026) ───────────────────────────────────
+    # Referral and invitation functionality was removed: a signup never has a
+    # sponsor, and any `referral_code` still arriving from an older build is
+    # ignored rather than rejected, so stale app versions keep working.
+    # Historical `referred_by` / `sponsor_id` values on existing accounts are
+    # left exactly as they are for audit.
     sponsor = None
-    sponsor_code = (payload.referral_code or "").strip().upper() or None
-    if sponsor_code:
-        sponsor = await db.users.find_one({"referral_code": sponsor_code})
-        if not sponsor:
-            raise HTTPException(status_code=400, detail="Invalid invite code")
-        if (sponsor.get("email") or "").lower() == ADMIN_EMAIL.lower():
-            sponsor = None  # the seed admin is never anybody's referrer
-    referral_owner = sponsor
+    sponsor_code = None
+    referral_owner = None
     # Kept for backwards compatibility with historical reports: True means
-    # "nobody referred this user", it no longer routes money anywhere
-    # special (100% of every fee is platform revenue now).
-    no_referral_signup = sponsor is None
+    # "nobody referred this user".
+    no_referral_signup = True
 
     user_id = str(uuid.uuid4())
     # Ensure unique referral code
@@ -2485,6 +2479,7 @@ async def admin_list_products(
     vendor_id: Optional[str] = None,
     vendor_q: Optional[str] = None,
     q: Optional[str] = None,
+    ids: Optional[str] = None,
     limit: int = 60,
     offset: int = 0,
     _: Dict[str, Any] = Depends(require_admin),
@@ -2502,10 +2497,20 @@ async def admin_list_products(
     Vendor enrichment stays as a single batched lookup.  Full text
     search via `?q=` uses the same regex across name/brand/category.
     """
-    limit = max(1, min(300, int(limit)))
+    limit = max(1, min(500, int(limit)))
     offset = max(0, int(offset))
 
     prod_query: Dict[str, Any] = {}
+    if ids:
+        # Nov 2026 — resolve a KNOWN set of products (Shop Layout shows the
+        # names of the products its blocks reference). Without this the admin
+        # screen had to download the whole catalogue just to label a few rows,
+        # which froze the app at 5k+ SKUs.
+        wanted = [s for s in (ids or "").split(",") if s.strip()][:300]
+        if not wanted:
+            return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
+        prod_query["id"] = {"$in": wanted}
+        limit = max(limit, len(wanted))
     if vendor_id:
         prod_query["vendor_id"] = vendor_id
     elif vendor_q:
@@ -2593,6 +2598,12 @@ async def admin_list_products(
         elif not p.get("vendor_name"):
             p["vendor_name"] = "Admin catalog"
 
+    if ids:
+        # Return them in the order the caller asked for — Shop Layout blocks
+        # render their products in the sequence the admin arranged.
+        order = {pid: i for i, pid in enumerate(wanted)}
+        items.sort(key=lambda r: order.get(r.get("id"), 10 ** 6))
+
     return {
         "items": items,
         "total": total,
@@ -2650,6 +2661,85 @@ async def admin_list_vendors(q: Optional[str] = None, _: Dict[str, Any] = Depend
             "status": v.get("vendor_status") or ("approved" if v.get("is_vendor_approved") else "pending"),
         })
     return {"items": items, "total": len(items)}
+
+
+@api_router.post("/admin/products/bulk-category")
+async def admin_bulk_assign_category(
+    payload: Dict[str, Any] = Body(default={}),
+    admin: Dict[str, Any] = Depends(require_admin_not_finance),
+):
+    """Nov 2026 — Map MANY products to a category / sub-category in one tap.
+
+    The owner's ask: the same ergonomics as "Publish all" but for shelving.
+    Select products in the Admin Products grid, pick the shelf, done.
+
+    Body:
+      • `product_ids` — the selected products (required, max 2000 per call).
+      • `category`    — the shop category NAME to set (required).
+      • `subcategory` — optional sub-shelf NAME; pass "" to clear it.
+    Returns how many documents actually changed.
+    """
+    ids = [str(i) for i in ((payload or {}).get("product_ids") or []) if i]
+    category = ((payload or {}).get("category") or "").strip()
+    subcategory = (payload or {}).get("subcategory")
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one product.")
+    if len(ids) > 2000:
+        raise HTTPException(status_code=400, detail="Select 2000 products or fewer per batch.")
+    if not category:
+        raise HTTPException(status_code=400, detail="Choose a category.")
+
+    update: Dict[str, Any] = {"category": category, "updated_at": now_utc().isoformat()}
+    if subcategory is not None:
+        # "" deliberately clears the sub-shelf; a value sets it.
+        sub = str(subcategory).strip()
+        # Nov 2026 — the catalogue carries BOTH `subcategory` and the older
+        # `sub_category`, and the public filter matches either. Writing only
+        # one left products showing on their previous sub-shelf, so both are
+        # kept in step.
+        update["subcategory"] = sub
+        update["sub_category"] = sub
+
+    # Reject a shelf that doesn't exist, otherwise a typo silently hides every
+    # selected product from the shop.
+    known = await db.shop_categories.find_one(
+        {"name": {"$regex": f"^{re.escape(category)}$", "$options": "i"}}, {"_id": 1, "id": 1},
+    )
+    if not known:
+        raise HTTPException(status_code=400, detail=f"No such category: {category}")
+
+    # The Recharge tree is served by the recharge flow (operators and plans),
+    # not by the product catalogue, so a physical product shelved there would
+    # simply never be reachable.
+    from routes.shop_categories import recharge_category_ids
+    recharge_ids = await recharge_category_ids()
+    if known.get("id") in recharge_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{category}' is a recharge shelf — products can't be mapped there.",
+        )
+    if subcategory is not None and str(subcategory).strip():
+        sub_doc = await db.shop_categories.find_one(
+            {"name": {"$regex": f"^{re.escape(str(subcategory).strip())}$", "$options": "i"}},
+            {"_id": 1, "id": 1},
+        )
+        if sub_doc and sub_doc.get("id") in recharge_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{subcategory}' is a recharge shelf — products can't be mapped there.",
+            )
+
+    res = await db.products.update_many({"id": {"$in": ids}}, {"$set": update})
+    await _audit_log(admin, "products.bulk_category", "product", ",".join(ids[:5]),
+                     {"count": res.modified_count, "category": category,
+                      "subcategory": update.get("subcategory")})
+    try:
+        from routes.products_public import bust_products_public_caches
+        bust_products_public_caches()
+    except Exception:
+        pass
+    return {"ok": True, "updated": res.modified_count, "requested": len(ids),
+            "category": category, "subcategory": update.get("subcategory")}
 
 
 @api_router.post("/admin/products/publish-all")
@@ -7813,7 +7903,23 @@ async def on_startup():
     # backfills — runs in the background so uvicorn binds to 0.0.0.0:8001
     # within < 1 second and the Kubernetes startup probe passes immediately.
     try:
-        await db.users.create_index("email", unique=True)
+        # Nov-2026 — PARTIAL unique index on email. Mobile-only accounts have
+        # no email at all, and a plain unique index treated every one of them
+        # as a duplicate (the second mobile signup 500'd). Only real email
+        # strings are constrained now, exactly like the phone index.
+        try:
+            existing = await db.users.index_information()
+            spec = existing.get("email_1") or {}
+            if spec and not spec.get("partialFilterExpression"):
+                await db.users.drop_index("email_1")
+        except Exception:
+            pass
+        await db.users.create_index(
+            "email",
+            unique=True,
+            name="email_1",
+            partialFilterExpression={"email": {"$type": "string", "$gt": ""}},
+        )
         await db.users.create_index("referral_code", unique=True)
         # Phase 1 — idempotency for every money movement is enforced by the
         # DATABASE, so a replayed webhook / double tap cannot move money twice.
@@ -7822,13 +7928,10 @@ async def on_startup():
         # Phase 2 — returns / inventory-restoration lookups + guards.
         from core import returns as _returns_core
         await _returns_core.ensure_indexes()
-        # SIM-binding (Oct 2026): single binding row per user, single-use
-        # challenges, audit lookups, unique device-link codes.
-        from core import sim_binding as _sim_binding
-        await _sim_binding.ensure_indexes()
-        # Truecaller one-tap: single-use OAuth states with a TTL.
-        from routes import truecaller_auth as _tc_auth
-        await _tc_auth.ensure_indexes()
+        # Mobile-number sign-in (Nov 2026): one live code per number, plus the
+        # per-mobile / per-IP send counters behind the rate limit.
+        from core import otply as _otply
+        await _otply.ensure_indexes()
         # Unique index on the normalised phone — the real guard against two
         # accounts confirming the same number in a race.
         from routes import signup_gate as _signup_gate
@@ -7995,6 +8098,53 @@ async def _background_init():
             await db.shop_layout_blocks.create_index([("scope_pincode", 1)], name="ix_sl_scope_pin")
             await db.system_wallet_deposits.create_index([("bucket", 1)], name="ix_swd_bucket")
             await db.products.create_index([("is_in_stock", 1)], name="ix_prod_stock")
+            # Nov 2026 — catalogue-scale paging (owner runs 5.7k+ SKUs and
+            # wants 100k to work). These cover the shop's hot sorts so Mongo
+            # never has to sort in memory while skipping deep offsets.
+            await db.products.create_index(
+                [("created_at", -1), ("id", 1)], name="ix_prod_created_id",
+            )
+            await db.products.create_index(
+                [("category", 1), ("created_at", -1), ("id", 1)], name="ix_prod_cat_created_id",
+            )
+            await db.products.create_index(
+                [("sub_category", 1), ("created_at", -1)], name="ix_prod_subcat_created",
+            )
+            await db.products.create_index(
+                [("vendor_id", 1), ("created_at", -1), ("id", 1)], name="ix_prod_vendor_created_id",
+            )
+            await db.products.create_index([("id", 1)], name="ix_prod_id")
+            # Nov 2026 — backfill the denormalised `interested_count` for
+            # products that pre-date it, so the badge is right on list screens
+            # (which never receive the raw `interested_users` array).
+            try:
+                await db.products.update_many(
+                    {"interested_users": {"$exists": True, "$ne": []},
+                     "interested_count": {"$exists": False}},
+                    [{"$set": {"interested_count": {"$size": {"$ifNull": ["$interested_users", []]}}}}],
+                )
+            except Exception:
+                pass
+            # Text index so product search stays fast past ~100k rows (the
+            # regex fallback scans every document). It must cover the SAME
+            # fields the regex searches, otherwise the index shortcut returns
+            # fewer hits than the fallback (e.g. a category name).
+            try:
+                existing = await db.products.index_information()
+                if "ix_prod_text" in existing:
+                    await db.products.drop_index("ix_prod_text")
+                await db.products.create_index(
+                    [
+                        ("name", "text"), ("brand", "text"), ("tags", "text"),
+                        ("category", "text"), ("sub_category", "text"),
+                        ("subcategory", "text"), ("description", "text"),
+                    ],
+                    name="ix_prod_text_v2", default_language="english",
+                )
+            except Exception:
+                # A different text index already exists (Mongo allows only
+                # one per collection) — the regex path still works.
+                pass
         except Exception as _idx_err:
             logger.warning(f"Hot-query index setup failed (non-fatal): {_idx_err}")
 
@@ -9167,7 +9317,7 @@ async def vendor_my_products(
     # does `res.data.map(...)`. Returning the paged object to those builds
     # showed an empty vendor panel, so they still get the plain array.
     legacy = limit is None and offset is None
-    limit = max(1, min(300, int(limit if limit is not None else 60)))
+    limit = max(1, min(500, int(limit if limit is not None else 60)))
     offset = max(0, int(offset or 0))
 
     match: Dict[str, Any] = {"vendor_id": vendor["id"]}
@@ -10784,22 +10934,17 @@ async def my_service_bookings(role: Optional[str] = "all", user: Dict[str, Any] 
 # ============================================================
 @api_router.get("/services/reveal-config")
 async def get_phone_reveal_config(user: Dict[str, Any] = Depends(get_current_user)):
-    """Return fee + GST + user balance + already-revealed providers."""
+    """Nov-2026 — getting a provider's number is FREE for every customer.
+
+    The owner removed the contact charge entirely, so this reports ₹0 and the
+    app shows a plain "Get Phone Number" button. The historical
+    `phone_reveal_invoices` rows (and the ₹1.18 receipts inside them) are left
+    untouched for accounting.
+    """
     settings = await get_settings()
-    # Sep 2026 — `or 1.0` swallowed a deliberate ₹0 fee, so admins could not
-    # make unlock/chat free. Read the value as configured (None = default ₹1).
-    _fee_cfg = settings.get("phone_reveal_fee")
-    fee = float(_fee_cfg) if _fee_cfg is not None else 1.0
-    gst_pct = float(settings.get("phone_reveal_gst_pct") if settings.get("phone_reveal_gst_pct") is not None else 18.0)
-    gst_amt = round(fee * gst_pct / 100.0, 2)
-    total = round(fee + gst_amt, 2)
-    # ── Member benefit — unlimited numbers, free ─────────────────────────
-    member = bool(user.get("registration_paid")) and bool(
-        settings.get("subscription_free_reveals", True)
-    )
-    paid_fee, paid_total = fee, total
-    if member:
-        fee = gst_amt = total = 0.0
+    fee = gst_pct = gst_amt = total = 0.0
+    member = bool(user.get("registration_paid"))
+    paid_fee, paid_total = 0.0, 0.0
     # Providers already revealed by this user (so we can show without re-charging)
     revealed_rows = await db.phone_reveal_invoices.find(
         {"user_id": user["id"]}, {"_id": 0, "provider_id": 1}
@@ -10809,10 +10954,11 @@ async def get_phone_reveal_config(user: Dict[str, Any] = Depends(get_current_use
         "gst_pct": gst_pct,
         "gst_amount": gst_amt,
         "total": total,
+        "free_for_everyone": True,
         "wallet_balance": float(user.get("wallet_balance") or 0),
         "revealed_provider_ids": list({r.get("provider_id") for r in revealed_rows if r.get("provider_id")}),
         "is_subscriber": member,
-        "free_for_members": bool(settings.get("subscription_free_reveals", True)),
+        "free_for_members": True,
         "non_member_fee": paid_fee,
         "non_member_total": paid_total,
     }
@@ -10820,24 +10966,27 @@ async def get_phone_reveal_config(user: Dict[str, Any] = Depends(get_current_use
 
 @api_router.post("/services/{provider_id}/reveal-phone")
 async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, user: Dict[str, Any] = Depends(get_current_user)):
-    """Charge wallet, credit System Wallet (service_margin + gst_collected),
-    write a phone_reveal_invoices doc and return the provider's phone number.
+    """Return the provider's phone number — FREE (Nov-2026).
 
-    Idempotent per (user_id, provider_id): if the user has already paid for
-    this provider's phone we just return the existing invoice — no double
-    charge. T&C must be explicitly accepted via `accept_terms=true`.
+    The ₹1.18 contact charge is gone: no wallet debit, no System Wallet credit,
+    no GST row and no payment gateway hop. A ₹0 access record is still written
+    to `phone_reveal_invoices` so "already revealed" and the provider's
+    notification keep working, and the old paid receipts stay readable.
     """
-    if not payload.accept_terms:
-        raise HTTPException(status_code=400, detail="You must accept the terms & conditions.")
     if provider_id == user["id"]:
         raise HTTPException(status_code=400, detail="You can't reveal your own number")
     provider = await db.users.find_one({"id": provider_id, "is_service_provider": True})
     if not provider:
         raise HTTPException(status_code=404, detail="Service provider not found")
-    if user.get("wallet_frozen"):
-        raise HTTPException(status_code=400, detail="Your wallet is frozen")
+    # Provider consent: no number on the profile, or sharing switched off, and
+    # we show nothing rather than leaking a private number.
+    if provider.get("share_phone") is False or not (provider.get("phone") or "").strip():
+        raise HTTPException(
+            status_code=403,
+            detail="This provider hasn't shared a phone number. Please message them in chat instead.",
+        )
 
-    # Idempotency — already revealed once
+    # Already fetched once — return the same record.
     existing = await db.phone_reveal_invoices.find_one(
         {"user_id": user["id"], "provider_id": provider_id}, {"_id": 0}
     )
@@ -10851,36 +11000,8 @@ async def reveal_phone_number(provider_id: str, payload: RevealPhoneRequest, use
         }
 
     settings = await get_settings()
-    # Sep 2026 — `or 1.0` swallowed a deliberate ₹0 fee, so admins could not
-    # make unlock/chat free. Read the value as configured (None = default ₹1).
-    _fee_cfg = settings.get("phone_reveal_fee")
-    fee = float(_fee_cfg) if _fee_cfg is not None else 1.0
-    gst_pct = float(settings.get("phone_reveal_gst_pct") if settings.get("phone_reveal_gst_pct") is not None else 18.0)
-    gst_amt = round(fee * gst_pct / 100.0, 2)
-    total = round(fee + gst_amt, 2)
-    # Jun-2026 — a subscriber gets every provider's number free, for ever.
-    is_member = bool(user.get("registration_paid")) and bool(
-        settings.get("subscription_free_reveals", True)
-    )
-    if is_member:
-        fee = gst_amt = total = 0.0
-    bal = float(user.get("wallet_balance") or 0)
-    if bal < total:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Insufficient wallet balance — need ₹{total:.2f} (₹{fee:.2f} + ₹{gst_amt:.2f} GST). Please top up.",
-        )
-
-    # Atomic wallet debit guarded by balance condition.
-    # A ₹0 configured fee means unlocking is free — skip the debit entirely
-    # (an $inc of 0 would still fail the $gte guard on an empty wallet).
-    if total > 0:
-        debit_res = await db.users.update_one(
-            {"id": user["id"], "wallet_balance": {"$gte": total}},
-            {"$inc": {"wallet_balance": -total}},
-        )
-        if debit_res.modified_count == 0:
-            raise HTTPException(status_code=400, detail="Insufficient wallet balance — please top up.")
+    fee = gst_pct = gst_amt = total = 0.0
+    is_member = bool(user.get("registration_paid"))
 
     inv_id = str(uuid.uuid4())
     ts = now_utc().isoformat()
@@ -11224,11 +11345,9 @@ app.include_router(delivery_partner_router.router, prefix="/api")
 from routes import subscription as subscription_router  # noqa: E402
 app.include_router(subscription_router.router, prefix="/api")
 
-from routes import sim_binding as sim_binding_router  # noqa: E402
-app.include_router(sim_binding_router.router, prefix="/api")
+from routes import otp_auth as otp_auth_router  # noqa: E402
+app.include_router(otp_auth_router.router, prefix="/api")
 
-from routes import truecaller_auth as truecaller_auth_router  # noqa: E402
-app.include_router(truecaller_auth_router.router, prefix="/api")
 
 # ============================================================
 # CORS — explicit allowlist for production (June 2026 hardening)

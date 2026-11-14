@@ -538,6 +538,46 @@ async def list_active_shop_layout(
     return {"items": items, "scope": scope or "home", "category": category or "", "pincode": pincode or ""}
 
 
+@router.get("/shop-layout/curated-product-ids")
+async def curated_product_ids(
+    pincode: Optional[str] = Query(None, description="Customer delivery pincode"),
+):
+    """Nov 2026 — every product id an admin pinned into ANY active block.
+
+    The shop hides these from the plain browse grids, so a curated product
+    appears inside its block only instead of being listed twice. Both the shop
+    home and the category screens need the FULL set (a product pinned into a
+    home block must also vanish from the category screen), which is why this
+    is scope-less. Pincode-targeted blocks only count for that pincode.
+    """
+    q: Dict[str, Any] = {"active": True}
+    # Mirror the public visibility rules for pincode-targeted blocks: a block
+    # the shopper can't see must not hide its products either (without a
+    # pincode only GLOBAL blocks render, so only those count here).
+    global_only = [
+        {"$or": [{"scope_pincodes": {"$in": [None, []]}}, {"scope_pincodes": {"$exists": False}}]},
+        {"$or": [{"scope_pincode": {"$in": [None, ""]}}, {"scope_pincode": {"$exists": False}}]},
+    ]
+    if pincode:
+        q["$or"] = [
+            {"scope_pincodes": pincode},
+            {"scope_pincode": pincode},
+            {"$and": global_only},
+        ]
+    else:
+        q["$and"] = global_only
+    cursor = db.shop_layout_blocks.find(q, {"_id": 0, "product_ids": 1, "product_id": 1})
+    ids: List[str] = []
+    for d in await cursor.to_list(500):
+        for pid in (d.get("product_ids") or []):
+            if pid:
+                ids.append(str(pid))
+        if d.get("product_id"):
+            ids.append(str(d["product_id"]))
+    unique = sorted(set(ids))
+    return {"items": unique, "count": len(unique)}
+
+
 # ── Image endpoints (Phase 5B) ───────────────────────────────────────────
 
 def _decode_data_url(data_url: str):

@@ -5,7 +5,6 @@ import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
-import { SubscriptionLocked } from "../../src/subscription";
 import { colors, radii, spacing } from "../../src/theme";
 import { TermsAcceptancePanel } from "../../src/TermsAcceptancePanel";
 import { LocationPicker, LocationValue, EMPTY_LOCATION } from "../../src/LocationPicker";
@@ -165,9 +164,6 @@ export default function VendorApplyScreen() {
           <View style={{ width: 40 }} />
         </View>
         <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }} keyboardShouldPersistTaps="handled" refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}>
-          {!user?.registration_paid ? (
-            <SubscriptionLocked feature="Running a shop" />
-          ) : null}
           {showPending && lastApp && (
             <View style={[styles.statusCard, { backgroundColor: "#FFF4E5" }]}>
               <MaterialCommunityIcons name="clock-outline" size={28} color="#7A4A0E" />

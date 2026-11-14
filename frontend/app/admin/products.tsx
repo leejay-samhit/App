@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshControl, Alert, Modal, TextInput, ScrollView, Platform, AppState } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshControl, Alert, Modal, TextInput, ScrollView, FlatList, Platform, AppState } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -10,9 +10,10 @@ import { GradientCard } from "../../src/gradient-card";
 import { HelpGuide, HelpButton, useFirstVisitGuide, GuideStep } from "../../src/help-guide";
 import { RichProductEditor } from "../../src/rich-product-editor";
 import { ProductImage } from "../../src/product-image";
+import { notify } from "../../src/notify";
 
 /** Products fetched per page by the admin catalogue list. */
-const PAGE_SIZE = 60;
+const PAGE_SIZE = 250;
 
 // Walkthrough steps shown on first visit (and via the "?" button) of
 // /admin/products. Keep these in plain language; admins are not engineers.
@@ -106,8 +107,21 @@ export default function AdminProducts() {
   // like it had lost 1,300 items.  We now page through the catalogue and
   // search on the SERVER, so every product is reachable.
   const [total, setTotal] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  // Nov 2026 — numbered pages replaced the old "Load more" accumulator.
+  // The accumulator reset to 60 whenever the screen regained focus (or the
+  // app returned from background), so after scrolling to 180 products the
+  // list silently snapped back to 60. Pages hold their position and scale to
+  // any catalogue size.
+  const [page, setPage] = useState(0);
+  const loadSeq = useRef(0);
+  // Current page, in a ref too, so `load` keeps a stable identity (the focus
+  // effect used to re-run — and re-fetch — on every page tap).
+  const pageRef = useRef(0);
+  // Bulk sub-category mapping: ids ticked in the grid.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [mapOpen, setMapOpen] = useState(false);
+  const [mapBusy, setMapBusy] = useState(false);
+  const [catTree, setCatTree] = useState<{ id?: string; name: string; parent_id?: string | null }[]>([]);
   // Jun 2026 — Image repair (see backend routes/product_images_repair.py).
   const [imgHealth, setImgHealth] = useState<{ needs_repair: number; failed: number; permanent: number } | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
@@ -129,52 +143,218 @@ export default function AdminProducts() {
     };
   }, [vendorFilter, appliedSearch]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (toPage?: number) => {
+    const target = typeof toPage === "number" ? toPage : pageRef.current;
+    // Guard against an older response landing after a newer one (fast typing
+    // in the search box fires overlapping requests).
+    const reqId = ++loadSeq.current;
     try {
-      const page = await loadPage(0);
-      // `interested_count` lives on the public list; merge it in for the
-      // first page only so the badge still works without a second heavy call.
+      const res = await loadPage(target * PAGE_SIZE);
+      if (reqId !== loadSeq.current) return;
+      // `interested_count` lives on the public list. Nov 2026 — ask for THIS
+      // page's ids instead of the public first page, so the badge is right
+      // beyond product 60 and the call stays tiny.
       let countMap = new Map<string, number>();
       try {
-        const pub = await api.get<any>("/products");
-        const pubList: any[] = Array.isArray(pub.data) ? pub.data : (pub.data?.items || []);
-        countMap = new Map(pubList.map((p: any) => [p.id, p.interested_count || 0]));
+        if (res.items.length) {
+          const pub = await api.get<any>("/products", {
+            params: { ids: res.items.map((p) => p.id).join(",") },
+          });
+          const pubList: any[] = Array.isArray(pub.data) ? pub.data : (pub.data?.items || []);
+          countMap = new Map(pubList.map((p: any) => [p.id, p.interested_count || 0]));
+        }
       } catch { /* badge is cosmetic */ }
-      setItems(page.items.map((p) => ({ ...p, interested_count: countMap.get(p.id) || 0 })));
-      setTotal(page.total);
-      setHasMore(page.hasMore);
+      setItems(res.items.map((p) => ({ ...p, interested_count: countMap.get(p.id) || 0 })));
+      setTotal(res.total);
+      pageRef.current = target;
+      setPage(target);
     } catch (e) {
-      Alert.alert("Error", formatApiError(e));
+      if (reqId === loadSeq.current) notify("Error", formatApiError(e));
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, [loadPage]);
 
-  const loadMore = useCallback(async () => {
-    if (loadingMore || !hasMore) return;
-    setLoadingMore(true);
+
+  const togglePick = useCallback((id: string) => {
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Nov 2026 — one product card. Extracted so the list can virtualise rows.
+  const renderCard = useCallback((item: Product) => {
+        const oos = (item.stock || 0) === 0;
+        const lowStock = (item.stock || 0) > 0 && (item.stock || 0) <= 5;
+        const isPicked = picked.has(item.id);
+        return (
+          <TouchableOpacity
+            key={item.id}
+            activeOpacity={0.85}
+            onPress={() => (picked.size > 0 ? togglePick(item.id) : setEditing(item))}
+            onLongPress={() => togglePick(item.id)}
+            delayLongPress={220}
+            style={[styles.gridCard, isPicked && { borderColor: colors.primary, borderWidth: 2 }]}
+            testID={`product-${item.id}`}
+          >
+            {/* Tick target — long-press any card to start selecting */}
+            <TouchableOpacity
+              onPress={() => togglePick(item.id)}
+              style={styles.pickDot}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              testID={`product-pick-${item.id}`}
+            >
+              <Feather
+                name={isPicked ? "check-circle" : "circle"}
+                size={20}
+                color={isPicked ? colors.primary : "rgba(255,255,255,0.9)"}
+              />
+            </TouchableOpacity>
+            <View style={styles.gridImgWrap}>
+              <ProductImage
+                uri={item.image_url}
+                name={item.name}
+                style={styles.gridImg}
+                containerStyle={{ width: "100%", height: "100%" }}
+                resizeMode="cover"
+                testID={`product-${item.id}-img`}
+              />
+              {item.is_published === false && (
+                <View style={[styles.draftPillTop, item.review_status === "pending" && { backgroundColor: colors.warning }]}>
+                  <Text style={styles.draftPillText}>
+                    {item.review_status === "pending" ? "NEEDS APPROVAL" : "DRAFT"}
+                  </Text>
+                </View>
+              )}
+              {oos && (
+                <View style={styles.oosOverlay} pointerEvents="none">
+                  <Text style={styles.oosOverlayText}>SOLD OUT</Text>
+                </View>
+              )}
+              {lowStock && !oos && (
+                <View style={styles.lowStockPill}><Text style={styles.lowStockText}>Only {item.stock}</Text></View>
+              )}
+              {(item.interested_count || 0) > 0 && (
+                <TouchableOpacity
+                  style={styles.interestBadge}
+                  onPress={() => setInterestedFor(item)}
+                  testID={`product-${item.id}-interested`}
+                >
+                  <Feather name="users" size={10} color="#fff" />
+                  <Text style={styles.interestBadgeText}>{item.interested_count}</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            <View style={styles.gridBody}>
+              {item.category ? <Text style={styles.gridCat} numberOfLines={1}>{item.category}</Text> : null}
+              <Text style={styles.gridName} numberOfLines={2}>{item.name}</Text>
+              {/* Jul 2026 — Show which vendor owns this product so admins can spot ownership at-a-glance. */}
+              {item.vendor_name ? (
+                <View style={styles.vendorRow}>
+                  <Feather name="briefcase" size={9} color={item.vendor_id ? colors.primary : colors.textMuted} />
+                  <Text
+                    style={[styles.vendorRowText, !item.vendor_id && { color: colors.textMuted, fontStyle: "italic" }]}
+                    numberOfLines={1}
+                  >
+                    {item.vendor_name}
+                  </Text>
+                </View>
+              ) : null}
+              <View style={styles.gridFooter}>
+                <Text style={styles.gridPrice}>{formatINR(item.price)}</Text>
+                <Text style={styles.gridStock}>{item.stock ?? 0} in stock</Text>
+              </View>
+              <View style={styles.gridActions}>
+                <TouchableOpacity onPress={() => setEditing(item)} style={styles.actionBtn} testID={`product-${item.id}-edit`}>
+                  <Feather name="edit-2" size={13} color={colors.primary} />
+                  <Text style={styles.actionBtnText}>Edit</Text>
+                </TouchableOpacity>
+                {/* Aug 2026 — Delete button removed on purpose.
+                    Deleting a live product wiped it from vendor
+                    stock too, causing downstream cart/order
+                    damage.  Admins retain full EDIT rights and
+                    can also toggle "Published" off to hide the
+                    product without destroying vendor data. */}
+              </View>
+            </View>
+          </TouchableOpacity>
+        );
+  }, [picked, togglePick, setEditing, setInterestedFor]);
+
+  // Cards are laid out two per row (styles.gridCard is ~48% wide); the list
+  // virtualises ROWS so the responsive layout is untouched.
+  const cardRows = useMemo(() => {
+    // Search happens on the SERVER (see `appliedSearch`), so the only
+    // client-side narrowing left is the approval-queue toggle.
+    const filtered = reviewOnly ? items.filter((p) => p.review_status === "pending") : items;
+    const out: Product[][] = [];
+    for (let i = 0; i < filtered.length; i += 2) out.push(filtered.slice(i, i + 2));
+    return out;
+  }, [items, reviewOnly]);
+
+  const goToPage = useCallback((n: number) => {
+    setLoading(true);
+    setPicked(new Set());   // selections are per-page
+    pageRef.current = n;
+    load(n);
+  }, [load]);
+
+  // Bulk sub-category mapping (Nov 2026) — same one-tap ergonomics as
+  // "Publish all", but for shelving many products at once.
+
+  const openMapper = useCallback(async () => {
+    setMapOpen(true);
+    if (catTree.length) return;
     try {
-      const page = await loadPage(items.length);
-      setItems((cur) => {
-        const seen = new Set(cur.map((p) => p.id));
-        return [...cur, ...page.items.filter((p) => !seen.has(p.id))];
+      // Nov 2026 — shelving targets only. The Recharge tree is served by the
+      // recharge flow, not the product catalogue, so a physical product must
+      // never be shelved there.
+      const { data } = await api.get<any>("/admin/shop-categories", {
+        params: { exclude_recharge_root: "true" },
       });
-      setTotal(page.total);
-      setHasMore(page.hasMore);
+      setCatTree(data?.items || []);
     } catch (e) {
-      Alert.alert("Couldn't load more", formatApiError(e));
-    } finally {
-      setLoadingMore(false);
+      notify("Couldn't load categories", formatApiError(e));
     }
-  }, [loadingMore, hasMore, items.length, loadPage]);
+  }, [catTree.length]);
+
+  const applyMapping = useCallback(async (category: string, subcategory: string) => {
+    setMapBusy(true);
+    try {
+      const { data } = await api.post<any>("/admin/products/bulk-category", {
+        product_ids: Array.from(picked),
+        category,
+        subcategory,
+      });
+      setMapOpen(false);
+      setPicked(new Set());
+      await load(pageRef.current);
+      notify(
+        "Products shelved",
+        `${data.updated} product${data.updated === 1 ? "" : "s"} moved to ` +
+        `${category}${subcategory ? ` → ${subcategory}` : ""}.`,
+      );
+    } catch (e) {
+      notify("Mapping failed", formatApiError(e));
+    } finally { setMapBusy(false); }
+  }, [picked, load]);
 
   // Debounce the search box, then reload page 1 from the server.
   useEffect(() => {
     const t = setTimeout(() => setAppliedSearch(search), 350);
     return () => clearTimeout(t);
   }, [search]);
-  useEffect(() => { setLoading(true); load(); }, [appliedSearch, vendorFilter]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // A new search / vendor filter changes the whole result set, so jump back to
+  // page 1 and drop the ticks (they could point at rows no longer shown).
+  useEffect(() => {
+    setLoading(true);
+    setPicked(new Set());
+    pageRef.current = 0;
+    load(0);
+  }, [appliedSearch, vendorFilter]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshImageHealth = useCallback(async () => {
     try {
@@ -212,18 +392,29 @@ export default function AdminProducts() {
     }
   }, [refreshImageHealth, load]);
 
+  // Dec 2026 — Silent auto-refresh so new vendor products & publish-toggle
+  // changes appear without a manual pull-to-refresh.
+  // Nov 2026 — `load` is re-created whenever the search or vendor filter
+  // changes, which used to re-run this effect and fire a second, identical
+  // fetch. Keeping it in a ref makes the effect depend on nothing.
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const firstFocus = useRef(true);
   useFocusEffect(useCallback(() => {
-    load();
-    refreshImageHealth();
-    // Dec 2026 — Silent auto-refresh every 15 s so new vendor products
-    // & publish-toggle changes appear without a manual pull-to-refresh.
-    // Interval is cleared on blur (useFocusEffect cleanup runs).
+    if (firstFocus.current) {
+      // The mount effect already fetched page 1.
+      firstFocus.current = false;
+      refreshImageHealth();
+    } else {
+      loadRef.current();
+      refreshImageHealth();
+    }
     const iv = setInterval(() => {
       if (AppState.currentState !== "active") return;   // don't poll from the pocket
-      load();
+      loadRef.current();
     }, 15000);
     return () => clearInterval(iv);
-  }, [load, refreshImageHealth]));
+  }, [refreshImageHealth]));
 
   const runBulkPublish = async () => {
     if (!bulkConfirm) return;
@@ -260,10 +451,14 @@ export default function AdminProducts() {
         </View>
       </View>
 
-      {/* In-app walkthrough — auto-opens on first visit, re-openable via ? button */}
+      {/* In-app walkthrough — auto-opens on first visit, re-openable via ?
+          button. Nov 2026 — "create your first product" is noise on a shop
+          that already has a catalogue, so it only auto-opens once the first
+          load has finished and the catalogue really is empty (an unfiltered
+          one — a search with no hits isn't an empty shop). */}
       <HelpGuide
         id="products-v1"
-        visible={helpVisible || helpOpen}
+        visible={(helpVisible && !loading && total === 0 && !appliedSearch.trim() && !vendorFilter) || helpOpen}
         title="How to create a product"
         subtitle="A quick 6-step tour. Tap anywhere outside to dismiss."
         steps={PRODUCT_GUIDE_STEPS}
@@ -277,10 +472,23 @@ export default function AdminProducts() {
           </View>
         </View>
       ) : (
-        <ScrollView
+        <FlatList
+          // Nov 2026 — VIRTUALISED: 250 image cards used to mount at once,
+          // which stuttered (and could force-close) on low-end phones. Rows
+          // are recycled now; the pager still decides which 250 are in play.
+          data={cardRows}
+          keyExtractor={(row: Product[]) => `row-${row[0]?.id}`}
+          renderItem={({ item: row }: { item: Product[] }) => (
+            <View style={styles.grid}>{row.map(renderCard)}</View>
+          )}
+          initialNumToRender={6}
+          maxToRenderPerBatch={6}
+          windowSize={7}
+          removeClippedSubviews={Platform.OS !== "web"}
           contentContainerStyle={{ padding: spacing.screen, paddingTop: 4, paddingBottom: 80 }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
-        >
+          ListHeaderComponent={
+            <>
           <FadeSlideIn triggerKey={`admprod-${refreshing ? "r" : "d"}`}>
           {/* Hero summary card */}
           <GradientCard variant="primary" style={{ marginBottom: 14, padding: 18 }}>
@@ -292,7 +500,7 @@ export default function AdminProducts() {
             </Text>
             <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", marginTop: 4 }}>
               {appliedSearch.trim() ? `for “${appliedSearch.trim()}” · ` : ""}
-              Showing {items.length.toLocaleString("en-IN")}{hasMore ? " — scroll down to load more" : ""}
+              Page {page + 1} of {Math.max(1, Math.ceil(total / PAGE_SIZE))} · showing {items.length.toLocaleString("en-IN")}
             </Text>
           </GradientCard>
 
@@ -373,10 +581,10 @@ export default function AdminProducts() {
             {/* These three can only count what has been loaded, so they say
                 "so far" until the last page is in — otherwise a 5,000-SKU
                 catalogue looks like it has only 3 out-of-stock items. */}
-            <Stat label={hasMore ? "No stock so far" : "Out of stock"} value={String(items.filter(p => (p.stock || 0) === 0).length)} warn />
-            <Stat label={hasMore ? "Interest so far" : "With interest"} value={String(items.filter(p => (p.interested_count || 0) > 0).length)} />
+            <Stat label="No stock (page)" value={String(items.filter(p => (p.stock || 0) === 0).length)} warn />
+            <Stat label="Interest (page)" value={String(items.filter(p => (p.interested_count || 0) > 0).length)} />
             <Stat
-              label={hasMore ? "Approvals so far" : "Needs approval"}
+              label="Approvals (page)"
               value={String(items.filter(p => p.review_status === "pending").length)}
               warn
             />
@@ -463,128 +671,145 @@ export default function AdminProducts() {
             </TouchableOpacity>
           ) : null}
 
-          {/* Grid */}
-          {(() => {
-            // Search now happens on the SERVER (see `appliedSearch`), so the
-            // only client-side narrowing left is the approval queue toggle.
-            const filtered = reviewOnly ? items.filter(p => p.review_status === "pending") : items;
-            if (filtered.length === 0) {
-              return <Text style={styles.empty}>{search ? "No matches" : (vendorFilter ? `No products from ${vendorFilter.name} yet.` : "No products yet — tap the + to add one.")}</Text>;
-            }
-            return (
-              <View style={styles.grid}>
-                {filtered.map((item) => {
-                  const oos = (item.stock || 0) === 0;
-                  const lowStock = (item.stock || 0) > 0 && (item.stock || 0) <= 5;
-                  return (
-                    <TouchableOpacity
-                      key={item.id}
-                      activeOpacity={0.85}
-                      onPress={() => setEditing(item)}
-                      style={styles.gridCard}
-                      testID={`product-${item.id}`}
-                    >
-                      <View style={styles.gridImgWrap}>
-                        <ProductImage
-                          uri={item.image_url}
-                          name={item.name}
-                          style={styles.gridImg}
-                          containerStyle={{ width: "100%", height: "100%" }}
-                          resizeMode="cover"
-                          testID={`product-${item.id}-img`}
-                        />
-                        {item.is_published === false && (
-                          <View style={[styles.draftPillTop, item.review_status === "pending" && { backgroundColor: colors.warning }]}>
-                            <Text style={styles.draftPillText}>
-                              {item.review_status === "pending" ? "NEEDS APPROVAL" : "DRAFT"}
-                            </Text>
-                          </View>
-                        )}
-                        {oos && (
-                          <View style={styles.oosOverlay} pointerEvents="none">
-                            <Text style={styles.oosOverlayText}>SOLD OUT</Text>
-                          </View>
-                        )}
-                        {lowStock && !oos && (
-                          <View style={styles.lowStockPill}><Text style={styles.lowStockText}>Only {item.stock}</Text></View>
-                        )}
-                        {(item.interested_count || 0) > 0 && (
-                          <TouchableOpacity
-                            style={styles.interestBadge}
-                            onPress={() => setInterestedFor(item)}
-                            testID={`product-${item.id}-interested`}
-                          >
-                            <Feather name="users" size={10} color="#fff" />
-                            <Text style={styles.interestBadgeText}>{item.interested_count}</Text>
-                          </TouchableOpacity>
-                        )}
-                      </View>
-                      <View style={styles.gridBody}>
-                        {item.category ? <Text style={styles.gridCat} numberOfLines={1}>{item.category}</Text> : null}
-                        <Text style={styles.gridName} numberOfLines={2}>{item.name}</Text>
-                        {/* Jul 2026 — Show which vendor owns this product so admins can spot ownership at-a-glance. */}
-                        {item.vendor_name ? (
-                          <View style={styles.vendorRow}>
-                            <Feather name="briefcase" size={9} color={item.vendor_id ? colors.primary : colors.textMuted} />
-                            <Text
-                              style={[styles.vendorRowText, !item.vendor_id && { color: colors.textMuted, fontStyle: "italic" }]}
-                              numberOfLines={1}
-                            >
-                              {item.vendor_name}
-                            </Text>
-                          </View>
-                        ) : null}
-                        <View style={styles.gridFooter}>
-                          <Text style={styles.gridPrice}>{formatINR(item.price)}</Text>
-                          <Text style={styles.gridStock}>{item.stock ?? 0} in stock</Text>
-                        </View>
-                        <View style={styles.gridActions}>
-                          <TouchableOpacity onPress={() => setEditing(item)} style={styles.actionBtn} testID={`product-${item.id}-edit`}>
-                            <Feather name="edit-2" size={13} color={colors.primary} />
-                            <Text style={styles.actionBtnText}>Edit</Text>
-                          </TouchableOpacity>
-                          {/* Aug 2026 — Delete button removed on purpose.
-                              Deleting a live product wiped it from vendor
-                              stock too, causing downstream cart/order
-                              damage.  Admins retain full EDIT rights and
-                              can also toggle "Published" off to hide the
-                              product without destroying vendor data. */}
-                        </View>
-                      </View>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            );
-          })()}
-
-          {/* Jun 2026 — Load more. Replaces the old hardcoded 200-item cap. */}
-          {hasMore && !reviewOnly ? (
-            <TouchableOpacity
-              onPress={loadMore}
-              disabled={loadingMore}
-              style={[styles.loadMoreBtn, loadingMore && { opacity: 0.6 }]}
-              testID="products-load-more"
-              activeOpacity={0.85}
-            >
-              {loadingMore
-                ? <ActivityIndicator size="small" color={colors.primary} />
-                : <Feather name="chevron-down" size={16} color={colors.primary} />}
-              <Text style={styles.loadMoreText}>
-                {loadingMore
-                  ? "Loading…"
-                  : `Load ${Math.min(PAGE_SIZE, Math.max(0, total - items.length))} more (${items.length.toLocaleString("en-IN")} of ${total.toLocaleString("en-IN")})`}
+          {/* Nov 2026 — bulk sub-category mapping. Tick products below, then
+              shelve them all in one tap (mirrors "Publish all"). */}
+          {picked.size > 0 && !reviewOnly ? (
+            <View style={styles.mapBar} testID="products-map-bar">
+              <Feather name="layers" size={18} color={colors.primaryFg} />
+              <Text style={styles.mapBarText}>
+                {picked.size} selected on this page
               </Text>
-            </TouchableOpacity>
+              <TouchableOpacity onPress={() => setPicked(new Set())} style={{ padding: 8 }} testID="products-map-clear">
+                <Feather name="x" size={18} color={colors.primaryFg} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={openMapper} style={styles.mapBarBtn} testID="products-map-open">
+                <Text style={styles.mapBarBtnText}>Map to shelf</Text>
+              </TouchableOpacity>
+            </View>
           ) : null}
-          {!hasMore && items.length > 0 && !reviewOnly ? (
-            <Text style={styles.endOfList} testID="products-end">
-              All {total.toLocaleString("en-IN")} products loaded
+
+          {/* The product cards themselves are rendered by the
+              virtualised list (see `renderItem` above). */}
+          {cardRows.length === 0 ? (
+            <Text style={styles.empty}>
+              {search ? "No matches" : (vendorFilter ? `No products from ${vendorFilter.name} yet.` : "No products yet — tap the + to add one.")}
             </Text>
           ) : null}
           </FadeSlideIn>
-        </ScrollView>
+            </>
+          }
+          ListFooterComponent={
+            <>
+          {/* Nov 2026 — numbered pages (250 per page). Replaces "Load more",
+              which reset to the first page whenever the screen refocused. */}
+          {!reviewOnly && total > PAGE_SIZE ? (
+            <View style={styles.pager} testID="products-pager">
+              <TouchableOpacity
+                onPress={() => goToPage(page - 1)}
+                disabled={page <= 0}
+                style={[styles.pagerBtn, page <= 0 && { opacity: 0.35 }]}
+                testID="products-page-prev"
+              >
+                <Feather name="chevron-left" size={18} color={colors.primary} />
+              </TouchableOpacity>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 6, paddingHorizontal: 6 }}
+                style={{ flex: 1 }}
+              >
+                {Array.from({ length: Math.ceil(total / PAGE_SIZE) }).map((_, i) => (
+                  <TouchableOpacity
+                    key={i}
+                    onPress={() => goToPage(i)}
+                    style={[styles.pageChip, i === page && styles.pageChipActive]}
+                    testID={`products-page-${i + 1}`}
+                  >
+                    <Text style={[styles.pageChipText, i === page && styles.pageChipTextActive]}>
+                      {i + 1}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              <TouchableOpacity
+                onPress={() => goToPage(page + 1)}
+                disabled={(page + 1) * PAGE_SIZE >= total}
+                style={[styles.pagerBtn, (page + 1) * PAGE_SIZE >= total && { opacity: 0.35 }]}
+                testID="products-page-next"
+              >
+                <Feather name="chevron-right" size={18} color={colors.primary} />
+              </TouchableOpacity>
+            </View>
+          ) : null}
+          {items.length > 0 && !reviewOnly ? (
+            <Text style={styles.endOfList} testID="products-end">
+              Page {page + 1} of {Math.max(1, Math.ceil(total / PAGE_SIZE))} · showing{" "}
+              {items.length.toLocaleString("en-IN")} of {total.toLocaleString("en-IN")} products
+            </Text>
+          ) : null}
+            </>
+          }
+        />
       )}
+
+      {/* Nov 2026 — shelf picker: every category with its sub-shelves nested,
+          one tap to map every selected product. */}
+      <Modal visible={mapOpen} transparent animationType="slide" onRequestClose={() => setMapOpen(false)}>
+        <TouchableOpacity
+          style={styles.bulkOverlay}
+          activeOpacity={1}
+          onPress={() => !mapBusy && setMapOpen(false)}
+        >
+          <TouchableOpacity activeOpacity={1} style={styles.mapSheet} onPress={() => {}}>
+            <View style={styles.mapGrab} />
+            <View style={{ paddingHorizontal: 16, paddingBottom: 10 }}>
+              <Text style={{ fontSize: 17, fontWeight: "900", color: colors.textMain }}>
+                Move {picked.size} product{picked.size === 1 ? "" : "s"} to…
+              </Text>
+              <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 3 }}>
+                Tap a shelf. Sub-shelves are listed under their category.
+              </Text>
+            </View>
+            {mapBusy ? (
+              <View style={{ paddingVertical: 36, alignItems: "center" }}>
+                <ActivityIndicator color={colors.primary} />
+                <Text style={{ marginTop: 10, color: colors.textMuted, fontSize: 12.5 }}>Shelving…</Text>
+              </View>
+            ) : (
+              <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ paddingBottom: 28 }}>
+                {catTree.filter((c) => !c.parent_id).map((root) => {
+                  const subs = catTree.filter((c) => c.parent_id && c.parent_id === root.id);
+                  return (
+                    <View key={root.id || root.name}>
+                      <TouchableOpacity
+                        style={styles.mapRoot}
+                        onPress={() => applyMapping(root.name, "")}
+                        testID={`map-cat-${root.name}`}
+                      >
+                        <Feather name="folder" size={17} color={colors.primary} />
+                        <Text style={styles.mapRootText}>{root.name}</Text>
+                        <Feather name="chevron-right" size={16} color={colors.textMuted} />
+                      </TouchableOpacity>
+                      {subs.map((sub) => (
+                        <TouchableOpacity
+                          key={sub.id || sub.name}
+                          style={styles.mapSub}
+                          onPress={() => applyMapping(root.name, sub.name)}
+                          testID={`map-sub-${sub.name}`}
+                        >
+                          <Feather name="corner-down-right" size={14} color={colors.textMuted} />
+                          <Text style={styles.mapSubText}>{sub.name}</Text>
+                          <Feather name="chevron-right" size={15} color={colors.border} />
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            )}
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
       <RichProductEditor
         visible={createOpen || !!editing}
@@ -984,6 +1209,64 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, minHeight: 48,
   },
   loadMoreText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  // Numbered pager (Nov 2026)
+  pager: {
+    flexDirection: "row", alignItems: "center", marginTop: 4, marginBottom: 6,
+    backgroundColor: colors.surface, borderRadius: radii.button,
+    borderWidth: 1, borderColor: colors.border, paddingVertical: 6, paddingHorizontal: 4,
+  },
+  pagerBtn: {
+    width: 44, height: 44, borderRadius: radii.button,
+    alignItems: "center", justifyContent: "center",
+  },
+  pageChip: {
+    minWidth: 44, height: 44, paddingHorizontal: 12, borderRadius: radii.button,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border,
+  },
+  pageChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  pageChipText: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  pageChipTextActive: { color: colors.primaryFg },
+  // Bulk sub-category mapping bar + sheet
+  mapBar: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    backgroundColor: colors.primary, borderRadius: radii.card,
+    paddingVertical: 12, paddingHorizontal: 14, marginBottom: 10, minHeight: 48,
+  },
+  mapBarText: { flex: 1, color: colors.primaryFg, fontSize: 13, fontWeight: "800" },
+  mapBarBtn: {
+    paddingHorizontal: 14, paddingVertical: 10, borderRadius: radii.button,
+    backgroundColor: colors.primaryFg, minHeight: 40, justifyContent: "center",
+  },
+  mapBarBtnText: { color: colors.primary, fontSize: 12.5, fontWeight: "900" },
+  mapSheet: {
+    position: "absolute", left: 0, right: 0, bottom: 0, maxHeight: "82%",
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingTop: 10,
+  },
+  mapGrab: {
+    alignSelf: "center", width: 40, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, marginBottom: 10,
+  },
+  mapRoot: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingVertical: 14, paddingHorizontal: 16,
+    borderBottomWidth: 1, borderBottomColor: colors.border, minHeight: 52,
+  },
+  mapRootText: { flex: 1, fontSize: 14.5, fontWeight: "800", color: colors.textMain },
+  mapSub: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingVertical: 12, paddingLeft: 36, paddingRight: 16,
+    borderBottomWidth: 1, borderBottomColor: colors.surfaceMuted, minHeight: 48,
+  },
+  mapSubText: { flex: 1, fontSize: 13.5, fontWeight: "600", color: colors.textMuted },
+  tickCell: { width: 30, alignItems: "center", justifyContent: "center" },
+  pickDot: {
+    position: "absolute", top: 6, left: 6, zIndex: 5,
+    width: 30, height: 30, borderRadius: 15,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.35)",
+  },
   endOfList: { textAlign: "center", fontSize: 11.5, color: colors.textMuted, paddingVertical: 14 },
   bulkOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 24 },
   bulkCard: { backgroundColor: colors.surface, borderRadius: 18, padding: 20 },

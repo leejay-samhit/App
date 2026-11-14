@@ -10,7 +10,7 @@ import {
   ScrollView,
   ActivityIndicator,
 } from "react-native";
-import { useRouter, Link, useLocalSearchParams } from "expo-router";
+import { Link, useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -23,12 +23,10 @@ export default function Register() {
   const { register } = useAuth();
   const router = useRouter();
   const wideColumn = useResponsiveContainer();
-  const params = useLocalSearchParams<{ ref?: string }>();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [phone, setPhone] = useState("");
-  const [referral, setReferral] = useState((params.ref as string) || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -49,7 +47,6 @@ export default function Register() {
         email: email.trim(),
         password,
         phone: phone.trim() || undefined,
-        referral_code: referral.trim() || undefined,
       });
       router.replace("/payment");
     } catch (e) {
@@ -98,20 +95,15 @@ export default function Register() {
             <Text style={styles.label}>Password</Text>
             <TextInput testID="register-password-input" value={password} onChangeText={setPassword} secureTextEntry placeholder="Min 6 characters" placeholderTextColor={colors.textMuted} style={styles.input} />
           </View>
-          <View style={styles.formGroup}>
-            <Text style={styles.label}>Invite code (optional)</Text>
-            <TextInput testID="register-referral-input" value={referral} onChangeText={(t) => setReferral(t.toUpperCase())} autoCapitalize="characters" placeholder="e.g. ABC123" placeholderTextColor={colors.textMuted} style={styles.input} />
-          </View>
 
           {error ? <Text style={styles.error} testID="register-error">{error}</Text> : null}
 
           <TouchableOpacity testID="register-submit-button" style={[styles.primaryBtn, loading && { opacity: 0.7 }]} onPress={onSubmit} disabled={loading}>
-            {loading ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={styles.primaryBtnText}>Continue to payment</Text>}
+            {loading ? <ActivityIndicator color={colors.primaryFg} /> : <Text style={styles.primaryBtnText}>Create my account</Text>}
           </TouchableOpacity>
 
-          {/* Emergent-managed Google sign-up — the invite code typed above
-              is carried through the redirect so attribution still works. */}
-          <GoogleSignInButton referralCode={referral} onError={setError} label="Sign up with Google" />
+          {/* Nov-2026 — free signup: no invite code and no payment step. */}
+          <GoogleSignInButton onError={setError} label="Sign up with Google" />
 
           <View style={styles.footerRow}>
             <Text style={styles.muted}>Already have an account?</Text>

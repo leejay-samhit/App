@@ -35,7 +35,6 @@ const ITEMS = [
   { icon: "package", label: "Orders management", route: "/admin/orders" },
   { icon: "rotate-ccw", label: "Returns · refunds · reconciliation", route: "/admin/returns" },
   { icon: "bell", label: "Push notification diagnostics", route: "/admin/push-diagnostics" },
-  { icon: "shield", label: "SIM binding & chat access", route: "/admin/sim-binding" },
   { icon: "list", label: "Transactions", route: "/admin/transactions" },
   { icon: "file-text", label: "Admin audit log", route: "/admin/audit" },
   { icon: "award", label: "Membership (₹118 subscription)", route: "/admin/subscription" },

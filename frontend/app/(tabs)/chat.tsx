@@ -9,7 +9,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
 import { api, formatApiError } from "../../src/api";
-import { handleChatGateError } from "../../src/sim-verification";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing } from "../../src/theme";
 import { useChatSocket } from "../../src/use-chat-socket";
@@ -116,7 +115,6 @@ export default function ChatListScreen() {
       Alert.alert("Request sent", `Waiting for ${searchResult.user.name} to accept.`);
       load();
     } catch (e) {
-      if (handleChatGateError(e, (p) => router.push(p as any))) return;
       Alert.alert("Failed", formatApiError(e));
     }
   };
@@ -127,7 +125,6 @@ export default function ChatListScreen() {
       load();
       if (r.data?.thread_id) router.push(`/chat/${r.data.thread_id}` as any);
     } catch (e) {
-      if (handleChatGateError(e, (p) => router.push(p as any))) return;
       Alert.alert("Failed", formatApiError(e));
     }
   };

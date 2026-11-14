@@ -13,14 +13,12 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import * as Clipboard from "expo-clipboard";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { api } from "../../src/api";
 import { cachedGet } from "../../src/cachedGet";
 import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
 import { colors, formatINR, radii, spacing, withAlpha } from "../../src/theme";
-import { SubscribeBanner } from "../../src/subscription";
 import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
 import { Sparkline } from "../../src/charts";
@@ -56,7 +54,6 @@ export default function DashboardScreen() {
   const [data, setData] = useState<Dashboard | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
   // When the user taps the Total Earnings card body, expand to reveal
   // all the secondary dashboard sections. Withdraw button stays out of
   // the toggle area.
@@ -160,21 +157,7 @@ export default function DashboardScreen() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const onShareCode = async () => {
-    if (!data?.invite_code) return;
-    try {
-      await Share.share({
-        message: `Shop local vendors on Slangcart and get cashback on every delivered order. Use my invite code *${data.invite_code}* when you sign up: slangcart.com/r/${data.invite_code}`,
-      });
-    } catch {}
-  };
 
-  const onCopyCode = async () => {
-    if (!data?.invite_code) return;
-    await Clipboard.setStringAsync(data.invite_code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   if (loading || !data) {
     return (
@@ -246,7 +229,6 @@ export default function DashboardScreen() {
           </View>
         </Animated.View>
 
-        <SubscribeBanner />
 
         <Animated.View entering={FadeInDown.duration(400).delay(80)} style={{ height: 6 }} />
 
@@ -507,19 +489,6 @@ export default function DashboardScreen() {
 
         <Animated.View entering={FadeInDown.duration(450).delay(300)}>
           <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
-          <View style={styles.codeCard}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.codeLabel}>YOUR INVITE CODE</Text>
-              <Text style={styles.codeValue}>{data.invite_code}</Text>
-            </View>
-            <TouchableOpacity onPress={onCopyCode} style={styles.codeIconBtn} testID="dashboard-copy-code">
-              <Feather name={copied ? "check" : "copy"} size={16} color={colors.primaryFg} />
-            </TouchableOpacity>
-            <TouchableOpacity onPress={onShareCode} style={[styles.codeIconBtn, { backgroundColor: colors.accent }]} testID="dashboard-share-code">
-              <Feather name="share-2" size={16} color={colors.accentFg} />
-            </TouchableOpacity>
-          </View>
-
           {/* Oct-2026 — bank / UPI details only matter for people we pay
               out to (sellers, riders). Shoppers never see this row. */}
           {canPayout ? (

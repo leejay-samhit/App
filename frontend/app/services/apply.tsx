@@ -251,18 +251,11 @@ export default function ServiceApply() {
   const status = existing?.service_status as string | null;
   const isApproved = status === "approved";
   const isPending = status === "pending";
-  const needsRegistration = registrationPaid === false;
-  // June 2026 — approved providers can EDIT (locked=false while `editing`).
-  // Pending applications stay locked (admin is reviewing). Unpaid users
-  // stay locked (must pay registration first).
-  const locked = (isApproved && !editing) || isPending || needsRegistration;
-  const banner = needsRegistration
-    ? {
-        color: colors.error,
-        label: "Only members can list a service — become a member to apply.",
-        cta: { text: "Become a member", route: "/payment" },
-      }
-    : isApproved
+  // Nov-2026 — applying is FREE: the ₹118 membership requirement is gone.
+  // Approved providers can EDIT (locked=false while `editing`); pending
+  // applications stay locked while the admin reviews them.
+  const locked = (isApproved && !editing) || isPending;
+  const banner = isApproved
     ? { color: colors.success, label: "You're a verified service provider" }
     : isPending
     ? { color: colors.accent, label: "Application under review" }

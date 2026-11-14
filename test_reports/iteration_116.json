@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 116 is a partial retest, backend only. I ran test_iter116_retest.py and test_iter115_retest.py, compared text-index and regex search counts straight in the DB, read the code for items A to G, and tested item E with 2 temporary TEST_ products, which I deleted afterwards. Items D and G, the frontend Playwright UI tests and the vendor pager were NOT run because the session ended. Item F (text-index search) changed search results: a single word that also appears in one product's name or tags now returns only those products, e.g. 'beauty' gives 1 result instead of 546 and 'test' gives 2 instead of 6003, because ix_prod_text indexes only brand/name/tags. The 5 checks named in the request all pass: Widget=2, 'PERFTEST Product 00500'=1, mobile=545, Produ=6000, nonsense=0. Item E is only partly fixed: a product with sub_category='' and the legacy subcategory set is not counted, because $ifNull treats '' as a real value.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/products?q=<single word>", "issue": "When the text index finds any match, the regex fallback is skipped. ix_prod_text covers only brand/name/tags, so the description, category and sub_category matches are lost. Results: 'beauty' returns 1 (should be 546, the Beauty category), 'test' returns 2 (should be 6003). Any category word that appears in one product name now hides the rest of that category.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/products/subcategory-counts", "issue": "Uses $ifNull[$sub_category,$subcategory], which does not fall back when sub_category is ''. In a live test with 2 TEST_ products in the TEST_116_Legacy sub-category (one with sub_category missing, one with sub_category=''), the chip count was 1 and the list total was 2. 545 Electronics rows already have sub_category=''. Fix: use $cond on empty/null, or $ifNull plus a $ne '' check."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Shop layout product resolve (C/D), from reading the code only", "issue": "shop-layout-renderer.tsx:1166-1170 sets lastIdsKey before the request. If the effect re-runs (pincode lands, refreshTick) while that request is in flight, the old response is dropped by the `cancelled` check and the new run skips because the key matches. Products are then never loaded (the request is not retried, and lastIdsKey is not cleared on error). Pull-to-refresh also never refreshes block products. productsResolved is never set back to false when the effect re-runs. Fix: clear lastIdsKey in the effect cleanup and on error, or store the promise per key.", "affected_testIDs": []},
+      {"flow": "Admin Products search (A), from reading the code only", "issue": "load depends on loadPage, which depends on appliedSearch/vendorFilter. So a search change re-runs the useFocusEffect (calls load()) on top of the reset effect (calls load(0)), giving 2 requests per search and restarting the 15s interval. It still shows the correct page 0, so this costs a request but gives no wrong data.", "affected_testIDs": []}
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iter116_retest.py", "/app/backend/tests/test_iter115_retest.py", "/app/test_reports/pytest/pytest_iter116.xml"],
+  "action_items": [
+    "products_public.py:278-288: use the text index only when it gives the same results as the regex. Either add category/sub_category/subcategory/description to ix_prod_text and still fall back to the regex for partial words, or drop the text short-circuit.",
+    "subcategory-counts: treat '' sub_category as missing, e.g. $cond [{$in:[$sub_category,[null,'']]}, $subcategory, $sub_category].",
+    "shop-layout-renderer.tsx: reset lastIdsKey in the effect cleanup and on error, and set productsResolved back to false when the ids change.",
+    "admin/products.tsx: keep load stable through a ref so a search change fires only one fetch."
+  ],
+  "critical_code_review_comments": ["admin/products.tsx is 1263 lines and shop-layout-renderer.tsx is 1667 lines; both should be split."],
+  "updated_files": ["/app/backend/tests/test_iter116_retest.py"],
+  "success_rate": {"backend": "~80% (the 6 failures in the first run were a test event-loop bug that I fixed but did not re-run; the text-index search regression is real)", "frontend": "not tested"},
+  "seed_data_creation": "2 TEST_ products (TEST_116_leg_a, TEST_116_leg_b) created and deleted. No layout blocks created.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Still to do: D (create a product_grid block with an unknown id and a content_box with an unknown product_id via POST /api/admin/shop-layout, check in the UI that neither renders, then delete both), G, count the /products?ids requests per shop open, the admin pager, and the vendor pager (no vendor password is known). Re-run test_iter116_retest.py: it now uses sync pymongo for the regex counts.",
+  "rca_of_issue": "F: count_documents($text, limit=1) succeeding is treated as proof the text index covers the query, but the index fields are a subset of the regex fields. E: $ifNull does not fall through on an empty string."
+}

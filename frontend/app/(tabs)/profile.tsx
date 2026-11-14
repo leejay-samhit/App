@@ -25,7 +25,7 @@ import { useAuth } from "../../src/auth";
 import { useBranding } from "../../src/branding";
 import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { colors, radii, spacing } from "../../src/theme";
-import { SubscribeBanner, MembershipCard } from "../../src/subscription";
+import { MembershipCard } from "../../src/subscription";
 import { GradientCard } from "../../src/gradient-card";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
@@ -223,7 +223,6 @@ export default function ProfileScreen() {
           keyboardShouldPersistTaps="handled"
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
         >
-          <SubscribeBanner />
           <MembershipCard />
           <GradientCard variant="royal" style={{ marginBottom: spacing.cardPad, padding: 24 }}>
             <View style={{ flexDirection: "row", alignItems: "center" }}>
@@ -286,10 +285,6 @@ export default function ProfileScreen() {
               </View>
             </View>
             <View style={{ flexDirection: "row", marginTop: 16, gap: 8 }}>
-              <View style={{ backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }}>
-                <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", fontWeight: "700", letterSpacing: 1 }}>INVITE CODE</Text>
-                <Text style={{ fontSize: 14, fontWeight: "800", color: "#fff", letterSpacing: 1 }}>{user?.referral_code}</Text>
-              </View>
               {(user as any)?.is_vendor && (
                 <View style={{ backgroundColor: "rgba(255,255,255,0.18)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, justifyContent: "center" }}>
                   <Text style={{ fontSize: 11, fontWeight: "700", color: "#fff", letterSpacing: 0.5 }}>🛍️ VENDOR</Text>
@@ -342,15 +337,6 @@ export default function ProfileScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.kycTitle}>Notifications</Text>
                 <Text style={styles.kycSub}>ORDERS · CHATS · OFFERS</Text>
-              </View>
-              <Feather name="chevron-right" size={18} color={colors.textMuted} />
-            </TouchableOpacity>
-            <View style={styles.rowDivider} />
-            <TouchableOpacity onPress={() => router.push("/verify-sim" as any)} style={styles.rowItem} testID="profile-verify-sim-link">
-              <View style={[styles.kycDot, { backgroundColor: colors.brand500 }]} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.kycTitle}>Chat verification</Text>
-                <Text style={styles.kycSub}>SIM CHECK · LINK A DEVICE</Text>
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>

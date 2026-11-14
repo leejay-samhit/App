@@ -3058,3 +3058,57 @@ suites — 129 backend tests passing.
 - Verified by testing agent (iter110): friendly error in API + admin UI, banner
   geometry measured, festival apply/switch/restore regression green, 18/18
   festival tests pass.
+
+## Nov 2026 (4) — Auth overhaul: WhatsApp OTP in, Truecaller / ₹118 / referrals out
+
+User brief: remove Truecaller + SIM binding, add OTPly WhatsApp OTP login, drop the
+mandatory ₹118 registration fee, make service-provider phone numbers free, stop
+assigning sponsors/invites — and touch nothing financial.
+
+**Sign-in is now exactly three doors** (`app/login.tsx`): email + password,
+Emergent-managed Google, and "Continue with Mobile Number" (WhatsApp OTP).
+
+**WhatsApp OTP (OTPly)**
+- `backend/core/otply.py` — provider call (GET `api.adeptcode.in`, key from backend
+  secret `OTPLY_API_KEY`), 6-digit code, SHA-256 hashed with a per-request salt,
+  5-min expiry, 60s resend cooldown, 5 attempt cap, per-mobile + per-IP rate limits,
+  one-time use, httpx logger silenced so the key/URL never reaches logs.
+- `backend/routes/otp_auth.py` — `POST /api/auth/otp/send`, `POST /api/auth/otp/verify`.
+  Verify reuses the existing `create_access_token` / `register_session` machinery.
+- Frontend: `src/mobile-otp-card.tsx`, `app/verify-mobile.tsx`,
+  `app/complete-profile.tsx` (name/email asked once for brand-new mobile users).
+
+**Phone ownership rule.** A number typed at signup was never proof of anything, so
+when an OTP-verified number is found on an account that never verified it *and* has
+another way in (password / Google), the number is released from that account
+(`phone: ""`, `phone_released_reason: claimed_by_whatsapp_otp`) and the person who
+proved control continues on their own account. The other account keeps its email /
+Google login and all its data. Verified numbers always return the same account.
+Blocked accounts are refused with a masked email.
+
+**Removed**
+- Truecaller + SIM binding: backend routes/startup/indexes, chat/cart/product SIM
+  gates, `frontend/modules/truecaller`, `plugins/withTruecaller.js`, the `app.json`
+  plugin entry, admin SIM page and the profile "Verify SIM" row.
+- ₹118: `app/payment.tsx` replaced, membership gates dropped from
+  `services/apply.tsx` / `delivery/apply.tsx`, `SubscribeBanner` removed from shop,
+  dashboard and profile, `src/post-auth-route.ts` no longer routes to payment.
+  Historical ₹118 transactions and invoices are untouched.
+- Invites/sponsors: register screen's invite field gone; `POST /api/auth/register`
+  and `routes/signup_gate.py` no longer resolve or assign a sponsor (the `EARN`
+  fallback is dead); dashboard invite card removed.
+- Paid phone reveal: `GET /api/services/{id}/reveal-phone` is free — no invoice, no
+  wallet debit, no GST. `app/services/[id].tsx` now shows "Get Phone Number" + a
+  direct call action; chat with a provider is free too. Provider consent /
+  availability checks still apply.
+
+**Index change.** `users.email` is now a *partial* unique index
+(`email` exists and is a non-empty string) so mobile-only accounts — which carry no
+email — can coexist. Previously the second mobile signup hit a duplicate-key 500.
+
+**Financial reconciliation.** Wallet total (₹287,525.91) and transaction count
+(2,827) identical before and after; newest transaction is still 2026-11-05, i.e. no
+money document was written by any of this work.
+
+Verified by the testing agent (9/9 flows) plus local end-to-end OTP tests covering
+claim-release, same-account re-login, one-time use and replay rejection.

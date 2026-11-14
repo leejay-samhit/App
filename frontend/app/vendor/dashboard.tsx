@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, FlatList, Modal, TextInput, TouchableOpacity, ActivityIndicator, Alert, RefreshControl, Image, KeyboardAvoidingView, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -12,7 +12,7 @@ import { useSwipePager } from "../../src/use-swipe-pager";
 import { ProductImage } from "../../src/product-image";
 
 /** Products fetched per page by the vendor dashboard list. */
-const PRODUCT_PAGE = 60;
+const PRODUCT_PAGE = 250;   // Nov 2026 — owner asked for 250 per page
 
 type Stats = {
   total_sales: number; total_earnings: number; today_earnings: number;
@@ -86,31 +86,57 @@ export default function VendorDashboard() {
   const [submittingAnswer, setSubmittingAnswer] = useState(false);
   // Jun 2026 — paged product list (see /vendor/me/products).
   const [productTotal, setProductTotal] = useState(0);
-  const [productsHasMore, setProductsHasMore] = useState(false);
-  const [loadingMoreProducts, setLoadingMoreProducts] = useState(false);
+  // Nov 2026 — numbered pages of 250 instead of "Load more", which restarted
+  // from the first page on every refocus and so never reached a big catalogue.
+  const [productPage, setProductPage] = useState(0);
+  const productPageRef = useRef(0);
+  // How many of the page's 250 cards are mounted (grows as you scroll).
+  const [visibleCount, setVisibleCount] = useState(40);
 
   const load = useCallback(async () => {
+    const pageNo = productPageRef.current;
     try {
-      const [s, p, sl, pubResp, qa] = await Promise.all([
+      const [s, p, sl, qa] = await Promise.all([
         api.get<Stats>("/vendor/me/stats"),
-        api.get<any>("/vendor/me/products", { params: { limit: PRODUCT_PAGE, offset: 0 } }),
+        api.get<any>("/vendor/me/products", { params: { limit: PRODUCT_PAGE, offset: pageNo * PRODUCT_PAGE } }),
         api.get<{ items: Sale[] }>("/vendor/me/sales"),
-        api.get<any>("/products").catch(() => ({ data: [] })),
         api.get<{ items: VendorQuestion[]; pending_count: number }>("/vendor/me/questions").catch(() => ({ data: { items: [], pending_count: 0 } as any })),
       ]);
-      const pubList: any[] = Array.isArray(pubResp.data) ? pubResp.data : (pubResp.data?.items || []);
-      const cMap = new Map<string, number>();
-      pubList.forEach((x: any) => cMap.set(x.id, x.interested_count || 0));
       // Jun 2026 — /vendor/me/products is now PAGED ({items,total,has_more}).
       // The old hard cap silently dropped everything past the first 1,000
       // rows, so a restored catalogue looked incomplete. Legacy array shape
       // is still accepted for older builds.
       const prodData = p.data;
       const prodList: Product[] = Array.isArray(prodData) ? prodData : (prodData?.items || []);
+      // Nov 2026 — "interested" counts live on the public list. Ask for THIS
+      // page's ids: the old call fetched the public FIRST page, so every
+      // badge past product 60 showed 0.
+      const cMap = new Map<string, number>();
+      if (prodList.length) {
+        try {
+          const pubResp = await api.get<any>("/products", {
+            params: { ids: prodList.map((x) => x.id).join(",") },
+          });
+          const pubList: any[] = Array.isArray(pubResp.data) ? pubResp.data : (pubResp.data?.items || []);
+          pubList.forEach((x: any) => cMap.set(x.id, x.interested_count || 0));
+        } catch { /* badge is cosmetic */ }
+      }
       setStats(s.data);
       setProducts(prodList.map((it) => ({ ...it, interested_count: cMap.get(it.id) || 0 })));
-      setProductTotal(Number(Array.isArray(prodData) ? prodList.length : (prodData?.total ?? prodList.length)));
-      setProductsHasMore(Boolean(Array.isArray(prodData) ? false : prodData?.has_more));
+      const tot = Number(Array.isArray(prodData) ? prodList.length : (prodData?.total ?? prodList.length));
+      setProductTotal(tot);
+      // Deleting the last product on the final page would strand the vendor on
+      // an empty page — step back to the last page that still has rows.
+      if (prodList.length === 0 && tot > 0 && pageNo > 0) {
+        const last = Math.max(0, Math.ceil(tot / PRODUCT_PAGE) - 1);
+        if (last !== pageNo) {
+          productPageRef.current = last;
+          setProductPage(last);
+          const back = await api.get<any>("/vendor/me/products", { params: { limit: PRODUCT_PAGE, offset: last * PRODUCT_PAGE } });
+          const backList: Product[] = Array.isArray(back.data) ? back.data : (back.data?.items || []);
+          setProducts(backList.map((it) => ({ ...it, interested_count: cMap.get(it.id) || 0 })));
+        }
+      }
       setSales(sl.data.items || []);
       setQuestions(qa.data?.items || []);
       setPendingCount(qa.data?.pending_count || 0);
@@ -123,26 +149,13 @@ export default function VendorDashboard() {
     finally { setLoading(false); setRefreshing(false); }
   }, [router]);
 
-  const loadMoreProducts = useCallback(async () => {
-    if (loadingMoreProducts || !productsHasMore) return;
-    setLoadingMoreProducts(true);
-    try {
-      const r = await api.get<any>("/vendor/me/products", {
-        params: { limit: PRODUCT_PAGE, offset: products.length },
-      });
-      const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
-      setProducts((cur) => {
-        const seen = new Set(cur.map((x) => x.id));
-        return [...cur, ...list.filter((x) => !seen.has(x.id))];
-      });
-      setProductTotal(Number(r.data?.total ?? productTotal));
-      setProductsHasMore(Boolean(r.data?.has_more));
-    } catch (e) {
-      Alert.alert("Couldn't load more", formatApiError(e));
-    } finally {
-      setLoadingMoreProducts(false);
-    }
-  }, [loadingMoreProducts, productsHasMore, products.length, productTotal]);
+  const goToProductPage = useCallback((n: number) => {
+    productPageRef.current = n;
+    setProductPage(n);
+    setVisibleCount(40);   // a new page starts from the top
+    setLoading(true);
+    load();
+  }, [load]);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
 
@@ -465,6 +478,16 @@ export default function VendorDashboard() {
         ) : (
           <ScrollView
             contentContainerStyle={{ padding: spacing.screen, paddingBottom: 80 }}
+            // Nov 2026 — grow the rendered slice as the vendor scrolls. All
+            // 250 cards used to mount at once, which stuttered on low-end
+            // phones; now only what has been scrolled to is on screen.
+            scrollEventThrottle={64}
+            onScroll={(e) => {
+              const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+              if (contentOffset.y + layoutMeasurement.height >= contentSize.height - layoutMeasurement.height) {
+                setVisibleCount((n) => (n >= products.length ? n : n + 40));
+              }
+            }}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
           >
             <TouchableOpacity onPress={() => router.push("/vendor/catalogue-backup" as any)} style={styles.backupRow} testID="vendor-backup-open">
@@ -476,7 +499,7 @@ export default function VendorDashboard() {
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
             <View style={styles.vendorGrid}>
-              {products.map((item) => {
+              {products.slice(0, visibleCount).map((item) => {
                 const oos = (item.stock || 0) === 0;
                 const lowStock = (item.stock || 0) > 0 && (item.stock || 0) <= 5;
                 return (
@@ -551,28 +574,50 @@ export default function VendorDashboard() {
                 );
               })}
             </View>
-            {/* Jun 2026 — Load more. The list used to stop at a hard 1,000
-                rows with no way to reach the rest of a restored catalogue. */}
-            {productsHasMore ? (
-              <TouchableOpacity
-                onPress={loadMoreProducts}
-                disabled={loadingMoreProducts}
-                style={[styles.vendorLoadMore, loadingMoreProducts && { opacity: 0.6 }]}
-                testID="vendor-products-load-more"
-                activeOpacity={0.85}
-              >
-                {loadingMoreProducts
-                  ? <ActivityIndicator size="small" color={colors.primary} />
-                  : <Feather name="chevron-down" size={16} color={colors.primary} />}
-                <Text style={styles.vendorLoadMoreText}>
-                  {loadingMoreProducts
-                    ? "Loading…"
-                    : `Load more (${products.length} of ${productTotal})`}
-                </Text>
-              </TouchableOpacity>
-            ) : products.length > 0 ? (
+            {/* Nov 2026 — numbered pages (250 per page). */}
+            {productTotal > PRODUCT_PAGE ? (
+              <View style={styles.vendorPager} testID="vendor-products-pager">
+                <TouchableOpacity
+                  onPress={() => goToProductPage(productPage - 1)}
+                  disabled={productPage <= 0}
+                  style={[styles.vendorPagerBtn, productPage <= 0 && { opacity: 0.35 }]}
+                  testID="vendor-page-prev"
+                >
+                  <Feather name="chevron-left" size={18} color={colors.primary} />
+                </TouchableOpacity>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ gap: 6, paddingHorizontal: 6 }}
+                  style={{ flex: 1 }}
+                >
+                  {Array.from({ length: Math.ceil(productTotal / PRODUCT_PAGE) }).map((_, i) => (
+                    <TouchableOpacity
+                      key={i}
+                      onPress={() => goToProductPage(i)}
+                      style={[styles.vendorPageChip, i === productPage && styles.vendorPageChipActive]}
+                      testID={`vendor-page-${i + 1}`}
+                    >
+                      <Text style={[styles.vendorPageChipText, i === productPage && styles.vendorPageChipTextActive]}>
+                        {i + 1}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <TouchableOpacity
+                  onPress={() => goToProductPage(productPage + 1)}
+                  disabled={(productPage + 1) * PRODUCT_PAGE >= productTotal}
+                  style={[styles.vendorPagerBtn, (productPage + 1) * PRODUCT_PAGE >= productTotal && { opacity: 0.35 }]}
+                  testID="vendor-page-next"
+                >
+                  <Feather name="chevron-right" size={18} color={colors.primary} />
+                </TouchableOpacity>
+              </View>
+            ) : null}
+            {products.length > 0 ? (
               <Text style={styles.vendorEndNote} testID="vendor-products-end">
-                All {productTotal || products.length} products loaded
+                Page {productPage + 1} of {Math.max(1, Math.ceil(productTotal / PRODUCT_PAGE))} · showing{" "}
+                {products.length.toLocaleString("en-IN")} of {(productTotal || products.length).toLocaleString("en-IN")} products
               </Text>
             ) : null}
           </ScrollView>
@@ -988,12 +1033,23 @@ const styles = StyleSheet.create({
   backupRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, marginBottom: 12, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   backupRowTitle: { fontSize: 13.5, fontWeight: "800", color: colors.textMain },
   backupRowHint: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
-  vendorLoadMore: {
-    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
-    marginTop: 4, paddingVertical: 14, borderRadius: radii.button,
-    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, minHeight: 48,
+  vendorPager: {
+    flexDirection: "row", alignItems: "center", marginTop: 4, marginBottom: 6,
+    backgroundColor: colors.surface, borderRadius: radii.button,
+    borderWidth: 1, borderColor: colors.border, paddingVertical: 6, paddingHorizontal: 4,
   },
-  vendorLoadMoreText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+  vendorPagerBtn: {
+    width: 44, height: 44, borderRadius: radii.button,
+    alignItems: "center", justifyContent: "center",
+  },
+  vendorPageChip: {
+    minWidth: 44, height: 44, paddingHorizontal: 12, borderRadius: radii.button,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border,
+  },
+  vendorPageChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  vendorPageChipText: { fontSize: 13, fontWeight: "800", color: colors.textMain },
+  vendorPageChipTextActive: { color: colors.primaryFg },
   vendorEndNote: { textAlign: "center", fontSize: 11.5, color: colors.textMuted, paddingVertical: 14 },
 
   prodCard: { flexDirection: "row", alignItems: "center", padding: 10, backgroundColor: colors.surface, borderRadius: radii.card, borderWidth: 1, borderColor: colors.border, gap: 10 },

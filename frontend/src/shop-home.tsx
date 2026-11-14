@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, TextInput,
+  View, Text, StyleSheet, ScrollView, FlatList, TouchableOpacity, Image, TextInput,
   ActivityIndicator, Platform,
   Modal, Pressable, RefreshControl, Linking,
 } from "react-native";
@@ -26,8 +26,9 @@ import { Feather, MaterialCommunityIcons, MaterialIcons } from "@expo/vector-ico
 // Parent screens already handle safe-area via <SafeAreaView edges={["top"]}>.
 import { api, formatApiError, resolveImageUrl } from "./api";
 import { colors, spacing } from "./theme";
-import { SubscribeBanner } from "./subscription";
 import { ShopLayoutRenderer } from "./shop-layout-renderer";
+import { useCuratedProductIds } from "./curated-products";
+import { LoadingMoreRow } from "./loading-more-row";
 import { FestivalBanner } from "./festival-decor";
 import {
   checkLocationPermission,
@@ -37,7 +38,8 @@ import { useAuth } from "./auth";
 import { NoVendorsHero } from "./no-vendors-hero";
 import { FadeSlideIn, ProductCardSkeleton } from "./anim";
 import { useShopCart } from "./use-shop-cart";
-import { ProductGridCard, productGridStyles } from "./product-grid-card";
+import { ProductGridCard, productGridStyles, gridColumnsFor } from "./product-grid-card";
+import { useContentWidth } from "./content-width";
 import { LocationBanner } from "./location-banner";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -138,6 +140,10 @@ export function ShopHome({
   const currentUserId = user?.id || null;
 
   const [products, setProducts] = useState<Product[]>([]);
+  // Nov 2026 — server-paged catalogue (see `load` / `loadMore` below).
+  const [totalProducts, setTotalProducts] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loading, setLoading] = useState(true);
   // Aug 2026 — pull-to-refresh & live-update state.  refreshTick propagates
   // into ShopLayoutRenderer so admin publishes appear without app restart.
@@ -272,39 +278,102 @@ export function ShopHome({
   // (that flow captures both pincode + lat/lng via the picker).
 
   // ── Data ───────────────────────────────────────────────────────────────
-  const load = useCallback(async () => {
+  // Nov 2026 — INCREMENTAL paging (owner runs 5,700+ SKUs and wants 100k to
+  // work). The screen used to download every page before painting, which made
+  // the shop take seconds to open and the scroll stutter. Now the first 60
+  // land immediately and the next page is fetched as the shopper nears the
+  // bottom, so memory and scroll stay flat no matter how big the catalogue is.
+  const PAGE = 60;
+  const loadSeq = useRef(0);
+  // Rows the server has sent for the current query (the paging cursor).
+  const fetchedCount = useRef(0);
+  // Params of the request we last served (de-dupes the mount double-fetch).
+  const lastLoadKey = useRef("");
+  const buildParams = useCallback(() => {
+    const params: Record<string, any> = { strict_location: "true", limit: PAGE };
+    if (deliveryPincode) params.pincode = deliveryPincode;
+    if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+    if (searchSubmitted && search.trim()) params.q = search.trim();
+    // Filtering on the SERVER keeps the counts honest: the category chip used
+    // to narrow only the rows already downloaded.
+    if (activeCategory && activeCategory !== "all") params.category = activeCategory;
+    return params;
+  }, [deliveryPincode, deliveryCoords, searchSubmitted, search, activeCategory]);
+
+  const shape = useCallback((list: Product[]) => {
+    const inStock = list.filter((p) => p && p.is_in_stock !== false);
+    // UPDATE 1 — Hide the current vendor's own products from themselves.
+    return currentUserId
+      ? inStock.filter((p) => !p.vendor_id || p.vendor_id !== currentUserId)
+      : inStock;
+  }, [currentUserId]);
+
+  // Which grid is on screen? Search results, a category, or the fallback
+  // "All products near you" (only when the admin built no layout blocks).
+  const gridShown = Boolean(
+    (searchSubmitted && search.trim())
+    || (activeCategory && activeCategory !== "all")
+    || layoutBlockCount === 0,
+  );
+
+  const load = useCallback(async (force = false) => {
+    // Nov 2026 — `load` is re-created when the delivery location resolves a
+    // beat after mount, which fetched page 1 twice. Skip an identical
+    // repeat of the request we just served. The check MUST run before
+    // `loadSeq` is bumped, otherwise the skipped duplicate invalidates the
+    // in-flight first request and the grid stays empty.
+    const hasLoc = Boolean(deliveryPincode || deliveryCoords);
+    const params = buildParams();
+    const key = JSON.stringify(params);
+    if (hasLoc && key === lastLoadKey.current && !force) return;
     setLoading(true);
+    const reqId = ++loadSeq.current;
     try {
-      // Jul 2026 — Location-first shop.  We only fetch products when
-      // we have a real location signal (pincode or coords).  strict_location
-      // ensures the backend returns [] if the signal doesn't match any
-      // nearby vendor, so the customer sees an empty-state rather than
-      // the global catalog.
-      const params: Record<string, any> = { strict_location: "true" };
-      if (deliveryPincode) params.pincode = deliveryPincode;
-      if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
-      // Dec 2026 — When user submitted a search, forward it as `q` to the
-      // backend AND bump the limit so we don't miss deep-catalog hits.
-      if (searchSubmitted && search.trim()) {
-        params.q = search.trim();
-        params.limit = 240;
-      }
-      // If we have NO location signal yet, skip the fetch entirely —
-      // the LocationGate view is what the user sees.
-      if (!deliveryPincode && !deliveryCoords) { setProducts([]); return; }
-      const r = await api.get<any>("/products", { params });
-      const list: Product[] = Array.isArray(r.data) ? r.data : (r.data?.items || []);
-      const inStock = list.filter((p) => p && p.is_in_stock !== false);
-      // UPDATE 1 — Hide the current vendor's own products from themselves.
-      const scoped = currentUserId
-        ? inStock.filter((p) => !p.vendor_id || p.vendor_id !== currentUserId)
-        : inStock;
-      setProducts(scoped);
+      // Jul 2026 — Location-first shop: no location signal, no fetch. The
+      // LocationGate view is what the user sees.
+      if (!hasLoc) { lastLoadKey.current = ""; setProducts([]); setTotalProducts(0); setHasMore(false); return; }
+      lastLoadKey.current = key;
+      const { data } = await api.get<any>("/products", { params });
+      if (reqId !== loadSeq.current) return;
+      const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
+      fetchedCount.current = list.length;
+      setProducts(shape(list));
+      setTotalProducts(Number(Array.isArray(data) ? list.length : (data?.total ?? list.length)));
+      setHasMore(Array.isArray(data) ? list.length >= PAGE : Boolean(data?.has_more));
     } catch (e) {
+      // A failed page 1 must not block the next identical (retry) request.
+      if (reqId === loadSeq.current) lastLoadKey.current = "";
       // eslint-disable-next-line no-console
       console.warn("ShopHome /products failed:", formatApiError(e));
-    } finally { setLoading(false); }
-  }, [currentUserId, deliveryPincode, deliveryCoords, searchSubmitted, search]);
+    } finally { if (reqId === loadSeq.current) setLoading(false); }
+  }, [deliveryPincode, deliveryCoords, buildParams, shape]);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    // Nothing to extend when the home is showing the admin's layout blocks
+    // instead of a product grid — fetching there was pure waste.
+    if (!gridShown) return;
+    setLoadingMore(true);
+    const reqId = loadSeq.current;
+    try {
+      const { data } = await api.get<any>("/products", {
+        // Offset counts the rows the SERVER has sent, not the rows that
+        // survived filtering — otherwise a fully-filtered page made the next
+        // scroll re-request the same offset forever.
+        params: { ...buildParams(), offset: fetchedCount.current, with_total: "false" },
+      });
+      if (reqId !== loadSeq.current) return;
+      const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
+      fetchedCount.current += list.length;
+      setProducts((cur) => {
+        const seen = new Set(cur.map((x) => x.id));
+        return [...cur, ...shape(list).filter((x) => !seen.has(x.id))];
+      });
+      setHasMore(Array.isArray(data) ? list.length >= PAGE : Boolean(data?.has_more));
+    } catch {
+      // Keep what's on screen; the shopper can scroll again to retry.
+    } finally { setLoadingMore(false); }
+  }, [loadingMore, hasMore, gridShown, buildParams, shape]);
 
   // Jun 2026 — Debounced typeahead. Fires 250 ms after the last keystroke
   // once 2+ characters are typed. Location params keep suggestions to
@@ -395,15 +464,35 @@ export function ShopHome({
   }, [loadCategories]));
 
   // ── Derived collections per section ───────────────────────────────────
+  const blockedIds = useCuratedProductIds(deliveryPincode || undefined, refreshTick);
+
   const filteredProducts = useMemo(() => {
     let arr = products;
-    if (activeCategory !== "all") {
-      arr = arr.filter((p) => (p.category || "").toLowerCase() === activeCategory.toLowerCase());
-    }
-    const q = search.trim().toLowerCase();
-    if (q) arr = arr.filter((p) => p.name.toLowerCase().includes(q));
+    // Nov 2026 — A product the admin curated into a Shop Layout block belongs
+    // to that block only; hide it from the plain browse grids so it isn't
+    // listed twice. A submitted SEARCH bypasses the rule, otherwise a shopper
+    // looking for a curated item would be told it doesn't exist.
+    const searching = searchSubmitted && !!search.trim();
+    if (!searching && blockedIds.size) arr = arr.filter((p) => !blockedIds.has(p.id));
+    // No client-side narrowing: the server already applied the category and
+    // the search term (`buildParams`). Re-filtering by name here hid valid
+    // results — a search for "Mobiles" matched the category server-side but
+    // nothing by name, so the screen showed "N products" and "No results".
     return arr;
-  }, [products, activeCategory, search]);
+  }, [products, search, searchSubmitted, blockedIds]);
+
+  // Rows of cards for the virtualised list: one entry per grid ROW, so the
+  // cards keep their existing responsive 2-5 column layout.
+  const contentWidth = useContentWidth();
+  const cols = gridColumnsFor(contentWidth);
+  const gridRows = useMemo(() => {
+    if (!gridShown) return [] as Product[][];
+    const out: Product[][] = [];
+    for (let i = 0; i < filteredProducts.length; i += cols) {
+      out.push(filteredProducts.slice(i, i + cols));
+    }
+    return out;
+  }, [filteredProducts, cols, gridShown]);
 
   // Jul 2026 — Location gate.  We show a full-screen "Enable location to
   // browse products" screen when we haven't captured GPS yet.  Users
@@ -633,9 +722,39 @@ export function ShopHome({
         ) : null}
       </View>
 
-      <ScrollView
+      <FlatList
+        // Nov 2026 — VIRTUALISED grid. The screen used to render every loaded
+        // card inside a ScrollView, so a shopper who scrolled through 2,600
+        // products held ~37k views — the lag and force-close the owner saw on
+        // Android. Rows are now recycled, so memory stays flat at any depth.
+        data={gridRows}
+        keyExtractor={(_, i) => `grid-row-${i}`}
+        renderItem={({ item: row, index: rowIdx }) => (
+          <View style={[productGridStyles.wrap, { paddingHorizontal: spacing.screen }]}>
+            {row.map((item, i) => (
+              <ProductGridCard
+                key={item.id}
+                product={item as any}
+                qty={cartQty[item.id] || 0}
+                index={rowIdx * cols + i}
+                onOpen={(x) => router.push(`/product/${x.id}` as any)}
+                onAdd={addToCart}
+                onDecrement={decrement}
+              />
+            ))}
+          </View>
+        )}
+        initialNumToRender={6}
+        maxToRenderPerBatch={6}
+        windowSize={7}
+        removeClippedSubviews={Platform.OS !== "web"}
         contentContainerStyle={{ paddingBottom: 32 }}
         showsVerticalScrollIndicator={false}
+        // Fetches the next 60 products while the shopper is still ~1.5 screens
+        // from the bottom, so scrolling never stalls at the end of a page.
+        onEndReachedThreshold={1.5}
+        onEndReached={loadMore}
+        ListFooterComponent={loadingMore ? <LoadingMoreRow /> : null}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -646,18 +765,18 @@ export function ShopHome({
               //   • wallpapers / promos via ShopLayoutRenderer's refreshTick
               setRefreshing(true);
               setRefreshTick((n) => n + 1);
-              try { await load(); } finally { setRefreshing(false); }
+              try { await load(true); } finally { setRefreshing(false); }
             }}
             tintColor={colors.primary}
           />
         }
-      >
+        ListHeaderComponent={
+          <>
         <LocationBanner />
         {/* Festival banner — renders only while a festival theme is live. */}
         <FestivalBanner />
         {/* Free-tier upsell — hidden automatically for subscribed users. */}
         <View style={{ paddingHorizontal: spacing.screen, paddingTop: 6 }}>
-          <SubscribeBanner compact />
         </View>
         {addedFlash ? (
           <View style={styles.addedFlash} pointerEvents="none">
@@ -672,7 +791,7 @@ export function ShopHome({
               <Text style={styles.searchResultTitle}>
                 Results for "<Text style={{ color: colors.primary }}>{search.trim()}</Text>"
               </Text>
-              <Text style={styles.searchResultCount}>{filteredProducts.length} product{filteredProducts.length === 1 ? "" : "s"}</Text>
+              <Text style={styles.searchResultCount}>{(totalProducts || filteredProducts.length).toLocaleString("en-IN")} product{(totalProducts || filteredProducts.length) === 1 ? "" : "s"}</Text>
             </View>
             {loading ? (
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, paddingHorizontal: 4 }}>
@@ -696,19 +815,8 @@ export function ShopHome({
                 </TouchableOpacity>
               </View>
             ) : (
-              <View style={productGridStyles.wrap}>
-                {filteredProducts.map((item, idx) => (
-                  <ProductGridCard
-                    key={`result-${item.id}`}
-                    product={item as any}
-                    qty={cartQty[item.id] || 0}
-                    index={idx}
-                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
-                    onAdd={addToCart}
-                    onDecrement={decrement}
-                  />
-                ))}
-              </View>
+              // The grid itself is rendered by the virtualised list below.
+              null
             )}
           </View>
         ) : (
@@ -831,7 +939,7 @@ export function ShopHome({
               </Text>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                 <Text style={styles.searchResultCount}>
-                  {filteredProducts.length} product{filteredProducts.length === 1 ? "" : "s"}
+                  {(totalProducts || filteredProducts.length).toLocaleString("en-IN")} product{(totalProducts || filteredProducts.length) === 1 ? "" : "s"}
                 </Text>
                 <TouchableOpacity
                   onPress={() => setActiveCategory("all")}
@@ -880,19 +988,8 @@ export function ShopHome({
                 </View>
               )
             ) : (
-              <View style={productGridStyles.wrap}>
-                {filteredProducts.map((item, idx) => (
-                  <ProductGridCard
-                    key={`cat-${item.id}`}
-                    product={item as any}
-                    qty={cartQty[item.id] || 0}
-                    index={idx}
-                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
-                    onAdd={addToCart}
-                    onDecrement={decrement}
-                  />
-                ))}
-              </View>
+              // The grid itself is rendered by the virtualised list below.
+              null
             )}
           </View>
         ) : (
@@ -937,21 +1034,9 @@ export function ShopHome({
               <View style={styles.searchResultHeader}>
                 <Text style={styles.searchResultTitle}>All products near you</Text>
                 <Text style={styles.searchResultCount}>
-                  {products.length} product{products.length === 1 ? "" : "s"}
+                  {(totalProducts || filteredProducts.length).toLocaleString("en-IN")} product
+                  {(totalProducts || filteredProducts.length) === 1 ? "" : "s"}
                 </Text>
-              </View>
-              <View style={productGridStyles.wrap}>
-                {products.map((item, idx) => (
-                  <ProductGridCard
-                    key={`near-${item.id}`}
-                    product={item as any}
-                    qty={cartQty[item.id] || 0}
-                    index={idx}
-                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
-                    onAdd={addToCart}
-                    onDecrement={decrement}
-                  />
-                ))}
               </View>
             </View>
           ) : null}
@@ -969,7 +1054,9 @@ export function ShopHome({
         )}
           </>
         )}
-      </ScrollView>
+          </>
+        }
+      />
 
       {/* ── Delivery-location picker modal ─────────────────────────────
           Opens when the user taps the "Deliver to {city}" pill in the

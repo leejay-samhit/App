@@ -1111,6 +1111,17 @@ export function ShopLayoutRenderer({
 }: RendererProps) {
   const [blocks, setBlocks] = useState<LayoutBlock[] | null>(null);
   const [productsById, setProductsById] = useState<Record<string, Product>>({});
+  // The in-flight /products?ids= request, shared by every caller of
+  // resolveBlockProducts so one shop open makes one request.
+  const idsRequest = useRef<{ key: string; promise: Promise<any> } | null>(null);
+  // Id-set whose products are already on screen, so a cached open (layout from
+  // cache, then the fresh copy ~70ms later) doesn't repeat the lookup. Cleared
+  // on pull-to-refresh via the refreshTick effect below.
+  const resolvedKey = useRef("");
+  // True once the curated products have been fetched (even if none survived),
+  // so blocks whose products were deleted can be dropped rather than render
+  // as empty cards — without dropping valid blocks mid-load.
+  const [productsResolved, setProductsResolved] = useState(false);
   const [sourceCache, setSourceCache] = useState<Record<string, Product[]>>({});
   // Aug 2026 — Auto-poll counter for live admin updates (30 s interval).
   // pollTick retained (referenced in deps) but auto-poll effect removed.
@@ -1125,6 +1136,8 @@ export function ShopLayoutRenderer({
   useEffect(() => {
     let cancelled = false;
     setBlocks(null);
+    // A pull-to-refresh / poll must actually re-fetch the curated products.
+    resolvedKey.current = "";
     (async () => {
       try {
         const params: any = { scope };
@@ -1142,55 +1155,76 @@ export function ShopLayoutRenderer({
         // customer saw a shop with NO admin layout at all until the next
         // app open. We now remember the fresh payload and prefer it.
         let freshBlocks: LayoutBlock[] | null = null;
+        // Nov 2026 — PRODUCT RESOLUTION BY ID.
+        // This used to download the whole location catalogue (240 → 500 → every
+        // page) just to look up the handful of products a block references. At
+        // 5,700 SKUs that was ~23 sequential requests on every shop open: the
+        // blocks appeared only after all of them landed, and the app went
+        // "not responding". Now we fetch exactly the referenced ids.
+        const resolveBlockProducts = async (bl: LayoutBlock[]) => {
+          const ids = Array.from(new Set(
+            bl.flatMap((b) => [...(b.product_ids || []), ...(b.product_id ? [b.product_id] : [])])
+              .filter(Boolean) as string[],
+          ));
+          if (!ids.length) { setProductsById({}); setProductsResolved(true); return; }
+          // Resolving runs from the cache callback AND after the await, and
+          // the effect re-runs when auth/location land — so share ONE promise
+          // per id-set instead of firing a request each time (and instead of
+          // skipping the fetch, which once left the blocks permanently empty).
+          const key = ids.join(",");
+          if (key === resolvedKey.current) return;   // already on screen
+          let req = idsRequest.current;
+          if (!req || req.key !== key) {
+            req = {
+              key,
+              promise: api.get<any>("/products", { params: { ids: key } })
+                .finally(() => {
+                  // Let a later run retry (e.g. after a failure).
+                  if (idsRequest.current?.key === key) idsRequest.current = null;
+                }),
+            };
+            idsRequest.current = req;
+            setProductsResolved(false);
+          }
+          const data = (await req.promise).data;
+          if (cancelled) return;
+          resolvedKey.current = key;
+          const list: Product[] = excludeOwn(Array.isArray(data) ? data : (data?.items || []));
+          const map: Record<string, Product> = {};
+          list.forEach((p) => { map[p.id] = p; });
+          setProductsById(map);
+          setProductsResolved(true);
+        };
         const applyLayout = (bData: { items?: LayoutBlock[] } | null) => {
           if (cancelled) return null;
           return bData?.items || [];
         };
-        const [bRes, pRes] = await Promise.all([
-          cachedGet<{ items: LayoutBlock[] }>("/shop-layout", {
-            ttlMs: 600_000,   // Nov 2026 — 10 min TTL (was 2 min) to
-                              // eliminate the constant network churn.
-            params,
-            onFresh: (fresh) => {
-              const items = applyLayout(fresh);
-              if (items) { freshBlocks = items; setBlocks(items); }
-            },
-          }),
-          // Jul 2026 — pass lat/lng + strict_location so the layout
-          // renderer's products fetch matches the customer's actual
-          // delivery zone (previously only pincode was forwarded, and
-          // when pincode reverse-geocode failed the shop leaked all
-          // products regardless of location).
-          api.get<any>("/products", {
-            params: {
-              ...(category ? { category, limit: 240 } : { limit: 240 }),
-              ...(pincode ? { pincode } : {}),
-              ...(lat !== undefined && lng !== undefined ? { lat, lng } : {}),
-              strict_location: "true",
-            },
-          }),
-        ]);
+        const bRes = await cachedGet<{ items: LayoutBlock[] }>("/shop-layout", {
+          ttlMs: 600_000,   // Nov 2026 — 10 min TTL (was 2 min) to
+                            // eliminate the constant network churn.
+          params,
+          onFresh: (fresh) => {
+            const items = applyLayout(fresh);
+            if (items) {
+              freshBlocks = items;
+              setBlocks(items);
+              resolveBlockProducts(items).catch(() => { /* cards show a placeholder */ });
+            }
+          },
+        });
         if (cancelled) return;
         const blocks: LayoutBlock[] = freshBlocks || bRes?.items || [];
-        const pData = pRes.data;
-        const pListRaw: Product[] = Array.isArray(pData) ? pData : (pData?.items || pData?.products || []);
-        // UPDATE 1 — Drop the current vendor's own products before caching.
-        const pList: Product[] = excludeOwn(pListRaw);
-        const map: Record<string, Product> = {};
-        pList.forEach((p) => { map[p.id] = p; });
-        setProductsById(map);
-        // Jun 2026 — manual blocks no longer need a pre-computed cache: the
-        // renderer maps `product_ids` → `productsById` at render time. That
-        // removes an ordering bug where the cache was built from an EMPTY
-        // block list (the layout arrived a beat later via `onFresh`), leaving
-        // every manual grid / spotlight showing zero products.
-        // Auto-sourced blocks are fetched by a dedicated effect below, once
-        // we actually know which blocks exist.
+        // Paint the blocks FIRST, then fill in their products — the shop feels
+        // instant instead of waiting on a second round-trip.
         setBlocks(blocks);
+        resolveBlockProducts(blocks).catch(() => { /* cards show a placeholder */ });
       } catch {
         if (!cancelled) setBlocks([]);
       }
     })();
+    // A cancelled run drops its /products?ids= response, so forget its key —
+    // otherwise the re-run sees the same key, skips the fetch and the curated
+    // blocks never get their products (iter117 RCA).
     return () => { cancelled = true; };
   }, [scope, category, pincode, lat, lng, currentUserId, refreshTick, pollTick]);
 
@@ -1400,6 +1434,20 @@ export function ShopLayoutRenderer({
           prods = (b.data_source || "manual") === "manual"
             ? ((b.product_ids || []).map((id) => productsById[id]).filter(Boolean) as Product[])
             : (sourceCache[b.id] || []);
+        }
+        // Nov 2026 — a block whose curated products were later DELETED from
+        // the catalogue used to render as an empty white card. Skip it once
+        // the products have actually been resolved (so a slow network doesn't
+        // permanently drop a valid block).
+        const resolved = (b.data_source || "manual") === "manual"
+          ? productsResolved
+          : Array.isArray(sourceCache[b.id]);
+        if (PRODUCT_BLOCK_TYPES.includes(b.block_type) && prods.length === 0 && resolved) {
+          return null;
+        }
+        if (b.block_type === "content_box" && b.product_id
+            && productsResolved && !productsById[b.product_id]) {
+          return null;
         }
         // June 2026 Shop redesign — every block (admin-created or hardcoded)
         // is wrapped in <ContentContainer> so they all align on the same

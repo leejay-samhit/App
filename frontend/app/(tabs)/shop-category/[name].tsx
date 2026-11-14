@@ -2,20 +2,24 @@
 // blocks where scope="category" and scope_category=<name>. Falls back to a
 // plain product grid filtered by category if no admin layout exists.
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from "react-native";
+import { View, Text, StyleSheet, ScrollView, FlatList, RefreshControl, TouchableOpacity, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { colors, radii, spacing } from "../../../src/theme";
 import { ShopLayoutRenderer } from "../../../src/shop-layout-renderer";
+import { useCuratedProductIds } from "../../../src/curated-products";
+import { LoadingMoreRow } from "../../../src/loading-more-row";
 import { useAuth } from "../../../src/auth";
 import { useDeliveryLocation } from "../../../src/use-delivery-location";
 import { useSwipePager } from "../../../src/use-swipe-pager";
 import { useShopCart } from "../../../src/use-shop-cart";
-import { ProductGridCard, productGridStyles } from "../../../src/product-grid-card";
+import { ProductGridCard, productGridStyles, gridColumnsFor } from "../../../src/product-grid-card";
+import { useContentWidth } from "../../../src/content-width";
 import { NoVendorsHero } from "../../../src/no-vendors-hero";
 import { ProductCardSkeleton } from "../../../src/anim";
 import { cachedGet } from "../../../src/cachedGet";
+import { api } from "../../../src/api";
 
 type Product = { id: string; name: string; price: number; image_url?: string; stock?: number; is_in_stock?: boolean; category?: string; sub_category?: string; vendor_id?: string | null };
 
@@ -32,6 +36,18 @@ export default function ShopCategoryScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
+  // Nov 2026 — server-paged catalogue (60 per page, appended on scroll).
+  const PAGE = 60;
+  const [totalProducts, setTotalProducts] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Paging cursor: rows the server has sent for the current query.
+  const fetchedCount = useRef(0);
+  const loadSeq = useRef(0);
+  // Nov 2026 — real per-shelf counts from the server. The chips used to count
+  // only the rows already downloaded, so "Men" showed 60 of its 546.
+  const [subCounts, setSubCounts] = useState<Record<string, number>>({});
+  const [shelfTotal, setShelfTotal] = useState(0);
   // Aug 2026 — Bumped on every pull-to-refresh; passed down to
   // ShopLayoutRenderer so it re-fetches its admin-managed blocks live.
   const [refreshTick, setRefreshTick] = useState(0);
@@ -84,19 +100,27 @@ export default function ShopCategoryScreen() {
       setProducts([]); setLoadingProducts(false); setRefreshing(false); return;
     }
 
-    // Products — 60 s TTL.  Fetch WITHOUT subcategory filter — the chip
-    // strip narrows client-side so tapping between chips is instant.
-    const params: Record<string, any> = { category, limit: 240, strict_location: "true" };
+    // Products — 60 s TTL, PAGED (Nov 2026). A single big page (240 → 500 →
+    // every page) made a 5,700-SKU shop take seconds to open and stutter while
+    // scrolling. The first 60 paint instantly; `loadMore` appends as the
+    // shopper scrolls. The sub-category chip is now a SERVER filter too, so
+    // its count and its paging cover the whole shelf, not just loaded rows.
+    const params: Record<string, any> = { category, limit: PAGE, strict_location: "true" };
+    if (selectedSub) params.subcategory = selectedSub;
     if (deliveryPincode) params.pincode = deliveryPincode;
     if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
     const applyList = (data: any) => {
       const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
+      loadSeq.current += 1;   // invalidate any in-flight loadMore
       setProducts(
         list.filter((p: any) => {
           if (currentUserId && p.vendor_id && p.vendor_id === currentUserId) return false;
           return true;
         }),
       );
+      fetchedCount.current = list.length;
+      setTotalProducts(Number(Array.isArray(data) ? list.length : (data?.total ?? list.length)));
+      setHasMore(Array.isArray(data) ? list.length >= PAGE : Boolean(data?.has_more));
       setLoadingProducts(false);
       setRefreshing(false);
     };
@@ -107,16 +131,78 @@ export default function ShopCategoryScreen() {
     }).then((cached) => {
       if (cached) applyList(cached);
     }).catch(() => { setLoadingProducts(false); setRefreshing(false); });
-  }, [category, currentUserId, deliveryPincode, deliveryCoords]);
+  }, [category, selectedSub, currentUserId, deliveryPincode, deliveryCoords]);
 
-  // Dec 2026 — Client-side subcategory filter.  Zero network calls on
-  // chip tap.  Cascades product.sub_category (case-insensitive).
+  // Chip counts — one cheap aggregation, refreshed when the shelf or the
+  // delivery location changes (NOT when a chip is tapped).
+  useEffect(() => {
+    if (!deliveryPincode && !deliveryCoords) return;
+    const params: Record<string, any> = { category };
+    if (deliveryPincode) params.pincode = deliveryPincode;
+    if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+    let cancelled = false;
+    api.get<any>("/products/subcategory-counts", { params })
+      .then(({ data }) => {
+        if (cancelled) return;
+        setSubCounts(data?.counts || {});
+        setShelfTotal(Number(data?.total || 0));
+      })
+      .catch(() => { /* chips just fall back to the loaded-row count */ });
+    return () => { cancelled = true; };
+  }, [category, deliveryPincode, deliveryCoords, refreshTick]);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore || loadingProducts) return;
+    setLoadingMore(true);
+    // Guard against a page from the PREVIOUS shelf landing after the shopper
+    // switched sub-category chips mid-load.
+    const reqId = loadSeq.current;
+    try {
+      const params: Record<string, any> = {
+        // Offset counts rows the SERVER sent, not rows kept after filtering.
+        category, limit: PAGE, offset: fetchedCount.current, strict_location: "true",
+        // The total came with page 1; skip the re-count on every page.
+        with_total: "false",
+      };
+      if (selectedSub) params.subcategory = selectedSub;
+      if (deliveryPincode) params.pincode = deliveryPincode;
+      if (deliveryCoords) { params.lat = deliveryCoords.lat; params.lng = deliveryCoords.lng; }
+      const { data } = await api.get<any>("/products", { params });
+      if (reqId !== loadSeq.current) return;
+      const list: Product[] = Array.isArray(data) ? data : (data?.items || []);
+      fetchedCount.current += list.length;
+      setProducts((cur) => {
+        const seen = new Set(cur.map((x) => x.id));
+        return [...cur, ...list.filter((p: any) => {
+          if (seen.has(p.id)) return false;
+          if (currentUserId && p.vendor_id && p.vendor_id === currentUserId) return false;
+          return true;
+        })];
+      });
+      setHasMore(Array.isArray(data) ? list.length >= PAGE : Boolean(data?.has_more));
+    } catch {
+      // Keep what's on screen; scrolling again retries.
+    } finally { setLoadingMore(false); }
+  }, [loadingMore, hasMore, loadingProducts, category, selectedSub, deliveryPincode, deliveryCoords, currentUserId]);
+
+  // Nov 2026 — the sub-category is a SERVER filter (see `load`); this memo
+  // only drops curated products and keeps a defensive client-side match.
+  const curatedIds = useCuratedProductIds(deliveryPincode || undefined, refreshTick);
+
   const filtered = useMemo(() => {
-    if (!selectedSub) return products;
-    const target = selectedSub.trim().toLowerCase();
-    return products.filter((p) => (p.sub_category || "").trim().toLowerCase() === target
-      || (p.category || "").trim().toLowerCase() === target);
-  }, [products, selectedSub]);
+    // Nov 2026 — a product curated into a Shop Layout block shows inside that
+    // block only, so keep it out of this plain grid.
+    return curatedIds.size ? products.filter((p) => !curatedIds.has(p.id)) : products;
+  }, [products, curatedIds]);
+
+  // Rows for the virtualised grid (keeps the responsive 2-5 column layout).
+  const contentWidth = useContentWidth();
+  const cols = gridColumnsFor(contentWidth);
+  const gridRows = useMemo(() => {
+    const out: Product[][] = [];
+    for (let i = 0; i < filtered.length; i += cols) out.push(filtered.slice(i, i + cols));
+    return out;
+  }, [filtered, cols]);
 
   // Nov 2026 — resolve the parent category by name and fetch its admin-
   // managed subcategories so we can show REAL nested chips.
@@ -237,10 +323,38 @@ export default function ShopCategoryScreen() {
       ) : null}
 
       <View style={{ flex: 1 }} {...swipeHandlers}>
-      <ScrollView
+      <FlatList
+        // Nov 2026 — VIRTUALISED: rows are recycled, so a 5,000-product
+        // category no longer keeps thousands of views alive (the lag and
+        // force-close the owner reported). The next 60 load as you scroll.
+        data={gridRows}
+        keyExtractor={(_, i) => `grid-row-${i}`}
+        renderItem={({ item: row, index: rowIdx }) => (
+          <View style={[productGridStyles.wrap, { paddingHorizontal: spacing.screen }]}>
+            {row.map((p, i) => (
+              <ProductGridCard
+                key={p.id}
+                product={p}
+                qty={cartQty[p.id] || 0}
+                index={rowIdx * cols + i}
+                onOpen={(x) => router.push(`/product/${x.id}` as any)}
+                onAdd={onAddToCart}
+                onDecrement={onDecrement}
+              />
+            ))}
+          </View>
+        )}
+        initialNumToRender={6}
+        maxToRenderPerBatch={6}
+        windowSize={7}
+        removeClippedSubviews={Platform.OS !== "web"}
         contentContainerStyle={{ paddingBottom: 80 }}
+        onEndReachedThreshold={1.5}
+        onEndReached={loadMore}
+        ListFooterComponent={loadingMore ? <LoadingMoreRow /> : null}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setRefreshTick(t => t + 1); load(); }} tintColor={colors.primary} />}
-      >
+        ListHeaderComponent={
+          <>
         {/* Sept 2026 — Cascading sub-category chip strip.  Auto-computed
             from `sub_category` values of products in this category.  When
             a chip is selected we filter the fallback product grid, and
@@ -271,14 +385,15 @@ export default function ShopCategoryScreen() {
               >
                 <Text style={[styles.subChipText, selectedSub === "" && styles.subChipTextActive]}>All</Text>
                 <View style={[styles.subChipCount, selectedSub === "" && styles.subChipCountActive]}>
-                  <Text style={[styles.subChipCountText, selectedSub === "" && styles.subChipCountTextActive]}>{products.length}</Text>
+                  <Text style={[styles.subChipCountText, selectedSub === "" && styles.subChipCountTextActive]}>{(shelfTotal || totalProducts || products.length).toLocaleString("en-IN")}</Text>
                 </View>
               </TouchableOpacity>
               {subs.map((s) => {
                 const isActive = selectedSub === s;
-                // Count based on current in-memory products (approximate
-                // because server-side filter reloads on chip tap).
-                const count = products.filter((p) => (p.sub_category || "").trim().toLowerCase() === s.toLowerCase()).length;
+                // Real count from the server (see the subcategory-counts
+                // effect); falls back to the loaded rows if it hasn't landed.
+                const count = subCounts[s.trim().toLowerCase()]
+                  ?? products.filter((p) => (p.sub_category || "").trim().toLowerCase() === s.toLowerCase()).length;
                 return (
                   <TouchableOpacity
                     key={s}
@@ -352,7 +467,8 @@ export default function ShopCategoryScreen() {
               {selectedSub || category}
             </Text>
             <Text style={styles.gridHeadCount}>
-              {filtered.length} item{filtered.length === 1 ? "" : "s"}
+              {(totalProducts || filtered.length).toLocaleString("en-IN")} item
+              {(totalProducts || filtered.length) === 1 ? "" : "s"}
             </Text>
           </View>
         ) : null}
@@ -392,25 +508,14 @@ export default function ShopCategoryScreen() {
                 </View>
               );
             }
-            return (
-              <View style={productGridStyles.wrap}>
-                {filtered.map((p, idx) => (
-                  <ProductGridCard
-                    key={p.id}
-                    product={p}
-                    qty={cartQty[p.id] || 0}
-                    index={idx}
-                    onOpen={(x) => router.push(`/product/${x.id}` as any)}
-                    onAdd={onAddToCart}
-                    onDecrement={onDecrement}
-                  />
-                ))}
-              </View>
-            );
+            // The grid itself is rendered by the virtualised list.
+            return null;
           })()
         )}
         </View>
-      </ScrollView>
+          </>
+        }
+      />
       </View>
     </SafeAreaView>
   );

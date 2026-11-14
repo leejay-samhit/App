@@ -56,7 +56,12 @@ def _shape_product(p: Dict[str, Any]) -> Dict[str, Any]:
     stock = int(p.get("stock") or 0)
     interested = p.get("interested_users") or []
     p["is_in_stock"] = stock > 0
-    p["interested_count"] = len(interested) if isinstance(interested, list) else 0
+    if isinstance(interested, list) and interested:
+        p["interested_count"] = len(interested)
+    else:
+        # List endpoints drop `interested_users` (privacy + payload), so they
+        # fall back to the denormalised counter kept on the doc.
+        p["interested_count"] = int(p.get("interested_count") or 0)
     # Don't leak raw user-id list to the public endpoint — only the count.
     p.pop("interested_users", None)
     # Jun 2026 — Shopify-converted imports store `images` as OBJECTS
@@ -197,18 +202,44 @@ def _build_category_filter(names: List[str]) -> Dict[str, Any]:
     ]}
 
 
+_HUGE_THRESHOLD = 50_000
+_huge_cache: Dict[str, Any] = {"at": 0.0, "value": False}
+
+
+async def _products_are_huge() -> bool:
+    """True when the catalogue is big enough that a regex scan hurts.
+
+    Nov 2026 — below the threshold we keep the richer substring search (a
+    search for "test" still finds "PERFTEST"); above it we switch to the
+    text index, which is whole-word but index-backed. The estimate is cached
+    for 5 minutes — it only decides which plan to use.
+    """
+    import time as _time
+    now = _time.time()
+    if now - float(_huge_cache["at"]) < 300:
+        return bool(_huge_cache["value"])
+    try:
+        n = await db.products.estimated_document_count()
+    except Exception:
+        n = 0
+    _huge_cache.update({"at": now, "value": n >= _HUGE_THRESHOLD})
+    return bool(_huge_cache["value"])
+
+
 @router.get("/products")
 async def list_products(
     category: Optional[str] = Query(None, description="Filter by category name/id — cascades to all descendants when it matches a category tree node"),
     subcategory: Optional[str] = Query(None, description="Filter by subcategory name — ignored when `category` is a leaf"),
     q: Optional[str] = Query(None, description="Free-text search — case-insensitive substring match across name / description / brand / category"),
+    ids: Optional[str] = Query(None, description="Nov 2026 — comma-separated product ids; returns exactly those products (used by Shop Layout blocks)"),
     pincode: Optional[str] = Query(None, description="Nov 2026 — filter products to vendors whose store_pincode / delivery_pincodes matches"),
     lat: Optional[float] = Query(None, description="Jul 2026 — customer latitude (used together with lng to km-radius match vendors)"),
     lng: Optional[float] = Query(None, description="Jul 2026 — customer longitude"),
     strict_location: bool = Query(False, description="Jul 2026 — when true, require a location match. If no pincode + no lat/lng is provided, return an empty list instead of the global catalog."),
-    limit: int = Query(60, ge=1, le=300),
+    limit: int = Query(60, ge=1, le=500),
     offset: int = Query(0, ge=0),
     sort: str = Query("newest", description="newest | popular | price_asc | price_desc"),
+    with_total: bool = Query(True, description="Nov 2026 — set false on follow-up pages to skip the (expensive at 1M rows) count"),
 ):
     """PUBLIC — paginated + category-cascading product list.
 
@@ -232,6 +263,23 @@ async def list_products(
     # ── strict location gate ────────────────────────────────────────────
     have_pincode = bool(pincode)
     have_coords = (lat is not None and lng is not None)
+
+    # Nov 2026 — `ids` short-circuit. A Shop Layout block names the exact
+    # products the admin curated, so the shop fetches just those instead of
+    # downloading the catalogue to look them up. Curated placements ignore the
+    # location gate: the admin chose to show them on this shop.
+    if ids:
+        wanted = [s for s in (ids or "").split(",") if s.strip()][:300]
+        if not wanted:
+            return {"items": [], "total": 0, "limit": limit, "offset": 0, "has_more": False}
+        rows = await db.products.find(
+            {"id": {"$in": wanted}, "$or": [{"is_published": True}, {"is_published": {"$exists": False}}]},
+            _LIST_PROJECTION,
+        ).to_list(len(wanted))
+        by_id = {r["id"]: _slim_list_item(r) for r in rows}
+        shaped = [by_id[i] for i in wanted if i in by_id]   # keep the admin's order
+        return {"items": shaped, "total": len(shaped), "limit": limit, "offset": 0, "has_more": False}
+
     if strict_location and not have_pincode and not have_coords:
         return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
 
@@ -251,7 +299,27 @@ async def list_products(
 
     # Dec 2026 — Free-text search across name / description / brand /
     # category / sub_category.  Case-insensitive, escapes regex metas.
-    if q and q.strip():
+    # Nov 2026 — at catalogue scale the regex scans every document, so we try
+    # the `ix_prod_text` index FIRST (whole-word match, index-backed) and only
+    # fall back to the regex when it finds nothing (partial words, SKU
+    # fragments, category names).
+    used_text_index = False
+    if q and q.strip() and len(q.strip().split()) == 1 and len(q.strip()) >= 3:
+        # Whole-word, index-backed search. It's only worth the behaviour
+        # change (whole words instead of substrings) once the collection is
+        # big enough for the regex scan to hurt — below that threshold the
+        # regex is both fast AND better, because "test" still finds
+        # "PERFTEST". Single word only: Mongo ORs multi-word text queries.
+        if await _products_are_huge():
+            text_search = {"$and": [query, {"$text": {"$search": q.strip()}}]}
+            try:
+                if await db.products.count_documents(text_search, limit=1):
+                    query = text_search
+                    used_text_index = True
+            except Exception:
+                # No text index on this deployment — regex path below.
+                used_text_index = False
+    if q and q.strip() and not used_text_index:
         import re as _re
         needle = _re.escape(q.strip())
         text_or = {"$or": [
@@ -301,24 +369,31 @@ async def list_products(
         # We had location signals but no vendors matched — return empty.
         return {"items": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
 
-    # Sort mapping
-    sort_spec: List[tuple] = [("created_at", -1)]
+    # Sort mapping. `id` is a unique tie-breaker — without it Mongo's order is
+    # unstable when many products share a timestamp (bulk imports), so paging
+    # repeated some products and skipped others.
+    sort_spec: List[tuple] = [("created_at", -1), ("id", 1)]
     s = (sort or "newest").lower()
     if s == "price_asc":
-        sort_spec = [("price", 1), ("created_at", -1)]
+        sort_spec = [("price", 1), ("created_at", -1), ("id", 1)]
     elif s == "price_desc":
-        sort_spec = [("price", -1), ("created_at", -1)]
+        sort_spec = [("price", -1), ("created_at", -1), ("id", 1)]
     elif s == "popular":
         # popular by sales_count then interested_count
-        sort_spec = [("sales_count", -1), ("created_at", -1)]
+        sort_spec = [("sales_count", -1), ("created_at", -1), ("id", 1)]
 
-    # Total count (parallel to the paginated fetch) — kept cheap by
-    # relying on the newly-added compound indexes.
-    total = await db.products.count_documents(query)
-
+    # Total count. Nov 2026 — only counted when asked for: the shop counts on
+    # the FIRST page and reuses that number while paging, so a 1M-row
+    # catalogue doesn't re-count every match on every scroll.
     cursor = db.products.find(query, _LIST_PROJECTION).sort(sort_spec).skip(offset).limit(limit)
     items = await cursor.to_list(limit)
     shaped = [_slim_list_item(p) for p in items]
+    if with_total:
+        total = await db.products.count_documents(query)
+        has_more = (offset + len(shaped)) < total
+    else:
+        total = offset + len(shaped)
+        has_more = len(shaped) >= limit
 
     if category or subcategory or (q and q.strip()) or pincode or have_coords or offset > 0 or limit != 60 or sort != "newest":
         return {
@@ -326,7 +401,7 @@ async def list_products(
             "total": total,
             "limit": limit,
             "offset": offset,
-            "has_more": (offset + len(shaped)) < total,
+            "has_more": has_more,
         }
     return shaped
 
@@ -393,6 +468,65 @@ async def _eligible_vendor_ids(
 # ─────────────────────────────────────────────────────────────────────
 async def _vendors_within_radius(lat: float, lng: float) -> set:
     return await _eligible_vendor_ids(lat=lat, lng=lng)
+
+
+@router.get("/products/subcategory-counts")
+async def subcategory_counts(
+    category: str = Query(..., description="Parent category name / id"),
+    pincode: Optional[str] = Query(None),
+    lat: Optional[float] = Query(None),
+    lng: Optional[float] = Query(None),
+):
+    """Nov 2026 — real per-sub-shelf counts for the category screen chips.
+
+    The chips used to count only the rows the phone had downloaded, so "Men"
+    showed 60 when the shelf held 546. Mongo does the counting here, over the
+    same published + location filter the product list uses.
+    """
+    names = await _collect_cascade_names(category)
+    cat_filter = _build_category_filter(names)
+    query: Dict[str, Any] = {"$or": [{"is_published": True}, {"is_published": {"$exists": False}}]}
+    if cat_filter:
+        query = {"$and": [query, cat_filter]}
+    if pincode or (lat is not None and lng is not None):
+        vendor_ids = await _eligible_vendor_ids(
+            pincode=pincode,
+            lat=float(lat) if lat is not None else None,
+            lng=float(lng) if lng is not None else None,
+        )
+        loc: List[Dict[str, Any]] = []
+        if vendor_ids:
+            loc.append({"vendor_id": {"$in": list(vendor_ids)}})
+        if pincode:
+            loc.append({"delivery_pincodes": pincode})
+            loc.append({"store_pincode": pincode})
+        if not loc:
+            return {"total": 0, "counts": {}}
+        query = {"$and": query.get("$and", [query]) + [{"$or": loc}]}
+
+    pipeline = [
+        {"$match": query},
+        {"$group": {
+            # Products carry either `sub_category` or the older `subcategory`,
+            # and an EMPTY string in the new field must fall back to the old
+            # one (not count as "unshelved"). Imports sometimes store a NUMBER
+            # there, which used to crash $trim — hence the $toString.
+            "_id": {"$toLower": {"$trim": {"input": {
+                "$let": {
+                    "vars": {
+                        "a": {"$toString": {"$ifNull": ["$sub_category", ""]}},
+                        "b": {"$toString": {"$ifNull": ["$subcategory", ""]}},
+                    },
+                    "in": {"$cond": [{"$gt": [{"$strLenCP": "$$a"}, 0]}, "$$a", "$$b"]},
+                },
+            }}}},
+            "n": {"$sum": 1},
+        }},
+    ]
+    rows = await db.products.aggregate(pipeline).to_list(500)
+    counts = {r["_id"]: r["n"] for r in rows if r["_id"]}
+    total = sum(r["n"] for r in rows)
+    return {"total": total, "counts": counts}
 
 
 @router.get("/product-variant-charts")
@@ -854,6 +988,10 @@ async def register_interest(
     fresh = await db.products.find_one({"id": product_id}, {"_id": 0})
     interested = fresh.get("interested_users") or []
     count = len(interested) if isinstance(interested, list) else 0
+    # Nov 2026 — keep a denormalised counter on the doc. The LIST endpoints
+    # drop `interested_users` for privacy and payload size, so they had no way
+    # to compute the badge and always showed 0.
+    await db.products.update_one({"id": product_id}, {"$set": {"interested_count": count}})
 
     # Newly added (modified_count==1 means the array changed) → notify vendor
     if res.modified_count > 0 and product.get("vendor_id"):

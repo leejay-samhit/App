@@ -1,0 +1,64 @@
+{
+  "summary": "Tested OTPly WhatsApp OTP sign-in, Truecaller removal, ₹118/invite removal, free provider phone, financial reconciliation and regressions (backend pytest + Expo web UI at 375px). 2 real WhatsApp sends total (9999912301, 9999912305). FOUND + FIXED: (1) every brand-new mobile signup returned 500 (users.referral_code_1 unique index, null collision); (2) httpx INFO log leaked the full OTPly URL incl. api_key + OTP + mobile into backend.err.log. STILL OPEN CRITICAL: the 2nd and later brand-new mobile-only signups 500 on users.email_1 unique index (email \"\"). Register screen still has an 'Invite code (optional)' field. Profile 'Chat verification' row opens the deleted /verify-sim (Unmatched Route). Financials: ZERO drift (wallets 287525.91, txns 2827, credits 2138810.55, debits -94998.68, phone_reveal_invoices 2; admin system-wallet/breakdown/source-breakdown/net-worth identical before/after apart from generated_at). No deprecated Expo packages found.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/auth/otp/verify (new number)", "issue": "FIXED BY T1: new user doc had no referral_code -> E11000 on users.referral_code_1 (non-sparse unique; one existing user already has null) -> 500 for EVERY new mobile signup. Now generates a referral code via gen_referral_code (routes/otp_auth.py).", "priority": "CRITICAL"},
+      {"endpoint": "POST /api/auth/otp/verify (2nd+ new number)", "issue": "OPEN: new users are stored with email \"\" and users.email_1 is a NON-partial unique index (server.py:7912 create_index('email', unique=True)) -> E11000 dup key {email: \"\"} -> 500. Only ONE mobile-only account can ever exist. Reproduced in test_second_brand_new_number_also_creates_user. Fix: don't store email \"\" (omit the field), drop email_1 and recreate it partial-unique ({email: {$type:'string', $gt:''}}) the same way uniq_user_phone is built, update the startup create_index, and catch DuplicateKeyError -> 409.", "priority": "CRITICAL"},
+      {"endpoint": "core/otply.py _deliver", "issue": "FIXED BY T1: the httpx logger (root INFO from server.py:185 logging.basicConfig) logged 'HTTP Request: GET https://api.adeptcode.in/api.php?api_key=...&mobile=...&otp=...' for every send. Set the httpx/httpcore loggers to WARNING in core/otply.py and redacted the 2 existing lines in backend.err.log. A real send after the fix logged only 'otply: http=200 status=success code=OTP_SENT'. The key was in plain-text logs, so the owner should ROTATE OTPLY_API_KEY.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/auth/otp/verify", "issue": "SECURITY: signs into ANY account whose stored phone matches, even when phone_verified is false (28 accounts have self-typed, unverified phones; 3 of them have a wallet balance). If someone typed a wrong number or someone else's number at email signup, the real owner of that number can sign straight into that account. Suggest auto sign-in only when phone_verified is true, and otherwise refuse with the masked owner."},
+      {"endpoint": "POST /api/auth/signup-gate/check|send-otp", "issue": "The conflict block returns the owner's UNMASKED email (conflict.email) next to email_masked. Any logged-in user can look up phone -> email."},
+      {"endpoint": "core/otply.verify_otp", "issue": "The attempts check-then-$inc is not atomic, so parallel requests can get past 5 tries (use find_one_and_update with attempts<5). The 5th wrong reply just says 'That code isn't right.' with no 'request a new code' hint, and the row is only deleted on the 6th call (6th -> 429). verify also ignores purpose, so a login code and a signup_gate code can each be used for the other."},
+      {"endpoint": "core/otply._rate_limit", "issue": "The per-IP limit uses the first X-Forwarded-For entry, which the client can fake."},
+      {"endpoint": "GET /api/auth/signup-gate/status", "issue": "truecaller_available and fallback_code are gone (OK), but it still returns referral_code_used (leftover from invite codes). POST /api/auth/register still accepts referral_code and sets sponsor_id/referred_by."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "app/(tabs)/profile.tsx:349", "issue": "The 'Chat verification · SIM CHECK · LINK A DEVICE' row pushes /verify-sim, which was deleted -> Expo 'Unmatched Route' screen (confirmed in UI).", "testID": "profile-verify-sim-link", "priority": "HIGH"},
+      {"component": "app/register.tsx:101-114", "issue": "The signup form still shows 'Invite code (optional)', sends referral_code, and the Google button gets referralCode. The submit button still reads 'Continue to payment' (it routes to /payment, which now only redirects). This breaks requirement D (no invite field in the signup path).", "testID": "register-referral-input", "priority": "HIGH"},
+      {"component": "app/(tabs)/dashboard.tsx:164-174,513", "issue": "Still shows and shares 'Use my invite code ... when you sign up', but invite codes no longer exist at signup.", "testID": "", "priority": "MEDIUM"},
+      {"component": "app/login.tsx MobileOtpCard onVerified", "issue": "needs_profile from /auth/otp/verify is ignored and /auth/otp/complete-profile is never called, so new mobile users keep the placeholder name 'Slangcart 1234' and have no email.", "testID": "otp-verify-btn", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "services/[id]", "issues": ["Bottom CTA label is cut off as 'Get Phone Num…' at 375px width (button 166px wide)."]},
+      {"screen": "chat/[id]", "issues": ["The provider chat header subtitle shows a lone '#'."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_otp_free_reveal_nov2026.py",
+    "/app/backend/tests/fin_snapshot.py",
+    "/app/backend/tests/treasury_snapshot.py",
+    "/app/backend/tests/otp_planter.py",
+    "/app/test_reports/pytest/pytest_otp_nov2026.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix users.email_1 so that more than one mobile-only account can be created (partial unique index plus no empty-string email). Then re-run test_second_brand_new_number_also_creates_user.",
+    "CRITICAL: Rotate OTPLY_API_KEY: it was written in plain text to backend.err.log by the httpx logger. The logging leak itself is fixed.",
+    "HIGH: Remove the invite-code field, the referralCode prop and the 'Continue to payment' text from app/register.tsx. Stop /auth/register from attaching a sponsor.",
+    "HIGH: Remove or repoint the 'Chat verification' row in app/(tabs)/profile.tsx:349 (dead /verify-sim link).",
+    "MEDIUM: Update the dashboard invite-code share card.",
+    "MEDIUM: Only sign into an existing account through OTP when that account's phone is verified. Mask conflict.email in signup-gate/check.",
+    "LOW: Make the OTP attempt counter atomic and check purpose in verify. Remove EXPO_PUBLIC_TRUECALLER_CLIENT_ID from frontend/.env and the stale backend/core/__pycache__/truecaller*.pyc and sim_binding*.pyc. Handle needs_profile after mobile sign-in. Shorten the 'Get Phone Number' label for 375px."
+  ],
+  "critical_code_review_comments": [
+    "routes/otp_auth.py: the new-user insert had no DuplicateKeyError handling; any unique-index clash surfaces as a bare 500.",
+    "core/otply.py: hashing (sha256 salt:mobile:otp) and storage are correct. db.otp_codes holds only otp_hash + salt + counters, with no plain OTP. Cooldown and hourly limit work, and +91 / 0 / spaced prefixes normalise to the same number.",
+    "server.py reveal-phone: free path verified. No wallet debit, no transactions, no admin-bucket credit. A ₹0 phone_reveal_invoices row is written, which is what lets Start Chat through. share_phone:false -> 403.",
+    "The Truecaller code is removed. The remaining mentions are comments, frontend/.env EXPO_PUBLIC_TRUECALLER_CLIENT_ID, stale .pyc files and the metro cache. READ_PHONE_STATE is gone from app.json. The deleted files are confirmed gone. The old truecaller and sim-binding routes all return 404."
+  ],
+  "updated_files": [
+    "/app/backend/routes/otp_auth.py (generate referral_code for new mobile users; import gen_referral_code)",
+    "/app/backend/core/otply.py (httpx/httpcore loggers set to WARNING so the provider URL with api_key + OTP is never logged)",
+    "/var/log/supervisor/backend.err.log (redacted 2 leaked OTPly URLs)"
+  ],
+  "success_rate": {"backend": "96% (22/23 pytest; only the 2nd-new-mobile-user email_1 collision fails)", "frontend": "85% (login, OTP send/wrong/verify -> /shop, verify-mobile gate, /payment redirect, apply pages with no member lock, free reveal + chat with no pay sheet, admin pager and shop all OK; dead /verify-sim link and invite field on /register fail)"},
+  "seed_data_creation": "None kept. All TEST mobile users (9999912302/12303/12305), their sessions/login_history, the ₹0 phone_reveal_invoices rows, 2 chat threads with their messages, provider notifications, otp_codes and otp_requests rows were deleted by id. Provider 22c44148 share_phone was restored to unset.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Real WhatsApp sends cost money: only test_real_send_then_cooldown_and_normalisation sends (number 9999912301). Run the rest with -k 'not real_send and not wrong_codes'. To drive OTP verify without WhatsApp, use plant_code() in the test file, or run otp_planter.py in the background before the UI send. Financial baseline after this run is unchanged: wallets 287525.91, txns 2827, invoices 2, users 64. Only one service provider exists (Iter66 Provider 22c44148, phone 9999900000). brightkittu@gmail.com does NOT exist in this DB; use testbuyer@test.com / Test@1234 (no phone -> lands on /verify-mobile). Web AsyncStorage keys are auth_token and auth_refresh_token.",
+  "rca_of_issue": "Mobile signup 500: the users collection has legacy NON-sparse unique indexes on email and referral_code (server.py:7912-7913). A missing field is indexed as null and an empty string as \"\", so the first code-less user and the second empty-email user both collide. Repro: plant an otp_codes row for a fresh 99999xxxxx number and POST /api/auth/otp/verify. The log shows E11000 on referral_code_1 (fixed), then on email_1 (open). Log leak: logging.basicConfig(level=INFO) makes httpx log every request URL, and OTPly takes api_key and otp as query parameters."
+}

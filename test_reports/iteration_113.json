@@ -1,0 +1,57 @@
+{
+  "summary": "Scale/perf retest at 6,303 products. Backend: 13/14 new tests passed, plus the 4 iter112 bulk-category regression tests. Every timing was under 0.4s. Walking all pages returns every product exactly once: public 6,183 at 500/page, admin 6,303 at 250/page. /products?ids keeps the requested order, ignores the location gate and caps at 300. The one failure: /admin/products?ids does not keep the requested order. UI (375x667, shopper testbuyer@test.com at 13.7484,79.7027; brightkittu@gmail.com was not tried): the shop pages 60 at a time and keeps appending. First paint was 1.31s after login. Scrolled to 2,640 unique cards with no duplicates. The Mobiles category screen shows 545 items and appends with no duplicates. Layout blocks (shown only for pincode 517644, which I injected by mocking /geo/resolve because the real geo returns pincode '') make exactly ONE /products?ids= call, paint in 1.38s and open the product page when tapped. Admin Shop Layout opens in 1.24s with one /admin/products?ids call. The picker paints in 0.34s showing '100 shown of 6,303' and appends to 600 unique rows. Searching 'PERFTEST Product 05999' finds it. Products used in other blocks are excluded, an edited block still shows its own products, and saving a new block works. Still broken: the default home grid header shows the number of loaded rows ('60 products'), not the total; searching 'Mobiles' shows '545 products' plus 'No results found'; curated-ids leak from pincode-targeted blocks hides products from shoppers who have no pincode; there is no list virtualisation; the picker search is not reset between editor sessions. No deprecated Expo packages found.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/shop-layout/curated-product-ids (no pincode)", "issue": "Returns ids from pincode-TARGETED blocks too (routes/shop_layout.py:553 only filters active=True when pincode is missing), while GET /api/shop-layout without a pincode returns only GLOBAL blocks. For a shopper with no resolved pincode (the test geo resolves to pincode '' / pincode_valid:false), curated products are hidden from the browse grids AND their block is never shown, so the products vanish (the owner's 'missing products'). Reproduced: saving a block targeted at pincode 999999 raised the no-pincode curated count from 3 to 6 while /shop-layout?scope=home returned 0 blocks.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/admin/products?ids=", "issue": "Does not keep the requested id order (it uses the normal admin sort). The spec says it should behave like the public ?ids. Harmless today because the UI uses it as a lookup."},
+      {"endpoint": "GET /api/geo/resolve?lat=13.7484&lng=79.7027", "issue": "Returns pincode '' (rejected_pincode 517600), so a shopper at the requested test geo gets no pincode and never sees the 517644-targeted layout blocks."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Shop home 'All products near you' grid (the default view when no layout block matches)", "issue": "The header shows products.length (60, then 120… as you scroll) instead of the server total of 6,183. This is the owner's complaint (a). This grid also never renders <LoadingMoreRow/> (testID loading-more never appeared even with a 1.5s delayed page), and it maps `products` rather than `filteredProducts`, so curated products are not hidden here, unlike the category screen. Reference: src/shop-home.tsx:989-1010", "testID": "loading-more", "priority": "HIGH"},
+      {"component": "Shop home search results", "issue": "The server search matches name/description/brand/category/tags, then the client filters again by name only (src/shop-home.tsx:447). Searching 'Mobiles' shows the header '545 products' and the 'No results found' empty state. Because the grid is empty, loadMore never fires either.", "testID": "home-search-btn", "priority": "HIGH"},
+      {"component": "Admin Shop Layout product picker", "issue": "pickSearch and pickVendor persist across editor sessions (app/admin/shop-layout.tsx:800-801 are never reset when the editor opens). After one search, New Block -> Product Grid -> Products opens showing '0 shown of 2 — No products match', which looks like the 'zero products' complaint. Reset both when the editor or picker opens.", "testID": "multi-picker-search", "priority": "MEDIUM"},
+      {"component": "Admin single-product picker / banner item link labels", "issue": "Labels look up names in `products`, which now holds only the ids blocks already reference (shop-layout.tsx:1346 and 1540). A newly picked product shows its raw UUID until it is saved and the screen reloads. Banner items[].link_value ids are not added to refIds (line 233), so those labels show '—'. Keep the picked PickerProduct in local state or merge it into products.", "testID": "single-product-picker", "priority": "MEDIUM"},
+      {"component": "Category screen subcategory chip", "issue": "The sub-chip filters only the rows already loaded (app/(tabs)/shop-category/[name].tsx:154-160), so counts are partial. If only a few loaded rows match, the content is shorter than the screen, onScroll never reaches the bottom and no more rows load. Pass subcategory to the server instead.", "testID": "sub-chip-*", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Infinite scroll offset", "issue": "loadMore uses offset = products.length after client filtering (own-vendor products in shape(), shop-home.tsx:332; [name].tsx:130). If a whole page is filtered out (e.g. a vendor browsing a shelf of their own products), the offset stops advancing and the same page is fetched again on every scroll. Track the server offset separately.", "affected_testIDs": ["loading-more"]},
+      {"flow": "Shop home with layout blocks", "issue": "When layoutBlockCount>0 no browse grid is rendered, but onScroll still calls loadMore. A hidden /products?offset=60 call was seen while scrolling the blocks home; each scroll near the bottom downloads another 60 rows that are never shown. Guard loadMore when no grid is rendered.", "affected_testIDs": []},
+      {"flow": "Duplicate / polling requests", "issue": "The category screen fires the first /products request twice (cachedGet plus fresh). Admin products sends every /admin/products request twice. Admin Shop Layout calls load() (blocks + analytics + categories + ids) every 20s while open.", "affected_testIDs": []}
+    ],
+    "design_issues": [
+      {"screen": "Admin Shop Layout picker", "issues": ["When every search result is excluded because it is used in another block, the picker says 'No products match this search / vendor'. It should say they are already used in another block."]}
+    ],
+    "react_native_issues": [
+      {"component": "Non-virtualised product grids", "issue": "Shopper grids are ScrollView + .map (src/shop-home.tsx:752, 937, 998; app/(tabs)/shop-category/[name].tsx), and so is the admin picker (shop-layout.tsx:1728). After scrolling 2,640 products the web DOM held 37k nodes. On a low-end Android device every mounted card and Image stays in memory, which risks scroll jank and ANR/force-close at 5k+ SKUs (owner complaints c and d). Use FlatList or @shopify/flash-list with numColumns=2, onEndReached, windowSize and removeClippedSubviews."},
+      {"component": "Web preview font loading", "issue": "On first load the Expo dev overlay shows an 'Uncaught Error: 6000ms timeout exceeded' red screen from fontfaceobserver (dev only, dismissible). Check font loading in app/_layout.tsx."}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter113_scale_perf.py", "/app/backend/tests/test_iter112_bulkcat_retest.py", "/app/test_reports/pytest/iter113_results.xml"],
+  "action_items": [
+    "HIGH: shop-home.tsx:994 — show totalProducts in the 'All products near you' header, render <LoadingMoreRow/> under that grid, and map filteredProducts.",
+    "HIGH: shop-home.tsx:447 — drop the client name filter when searchSubmitted (the server already searched), or match the same fields as the server.",
+    "HIGH: routes/shop_layout.py curated_product_ids — when pincode is missing, return only GLOBAL blocks' ids (same global_only rule as _scope_filter).",
+    "HIGH: replace the ScrollView+map grids with FlatList/FlashList (numColumns=2, onEndReached) so memory stays flat as shoppers scroll thousands of products.",
+    "MEDIUM: reset pickSearch/pickVendor when the block editor or picker opens.",
+    "MEDIUM: keep picked products (single picker + banner item link) in local state so their names show; add items[].link_value to refIds.",
+    "MEDIUM: track the server offset in loadMore instead of products.length; skip loadMore when no grid is rendered.",
+    "MEDIUM: shop-category subcategory chip — filter on the server (subcategory param) and page.",
+    "MINOR: keep the requested order in /admin/products?ids; remove the duplicate initial fetches."
+  ],
+  "critical_code_review_comments": [
+    "shop-home.tsx (1,529 lines), shop-layout-renderer.tsx (1,640) and admin/shop-layout.tsx (2,064) are well over 700 lines; split them.",
+    "use-admin-product-search: loadMore uses items.length as the offset, which is fine because the server does not filter it, but the usedElsewhere exclusion is applied after paging. If a whole page is excluded, the list can look empty and never scroll to load more.",
+    "The fallback 'All products near you' grid duplicates the card-mapping block about three times in shop-home.tsx (DRY)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter113_scale_perf.py (new test file only)"],
+  "success_rate": {"backend": "93% (13/14 new; 4/4 iter112 regression)", "frontend": "~70% (paging, ids resolution, admin picker, save and exclusion work; header count, search, curated leak and picker search persistence are broken)"},
+  "seed_data_creation": "Created the TEST_iter113 grid product_grid block (pincode 999999, id 8f91957b-a382-4c05-b995-7a73b1efc2a6) through the UI to test save, then deleted it via the API; curated count is back to 3. The PERFTEST products were not changed. No product categories were modified.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Shopper testbuyer@test.com / Test@1234 at geo 13.7484,79.7027. /geo/resolve returns pincode '', so layout blocks (all targeted at 517644) only show if you mock /api/geo/resolve to return pincode 517644 with page.route. Admin pages open a HelpGuide sheet on first visit; close it by clicking its X at about (337,295) on a 375px viewport. Home category chips navigate to /shop-category/<Name>. Picker counter text: 'N shown of 6,303 · K selected'.",
+  "rca_of_issue": "(a) The '60/500 products' count comes from the fallback grid header using products.length (loaded rows), not totalProducts. Search showing no results: the server's broad search is filtered again on the client by name. Missing products: curated-product-ids ignores pincode targeting when the pincode is absent. Remaining lag/ANR risk: rows are never unmounted because the grids are not virtualised."
+}

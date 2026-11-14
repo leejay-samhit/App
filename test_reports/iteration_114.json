@@ -1,0 +1,45 @@
+{
+  "summary": "Retest of the iter113 fixes at 6,303 products. Backend: 23 of 25 tests passed and 2 were skipped (test_iter114_scale_retest.py plus the iter113 and iter112 suites). Both failures are the same open MINOR issue: /admin/products?ids does not keep the requested order. The 2 skipped tests (sub-category and brand search) need data the seed doesn't have. I ran both checks by hand with temporary data and both passed. Every endpoint's p95 is under 0.16s; none is over 1s. UI checks at 375x667, shopper testbuyer@test.com (brightkittu@gmail.com / Just@4me returns 'Invalid credentials'): H1 PASS (the header shows the server total '6,183 products'). H2 PASS ('Mobiles' shows 545 results; a brand search shows 5; searching curated 'Test Widget' finds it). H3 PASS (without a pincode only GLOBAL blocks count, giving 0 ids; 517644 gives 3; 999999 gives 0). H4 PASS (virtualised list: 32 cards in the DOM, about 690 DOM nodes and a 45MB heap after scrolling through 84 pages / 5,040 rows; offsets 60..5040 in order with no repeats or gaps; cards render once scrolling settles). M1 PASS (after a stale search, New Block → Product grid → Products opens with an empty search and '100 shown of 6,303'). M2 PASS (content_box and banner item-link picks show the product name). M3 PASS. M4 PASS (0 page requests while layout blocks are shown). M5 PARTIAL: the sub-category chip filters on the server and pages correctly (75 of 75 rows across 2 pages), but the header count and the chip badges still count loaded rows ('60 items' while the shelf holds 75; the 'All' chip shows 60 while Men holds 546). New MEDIUM bug: in search results and the home category grid, the loading-more row appears twice (once in the list header, once in the footer), so the grid jumps 56px whenever a page starts or finishes loading. Regression PASS: admin Products shows 250 rows per page with a numbered pager; the bulk-mapping sheet hides Recharge; bulk-category returns 400 for unknown and recharge shelves; the shop-layout picker shows the Recharge root but not its operator sub-categories (API check). Vendor dashboard pager NOT tested (no vendor credentials).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/admin/products?ids=", "issue": "Still does not keep the requested id order (iter113 MINOR, not fixed). /api/products?ids does keep it."},
+      {"endpoint": "GET /api/products (scale risk)", "issue": "count_documents runs on EVERY page, loadMore pages included. Explain plan: the count FETCHes every matching doc because of is_published $or/$exists (6,265 docs, 6ms now; grows linearly, roughly 1s+ at 1M). The q search uses unanchored case-insensitive $regex, which examines all 6,265 docs. skip(offset) is O(offset). Fine at 6k; it will not meet the 1M-product requirement without a cached total, a computed is_published flag and a text/Atlas Search index."},
+      {"endpoint": "shop_layout_blocks data", "issue": "content_box 815466b2 and the brand_slider 'Gadget Store' item point to product 409e52af, which no longer exists. The shopper home shows an empty white card for that content box, and the admin item link shows '—'."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "shop-category/[name].tsx:358, :365, :439", "issue": "M5 not fully fixed: the 'All' chip badge = products.length (loaded rows: 60 while Men holds 546). Sub-chip badges count loaded rows. When a sub is selected the header shows filtered.length ('60 items' while the server total is 75). Use totalProducts from the server (and per-sub totals if badges are kept, or drop the badges).", "testID": "sub-chip-all", "priority": "HIGH"},
+      {"component": "shop-home.tsx:809 and :983 (ListHeaderComponent)", "issue": "<LoadingMoreRow/> is rendered in the list HEADER as well as the ListFooterComponent (line 744). The header copy changes the header height, so the virtualised search and category grid jumps 56px whenever loading starts or stops (measured: a card moved 357→301px). Remove the two header copies.", "testID": "loading-more", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "shop-category loadMore", "issue": "loadMore has no request-sequence guard (shop-home has loadSeq). Switching a sub chip while a page is loading appends the stale shelf's page to the new list and moves fetchedCount by 60.", "affected_testIDs": ["sub-chip-all"]},
+      {"flow": "shop home first load", "issue": "Duplicate page-1 /products call, and curated-product-ids is fetched twice (first without a pincode, then with one). /products page 1 is also fetched when layout blocks replace the grid. Admin /admin/products page N is fetched twice per page.", "affected_testIDs": []}
+    ],
+    "design_issues": [
+      {"screen": "admin/shop-layout single 'Pick a product' sheet", "issues": ["No search box. With 6k+ products (1M target) an admin must scroll 100-row pages to find a product; it also inherits pickSearch from the multi picker with no way to clear it", "Rows have no testID and are a non-virtualised ScrollView map"]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iter114_scale_retest.py", "/app/backend/tests/test_iter113_scale_perf.py", "/app/test_reports/pytest/pytest_iter114.xml"],
+  "action_items": [
+    "HIGH: shop-category/[name].tsx: show the server total (totalProducts) in the header and on the 'All' chip even when a sub is selected; drop or server-source the per-sub chip badges.",
+    "MEDIUM: shop-home.tsx: delete the {loadingMore ? <LoadingMoreRow/> : null} lines inside ListHeaderComponent (about lines 809 and 983); keep only the footer.",
+    "MEDIUM: shop-category loadMore: add a loadSeq/reqId guard like shop-home so a chip switch drops stale pages.",
+    "MEDIUM (1M scale): compute total only on offset==0 (or cache it) and reuse it in loadMore; backfill is_published so the count can be index-only; add a text index or Atlas Search for q.",
+    "MINOR: keep the requested order in /admin/products?ids; add a search input + testIDs to the single product picker; skip rendering content_box/items whose product no longer exists; remove the duplicate initial fetches."
+  ],
+  "critical_code_review_comments": [
+    "shop-home.tsx is 1,553 lines and admin/shop-layout.tsx is 2,076. Both are far over 700 and should be split.",
+    "nameOf falls back to pool.items. If the admin searches the picker again later, an earlier picked product's name can revert to the UUID (content_box) or '—' (items). Keep a picked-products map instead.",
+    "products_public.py: count_documents + skip on every page call is the next bottleneck toward 1M SKUs."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter114_scale_retest.py"],
+  "success_rate": {"backend": "92% (23/25; both failures are the same minor admin ?ids ordering issue)", "frontend": "90% (10 of 11 retest items pass; M5 counts partially fixed; 1 new MEDIUM loading-row jump)"},
+  "seed_data_creation": "Temporary only: shop category TEST_iter114_Sub under Men, sub_category='TEST_iter114_Sub' on 75 perftest Men products, brand='TESTBrandZed' on 5 of them. All restored to '' and the category deleted by id. Products 6,303 and layout blocks 10, both unchanged. Leftover TEST_aa1b75_* category-scope section_header blocks were already present (not mine).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Shopper testbuyer@test.com / Test@1234 with geolocation 13.7484,79.7027. brightkittu@gmail.com does NOT exist. To see layout blocks, route **/api/geo/resolve and set pincode '517644'. Home category chip testIDs are home-cat-<uuid>; click by text 'Men' or go to /shop-category/Men. No product has a sub_category or brand in this DB: the sub-chip/brand tests skip unless you create a TEST_ sub-category under Men and set sub_category on some perftest products (restore afterwards). In admin bottom sheets use element.dispatch_event('click') after scrollIntoView (normal clicks fail with 'outside of viewport'). Close the admin HelpGuide by clicking (337,295).",
+  "rca_of_issue": "M5 count: the chip-strip badges (line 358 products.length, line 365 filter over loaded products) and the header (line 439 selectedSub ? filtered.length) were not switched to the server total when the filter moved to the server. Loading jump: LoadingMoreRow was added to the footer but the older header copies were not removed; on web, header height changes shift every row."
+}

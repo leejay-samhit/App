@@ -1,7 +1,0 @@
-{
-  "name": "truecaller",
-  "version": "1.0.0",
-  "description": "Local Expo module: Truecaller OAuth SDK 3.3.0 one-tap number verification",
-  "main": "index.ts",
-  "private": true
-}
