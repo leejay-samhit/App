@@ -819,7 +819,7 @@ async def backup_file_job_status(
     job_id: str,
     _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
 ):
-    job = await db.backup_file_jobs.find_one({"id": job_id}, {"_id": 0})
+    job = await db.backup_file_jobs.find_one({"id": job_id, "expired": {"$ne": True}}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="No such backup job")
     return job
@@ -832,14 +832,14 @@ async def download_prepared_backup(
 ):
     """Stream the finished file from its Mongo chunks — fast, because the
     packing already happened."""
-    job = await db.backup_file_jobs.find_one({"id": job_id})
+    job = await db.backup_file_jobs.find_one({"id": job_id, "expired": {"$ne": True}})
     if not job:
         raise HTTPException(status_code=404, detail="No such backup job")
     if job.get("status") != "ready":
         raise HTTPException(status_code=409, detail=f"Still packing ({job.get('status')})")
 
     async def _chunks() -> AsyncIterator[bytes]:
-        async for ch in db.backup_file_chunks.find({"job_id": job_id}).sort("seq", 1):
+        async for ch in db.backup_file_chunks.find({"job_id": job_id, "expired": {"$ne": True}}).sort("seq", 1):
             yield bytes(ch["data"])
 
     return StreamingResponse(

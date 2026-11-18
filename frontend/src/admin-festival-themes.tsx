@@ -9,7 +9,8 @@
  */
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  ActivityIndicator, Alert, Image, Platform, StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, Alert, Image, Platform, StyleSheet, Text, TextInput,
+  TouchableOpacity, View,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
@@ -44,12 +45,21 @@ export function FestivalThemesSection() {
   const [preview, setPreview] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [artwork, setArtwork] = useState<Record<string, string>>({});
+  // Nov-2026 (req 17) — editable banner heading / subtitle / layout per festival.
+  const [copyOpen, setCopyOpen] = useState<string | null>(null);
+  const [bannerText, setBannerText] = useState<Record<string, any>>({});
 
   const load = useCallback(async () => {
     try {
       const { data } = await api.get<{ items: FestivalCard[]; active_id: string | null }>("/festival-themes");
       setItems(data.items || []);
       setActiveId(data.active_id || null);
+      try {
+        const copy = await api.get<{ items: Record<string, any> }>("/admin/festival-theme/banner-text");
+        setBannerText(copy.data?.items || {});
+      } catch {
+        // the section still works without saved overrides
+      }
     } catch (e) {
       setNotice({ ok: false, text: formatApiError(e) });
     } finally { setLoading(false); }
@@ -91,6 +101,33 @@ export function FestivalThemesSection() {
       setBranding(data);
       setActiveId(null);
       setNotice({ ok: true, text: "Back to the standard Slangcart theme." });
+    } catch (e) {
+      setNotice({ ok: false, text: formatApiError(e) });
+    } finally { setBusy(null); }
+  };
+
+  const setCopyField = (fid: string, key: string, value: string) => {
+    setBannerText((b) => ({ ...b, [fid]: { ...(b[fid] || {}), [key]: value } }));
+  };
+
+  const saveBannerText = async (f: FestivalCard) => {
+    const v = bannerText[f.id] || {};
+    setBusy(`copy-${f.id}`);
+    setNotice(null);
+    try {
+      await api.put("/admin/festival-theme/banner-text", {
+        festival_id: f.id,
+        title: v.title || null,
+        subtitle: v.subtitle || null,
+        align: v.align || null,
+        title_size: v.title_size ? Number(v.title_size) : null,
+        subtitle_size: v.subtitle_size ? Number(v.subtitle_size) : null,
+        title_color: v.title_color || null,
+        subtitle_color: v.subtitle_color || null,
+        height: v.height ? Number(v.height) : null,
+      });
+      setNotice({ ok: true, text: `${f.name} banner text saved.` });
+      load();
     } catch (e) {
       setNotice({ ok: false, text: formatApiError(e) });
     } finally { setBusy(null); }
@@ -216,6 +253,121 @@ export function FestivalThemesSection() {
               ) : null}
 
               {f.available ? (
+                <>
+                  <TouchableOpacity
+                    onPress={() => setCopyOpen((c) => (c === f.id ? null : f.id))}
+                    style={styles.artBtn}
+                    testID={`festival-copy-toggle-${f.id}`}
+                  >
+                    <Feather name="type" size={13} color={colors.textMuted} />
+                    <Text style={styles.artBtnText}>
+                      {copyOpen === f.id ? "Hide banner text" : "Edit banner text & layout"}
+                    </Text>
+                  </TouchableOpacity>
+                  {copyOpen === f.id ? (
+                    <View style={styles.copyPanel} testID={`festival-copy-panel-${f.id}`}>
+                      <Text style={styles.copyLabel}>Heading</Text>
+                      <TextInput
+                        value={(bannerText[f.id] || {}).title ?? ""}
+                        onChangeText={(v) => setCopyField(f.id, "title", v)}
+                        placeholder={(f.decor || {}).banner_title || f.name}
+                        placeholderTextColor={colors.textMuted}
+                        style={styles.copyInput}
+                        maxLength={60}
+                        testID={`festival-copy-title-${f.id}`}
+                      />
+                      <Text style={styles.copyLabel}>Subtitle</Text>
+                      <TextInput
+                        value={(bannerText[f.id] || {}).subtitle ?? ""}
+                        onChangeText={(v) => setCopyField(f.id, "subtitle", v)}
+                        placeholder={(f.decor || {}).banner_subtitle || `Celebrate ${f.name} with us`}
+                        placeholderTextColor={colors.textMuted}
+                        style={styles.copyInput}
+                        maxLength={120}
+                        testID={`festival-copy-subtitle-${f.id}`}
+                      />
+                      <Text style={styles.copyLabel}>Alignment</Text>
+                      <View style={styles.alignRow}>
+                        {(["left", "center", "right"] as const).map((a) => {
+                          const on = ((bannerText[f.id] || {}).align || "left") === a;
+                          return (
+                            <TouchableOpacity
+                              key={a}
+                              onPress={() => setCopyField(f.id, "align", a)}
+                              style={[styles.alignChip, on && styles.alignChipOn]}
+                              testID={`festival-copy-align-${a}-${f.id}`}
+                            >
+                              <Text style={[styles.alignChipText, on && styles.alignChipTextOn]}>
+                                {a.toUpperCase()}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                      <View style={styles.copyGrid}>
+                        <View style={styles.copyCell}>
+                          <Text style={styles.copyLabel}>Heading size</Text>
+                          <TextInput
+                            value={String((bannerText[f.id] || {}).title_size ?? "")}
+                            onChangeText={(v) => setCopyField(f.id, "title_size", v.replace(/\D/g, ""))}
+                            placeholder="19"
+                            placeholderTextColor={colors.textMuted}
+                            keyboardType="number-pad"
+                            style={styles.copyInput}
+                            maxLength={2}
+                          />
+                        </View>
+                        <View style={styles.copyCell}>
+                          <Text style={styles.copyLabel}>Subtitle size</Text>
+                          <TextInput
+                            value={String((bannerText[f.id] || {}).subtitle_size ?? "")}
+                            onChangeText={(v) => setCopyField(f.id, "subtitle_size", v.replace(/\D/g, ""))}
+                            placeholder="13"
+                            placeholderTextColor={colors.textMuted}
+                            keyboardType="number-pad"
+                            style={styles.copyInput}
+                            maxLength={2}
+                          />
+                        </View>
+                      </View>
+                      <View style={styles.copyGrid}>
+                        <View style={styles.copyCell}>
+                          <Text style={styles.copyLabel}>Heading colour</Text>
+                          <TextInput
+                            value={(bannerText[f.id] || {}).title_color ?? ""}
+                            onChangeText={(v) => setCopyField(f.id, "title_color", v)}
+                            placeholder="#FFD479"
+                            placeholderTextColor={colors.textMuted}
+                            autoCapitalize="characters"
+                            style={styles.copyInput}
+                            maxLength={9}
+                          />
+                        </View>
+                        <View style={styles.copyCell}>
+                          <Text style={styles.copyLabel}>Banner height</Text>
+                          <TextInput
+                            value={String((bannerText[f.id] || {}).height ?? "")}
+                            onChangeText={(v) => setCopyField(f.id, "height", v.replace(/\D/g, ""))}
+                            placeholder="112"
+                            placeholderTextColor={colors.textMuted}
+                            keyboardType="number-pad"
+                            style={styles.copyInput}
+                            maxLength={3}
+                          />
+                        </View>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => saveBannerText(f)}
+                        disabled={busy === `copy-${f.id}`}
+                        style={styles.copySaveBtn}
+                        testID={`festival-copy-save-${f.id}`}
+                      >
+                        {busy === `copy-${f.id}`
+                          ? <ActivityIndicator size="small" color={colors.primaryFg} />
+                          : <Text style={styles.copySaveText}>Save banner text</Text>}
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
                 <TouchableOpacity onPress={() => generateArtwork(f)} disabled={busy === `art-${f.id}`}
                   style={styles.artBtn} testID={`festival-artwork-${f.id}`}>
                   {busy === `art-${f.id}`
@@ -225,6 +377,7 @@ export function FestivalThemesSection() {
                     {busy === `art-${f.id}` ? "Generating artwork…" : "Generate AI banner artwork"}
                   </Text>
                 </TouchableOpacity>
+                </>
               ) : null}
             </View>
           </View>
@@ -339,6 +492,34 @@ const styles = StyleSheet.create({
   applyBtnText: { fontSize: 12, fontWeight: "800", color: colors.primaryFg },
   artBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, minHeight: 36 },
   artBtnText: { fontSize: 11, fontWeight: "700", color: colors.textMuted },
+  // Banner text editor (Nov-2026, req 17)
+  copyPanel: {
+    marginTop: 8, padding: 12, borderRadius: radii.card,
+    backgroundColor: colors.surfaceMuted, gap: 6,
+  },
+  copyLabel: { fontSize: 10, fontWeight: "800", letterSpacing: 0.8, color: colors.textMuted },
+  copyInput: {
+    backgroundColor: colors.surface, borderRadius: radii.input,
+    borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
+    paddingHorizontal: 10, paddingVertical: 9, fontSize: 13, color: colors.textMain,
+    minHeight: 40,
+  },
+  copyGrid: { flexDirection: "row", gap: 10 },
+  copyCell: { flex: 1 },
+  alignRow: { flexDirection: "row", gap: 8 },
+  alignChip: {
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999,
+    backgroundColor: colors.surface, borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border, minHeight: 36, justifyContent: "center",
+  },
+  alignChipOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  alignChipText: { fontSize: 10, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.6 },
+  alignChipTextOn: { color: colors.primaryFg },
+  copySaveBtn: {
+    marginTop: 6, backgroundColor: colors.primary, borderRadius: radii.button,
+    paddingVertical: 11, alignItems: "center", justifyContent: "center", minHeight: 44,
+  },
+  copySaveText: { color: colors.primaryFg, fontWeight: "800", fontSize: 13 },
 
   previewWrap: { gap: 8, paddingTop: 4 },
   previewCaption: { fontSize: 11, fontWeight: "800", color: colors.textMuted, letterSpacing: 0.3 },

@@ -73,6 +73,17 @@ export type Branding = {
       banner_subtitle?: string;
     };
     artwork?: { banner?: string };
+    /** Admin-editable banner copy + layout (Nov-2026). */
+    banner_text?: {
+      title?: string;
+      subtitle?: string;
+      align?: "left" | "center" | "right";
+      title_size?: number;
+      subtitle_size?: number;
+      title_color?: string;
+      subtitle_color?: string;
+      height?: number;
+    };
   } | null;
   /** Bumped by the backend on every theme change — open apps poll it. */
   theme_version?: number;

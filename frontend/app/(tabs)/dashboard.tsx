@@ -22,7 +22,6 @@ import { colors, formatINR, radii, spacing, withAlpha } from "../../src/theme";
 import { GradientCard } from "../../src/gradient-card";
 import { Skeleton, SkeletonCard, SkeletonRow } from "../../src/skeleton";
 import { Sparkline } from "../../src/charts";
-import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { startBackgroundProviderLocation, stopBackgroundProviderLocation, pushLocationNow } from "../../src/bg-location";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
@@ -48,8 +47,6 @@ export default function DashboardScreen() {
   // Admin-configurable WhatsApp support number (falls back to the default
   // we wired into the helper). Branding service can later expose
   // `support_whatsapp` so admin can edit it via the admin panel.
-  const supportWhatsapp = (branding as any)?.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
-  const appName = branding?.app_name || "Slangcart";
   const router = useRouter();
   const [data, setData] = useState<Dashboard | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -179,8 +176,6 @@ export default function DashboardScreen() {
     );
   }
 
-  // Free tier = signed up but no ₹118 subscription yet.
-  const isFreeTier = !!user && (user as any).role !== "admin" && !user.registration_paid;
   // Bank withdrawals are a SELLER settlement feature only — a customer's
   // Slangcart wallet is spent inside the app.
   const isSeller = !!(user as any)?.is_vendor && !!(user as any)?.is_vendor_approved;
@@ -189,9 +184,6 @@ export default function DashboardScreen() {
   // wallet inside the app, so the bank/UPI row is hidden for them.
   const isRider = !!(user as any)?.is_delivery_partner;
   const canPayout = isSeller || isRider || (user as any)?.role === "admin";
-  // WhatsApp support is a paid-member perk — hidden until the user
-  // subscribes (owner's rule, Oct-2026).
-  const showWhatsApp = !isFreeTier;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -232,10 +224,9 @@ export default function DashboardScreen() {
 
         <Animated.View entering={FadeInDown.duration(400).delay(80)} style={{ height: 6 }} />
 
-        {/* Approval status banner — only for SUBSCRIBED users awaiting
-            verification. Free (unsubscribed) users see the subscribe banner
-            above instead; approval never blocks app access (Aug-2026). */}
-        {!isFreeTier && (user as any)?.approval_status && (user as any).approval_status !== "approved" && (
+        {/* Approval status banner — shown while extra documents are being
+            checked. It never blocks app access. */}
+        {(user as any)?.approval_status && (user as any).approval_status !== "approved" && (
           <TouchableOpacity
             onPress={() => router.push("/extra-docs" as any)}
             style={[styles.approvalBanner, { backgroundColor: (user as any).approval_status === "rejected" ? "#FCE9E5" : "#FFF4E5", borderColor: (user as any).approval_status === "rejected" ? "#F2B8B5" : "#FFD79A" }]}
@@ -260,38 +251,6 @@ export default function DashboardScreen() {
           </TouchableOpacity>
         )}
 
-        {/* WhatsApp welcome card — added 2026-06-10.
-            Lets the user tap once to open WhatsApp with a pre-filled
-            "Hi Slangcart, I just registered as <name>" message going to
-            the admin support number. Free (uses wa.me URL scheme), works
-            on every device with WhatsApp installed.
-            Oct-2026 — only subscribed members see it. */}
-        {showWhatsApp ? (
-        <TouchableOpacity
-          onPress={() => openWhatsApp(
-            buildWelcomeMessage({
-              name: user?.name,
-              referral_code: user?.referral_code,
-              app_name: appName,
-            }),
-            supportWhatsapp,
-          )}
-          activeOpacity={0.85}
-          style={styles.waCard}
-          testID="dashboard-whatsapp-welcome"
-        >
-          <View style={styles.waIconWrap}>
-            <Feather name="message-circle" size={22} color="#FFFFFF" />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.waTitle}>Chat with us on WhatsApp</Text>
-            <Text style={styles.waSub} numberOfLines={2}>
-              Send your welcome message & get instant support from our team.
-            </Text>
-          </View>
-          <Feather name="chevron-right" size={20} color="#FFFFFF" />
-        </TouchableOpacity>
-        ) : null}
 
         {/* === Slangcart wallet + cashback card ===
             Shown to every shopper: the wallet holds cashback from delivered
@@ -623,27 +582,6 @@ const styles = StyleSheet.create({
   tierTeam: { fontSize: 11, color: colors.primary, fontWeight: "600" },
   approvalBanner: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, borderWidth: 1, marginBottom: 16 },
   // WhatsApp welcome card — Bright green to look like WhatsApp's own brand.
-  waCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: "#25D366",
-    marginBottom: 16,
-    shadowColor: "#25D366",
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 3,
-  },
-  waIconWrap: {
-    width: 40, height: 40, borderRadius: 20,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    alignItems: "center", justifyContent: "center",
-  },
-  waTitle: { fontSize: 15, fontWeight: "900", color: "#FFFFFF", letterSpacing: 0.2 },
-  waSub: { fontSize: 12, color: "rgba(255,255,255,0.95)", marginTop: 2 },
   approvalBannerTitle: { fontSize: 13, fontWeight: "800" },
   approvalBannerSub: { fontSize: 11, color: colors.textMuted, marginTop: 2, lineHeight: 16 },
   heroCard: { marginBottom: 16, padding: 24 },

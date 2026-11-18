@@ -23,10 +23,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from core.db import db
 from core.notifications import create_notification
-from core.security import get_current_user, require_admin_role
+from core.security import get_current_user, require_admin, require_admin_role
 from core.utils import now_utc
 from models import TicketCreateRequest, TicketReplyRequest, TicketUpdateRequest, PublicTicketCreateRequest, PublicTicketLookupRequest, PublicTicketReplyRequest
 
@@ -34,7 +35,11 @@ from models import TicketCreateRequest, TicketReplyRequest, TicketUpdateRequest,
 router = APIRouter(tags=["tickets"])
 
 
-TICKET_CATEGORIES = ("payment", "withdrawal", "account", "kyc", "product", "other")
+# Nov-2026 — "account_deletion" is its own category so deletion requests are
+# easy to find, report on and route to the right admin queue.
+TICKET_CATEGORIES = (
+    "payment", "withdrawal", "account", "kyc", "product", "account_deletion", "other",
+)
 TICKET_STATUSES = ("open", "in_progress", "resolved", "closed")
 TICKET_PRIORITIES = ("low", "normal", "high", "urgent")
 TICKET_ADMIN_ROLES = ("super_admin", "support", "finance")
@@ -715,3 +720,152 @@ async def admin_export_tickets(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=tickets.csv"},
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Account deletion requests (Nov-2026, req 11 & 13)
+#
+# Submitting one locks the account immediately — the owner's choice — and
+# raises a trackable support ticket in the `account_deletion` category. An
+# admin reviews it and completes (or cancels) the deletion. Wallet, order
+# and transaction records are retained for accounting and tax law; the
+# account itself stops being usable right away.
+# ──────────────────────────────────────────────────────────────────────
+
+class AccountDeletionRequest(BaseModel):
+    reason: str = Field("", max_length=1000)
+    confirm: bool = False
+
+
+async def _lock_for_deletion(user_id: str, ticket_id: str) -> None:
+    """Block the account and end every signed-in device."""
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {
+            "is_blocked": True,
+            "block_reason": "Account deletion requested by the account holder.",
+            "deletion_requested_at": now_utc().isoformat(),
+            "deletion_ticket_id": ticket_id,
+            "active_session_ids": [],
+            "active_session_id": None,
+        }},
+    )
+
+
+@router.get("/me/account-deletion")
+async def my_deletion_request(user: Dict[str, Any] = Depends(get_current_user)):
+    """The user's latest deletion request, if any (for the Profile screen)."""
+    t = await db.tickets.find_one(
+        {"user_id": user["id"], "category": "account_deletion"},
+        {"_id": 0}, sort=[("created_at", -1)],
+    )
+    return {
+        "request": _sanitize_ticket(t) if t else None,
+        "account_locked": bool(user.get("is_blocked")),
+    }
+
+
+@router.post("/me/account-deletion")
+async def request_account_deletion(
+    payload: AccountDeletionRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Please confirm that you want your account deleted.",
+        )
+    if (user.get("role") or "user") == "admin":
+        raise HTTPException(
+            status_code=400,
+            detail="Admin accounts cannot be deleted from the app. Ask a super admin.",
+        )
+    existing = await db.tickets.find_one({
+        "user_id": user["id"],
+        "category": "account_deletion",
+        "status": {"$in": ["open", "in_progress"]},
+    }, {"_id": 0})
+    if existing:
+        # The user may have raised the request as an ordinary ticket first; the
+        # lock still has to happen, so apply it here before answering.
+        await _lock_for_deletion(user["id"], existing["id"])
+        return {
+            "ok": True,
+            "ticket": _sanitize_ticket(existing),
+            "already_requested": True,
+            "account_locked": True,
+        }
+
+    reason = (payload.reason or "").strip()
+    balance = float(user.get("wallet_balance") or 0)
+    tid = str(uuid.uuid4())
+    ts = now_utc().isoformat()
+    message = (
+        "The account holder requested deletion of this account.\n\n"
+        f"Reason: {reason or 'not given'}\n"
+        f"Wallet balance at request: ₹{balance:.2f}\n"
+        "The account has been locked and is awaiting admin review."
+    )
+    doc = {
+        "id": tid,
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "user_name": user.get("name"),
+        "subject": "Account deletion request",
+        "category": "account_deletion",
+        "priority": "high",
+        "status": "open",
+        "assigned_to": None,
+        "assigned_to_email": None,
+        "message_count": 1,
+        "last_message_at": ts,
+        "last_message_by": "user",
+        "last_message_preview": _short_preview(message),
+        "has_unread_admin": True,
+        "has_unread_user": False,
+        "wallet_balance_at_request": balance,
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    await db.tickets.insert_one(doc)
+    await db.ticket_messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "ticket_id": tid,
+        "sender_id": user["id"],
+        "sender_type": "user",
+        "sender_name": user.get("name") or user.get("email"),
+        "message": message,
+        "created_at": ts,
+    })
+    # Lock the account right away and end every live session.
+    await _lock_for_deletion(user["id"], tid)
+    return {"ok": True, "ticket": _sanitize_ticket(doc), "account_locked": True}
+
+
+@router.post("/admin/account-deletion/{ticket_id}/cancel")
+async def admin_cancel_deletion(
+    ticket_id: str,
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Unlock the account and close the request (user changed their mind)."""
+    t = await db.tickets.find_one({"id": ticket_id, "category": "account_deletion"})
+    if not t:
+        raise HTTPException(status_code=404, detail="Deletion request not found")
+    # Only lift the lock THIS request created — an unrelated admin block on the
+    # same account must stay in place.
+    res = await db.users.update_one(
+        {"id": t["user_id"], "deletion_ticket_id": ticket_id},
+        {"$set": {
+            "is_blocked": False,
+            "block_reason": None,
+            "deletion_requested_at": None,
+            "deletion_ticket_id": None,
+        }},
+    )
+    await db.tickets.update_one(
+        {"id": ticket_id},
+        {"$set": {"status": "closed", "updated_at": now_utc().isoformat()}},
+    )
+    # Report what actually happened: an admin block placed for another reason
+    # stays, so the account may still be locked after this call.
+    return {"ok": True, "unlocked": res.modified_count > 0}

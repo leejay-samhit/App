@@ -20,6 +20,7 @@ from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from pymongo.errors import DuplicateKeyError
+from bson import encode as bson_encode
 from pydantic import BaseModel, Field
 from models import (
     RegisterRequest,
@@ -262,6 +263,31 @@ async def register(request: Request, payload: RegisterRequest):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # ─── MOBILE NUMBER (Nov-2026) ─────────────────────────────────────
+    # The raw form value used to go straight into the unique `phone` index,
+    # so registering with a number that already existed (or with a "+91 "
+    # prefix that normalised to one) blew up as a bare HTTP 500. Normalise to
+    # the same 10-digit shape the rest of the app stores and answer clearly.
+    phone_digits = "".join(ch for ch in str(payload.phone or "") if ch.isdigit())
+    if phone_digits.startswith("91") and len(phone_digits) == 12:
+        phone_digits = phone_digits[2:]
+    if phone_digits.startswith("0") and len(phone_digits) == 11:
+        phone_digits = phone_digits[1:]
+    if phone_digits:
+        if len(phone_digits) != 10 or phone_digits[0] not in "6789":
+            raise HTTPException(
+                status_code=400, detail="Enter a valid 10-digit Indian mobile number.",
+            )
+        phone_clash = await db.users.find_one({"phone": phone_digits}, {"_id": 0, "id": 1})
+        if phone_clash:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This mobile number already has an account. Sign in with "
+                    "\"Continue with Mobile Number\" instead."
+                ),
+            )
+
     # ─── NO INVITE CODES (Nov-2026) ───────────────────────────────────
     # Referral and invitation functionality was removed: a signup never has a
     # sponsor, and any `referral_code` still arriving from an older build is
@@ -289,7 +315,7 @@ async def register(request: Request, payload: RegisterRequest):
         # Sep 2026 — hash for login + Fernet copy so a super-admin can read
         # the password back on a support call (see core/password_recovery).
         **password_fields(payload.password),
-        "phone": payload.phone,
+        "phone": phone_digits,
         "role": "user",
         "admin_role": None,
         "referral_code": code,
@@ -316,8 +342,10 @@ async def register(request: Request, payload: RegisterRequest):
         "kyc_submitted_at": None,
         "kyc_reviewed_at": None,
         "kyc_reject_reason": None,
-        # Admin approval gate (gates payout entry + withdrawals)
-        "approval_status": "pending",  # pending | approved | rejected
+        # Nov-2026 — registration is free, so there is nothing for an admin to
+        # approve at signup. (Role applications — vendor, delivery partner,
+        # service provider — keep their own document review.)
+        "approval_status": "approved",  # approved | rejected
         "approval_reviewed_at": None,
         "approval_reviewed_by": None,
         "approval_reject_category": None,
@@ -352,7 +380,14 @@ async def register(request: Request, payload: RegisterRequest):
         },
         "created_at": now_utc().isoformat(),
     }
-    await db.users.insert_one(user_doc)
+    try:
+        await db.users.insert_one(user_doc)
+    except DuplicateKeyError as dup:
+        # Index-level race (two signups with the same email/phone at once).
+        field = "mobile number" if "phone" in str(dup) else "email address"
+        raise HTTPException(
+            status_code=409, detail=f"An account with that {field} already exists.",
+        )
 
     # Mint a fresh session — registration immediately logs the user in.
     sid = new_session_id()
@@ -2895,6 +2930,38 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
         clash = await db.users.find_one({"email": update["email"], "id": {"$ne": user_id}})
         if clash:
             raise HTTPException(status_code=400, detail="Email already taken")
+    if "phone" in update:
+        # Nov-2026 — editing a mobile number used to hit the unique phone index
+        # raw and surface as a bare 500. Normalise to the same 10-digit shape
+        # the rest of the app stores, then report a clash in plain language.
+        raw = str(update["phone"] or "").strip()
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if digits.startswith("91") and len(digits) == 12:
+            digits = digits[2:]
+        if digits.startswith("0") and len(digits) == 11:
+            digits = digits[1:]
+        if not digits:
+            update["phone"] = ""
+        else:
+            if len(digits) != 10 or digits[0] not in "6789":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Enter a valid 10-digit Indian mobile number.",
+                )
+            clash = await db.users.find_one(
+                {"phone": digits, "id": {"$ne": user_id}}, {"_id": 0, "name": 1, "email": 1},
+            )
+            if clash:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{digits} is already on another account"
+                        f"{(' — ' + clash['name']) if clash.get('name') else ''}."
+                    ),
+                )
+            update["phone"] = digits
+            # An admin-set number has not been proven by the owner.
+            update["phone_verified"] = False
     if "role" in update and update["role"] not in ("user", "admin"):
         raise HTTPException(status_code=400, detail="Invalid role")
     if "admin_role" in update and update["admin_role"] not in ("super_admin", "manager", "support", "finance", None):
@@ -2914,7 +2981,11 @@ async def admin_update_user(user_id: str, payload: AdminUserUpdate, admin: Dict[
         admin_count = await db.users.count_documents({"role": "admin"})
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot demote the last admin")
-    await db.users.update_one({"id": user_id}, {"$set": update})
+    try:
+        await db.users.update_one({"id": user_id}, {"$set": update})
+    except DuplicateKeyError as dup:
+        field = "mobile number" if "phone" in str(dup) else "email"
+        raise HTTPException(status_code=409, detail=f"That {field} is already on another account.")
     fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "password_recovery_ciphertext": 0})
     await _create_notification(user_id, "account", "Account updated", "Your account details were updated by admin.")
     if sensitive_fields & set(update.keys()):
@@ -3043,12 +3114,69 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin")
 
-    # ---------- AUTO BACKUP before destructive action ----------
-    snap_info = await _take_snapshot(
-        kind="auto-pre-delete",
-        note=f"Auto-backup before deleting user {target.get('email')} ({target.get('name')})",
-        created_by=admin["id"],
-    )
+    # ---------- SCOPED ARCHIVE before destructive action ----------
+    # Nov-2026 — this used to copy the ENTIRE database (every collection, all
+    # products, all images) into db_snapshot_chunks before deleting one user.
+    # On production Atlas that read ran for minutes and the request died with a
+    # 500 before anything was deleted. An admin deleting one account only needs
+    # that account's own rows archived, which is small, fast and genuinely
+    # restorable. Full snapshots remain available on demand in Admin → Backup.
+    archive_id = str(uuid.uuid4())
+    archive_payload: Dict[str, Any] = {"users": [ {k: v for k, v in target.items() if k != "_id"} ]}
+    archive_truncated: Dict[str, int] = {}
+    # One shared ~8MB budget across every collection, comfortably inside
+    # MongoDB's 16MB document cap even for the heaviest account.
+    archive_budget = 8_000_000 - len(bson_encode(archive_payload["users"][0]))
+    # Money and fulfilment records are archived FIRST so they are never the
+    # rows dropped when the size budget runs out.
+    for coll, q in (
+        ("transactions",           {"user_id": user_id}),
+        ("orders",                 {"user_id": user_id}),
+        ("withdrawals",            {"user_id": user_id}),
+        ("service_bookings",       {"$or": [{"customer_id": user_id}, {"provider_id": user_id}]}),
+        ("vendor_applications",    {"user_id": user_id}),
+        ("service_applications",   {"user_id": user_id}),
+        ("approved_registrations", {"user_id": user_id}),
+        ("rejected_registrations", {"user_id": user_id}),
+        ("tickets",                {"user_id": user_id}),
+        ("cart_items",             {"user_id": user_id}),
+        ("notifications",          {"user_id": user_id}),
+    ):
+        try:
+            # A heavy account (thousands of orders) must not push the archive
+            # past MongoDB's 16MB document cap, so rows are capped per
+            # collection AND against a shared size budget; anything dropped is
+            # counted honestly in `truncated`.
+            total = await db[coll].count_documents(q)
+            rows: List[Dict[str, Any]] = []
+            async for row in db[coll].find(q, {"_id": 0}).limit(2000):
+                # Real stored size — Telugu/Hindi text is multi-byte, so
+                # counting characters would under-count badly.
+                archive_budget -= len(bson_encode(row))
+                if archive_budget <= 0:
+                    break
+                rows.append(row)
+            if rows:
+                archive_payload[coll] = rows
+            if total > len(rows):
+                archive_truncated[coll] = total - len(rows)
+        except Exception as _arc_err:
+            logger.warning(f"user-delete archive {coll}: {str(_arc_err)[:120]}")
+    await db.deleted_user_archives.insert_one({
+        "id": archive_id,
+        "user_id": user_id,
+        "email": target.get("email"),
+        "name": target.get("name"),
+        "deleted_by": admin.get("email") or admin["id"],
+        "created_at": now_utc().isoformat(),
+        "truncated": archive_truncated,
+        "data": archive_payload,
+    })
+    snap_info = {
+        "id": archive_id,
+        "created_at": now_utc().isoformat(),
+        "truncated": archive_truncated,
+    }
 
     cascade: Dict[str, int] = {}
 
@@ -3067,17 +3195,24 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
         # we'll delete tickets first then sweep ticket_messages for orphans below.
         ("tickets",               {"user_id": user_id}),
     ]
+    deleted_ticket_ids = [
+        t["id"] async for t in db.tickets.find({"user_id": user_id}, {"_id": 0, "id": 1})
+    ]
     for coll, query in hard_cascade_specs:
         res = await db[coll].delete_many(query)
         cascade[coll] = res.deleted_count
 
-    # 2. Sweep ticket_messages whose tickets were just deleted (no longer have a parent)
-    remaining_ticket_ids = {t["id"] async for t in db.tickets.find({}, {"_id": 0, "id": 1})}
-    if remaining_ticket_ids:
-        orphan_msgs = await db.ticket_messages.delete_many({"ticket_id": {"$nin": list(remaining_ticket_ids)}})
+    # 2. Remove the replies that belonged to THIS user's tickets. The old code
+    #    loaded every ticket id in the database and deleted any message whose
+    #    parent wasn't in that set — an unbounded scan that also deleted
+    #    unrelated orphans. We now delete by the ticket ids we just removed.
+    if deleted_ticket_ids:
+        orphan_msgs = await db.ticket_messages.delete_many(
+            {"ticket_id": {"$in": deleted_ticket_ids}},
+        )
+        cascade["ticket_messages"] = orphan_msgs.deleted_count
     else:
-        orphan_msgs = await db.ticket_messages.delete_many({})
-    cascade["ticket_messages_orphans"] = orphan_msgs.deleted_count
+        cascade["ticket_messages"] = 0
 
     # 3. Soft cleanup — preserve transactions/orders for audit, but unlink author refs
     # so the audit trail still resolves. We mark the original user_id as a sentinel.
@@ -3124,7 +3259,14 @@ async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(requir
         },
     )
 
-    return {"ok": True, "cascade": cascade, "snapshot_id": snap_info["id"], "snapshot_created_at": snap_info["created_at"]}
+    return {
+        "ok": True,
+        "cascade": cascade,
+        "snapshot_id": snap_info["id"],
+        "snapshot_created_at": snap_info["created_at"],
+        # Rows that did not fit the archive budget, per collection (usually {}).
+        "truncated": snap_info["truncated"],
+    }
 
 
 # ------------------ Admin: Admins management (super_admin only) ------------------
@@ -5348,7 +5490,16 @@ async def admin_block_user(user_id: str, payload: BlockRequest, admin: Dict[str,
         raise HTTPException(status_code=404, detail="User not found")
     if target["id"] == admin["id"]:
         raise HTTPException(status_code=400, detail="Cannot block yourself")
-    await db.users.update_one({"id": user_id}, {"$set": {"is_blocked": True, "block_reason": payload.reason}})
+    # Nov-2026 — an admin block takes ownership of the lock, so cancelling an
+    # old deletion request later cannot lift it.
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {
+            "is_blocked": True,
+            "block_reason": payload.reason,
+            "deletion_ticket_id": None,
+        }},
+    )
     await _audit_log(admin, "user.block", "user", user_id, {"reason": payload.reason})
     return {"ok": True}
 
@@ -7357,7 +7508,18 @@ async def admin_purge_demo_users(admin: Dict[str, Any] = Depends(require_admin_r
 
 
 # ------------------ Data Backup / Restore (admin) ------------------
-BACKUP_INTERVAL_SECONDS = int(os.environ.get("BACKUP_INTERVAL_SECONDS", 15 * 60))  # 15 min default
+# Nov-2026 — a full-database snapshot every 15 minutes is fine against a local
+# mongod, but on managed Atlas it is a network-heavy read that got throttled
+# ("The read operation timed out") and ate the pod's small CPU budget. When the
+# database is remote we space auto-snapshots out to 6 hours; an admin can still
+# take one on demand, and BACKUP_INTERVAL_SECONDS overrides either default.
+_DB_IS_REMOTE = not any(
+    h in (os.environ.get("MONGO_URL") or "") for h in ("localhost", "127.0.0.1")
+)
+_DEFAULT_BACKUP_INTERVAL = 6 * 60 * 60 if _DB_IS_REMOTE else 15 * 60
+BACKUP_INTERVAL_SECONDS = int(
+    os.environ.get("BACKUP_INTERVAL_SECONDS", _DEFAULT_BACKUP_INTERVAL)
+)
 BACKUP_RETENTION = int(os.environ.get("BACKUP_RETENTION", 24))  # keep last 24 snapshots
 # Auto snapshots are full-database copies now — keep fewer of them.
 BACKUP_AUTO_RETENTION = int(os.environ.get("BACKUP_AUTO_RETENTION", 6))
@@ -7498,7 +7660,13 @@ async def _take_snapshot(kind: str = "auto", note: Optional[str] = None,
     ).to_list(500)
     if expired:
         expired_ids = [e["id"] for e in expired]
-        await db.db_snapshot_chunks.delete_many({"snapshot_id": {"$in": expired_ids}})
+        # Soft retirement only (Nov-2026): the scheduler must never hard-delete
+        # documents on a production pod. Chunks are flagged and ignored by the
+        # readers; the real removal happens from the explicit admin
+        # DELETE /admin/backups/{snap_id} action.
+        await db.db_snapshot_chunks.update_many(
+            {"snapshot_id": {"$in": expired_ids}}, {"$set": {"purged": True}},
+        )
         await db.db_snapshots.update_many(
             {"id": {"$in": expired_ids}}, {"$set": {"purged": True}},
         )
@@ -7564,7 +7732,8 @@ async def _restore_snapshot(snap_id: str, job_id: Optional[str] = None,
             rows: List[Dict[str, Any]] = list(legacy_data.get(coll) or [])
             if not rows:
                 async for ch in db.db_snapshot_chunks.find(
-                    {"snapshot_id": snap_id, "collection": coll}, {"_id": 0, "rows": 1, "seq": 1},
+                    {"snapshot_id": snap_id, "collection": coll, "purged": {"$ne": True}},
+                    {"_id": 0, "rows": 1, "seq": 1},
                 ).sort("seq", 1).batch_size(10):
                     rows.extend(ch.get("rows") or [])
             # A collection captured as EMPTY must end up empty — that's what the
@@ -7622,8 +7791,15 @@ async def _backup_scheduler():
             ).to_list(100)
             if old:
                 ids = [o["id"] for o in old]
-                await db.backup_file_jobs.delete_many({"id": {"$in": ids}})
-                await db.backup_file_chunks.delete_many({"job_id": {"$in": ids}})
+                # Soft retirement (Nov-2026) — a startup-registered background
+                # task must not hard-delete. Download/list endpoints skip
+                # expired jobs; the admin delete action still removes them.
+                await db.backup_file_jobs.update_many(
+                    {"id": {"$in": ids}}, {"$set": {"expired": True}},
+                )
+                await db.backup_file_chunks.update_many(
+                    {"job_id": {"$in": ids}}, {"$set": {"expired": True}},
+                )
         except Exception as e:
             logging.warning(f"backup housekeeping failed: {e}")
         await asyncio.sleep(BACKUP_INTERVAL_SECONDS)
@@ -7891,6 +8067,48 @@ async def admin_delete_backup(snap_id: str, admin: Dict[str, Any] = Depends(requ
     return {"ok": True}
 
 
+@api_router.post("/admin/backups/purge-old")
+async def admin_purge_old_backups(
+    keep: int = 10,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Reclaim space taken by the snapshot backlog.
+
+    Nov-2026 — until this release every admin user-deletion wrote a FULL
+    database snapshot first, so production accumulated 1,160 of them and the
+    chunk collection grew so large that even counting it timed out. That
+    behaviour is gone; this endpoint cleans up what it left behind. Explicit,
+    super-admin-only and never automatic. The newest `keep` snapshots are
+    always preserved.
+    """
+    keep = max(1, min(int(keep or 10), 100))
+    survivors = await db.db_snapshots.find(
+        {}, {"_id": 0, "id": 1},
+    ).sort("created_at", -1).limit(keep).to_list(keep)
+    keep_ids = [s["id"] for s in survivors]
+    stale = await db.db_snapshots.find(
+        {"id": {"$nin": keep_ids}}, {"_id": 0, "id": 1},
+    ).to_list(5000)
+    removed_chunks = 0
+    for s in stale:
+        res = await db.db_snapshot_chunks.delete_many({"snapshot_id": s["id"]})
+        removed_chunks += res.deleted_count
+    removed = await db.db_snapshots.delete_many({"id": {"$nin": keep_ids}})
+    # Chunks whose parent snapshot no longer exists at all (older bugs).
+    all_ids = [s["id"] async for s in db.db_snapshots.find({}, {"_id": 0, "id": 1})]
+    orphans = await db.db_snapshot_chunks.delete_many({"snapshot_id": {"$nin": all_ids}})
+    await _audit_log(admin, "backup.purge_old", "snapshot", "bulk", {
+        "kept": keep, "snapshots_removed": removed.deleted_count,
+        "chunks_removed": removed_chunks + orphans.deleted_count,
+    })
+    return {
+        "ok": True,
+        "kept": keep,
+        "snapshots_removed": removed.deleted_count,
+        "chunks_removed": removed_chunks + orphans.deleted_count,
+    }
+
+
 @api_router.get("/admin/changes")
 async def admin_list_changes(_: Dict[str, Any] = Depends(require_admin_not_finance),
                              limit: int = 200):
@@ -7968,6 +8186,11 @@ async def on_startup():
     asyncio.create_task(_money_flow_checker())
 
 
+class _SkipMigration(Exception):
+    """Raised inside a one-shot backfill when its marker says it already ran."""
+
+
+
 async def _background_init():
     """Long-running startup work that MUST NOT block uvicorn's port-binding.
 
@@ -7985,6 +8208,23 @@ async def _background_init():
             await db.users.create_index("sponsor_id")
         except Exception as _idx_err:
             logger.warning(f"sponsor_id index setup failed: {_idx_err}")
+        # ---- Backup chunk lookups (Nov-2026 production RCA) ----
+        # `db_snapshot_chunks` had NO index on `snapshot_id`, so every chunk
+        # read or cleanup was a full collection scan. On production that
+        # collection had grown so large the scan blew past the socket timeout
+        # and surfaced as a 500 on admin user-deletion.
+        try:
+            await db.db_snapshot_chunks.create_index(
+                [("snapshot_id", 1), ("collection", 1), ("seq", 1)],
+                name="ix_snapchunk_lookup",
+            )
+            await db.backup_file_chunks.create_index(
+                [("job_id", 1), ("seq", 1)], name="ix_filechunk_lookup",
+            )
+            await db.db_snapshots.create_index("created_at")
+            await db.deleted_user_archives.create_index("user_id")
+        except Exception as _bidx_err:
+            logger.warning(f"backup index setup failed: {_bidx_err}")
         # ---- Idempotency safety-net partial-unique indexes ----
         # Oct-2026 — these are a SAFETY NET for legacy rows written before
         # `idempotency_key` existed. Any row that carries an idempotency_key
@@ -8254,6 +8494,10 @@ async def _background_init():
         # money from admin's `direct_signup` wallet bucket → `fee_residual`
         # bucket. Idempotent: subsequent runs no-op when no legacy rows match.
         try:
+            # One-shot (Nov-2026): guarded by a marker so it stops re-scanning
+            # the whole transaction collection on every boot.
+            if await db.migrations.find_one({"_id": "fee_residual_retag"}):
+                raise _SkipMigration()
             legacy_rows = await db.transactions.find({
                 "type": "direct_signup_credit",
                 "description": {"$regex": "[Ff]ee residual"},
@@ -8287,6 +8531,12 @@ async def _background_init():
                     f"Fee-residual migration: retagged {len(legacy_rows)} legacy rows, "
                     f"moved ₹{total_to_move} from direct_signup → fee_residual"
                 )
+            await db.migrations.update_one(
+                {"_id": "fee_residual_retag"},
+                {"$set": {"done_at": now_utc().isoformat()}}, upsert=True,
+            )
+        except _SkipMigration:
+            pass
         except Exception as _mig_err:
             logger.warning(f"Fee-residual migration failed: {str(_mig_err)[:200]}")
 
@@ -8295,6 +8545,10 @@ async def _background_init():
         # approved directs (catches the historical no-ref bug where the
         # count never incremented on placement). Idempotent.
         try:
+            # One-shot (Nov-2026): sponsors are no longer assigned, so this
+            # historical count repair only needs to run once per database.
+            if await db.migrations.find_one({"_id": "direct_referrals_count"}):
+                raise _SkipMigration()
             # Group: for each sponsor_id, how many approved user-directs?
             agg = await db.users.aggregate([
                 {"$match": {"role": "user", "approval_status": "approved",
@@ -8320,6 +8574,12 @@ async def _background_init():
                     fixed += 1
             if fixed:
                 logger.info(f"direct_referrals_count backfill: corrected {fixed} sponsors")
+            await db.migrations.update_one(
+                {"_id": "direct_referrals_count"},
+                {"$set": {"done_at": now_utc().isoformat(), "fixed": fixed}}, upsert=True,
+            )
+        except _SkipMigration:
+            pass
         except Exception as _drc_err:
             logger.warning(f"direct_referrals_count backfill failed: {str(_drc_err)[:200]}")
 
@@ -8331,6 +8591,14 @@ async def _background_init():
         # so Held == Inflow again. Idempotent via existence of a matching
         # `l1_funding` txn for that signup+recipient.
         try:
+            # Nov-2026 — this is a one-shot historical repair for pre-cutover
+            # MLM payouts. It used to re-scan up to 100k transactions on EVERY
+            # boot (slow, memory-hungry start on a small pod). A marker makes
+            # it run once per database; the MLM engine itself is retired, so no
+            # new rows can ever need it.
+            _l1_done = await db.migrations.find_one({"_id": "l1_funding_backfill"})
+            if _l1_done:
+                raise _SkipMigration()
             past_l1s = await db.transactions.find({
                 "type": "referral_payout",
                 "level": 1,
@@ -8402,6 +8670,13 @@ async def _background_init():
                     f"₹{funded_total:.2f} debited from admin buckets, "
                     f"shortfall ₹{shortfall_total:.2f} (will require admin UTR top-up)"
                 )
+            await db.migrations.update_one(
+                {"_id": "l1_funding_backfill"},
+                {"$set": {"done_at": now_utc().isoformat(), "funded": funded_count}},
+                upsert=True,
+            )
+        except _SkipMigration:
+            pass
         except Exception as _l1bf_err:
             logger.warning(f"L1 funding backfill failed: {str(_l1bf_err)[:200]}")
 
@@ -8950,11 +9225,6 @@ async def require_vendor(user: Dict[str, Any] = Depends(get_current_user)) -> Di
 
 @api_router.post("/vendor/apply")
 async def vendor_apply(payload: VendorApplyRequest, user: Dict[str, Any] = Depends(get_current_user)):
-    if not user.get("registration_paid"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only members can run a shop — activate your membership first",
-        )
     if user.get("approval_status") != "approved":
         raise HTTPException(status_code=403, detail="Your account must be approved by admin first")
     shop = (payload.shop_name or "").strip()
@@ -9964,11 +10234,6 @@ async def admin_reactivate_vendor(user_id: str, admin: Dict[str, Any] = Depends(
 async def service_apply(payload: ServiceApplyRequest, user: Dict[str, Any] = Depends(get_current_user)):
     if user.get("role") == "admin":
         raise HTTPException(status_code=400, detail="Admins cannot apply as service providers")
-    if not user.get("registration_paid"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only members can list a service — activate your membership first",
-        )
     # Reject if there's already a pending or approved application
     existing = await db.service_applications.find_one(
         {"user_id": user["id"], "status": {"$in": ["pending", "approved"]}}

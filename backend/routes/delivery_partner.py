@@ -96,11 +96,6 @@ class DPApply(BaseModel):
 
 @router.post("/delivery-partner/apply")
 async def dp_apply(payload: DPApply, user: Dict[str, Any] = Depends(get_current_user)):
-    if not user.get("registration_paid"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only members can deliver — activate your membership first",
-        )
     if user.get("approval_status") != "approved":
         raise HTTPException(status_code=403, detail="Your account must be approved by admin first")
     if user.get("is_vendor") or user.get("is_service_provider"):

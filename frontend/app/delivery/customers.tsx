@@ -70,7 +70,7 @@ export default function DeliveryCustomers() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   // Contextual permission: only when the rider asks for nearest-first.
-  const useMyLocation = async () => {
+  const requestMyLocation = async () => {
     setLocating(true);
     try {
       const place = await captureCurrentPlace();
@@ -161,7 +161,7 @@ export default function DeliveryCustomers() {
           <View style={s.sortRow}>
             <TouchableOpacity
               style={[s.sortChip, sortedBy === "distance" && s.sortChipOn]}
-              onPress={() => (origin ? setSortBy("distance") : useMyLocation())}
+              onPress={() => (origin ? setSortBy("distance") : requestMyLocation())}
               disabled={locating}
               testID="dp-sort-distance"
             >

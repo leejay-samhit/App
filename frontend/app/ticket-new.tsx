@@ -13,6 +13,7 @@ const CATEGORIES: { key: string; label: string; icon: any }[] = [
   { key: "account", label: "Account", icon: "user" },
   { key: "kyc", label: "KYC", icon: "shield" },
   { key: "product", label: "Shop / Product", icon: "shopping-bag" },
+  { key: "account_deletion", label: "Account Deletion", icon: "user-x" },
   { key: "other", label: "Other", icon: "help-circle" },
 ];
 

@@ -36,7 +36,7 @@ BASE_URL = (BASE_URL or "").rstrip("/")
 API = f"{BASE_URL}/api"
 
 ADMIN_EMAIL = "support@networkrupay.com"
-ADMIN_PASS = "Nlee@1115"
+ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "")
 VENDOR_EMAIL = "test_alice_73dc7f@test.com"
 VENDOR_PASS = "Passw0rd!"
 

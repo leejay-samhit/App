@@ -1,0 +1,60 @@
+{
+  "summary": "Iteration 124 (fourth pass, narrow scope). New backend suite test_iter124_chat_search_filters.py: 22/23 pass after one fix I made. FIXED: GET /chat/search?user_id= returned a user the searcher had chat-blocked, with a 200. The cause was in chat.py: the query `{**reachable, \"id\": user_id}` overwrote the `id $nin hidden_ids` filter. It now uses $and, and I re-tested it. Verified: 40- and 60-character terms no longer 422 (61 characters still 422). Missing both code and user_id, or a blank code, returns 400. An admin-blocked user stays hidden by exact code, lowercase code, name and user_id. A user the searcher chat-blocked stays hidden by name, code and id, while other people can still find them. Users with status pending, rejected or suspended are hidden on all three paths. The ambiguous list leaves out referral_code and sponsor_code for non-admins (checked on the raw response too) and includes the city and role flags. Admins still see referral_code. user_id search returns can_request, then request_pending (for both sides), then already_chatting with the right thread_id. Admin DELETE takes 0.27s, and the shared 8MB budget works: 12 rows of about 0.9MB gave 8 rows archived and truncated {notifications: 4}. The only failure: the DELETE response body does not include `truncated` (it is only on the archive document). Regression: iter121 36/36, iter122 18/18, iter123 18/19. The one iter123 failure is an outdated expectation: a 1-character term now gets a 404 instead of a 422 because min_length was removed. Finance unchanged: 2827 transactions and wallet sum 287525.91, before and after. Frontend (375x667): picking someone from the multi-match list now shows Open for an existing thread, and Open goes to the right thread. It shows Request otherwise. Errors from search, send-request and reject appear inline in chat-search-error. chat-banner appears after sending. The clear (x) button clears the error. The placeholder fits (scrollWidth equals clientWidth, 228px). Account deletion: the dialog copy is correct. 'Stay here' keeps the user on the page in the 'Request under review' state. But the session is dropped silently on the next load, and the review card's ticket button does nothing (details under issues). No deprecated Expo packages were found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/chat/search?user_id=", "issue": "FIXED BY TESTING AGENT: a user the searcher had chat-blocked was returned with a 200, because `{**reachable, 'id': user_id}` overwrote the `id: {$nin: hidden_ids}` filter. It now uses {'$and': [reachable, {'id': user_id}]}. routes/chat.py:360"},
+      {"endpoint": "DELETE /api/admin/users/{id}", "issue": "The response has no `truncated` field. It is only stored on deleted_user_archives.truncated, so the admin cannot see that the archive was cut short."},
+      {"endpoint": "DELETE /api/admin/users/{id}", "issue": "The archive order puts transactions and orders last (server.py:3139-3140). For a heavy account, the shared budget runs out on cart_items and notifications first, so the money records are the ones dropped. Archive transactions and orders first. Also, the budget counts len(str(row)) (Python repr characters), not BSON bytes. Non-ASCII text (for example Telugu, 3 bytes per character in UTF-8) could push the document past 16MB."},
+      {"endpoint": "GET /api/chat/search", "issue": "A 1-character term now returns 404 'Nobody matches that name or code.' instead of 422, because min_length was dropped. That is acceptable, but the iter123 test test_short_term_rejected needs updating."},
+      {"endpoint": "POST /api/chat/request", "issue": "Not checked here: whether the target is admin-blocked, unapproved, or has chat-blocked the sender. The search hides these users, but a client that knows the id can still send them a request. routes/chat.py:474-509"}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "account-deletion 'Stay here'", "issue": "'Stay here' only works until the next reload or navigation. The backend returns 403 on every call for a locked account, so the app quietly clears auth_token and auth_refresh_token. The user lands on /shop as a guest with no 'account locked' message. Opening /account-deletion again shows the full active form, including deletion-submit, because GET /me/account-deletion returns 403, `existing` is null, and the local `locked` flag is lost. The route also has no auth guard: a logged-out visitor sees the form.", "testID": "deletion-submitted-cancel", "priority": "MEDIUM"},
+      {"component": "account-deletion review card", "issue": "'Open support ticket' does nothing. `existing` is null because GET /me/account-deletion returns 403 once the account is locked, and onPress is guarded by existing?.id. The date is missing from the copy for the same reason. The copy says 'Reply on the support ticket if you want to cancel', but a locked user cannot reach /tickets (403). Use the ticket returned by the POST response, or allow locked users to read their own deletion ticket.", "testID": "deletion-open-ticket", "priority": "MEDIUM"},
+      {"component": "chat banner", "issue": "chat-banner ('Request sent — waiting for X to accept.') is never cleared. It stays through later searches and appears together with a later error from a different action (both seen at once). Clear it on a new search, on the clear button, and when an error is shown.", "testID": "chat-banner", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Friends (chat tab)", "issues": [
+        "The clear (x) touch target is 22x23px (searchClear padding 4, no hitSlop). It should be at least 44px; add hitSlop.",
+        "The Find button is 53x30px, under 44px high.",
+        "In the result card, a long name (e.g. 'TEST_ui1241c962Fellow') runs into the Request/Pending button. Add numberOfLines={1} and flexShrink to userName.",
+        "The Support & Help floating button covers the YOUR CHATS rows when the search card is open."
+      ]},
+      {"screen": "Account deletion", "issues": ["The first consequence line still says 'You are signed out everywhere…'. That contradicts the 'Stay here' dialog (account-deletion.tsx:33)."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter124_chat_search_filters.py",
+    "/app/backend/tests/ui_prep_iter124.py",
+    "/app/test_reports/pytest/iter124.xml",
+    "/app/test_reports/pytest/iter124_reg121.xml",
+    "/app/test_reports/pytest/iter124_reg122.xml",
+    "/app/test_reports/pytest/iter124_reg123.xml"
+  ],
+  "action_items": [
+    "Keep the testing agent's fix in routes/chat.py:360 ($and for the user_id lookup).",
+    "Account deletion: decide what a locked user should see. Either sign them out with a clear 'account locked, under review' screen, or let /me/account-deletion and their own deletion ticket work while locked. Today 'Stay here' is lost on the next load, and the form reappears.",
+    "Account deletion: make 'Open support ticket' work, using the ticket id from the POST response. Change the 'signed out everywhere' consequence text. Add an auth guard to /account-deletion.",
+    "Admin delete: return `truncated` in the DELETE response. Archive transactions and orders first, before notifications and cart_items. Consider measuring BSON size (bson.encode) instead of len(str(row)).",
+    "Chat UI: clear chat-banner on a new search, on clear, and on error. Add hitSlop to chat-search-clear and give chat-search-submit at least 44px height. Truncate long names in the result card.",
+    "Optional: apply the same block and approval checks in POST /chat/request.",
+    "Update test_iter123 test_short_term_rejected to accept a 404 for a 1-character term (or restore min_length=2)."
+  ],
+  "critical_code_review_comments": [
+    "chat.py search_by_refcode: merging dicts that both contain the same key ('id') silently drops a filter. This was the cause of the chat-block leak on the user_id path. The code and name paths are fine.",
+    "chat.py search: the person the caller has blocked is hidden, but someone who blocked the caller can still be found. That is acceptable if intended.",
+    "server.py admin_delete_user: the per-collection .limit(2000) plus the shared budget is correct. When a single row is larger than what is left of the budget, it is dropped and counted in truncated, which is correct."
+  ],
+  "updated_files": ["/app/backend/routes/chat.py", "/app/backend/tests/test_iter124_chat_search_filters.py", "/app/backend/tests/ui_prep_iter124.py"],
+  "success_rate": {"backend": "96% (22/23 new; regressions 72/73)", "frontend": "~85% (chat flows all pass; deletion persistence and ticket link fail)"},
+  "seed_data_creation": "Only temporary TEST_i124* and TEST_ui124* users, chat requests, threads, notifications, tickets and archives. All were deleted by id, including their login_history and security_events. No seed or production data was changed.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Use EXPO_PUBLIC_BACKEND_URL. Registration is limited to 5 per minute, so wait about 62s between suites. ui_prep_iter124.py setup|cleanup creates 4 users, with me and friend already in a thread. A locked (deletion-requested) user gets 403 on every API call, including /auth/me and /me/account-deletion, and the web app drops the tokens on the next load. Finance baseline: 2827 transactions, wallet sum 287525.91.",
+  "rca_of_issue": "Chat-block leak on the user_id path: in `{**reachable, 'id': user_id}`, the later 'id' key replaced `{'$nin': hidden_ids}`. Reproduced: s1 chat-blocks s3, then GET /chat/search?user_id=s3 returned 200. Fixed with $and; the same call now returns 404."
+}

@@ -30,6 +30,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing } from "../../src/theme";
+import { searchServiceIcons } from "../../src/service-icon-library";
 
 type Category = {
   id: string;
@@ -42,12 +43,7 @@ type Category = {
   provider_count: number;
 };
 
-const ICON_PRESETS = [
-  "tool", "wifi", "droplet", "zap", "edit-3", "settings",
-  "camera", "wind", "feather", "trash-2", "shield", "home",
-  "smartphone", "briefcase", "truck", "scissors", "key",
-  "globe", "star", "heart", "package", "phone-call",
-];
+
 const COLOR_PRESETS = [
   "#EA580C", "#2563EB", "#0891B2", "#CA8A04", "#9333EA", "#92400E",
   "#475569", "#0EA5E9", "#10B981", "#06B6D4", "#65A30D", "#DC2626",
@@ -235,6 +231,7 @@ function CategoryEditor({
   const isEdit = !!category;
   const [name, setName] = useState(category?.name || "");
   const [icon, setIcon] = useState(category?.icon || "briefcase");
+  const [iconQuery, setIconQuery] = useState("");
   const [color, setColor] = useState(category?.color || "#2563EB");
   const [sortOrder, setSortOrder] = useState(String(category?.sort_order ?? 999));
   const [saving, setSaving] = useState(false);
@@ -325,6 +322,7 @@ function CategoryEditor({
         // re-init form from `category` whenever sheet opens
         setName(category?.name || "");
         setIcon(category?.icon || "briefcase");
+        setIconQuery("");
         setColor(category?.color || "#2563EB");
         setSortOrder(String(category?.sort_order ?? 999));
         setImageB64(category?.image_b64 || null);
@@ -490,7 +488,7 @@ function CategoryEditor({
                         <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{aiBusy ? "  Thinking…" : "  Generate"}</Text>
                       </TouchableOpacity>
                       {aiOutput ? (
-                        <View style={{ marginTop: 12, padding: 10, backgroundColor: colors.bg, borderRadius: 10, borderWidth: 1, borderColor: colors.border }}>
+                        <View style={{ marginTop: 12, padding: 10, backgroundColor: colors.background, borderRadius: 10, borderWidth: 1, borderColor: colors.border }}>
                           <Text style={{ fontSize: 13, color: colors.textMain, lineHeight: 19 }} selectable>{aiOutput}</Text>
                         </View>
                       ) : null}
@@ -527,7 +525,7 @@ function CategoryEditor({
                         <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{aiImgBusy ? "  Painting…" : "  Generate image"}</Text>
                       </TouchableOpacity>
                       {aiImgB64 ? (
-                        <View style={{ marginTop: 12, padding: 10, backgroundColor: colors.bg, borderRadius: 10, borderWidth: 1, borderColor: colors.border, alignItems: "center" }}>
+                        <View style={{ marginTop: 12, padding: 10, backgroundColor: colors.background, borderRadius: 10, borderWidth: 1, borderColor: colors.border, alignItems: "center" }}>
                           <View style={{ width: "100%", aspectRatio: 1.4, backgroundColor: colors.surfaceMuted, borderRadius: 8, overflow: "hidden" }}>
                             <Image source={{ uri: aiImgB64 }} style={{ width: "100%", height: "100%" }} resizeMode="contain" />
                           </View>
@@ -571,21 +569,53 @@ function CategoryEditor({
                 </View>
               ) : null}
 
+              {/* Nov-2026 — the same picker, now backed by a much larger
+                  labelled library covering local trades. Search by trade name
+                  ("cctv", "ac", "plumber") or by icon name. */}
               <Text style={styles.label}>Icon</Text>
-              <View style={styles.pickerGrid}>
-                {ICON_PRESETS.map((i) => {
-                  const sel = icon === i;
-                  return (
-                    <TouchableOpacity
-                      key={i}
-                      onPress={() => setIcon(i)}
-                      style={[styles.pickerTile, sel && { borderColor: color, borderWidth: 2 }]}
-                    >
-                      <Feather name={i as any} size={18} color={sel ? color : colors.textMain} />
-                    </TouchableOpacity>
-                  );
-                })}
+              <View style={styles.iconSearchRow}>
+                <Feather name="search" size={14} color={colors.textMuted} />
+                <TextInput
+                  value={iconQuery}
+                  onChangeText={setIconQuery}
+                  placeholder="Search icons — cctv, plumber, ac, salon…"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.iconSearchInput}
+                  autoCorrect={false}
+                  testID="cat-icon-search"
+                />
+                {iconQuery ? (
+                  <TouchableOpacity onPress={() => setIconQuery("")} hitSlop={8}>
+                    <Feather name="x" size={14} color={colors.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
               </View>
+              {searchServiceIcons(iconQuery).map((grp) => (
+                <View key={grp.group}>
+                  <Text style={styles.iconGroupLabel}>{grp.group.toUpperCase()}</Text>
+                  <View style={styles.pickerGrid}>
+                    {grp.icons.map((it) => {
+                      const sel = icon === it.name;
+                      return (
+                        <TouchableOpacity
+                          key={`${grp.group}-${it.name}`}
+                          onPress={() => setIcon(it.name)}
+                          style={[styles.pickerTile, sel && { borderColor: color, borderWidth: 2 }]}
+                          accessibilityLabel={it.label}
+                          testID={`cat-icon-${it.name}`}
+                        >
+                          <Feather name={it.name as any} size={18} color={sel ? color : colors.textMain} />
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+              ))}
+              {searchServiceIcons(iconQuery).length === 0 ? (
+                <Text style={{ fontSize: 12, color: colors.textMuted, marginTop: 8 }}>
+                  No icon matches that search.
+                </Text>
+              ) : null}
 
               <Text style={styles.label}>Color</Text>
               <View style={styles.pickerGrid}>
@@ -631,7 +661,7 @@ function CategoryEditor({
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+  safe: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   container: { padding: spacing.lg, paddingBottom: 60 },
   header: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 6 },
@@ -681,7 +711,7 @@ const styles = StyleSheet.create({
 
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   modalSheet: {
-    backgroundColor: colors.bg,
+    backgroundColor: colors.background,
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
     padding: 18, maxHeight: "88%",
   },
@@ -704,6 +734,17 @@ const styles = StyleSheet.create({
     fontSize: 14, color: colors.textMain,
   },
   pickerGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  // Icon library search + group headings (Nov-2026)
+  iconSearchRow: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    backgroundColor: colors.surfaceMuted, borderRadius: radii.input,
+    paddingHorizontal: 12, minHeight: 42, marginBottom: 4,
+  },
+  iconSearchInput: { flex: 1, fontSize: 13, color: colors.textMain, paddingVertical: 9 },
+  iconGroupLabel: {
+    fontSize: 10, fontWeight: "800", letterSpacing: 0.8,
+    color: colors.textMuted, marginTop: 10, marginBottom: 6,
+  },
   pickerTile: {
     width: 44, height: 44, borderRadius: 10,
     backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,

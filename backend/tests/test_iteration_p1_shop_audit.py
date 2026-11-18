@@ -9,8 +9,8 @@ Credentials note:
   Main agent's review request mentioned support@slangcart.com / brightkittu@gmail.com
   but those users do NOT exist in the current DB. Per /app/memory/test_credentials.md
   and /app/backend/.env (ADMIN_EMAIL) we fall back to:
-      Admin  : support@networkrupay.com / Nlee@1115
-      User   : raju@gmail.com          / Demo@2026  (approved, non-admin)
+      Admin  : support@networkrupay.com / <ADMIN_PASSWORD env>
+      User   : raju@gmail.com          / <VENDOR_PASSWORD env>  (approved, non-admin)
 """
 import os
 import time
@@ -30,9 +30,9 @@ if _fe_env.exists():
 
 BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 ADMIN_EMAIL = "support@networkrupay.com"
-ADMIN_PASSWORD = "Nlee@1115"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 USER_EMAIL = "raju@gmail.com"
-USER_PASSWORD = "Demo@2026"
+USER_PASSWORD = os.environ.get("VENDOR_PASSWORD", "")
 
 
 def _auth(email, password):

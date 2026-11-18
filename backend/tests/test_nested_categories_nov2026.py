@@ -14,7 +14,7 @@ import requests
 
 BASE_URL = "http://localhost:8001"
 ADMIN_EMAIL = "support@networkrupay.com"
-ADMIN_PASSWORD = "Nlee@1115"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 # Unique suffix so re-runs don't collide with lingering data
 SUFFIX = uuid.uuid4().hex[:6]

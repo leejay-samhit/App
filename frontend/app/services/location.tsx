@@ -188,7 +188,7 @@ export default function ProviderLocation() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+  safe: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24, gap: 12 },
   container: { padding: spacing.lg, paddingBottom: 40 },
   header: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 },

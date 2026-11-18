@@ -25,7 +25,7 @@ if _fe.exists():
 
 BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "support@networkrupay.com")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Nlee@1115")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 
 REGULAR_EMAIL = "test_alice_73dc7f@test.com"
 REGULAR_PASSWORD = "Passw0rd!"

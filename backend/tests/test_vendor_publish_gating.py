@@ -27,7 +27,7 @@ ALICE_EMAIL = "test_alice_73dc7f@test.com"
 ALICE_PASSWORD = "Passw0rd!"
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "support@networkrupay.com")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Nlee@1115")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 
 
 # ---------------- helpers ----------------

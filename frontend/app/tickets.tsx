@@ -34,6 +34,7 @@ const CATEGORY_ICON: Record<string, any> = {
   account: "user",
   kyc: "shield",
   product: "shopping-bag",
+  account_deletion: "user-x",
   other: "help-circle",
 };
 

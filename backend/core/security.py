@@ -292,6 +292,14 @@ async def get_current_user(
         user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        # Nov-2026 — a blocked account (admin block, or the owner's own
+        # deletion request) must stop working on devices that are ALREADY
+        # signed in, not just at the next login.
+        if user.get("is_blocked"):
+            raise HTTPException(
+                status_code=403,
+                detail=user.get("block_reason") or "This account is blocked.",
+            )
 
         # ── Multi-session enforcement (Phase 2 — 2026-06-27) ───────────
         # A user may be logged in on MULTIPLE devices concurrently (e.g.

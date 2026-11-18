@@ -18,7 +18,6 @@ import TamperBlockedScreen from "../src/tamper-blocked-screen";
 import { registerForPush } from "../src/push";
 import { GoogleRedirectHandler } from "../src/google-redirect-handler";
 import { BiometricEnrollPrompt } from "../src/biometric-enroll-prompt";
-import { SubscriptionProvider } from "../src/subscription";
 import { ContentWidthProvider, TABLET_MAX_WIDTH } from "../src/content-width";
 import { colors } from "../src/theme";
 
@@ -309,7 +308,6 @@ function RootLayoutInner() {
       <SafeAreaProvider>
         <BrandingProvider>
           <AuthProvider>
-            <SubscriptionProvider>
             <ChatSettingsProvider>
             <GoogleRedirectHandler />
             <PushReRegister />
@@ -361,7 +359,6 @@ function RootLayoutInner() {
               </TabletContainer>
             </GlobalFont>
             </ChatSettingsProvider>
-            </SubscriptionProvider>
           </AuthProvider>
         </BrandingProvider>
       </SafeAreaProvider>

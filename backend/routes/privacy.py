@@ -158,7 +158,6 @@ async def get_my_privacy(user: Dict[str, Any] = Depends(get_current_user)):
         ) if locked else None,
         "options": [
             {"value": "everyone",          "label": "Everyone",                  "icon": "globe"},
-            {"value": "downline",          "label": "Downline Only",             "icon": "users"},
             {"value": "accepted_requests", "label": "Accepted Message Requests", "icon": "message-square"},
         ],
     }

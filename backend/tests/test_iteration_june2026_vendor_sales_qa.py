@@ -431,7 +431,7 @@ class TestShopCategories:
     def test_public_endpoint_returns_admin_categories(self):
         # Login admin (support@networkrupay.com)
         admin_email = os.environ.get("ADMIN_EMAIL", "support@networkrupay.com")
-        admin_pw = os.environ.get("ADMIN_PASSWORD", "Nlee@1115")
+        admin_pw = os.environ.get("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
         rl = requests.post(f"{BASE_URL}/api/auth/login",
                            json={"email": admin_email, "password": admin_pw}, timeout=15)
         assert rl.status_code == 200, f"admin login failed: {rl.status_code} {rl.text}"

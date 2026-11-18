@@ -99,23 +99,46 @@ export function FestivalBanner() {
   const tint = decor.decor_tint || colors.accent;
   const diyaCount = Math.max(4, Math.min(7, Math.floor(width / 70)));
 
+  // Nov-2026 (req 17) — heading, subtitle and layout are editable from
+  // Admin → Branding → Festival Themes. Anything the admin leaves blank falls
+  // back to the festival's own wording, and the height is clamped so the
+  // banner can never eat the screen again.
+  const copy = (festival as any).banner_text || {};
+  const align: "left" | "center" | "right" = copy.align || "left";
+  const bannerHeight = Math.max(84, Math.min(Number(copy.height) || 112, 200));
+
   return (
     <View style={bannerStyles.wrap} testID="festival-banner">
       <LinearGradient
         colors={[gradient?.start || "#190A33", gradient?.middle || "#3B1178", gradient?.end || "#7C2D12"]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
-        style={bannerStyles.grad}
+        style={[bannerStyles.grad, { height: bannerHeight }]}
       >
         {art ? (
           <Image source={{ uri: art }} style={bannerStyles.art} resizeMode="cover" />
         ) : null}
-        <View style={bannerStyles.inner}>
-          <Text style={[bannerStyles.title, { color: glow }]} numberOfLines={1}>
-            {decor.banner_title || festival.name}
+        <View style={[bannerStyles.inner, { alignItems: align === "center" ? "center" : align === "right" ? "flex-end" : "flex-start" }]}>
+          <Text
+            style={[
+              bannerStyles.title,
+              { color: copy.title_color || glow, textAlign: align },
+              copy.title_size ? { fontSize: copy.title_size } : null,
+            ]}
+            numberOfLines={1}
+          >
+            {copy.title || decor.banner_title || festival.name}
           </Text>
-          <Text style={bannerStyles.sub} numberOfLines={2}>
-            {decor.banner_subtitle || `Celebrate ${festival.name} with us`}
+          <Text
+            style={[
+              bannerStyles.sub,
+              { textAlign: align },
+              copy.subtitle_color ? { color: copy.subtitle_color } : null,
+              copy.subtitle_size ? { fontSize: copy.subtitle_size } : null,
+            ]}
+            numberOfLines={2}
+          >
+            {copy.subtitle || decor.banner_subtitle || `Celebrate ${festival.name} with us`}
           </Text>
         </View>
         <View style={bannerStyles.diyaRow} pointerEvents="none">
@@ -159,10 +182,10 @@ const bannerStyles = StyleSheet.create({
   // decorations stacked under it, leaving a big empty band across the top.
   // Now the text is vertically centered and the decoration row is pinned to
   // the bottom edge, so the banner fills evenly at any width.
-  grad: { height: 132, justifyContent: "center" },
+  grad: { justifyContent: "center" },
   art: { ...StyleSheet.absoluteFillObject, opacity: 0.55 },
-  inner: { paddingHorizontal: spacing.cardPad, paddingBottom: 26 },
-  title: { fontSize: 20, fontWeight: "900", letterSpacing: 0.3 },
+  inner: { paddingHorizontal: spacing.cardPad, paddingBottom: 22 },
+  title: { fontSize: 19, fontWeight: "900", letterSpacing: 0.3 },
   sub: { color: "#F3E8FF", fontSize: 13, fontWeight: "600", marginTop: 2, lineHeight: 18 },
   diyaRow: {
     position: "absolute", bottom: 6, left: 0, right: 0,

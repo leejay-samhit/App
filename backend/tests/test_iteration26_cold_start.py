@@ -23,7 +23,7 @@ ALICE_EMAIL = "test_alice_73dc7f@test.com"
 BOB_EMAIL = "test_bob_d96d89@test.com"
 PASSWORD = "Passw0rd!"
 ADMIN_EMAIL = "support@networkrupay.com"
-ADMIN_PASSWORD = "Nlee@1115"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 
 # ---------- Module-scope helpers ----------

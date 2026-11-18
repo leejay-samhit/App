@@ -75,6 +75,38 @@ const swipe = useTabSwipe(["file", "snapshots"] as const, tab, setTab);
     } finally { setBusy(null); }
   };
 
+  // Nov-2026 — production had accumulated 1,160 auto snapshots because every
+  // admin user-deletion used to take a full-database copy first. That is gone;
+  // this reclaims the space those copies still occupy.
+  const onPurgeOld = async () => {
+    Alert.alert(
+      "Clean up old snapshots?",
+      "The 10 newest snapshots are kept. Everything older is removed along with its stored data.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Clean up",
+          style: "destructive",
+          onPress: async () => {
+            setBusy("purge");
+            try {
+              const { data } = await api.post<{ snapshots_removed: number; chunks_removed: number }>(
+                "/admin/backups/purge-old?keep=10", {},
+              );
+              await load();
+              Alert.alert(
+                "Clean-up done",
+                `Removed ${data.snapshots_removed} old snapshot${data.snapshots_removed === 1 ? "" : "s"}.`,
+              );
+            } catch (e) {
+              Alert.alert("Clean-up failed", formatApiError(e));
+            } finally { setBusy(null); }
+          },
+        },
+      ],
+    );
+  };
+
   const onRestore = async () => {
     if (!restoreFor) return;
     if (!isPin(restorePin)) {
@@ -188,10 +220,23 @@ const swipe = useTabSwipe(["file", "snapshots"] as const, tab, setTab);
       </View>
 
       {isSuper && (
-        <TouchableOpacity onPress={() => setManualOpen(true)} style={styles.takeBtn} testID="backups-take">
-          <Feather name="camera" size={16} color={colors.primaryFg} />
-          <Text style={styles.takeBtnText}>Take snapshot now</Text>
-        </TouchableOpacity>
+        <>
+          <TouchableOpacity onPress={() => setManualOpen(true)} style={styles.takeBtn} testID="backups-take">
+            <Feather name="camera" size={16} color={colors.primaryFg} />
+            <Text style={styles.takeBtnText}>Take snapshot now</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={onPurgeOld}
+            disabled={busy === "purge"}
+            style={styles.purgeBtn}
+            testID="backups-purge-old"
+          >
+            {busy === "purge"
+              ? <ActivityIndicator size="small" color={colors.textMuted} />
+              : <Feather name="trash-2" size={14} color={colors.textMuted} />}
+            <Text style={styles.purgeBtnText}>Clean up old snapshots</Text>
+          </TouchableOpacity>
+        </>
       )}
 
       {loading ? (
@@ -338,6 +383,12 @@ const styles = StyleSheet.create({
   metaTitle: { fontSize: 14, fontWeight: "800", color: colors.textMain },
   metaSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   takeBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, marginHorizontal: spacing.screen, padding: 12, backgroundColor: colors.primary, borderRadius: radii.button, marginBottom: 10 },
+  purgeBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    marginTop: 8, paddingVertical: 11, borderRadius: radii.button,
+    backgroundColor: colors.surfaceMuted, minHeight: 44,
+  },
+  purgeBtnText: { fontSize: 12.5, fontWeight: "700", color: colors.textMuted },
   takeBtnText: { color: colors.primaryFg, fontWeight: "800", fontSize: 14 },
   // Jun 2026 — entry point for the portable file backup (Phase 4B).
   tabsRow: { flexDirection: "row", gap: 8, paddingHorizontal: spacing.screen, marginBottom: 10 },

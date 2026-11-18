@@ -23,7 +23,6 @@ import { useLocalSearchParams, router } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
-import { useSubscription } from "../../src/subscription";
 
 type Review = {
   id: string;
@@ -72,21 +71,9 @@ export default function ProviderProfileScreen() {
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const { config: subConfig, isMember } = useSubscription();
   const [revealing, setRevealing] = useState(false);
   const [revealedPhone, setRevealedPhone] = useState<string | null>(null);
-  const [revealedInvoiceId, setRevealedInvoiceId] = useState<string | null>(null);
-  const [revealConfig, setRevealConfig] = useState<{
-    fee: number; gst_pct: number; gst_amount: number; total: number;
-    wallet_balance: number; revealed_provider_ids: string[];
-    is_subscriber?: boolean; non_member_total?: number;
-  } | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  // Sep 2026 — the pay sheet is shared by "Get phone number" and
-  // "Start Chat"; this remembers where to go once payment lands.
-  const [payIntent, setPayIntent] = useState<"call" | "chat">("call");
   const [chatOpening, setChatOpening] = useState(false);
-  const [termsAccepted, setTermsAccepted] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -100,22 +87,19 @@ export default function ProviderProfileScreen() {
     }
   }, [id]);
 
-  // Pre-fetch reveal config so we can show fee + warn if already revealed.
+  // Numbers are free since Nov-2026, so a provider the user already asked
+  // about simply shows its number again without another round trip.
   useEffect(() => {
     (async () => {
-      if (!user) return;
+      if (!user || !id) return;
       try {
         const { data } = await api.get("/services/reveal-config");
-        setRevealConfig(data);
-        if (id && data?.revealed_provider_ids?.includes(id)) {
-          // Already paid for this provider — auto-show phone
-          try {
-            const prof = await api.get(`/services/${id}/profile`);
-            setRevealedPhone(prof.data?.phone ?? null);
-          } catch {}
+        if (data?.revealed_provider_ids?.includes(id)) {
+          const prof = await api.get(`/services/${id}/profile`);
+          setRevealedPhone(prof.data?.phone ?? null);
         }
       } catch {
-        // non-fatal — endpoint may 401 on stale token
+        // non-fatal — endpoint may 401 on a stale token
       }
     })();
   }, [user, id]);
@@ -163,12 +147,10 @@ export default function ProviderProfileScreen() {
     // wallet debit. One tap fetches it and opens the dialer.
     setRevealing(true);
     try {
-      const { data } = await api.post<{
-        provider_phone: string;
-        invoice?: { id: string };
-      }>(`/services/${id}/reveal-phone`, { accept_terms: true });
+      const { data } = await api.post<{ provider_phone: string }>(
+        `/services/${id}/reveal-phone`, { accept_terms: true },
+      );
       setRevealedPhone(data.provider_phone);
-      setRevealedInvoiceId(data.invoice?.id || null);
       if (data.provider_phone) {
         setTimeout(() => {
           Linking.openURL(`tel:${data.provider_phone}`).catch(() => {});
@@ -202,58 +184,6 @@ export default function ProviderProfileScreen() {
       return;
     }
     openChatThread();
-  };
-
-  const confirmRevealAndPay = async () => {
-    if (!termsAccepted) {
-      Alert.alert("Terms required", "Please accept the terms & conditions to continue.");
-      return;
-    }
-    setRevealing(true);
-    try {
-      const { data } = await api.post<{
-        ok: boolean;
-        already_revealed: boolean;
-        invoice: { id: string };
-        provider_phone: string;
-      }>(`/services/${id}/reveal-phone`, { accept_terms: true });
-      setRevealedPhone(data.provider_phone);
-      setRevealedInvoiceId(data.invoice?.id || null);
-      setConfirmOpen(false);
-      // Refresh reveal-config so UI knows balance changed
-      try {
-        const { data: cfg } = await api.get("/services/reveal-config");
-        setRevealConfig(cfg);
-      } catch {}
-      // Sep 2026 — the sheet can be opened either to CALL or to CHAT. When
-      // the customer came in through "Start Chat" we take them into the
-      // thread instead of the dialer.
-      if (payIntent === "chat") {
-        setPayIntent("call");
-        openChatThread();
-        return;
-      }
-      // Auto open dialer after a brief pause
-      setTimeout(() => {
-        Linking.openURL(`tel:${data.provider_phone}`).catch(() => {});
-      }, 400);
-    } catch (e: any) {
-      const msg = formatApiError(e);
-      if (/insufficient/i.test(msg) || /top up/i.test(msg)) {
-        Alert.alert(
-          "Insufficient wallet balance",
-          msg,
-          [
-            { text: "Cancel", style: "cancel" },
-            { text: "Top up wallet", onPress: () => router.push("/(tabs)/wallet" as any) },
-          ],
-        );
-      } else {
-        Alert.alert("Couldn't unlock phone", msg);
-      }
-    } finally {
-      setRevealing(false);
-    }
   };
 
   if (loading) {
@@ -468,123 +398,6 @@ export default function ProviderProfileScreen() {
           ) : null}
         </View>
       </View>
-
-      {/* Confirm reveal modal — shows breakdown + T&C checkbox + Pay button */}
-      <Modal
-        visible={confirmOpen}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setConfirmOpen(false)}
-      >
-        <View style={styles.modalBg}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <View style={styles.revealHero}>
-              <View style={styles.revealHeroIcon}>
-                <Feather name="phone" size={28} color="#fff" />
-              </View>
-              <Text style={styles.modalTitle}>
-                {payIntent === "chat" ? "Unlock chat with provider" : "Unlock provider's phone"}
-              </Text>
-              <Text style={styles.revealSubtitle}>
-                {payIntent === "chat"
-                  ? `One-time fee to message ${p.name?.split(" ")[0] || "this provider"} directly. Their phone number unlocks too — chat and call anytime after this.`
-                  : `Pay a one-time fee to get ${p.name?.split(" ")[0] || "this provider"}'s direct number. You'll be able to call them anytime after that.`}
-              </Text>
-            </View>
-            {/* Fee breakdown */}
-            <View style={styles.feeCard}>
-              <View style={styles.feeRow}>
-                <Text style={styles.feeLabel}>Service fee</Text>
-                <Text style={styles.feeValue}>
-                  {revealConfig ? formatINR(revealConfig.fee) : "—"}
-                </Text>
-              </View>
-              <View style={styles.feeRow}>
-                <Text style={styles.feeLabel}>
-                  GST ({revealConfig ? `${revealConfig.gst_pct.toFixed(0)}%` : "18%"})
-                </Text>
-                <Text style={styles.feeValue}>
-                  {revealConfig ? formatINR(revealConfig.gst_amount) : "—"}
-                </Text>
-              </View>
-              <View style={[styles.feeRow, styles.feeTotalRow]}>
-                <Text style={styles.feeTotalLabel}>Total payable</Text>
-                <Text style={styles.feeTotalValue}>
-                  {revealConfig ? formatINR(revealConfig.total) : "—"}
-                </Text>
-              </View>
-              <View style={styles.feeRow}>
-                <Text style={[styles.feeLabel, { color: colors.textMuted }]}>Your wallet</Text>
-                <Text
-                  style={[
-                    styles.feeValue,
-                    {
-                      color:
-                        revealConfig &&
-                        (revealConfig.wallet_balance ?? 0) < (revealConfig.total ?? 0)
-                          ? "#B3261E"
-                          : colors.textMuted,
-                    },
-                  ]}
-                >
-                  {revealConfig ? formatINR(revealConfig.wallet_balance) : "—"}
-                </Text>
-              </View>
-            </View>
-            {/* T&C — boxed so the checkbox, the amount and the sentence all
-                sit on one tidy card instead of floating against the sheet. */}
-            <TouchableOpacity
-              onPress={() => setTermsAccepted((v) => !v)}
-              style={[styles.tncRow, termsAccepted && styles.tncRowOn]}
-              testID="reveal-tnc-checkbox"
-            >
-              <View style={[styles.tncBox, termsAccepted && styles.tncBoxOn]}>
-                {termsAccepted ? <Feather name="check" size={14} color="#fff" /> : null}
-              </View>
-              <Text style={styles.tncText}>
-                I agree that{" "}
-                <Text style={{ fontWeight: "800", color: colors.textMain }}>
-                  {revealConfig ? formatINR(revealConfig.total) : "the fee"}
-                </Text>{" "}
-                will be deducted from my wallet to unlock this provider’s phone
-                number and chat. Terms &amp; conditions apply.
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={confirmRevealAndPay}
-              disabled={!termsAccepted || revealing}
-              style={[
-                styles.modalBtn,
-                (!termsAccepted || revealing) && { opacity: 0.5 },
-              ]}
-              testID="reveal-confirm-btn"
-            >
-              {revealing ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.modalBtnText}>{payIntent === "chat" ? "Pay & chat" : "Pay & unlock"}</Text>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => setConfirmOpen(false)}
-              style={{ paddingVertical: 12, alignItems: "center" }}
-            >
-              <Text style={{ color: colors.textMuted, fontWeight: "700" }}>Cancel</Text>
-            </TouchableOpacity>
-            {revealedInvoiceId ? (
-              <TouchableOpacity
-                onPress={() => router.push(`/services/invoice/${revealedInvoiceId}` as any)}
-                style={{ paddingVertical: 6, alignItems: "center" }}
-              >
-                <Text style={{ color: colors.primary, fontWeight: "700", fontSize: 12 }}>
-                  View invoice
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        </View>
-      </Modal>
 
       {/* Review modal */}
       <Modal visible={reviewOpen} transparent animationType="slide" onRequestClose={() => setReviewOpen(false)}>

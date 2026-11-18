@@ -23,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
@@ -89,7 +91,6 @@ from core.chat_flags import (  # noqa: E402
     flag_message,
 )
 
-import re  # noqa: E402  (kept module-local since the regex is only built once)
 
 
 # ============== Helpers ==============
@@ -132,7 +133,7 @@ def _serialize(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def _user_brief(u: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not u:
-        return {"id": "", "name": "Unknown", "referral_code": "", "avatar": "", "sponsor_code": "", "is_vendor": False, "is_service_provider": False, "profile_image": None}
+        return {"id": "", "name": "Unknown", "referral_code": "", "avatar": "", "sponsor_code": "", "is_vendor": False, "is_service_provider": False, "is_delivery_partner": False, "profile_image": None}
     return {
         "id": u.get("id", ""),
         "name": u.get("name") or u.get("email") or "User",
@@ -143,6 +144,9 @@ def _user_brief(u: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         # (Downline / Vendors / Services / All / Unread). Cheap booleans.
         "is_vendor":            bool(u.get("is_vendor")),
         "is_service_provider":  bool(u.get("is_service_provider")),
+        # Nov-2026 — the Friends screen lists Delivery chats where the
+        # retired "Downline" tab used to be.
+        "is_delivery_partner":  bool(u.get("is_delivery_partner_approved")),
         # June 2026 — include the raw profile_image so the chat header /
         # profile-card modal can render the photo. Privacy mask is applied
         # by the calling endpoint via `_apply_user_brief_privacy()` below.
@@ -222,6 +226,9 @@ async def _find_or_create_thread(a: str, b: str) -> Dict[str, Any]:
 
 # ============== Connection manager (WebSocket) ==============
 
+_VIEWING_TTL_SECONDS = 60  # heartbeat is 20s, so a live reader always refreshes in time
+
+
 class _ConnectionManager:
     """In-process registry of active WebSocket connections keyed by user_id."""
 
@@ -233,6 +240,8 @@ class _ConnectionManager:
         # socket while backgrounded (location service), which used to
         # swallow every chat push (owner report, Sep 2026).
         self._viewing: Dict[str, str] = {}
+        # When that claim was last refreshed (see is_viewing).
+        self._viewing_at: Dict[str, float] = {}
 
     async def connect(self, user_id: str, ws: WebSocket) -> None:
         await ws.accept()
@@ -261,11 +270,33 @@ class _ConnectionManager:
     def set_viewing(self, user_id: str, thread_id: Optional[str]) -> None:
         if thread_id:
             self._viewing[user_id] = thread_id
+            self._viewing_at[user_id] = time.time()
         else:
             self._viewing.pop(user_id, None)
+            self._viewing_at.pop(user_id, None)
+
+    def touch_viewing(self, user_id: str) -> None:
+        """Refresh the freshness stamp on an existing claim (heartbeat)."""
+        if user_id in self._viewing:
+            self._viewing_at[user_id] = time.time()
 
     def is_viewing(self, user_id: str, thread_id: str) -> bool:
-        return self._viewing.get(user_id) == thread_id
+        """True only when the thread is open AND the claim is fresh.
+
+        Nov-2026 — a socket that dies without running its cleanup (process
+        restart, a pod rotating, a half-open mobile connection) used to leave
+        "user is reading thread X" set forever, and every later message to that
+        user silently skipped the push. The claim is refreshed by the app's
+        20-second heartbeat, so anything older than a minute is stale and the
+        push goes out.
+        """
+        if self._viewing.get(user_id) != thread_id:
+            return False
+        if time.time() - self._viewing_at.get(user_id, 0) > _VIEWING_TTL_SECONDS:
+            self._viewing.pop(user_id, None)
+            self._viewing_at.pop(user_id, None)
+            return False
+        return True
 
 
 manager = _ConnectionManager()
@@ -273,14 +304,86 @@ manager = _ConnectionManager()
 
 # ============== Search / Requests ==============
 
+def _public_match_brief(u: Dict[str, Any], include_codes: bool) -> Dict[str, Any]:
+    """What a searcher may see about someone they have not met yet.
+
+    Nov-2026 — the name-search match list used to hand out referral and sponsor
+    codes to anybody. Only admins see codes now; everyone else gets the name,
+    the photo and the role badges, plus the town so two people with the same
+    name can be told apart.
+    """
+    brief = {
+        "id": u.get("id", ""),
+        "name": u.get("name") or u.get("email") or "User",
+        "avatar": u.get("avatar_url") or u.get("avatar", "") or "",
+        "profile_image": u.get("profile_image") or None,
+        "is_vendor": bool(u.get("is_vendor")),
+        "is_service_provider": bool(u.get("is_service_provider")),
+        "is_delivery_partner": bool(u.get("is_delivery_partner_approved")),
+        "city": (u.get("address") or {}).get("city") if isinstance(u.get("address"), dict) else (u.get("city") or ""),
+    }
+    if include_codes:
+        brief["referral_code"] = u.get("referral_code", "")
+    return brief
+
+
 @router.get("/chat/search")
-async def search_by_refcode(code: str = Query(..., min_length=2, max_length=20), user: Dict[str, Any] = Depends(get_current_user)):
-    """Find a user by referral code. Returns minimal public info plus a
-    `relationship` summary (already_chatting / request_pending / can_request)."""
-    clean = code.strip().upper()
-    target = await db.users.find_one({"referral_code": clean}, {"_id": 0})
+async def search_by_refcode(
+    code: str = Query("", max_length=60),
+    user_id: str = Query("", max_length=64),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Find a person by referral code OR by name.
+
+    Nov-2026 — the Friends search box now accepts a name, because referral
+    codes are no longer something customers share. An exact code still wins;
+    otherwise we look for one clear name match and say so when the name is
+    ambiguous instead of guessing.
+    """
+    raw = code.strip()
+    if not raw and not user_id:
+        raise HTTPException(status_code=400, detail="Type a name or a code to search.")
+    # People this user has blocked in chat never appear in their search.
+    blocked_rows = await db.chat_blocks.find(
+        {"blocker_id": user["id"]}, {"_id": 0, "blocked_id": 1},
+    ).to_list(500)
+    hidden_ids = [b["blocked_id"] for b in blocked_rows] + [user["id"]]
+    reachable = {
+        "id": {"$nin": hidden_ids},
+        "is_blocked": {"$ne": True},
+        "status": {"$nin": ["pending", "rejected", "suspended"]},
+    }
+    # Picking someone from an ambiguous match list resolves by id, so the app
+    # can show the REAL relationship (open the existing chat vs send a request).
+    target = None
+    if user_id:
+        # $and keeps the "id": {"$nin": hidden_ids} filter — merging the dicts
+        # would overwrite it and let chat-blocked users through by id.
+        target = await db.users.find_one({"$and": [reachable, {"id": user_id}]}, {"_id": 0})
+    if not target and raw:
+        target = await db.users.find_one({**reachable, "referral_code": raw.upper()}, {"_id": 0})
+    if not target and not user_id and len(raw) >= 3:
+        safe = re.escape(raw)
+        matches = await db.users.find(
+            {**reachable, "name": {"$regex": f"^{safe}", "$options": "i"}},
+            {"_id": 0},
+        ).limit(5).to_list(5)
+        if len(matches) == 1:
+            target = matches[0]
+        elif len(matches) > 1:
+            is_admin = (user.get("role") == "admin") or bool(user.get("admin_role"))
+            return {
+                "user": None,
+                "relationship": "ambiguous",
+                "matches": [
+                    _public_match_brief(m, include_codes=is_admin) for m in matches
+                ],
+            }
     if not target:
-        raise HTTPException(status_code=404, detail="No user matches that referral code.")
+        raise HTTPException(
+            status_code=404,
+            detail="Nobody matches that name or code.",
+        )
     if target.get("id") == user.get("id"):
         raise HTTPException(status_code=400, detail="That's your own referral code.")
     if (target.get("status") or "approved") not in ("approved", "active"):
@@ -308,16 +411,29 @@ async def search_by_refcode(code: str = Query(..., min_length=2, max_length=20),
     }
 
 
+async def _share_an_order(a_id: str, b_id: str) -> bool:
+    """True when two people are on the same order — in any pairing of
+    customer, seller and delivery partner."""
+    q = {
+        "$or": [
+            {"user_id": a_id, "vendor_id": b_id},
+            {"user_id": b_id, "vendor_id": a_id},
+            {"user_id": a_id, "dp_id": b_id},
+            {"user_id": b_id, "dp_id": a_id},
+            {"vendor_id": a_id, "dp_id": b_id},
+            {"vendor_id": b_id, "dp_id": a_id},
+        ],
+    }
+    return bool(await db.orders.find_one(q, {"_id": 0, "id": 1}))
+
+
 @router.post("/chat/threads")
 async def start_thread(body: Dict[str, Any], request: Request, user: Dict[str, Any] = Depends(get_current_user)):
-    """June 2026 — Service-Provider Start-Chat shortcut.
+    """Open a chat thread directly, skipping the request/accept handshake.
 
-    The classic chat flow requires sending a `chat_request` and waiting for
-    acceptance. For Service Providers we skip that handshake: once the
-    customer has paid to reveal the provider's phone (any successful
-    `phone_reveal_invoices` row between the two), the chat thread is
-    created instantly so the customer can message the provider without
-    leaving the screen. Returns the thread doc.
+    Allowed for service providers (their chat is free since Nov-2026) and for
+    anyone sharing an order with the caller — the customer, the seller and
+    the delivery partner on a live order can always reach each other.
     """
     other_user_id = (body or {}).get("other_user_id") or ""
     if not other_user_id:
@@ -328,30 +444,18 @@ async def start_thread(body: Dict[str, Any], request: Request, user: Dict[str, A
     if not other:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    # Allow if (a) the customer has revealed THIS provider's phone, OR
-    # (b) the OTHER user is an approved service provider and the caller
-    # has at least one successful reveal of them in `phone_reveal_invoices`.
-    # Sep 2026 BUGFIX — this guard looked for `customer_id` + a `status`
-    # field, but a paid reveal writes `user_id` and no status at all (see
-    # /services/{id}/reveal-phone). So every customer who HAD paid the
-    # ₹1.18 fee still got "Reveal the provider's phone first" and Start
-    # Chat did nothing. An invoice row only exists after the wallet debit
-    # succeeded, so its presence IS the proof of payment.
+    # Who may open a thread without the request/accept handshake.
     if other.get("is_service_provider") or other.get("service_status") == "approved":
-        ok = await db.phone_reveal_invoices.find_one({
-            "provider_id": other_user_id,
-            "$or": [{"user_id": user["id"]}, {"customer_id": user["id"]}],
-        })
-        if not ok:
-            # A zero-fee configuration means chat is free for everyone —
-            # admins can set the unlock fee to ₹0 in Service Analytics.
-            settings = await db.settings.find_one({"id": "global"}, {"_id": 0, "phone_reveal_fee": 1}) or {}
-            fee = float(settings.get("phone_reveal_fee") if settings.get("phone_reveal_fee") is not None else 1.0)
-            if fee > 0:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Unlock this provider first to start a chat.",
-                )
+        # Nov-2026 — provider phone numbers and provider chat are FREE, so
+        # there is nothing left to unlock. (The old gate required a paid row
+        # in phone_reveal_invoices.)
+        pass
+    elif await _share_an_order(user["id"], other_user_id):
+        # Nov-2026 — the people working on the same order can talk to each
+        # other: customer ↔ seller, customer ↔ delivery partner, seller ↔
+        # delivery partner. These are the "Delivery" conversations the
+        # Friends screen lists.
+        pass
     else:
         # For non-provider chats keep the existing safety net — must already
         # have an accepted thread or an approved request.
@@ -376,6 +480,17 @@ async def send_chat_request(body: ChatRequestIn, request: Request, user: Dict[st
     target = await db.users.find_one({"id": body.to_user_id}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
+    # Nov-2026 — the same reachability rules the search applies, so knowing an
+    # id is not a way around a block or an unapproved account.
+    if target.get("is_blocked") or (target.get("status") or "approved") in ("pending", "rejected", "suspended"):
+        raise HTTPException(status_code=404, detail="User not found.")
+    if await db.chat_blocks.find_one({
+        "$or": [
+            {"blocker_id": user["id"], "blocked_id": target["id"]},
+            {"blocker_id": target["id"], "blocked_id": user["id"]},
+        ],
+    }):
+        raise HTTPException(status_code=403, detail="You cannot message this person.")
     # Already chatting?
     parts = await _participants_canonical(user["id"], target["id"])
     if await db.chat_threads.find_one({"participants": parts}):
@@ -531,13 +646,15 @@ async def list_threads(user: Dict[str, Any] = Depends(get_current_user)):
             "id": t["id"],
             "other": brief,
             "is_downline": is_downline,
+            "is_delivery_partner": bool(brief.get("is_delivery_partner")),
             "is_announcement": bool(t.get("is_announcement")),
             "last_message": _serialize(dict(last_msg)) if last_msg else None,
             "unread_count": unread,
             "last_message_at": (t.get("last_message_at") or t.get("created_at")).isoformat() if isinstance(t.get("last_message_at") or t.get("created_at"), datetime) else (t.get("last_message_at") or t.get("created_at")),
         })
-    # Sort: downline first, then by last_message_at desc
-    out.sort(key=lambda x: (0 if x["is_downline"] else 1, -(_parse_iso(x.get("last_message_at")))))
+    # Newest conversation first. (Until Nov-2026 downline threads were pinned
+    # above everything else — that tree is retired, so recency wins.)
+    out.sort(key=lambda x: -(_parse_iso(x.get("last_message_at"))))
     return {"threads": out}
 
 
@@ -1247,6 +1364,10 @@ async def websocket_chat(ws: WebSocket, token: str = Query(...)):
             # ping/heartbeat.
             try:
                 msg = await ws.receive_text()
+                # Any inbound frame proves the app is alive; refresh the
+                # "reading thread X" claim so is_viewing() stays accurate
+                # without the client having to re-announce it.
+                manager.touch_viewing(user_id)
                 if msg == "ping":
                     await ws.send_text("pong")
                     continue

@@ -48,7 +48,7 @@ export default function Register() {
         password,
         phone: phone.trim() || undefined,
       });
-      router.replace("/payment");
+      router.replace("/(tabs)/shop");
     } catch (e) {
       setError(formatApiError(e));
     } finally {
@@ -75,7 +75,7 @@ export default function Register() {
             <Text style={styles.gradOverline}>CREATE YOUR ACCOUNT</Text>
             <Text style={styles.gradH1}>Create your{"\n"}account</Text>
             <Text style={styles.gradSub}>
-              Refer 4 friends to unlock recurring rewards.
+              Shop, sell, deliver or list a service — one free account does it all.
             </Text>
           </LinearGradient>
 
@@ -103,7 +103,7 @@ export default function Register() {
           </TouchableOpacity>
 
           {/* Nov-2026 — free signup: no invite code and no payment step. */}
-          <GoogleSignInButton onError={setError} label="Sign up with Google" />
+          <GoogleSignInButton onError={setError} label="Sign up with Google" showDivider />
 
           <View style={styles.footerRow}>
             <Text style={styles.muted}>Already have an account?</Text>

@@ -20,6 +20,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError, resolveImageUrl } from "./api";
 import { colors, radii } from "./theme";
+import { CategoryPicker } from "./category-picker";
 import { clampCashbackPct, cashbackAmount, MAX_CASHBACK_PCT } from "./cashback";
 import {
   VariantEditor, VariantState, emptyVariantState, variantPayload, variantStateFrom,
@@ -2003,48 +2004,41 @@ export function RichProductEditor({
                 onChange={setVariantState}
                 basePrice={Number(price) || 0}
               />
-              <Text style={modalStyles.fieldLabel}>Category</Text>
-              <View style={sectionStyles.chipRow}>
-                {categoryChips.map((opt) => {
-                  const selected = opt === "Other"
-                    ? customCategory
-                    : !customCategory && category === opt;
-                  return (
-                    <TouchableOpacity
-                      key={opt}
-                      onPress={() => {
-                        if (opt === "Other") {
-                          setCustomCategory(true);
-                          // keep current text if present
-                        } else {
-                          setCustomCategory(false);
-                          // Nov-2026 BUGFIX — changing the MAIN category must
-                          // always clear the sub-category. It used to clear
-                          // only when leaving "Clothes", so e.g. Electronics →
-                          // Mobiles kept the old Electronics sub-category and
-                          // the product stayed listed under it forever.
-                          if (opt !== category) setSubCategory("");
-                          setCategory(opt);
-                          if (opt.toLowerCase() !== "clothes") {
-                            setClothingSize("");
-                          }
-                        }
-                      }}
-                      style={[sectionStyles.chip, selected && sectionStyles.chipActive]}
-                      testID={`product-category-${opt.toLowerCase()}`}
-                    >
-                      <Text style={[sectionStyles.chipText, selected && sectionStyles.chipTextActive]}>{opt}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+              {/* Nov-2026 (req 18) — the category chip wall is now a
+                  searchable dropdown: pick the main category, then its
+                  subcategory. Stored values are unchanged. */}
+              <CategoryPicker
+                label="CATEGORY"
+                value={customCategory ? "" : category}
+                options={categoryChips.filter((c) => c !== "Other")}
+                placeholder="Select a category"
+                onChange={(opt) => {
+                  if (!opt) { setCategory(""); setSubCategory(""); return; }
+                  setCustomCategory(false);
+                  // Changing the MAIN category always clears the sub-category,
+                  // otherwise a product keeps a sub-category from its old tree.
+                  if (opt !== category) setSubCategory("");
+                  setCategory(opt);
+                  if (opt.toLowerCase() !== "clothes") setClothingSize("");
+                }}
+                testID="product-category-picker"
+              />
+              <TouchableOpacity
+                onPress={() => { setCustomCategory((v) => !v); }}
+                style={{ paddingVertical: 8 }}
+                testID="product-category-other"
+              >
+                <Text style={{ fontSize: 12, fontWeight: "700", color: colors.primary }}>
+                  {customCategory ? "Pick from the list instead" : "My category is not listed"}
+                </Text>
+              </TouchableOpacity>
               {customCategory ? (
                 <TextInput
                   value={category}
                   onChangeText={setCategory}
                   placeholder="Type a custom category"
                   placeholderTextColor={colors.textMuted}
-                  style={[modalStyles.input, { marginTop: 8 }]}
+                  style={[modalStyles.input, { marginTop: 4 }]}
                   testID="product-category-custom"
                 />
               ) : null}
@@ -2066,21 +2060,14 @@ export function RichProductEditor({
                     Groups products inside “{category}”.
                   </Text>
                   {subcategoryChips.length > 0 ? (
-                    <View style={sectionStyles.chipRow}>
-                      {subcategoryChips.map((sc) => {
-                        const active = subCategory.trim().toLowerCase() === sc.toLowerCase();
-                        return (
-                          <TouchableOpacity
-                            key={sc}
-                            onPress={() => setSubCategory(active ? "" : sc)}
-                            style={[sectionStyles.chip, active && sectionStyles.chipActive]}
-                            testID={`product-subcat-${sc.toLowerCase()}`}
-                          >
-                            <Text style={[sectionStyles.chipText, active && sectionStyles.chipTextActive]}>{sc}</Text>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </View>
+                    <CategoryPicker
+                      label="SUB-CATEGORY"
+                      value={subCategory}
+                      options={subcategoryChips}
+                      placeholder="Select a sub-category"
+                      onChange={setSubCategory}
+                      testID="product-subcat-picker"
+                    />
                   ) : null}
                   <TextInput
                     value={subCategory}

@@ -28,9 +28,9 @@ else:
     API = BASE_URL
 
 ADMIN_EMAIL = "support@networkrupay.com"
-ADMIN_PASSWORD = "Nlee@1115"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 VENDOR_EMAIL = "raju@gmail.com"
-VENDOR_PASSWORD = "Demo@2026"
+VENDOR_PASSWORD = os.environ.get("VENDOR_PASSWORD", "")
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "referral_ecom_db")

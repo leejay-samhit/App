@@ -37,7 +37,6 @@ const ITEMS = [
   { icon: "bell", label: "Push notification diagnostics", route: "/admin/push-diagnostics" },
   { icon: "list", label: "Transactions", route: "/admin/transactions" },
   { icon: "file-text", label: "Admin audit log", route: "/admin/audit" },
-  { icon: "award", label: "Membership (₹118 subscription)", route: "/admin/subscription" },
   { icon: "sliders", label: "Payout structure (shop by shop)", route: "/admin/payout-structure" },
   { icon: "settings", label: "Platform defaults", route: "/admin/settings" },
   { icon: "credit-card", label: "UPI Payments (pending)", route: "/admin/payments-pending" },

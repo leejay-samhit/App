@@ -18,11 +18,12 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from core.branding import get_branding_doc, merge_branding
@@ -47,6 +48,23 @@ class ApplyPayload(BaseModel):
 class ArtworkPayload(BaseModel):
     festival_id: str
     slot: str = "banner"
+
+
+class BannerTextPayload(BaseModel):
+    """Editable banner copy + layout for ONE festival (Nov-2026, req 17).
+
+    Every field is optional — anything left out falls back to the festival's
+    own wording, so a half-filled form never blanks the banner.
+    """
+    festival_id: str
+    title: Optional[str] = Field(None, max_length=60)
+    subtitle: Optional[str] = Field(None, max_length=120)
+    align: Optional[str] = None            # left | center | right
+    title_size: Optional[int] = Field(None, ge=12, le=34)
+    subtitle_size: Optional[int] = Field(None, ge=10, le=24)
+    title_color: Optional[str] = Field(None, max_length=9)
+    subtitle_color: Optional[str] = Field(None, max_length=9)
+    height: Optional[int] = Field(None, ge=84, le=200)
 
 
 def _short(e: Exception, limit: int = 300) -> str:
@@ -126,6 +144,7 @@ async def apply_festival_theme(
         "pre_festival_colors": base_colors,
         "pre_festival_gradient": base_gradient,
         "festival": {
+            "banner_text": (stored.get("festival_banner_text") or {}).get(fest["id"]) or {},
             "id": fest["id"],
             "name": fest["name"],
             "subtitle": fest["subtitle"],
@@ -164,6 +183,49 @@ async def clear_festival_theme(
     )
     await audit_log(admin, "festival_theme.clear", "branding", "global")
     return merge_branding(await get_branding_doc())
+
+
+@router.put("/admin/festival-theme/banner-text")
+async def set_festival_banner_text(
+    payload: BannerTextPayload,
+    admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Save the editable heading / subtitle / layout for a festival banner."""
+    fest = get_festival(payload.festival_id)
+    if not fest:
+        raise HTTPException(status_code=404, detail="Unknown festival")
+    if payload.align and payload.align not in ("left", "center", "right"):
+        raise HTTPException(status_code=400, detail="align must be left, center or right")
+    for field in ("title_color", "subtitle_color"):
+        val = getattr(payload, field)
+        if val and not re.fullmatch(r"#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?", val):
+            raise HTTPException(status_code=400, detail=f"{field} must be a hex colour like #FFD700")
+
+    overrides = {
+        k: v for k, v in payload.model_dump(exclude={"festival_id"}).items() if v not in (None, "")
+    }
+    await db.settings.update_one(
+        {"id": "branding"},
+        {"$set": {f"festival_banner_text.{fest['id']}": overrides}},
+        upsert=True,
+    )
+    # Republish instantly when this festival is the live one.
+    stored = await get_branding_doc()
+    if (stored.get("festival") or {}).get("id") == fest["id"]:
+        await db.settings.update_one(
+            {"id": "branding"},
+            {"$set": {"festival.banner_text": overrides, "theme_version": _version()}},
+        )
+    await audit_log(admin, "festival_theme.banner_text", "branding", fest["id"], overrides)
+    return {"ok": True, "festival_id": fest["id"], "banner_text": overrides}
+
+
+@router.get("/admin/festival-theme/banner-text")
+async def list_festival_banner_text(
+    _admin: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    stored = await get_branding_doc()
+    return {"items": stored.get("festival_banner_text") or {}}
 
 
 def _storage_path(fid: str, slot: str) -> str:

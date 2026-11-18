@@ -1,0 +1,57 @@
+{
+  "summary": "Iteration 123 (third pass, leftovers from iter122). Backend: new suite test_iter123_chat_search_cancel.py 16/19 passed. Exact code wins (case-insensitive), a unique name prefix returns the user, 'Test' and 'buyer' return an ambiguous list (200) without the caller, no match returns 404 'Nobody matches that name or code.', regex characters are escaped, and admin-blocked users are left out of name search. Deletion cancel returns unlocked:true and then unlocked:false on a second call. An admin block clears deletion_ticket_id, so cancelling the old ticket returns unlocked:false and the block stays. Admin DELETE returns 200 in 0.15s with truncated:{}. 3 failures: search names longer than 20 characters get a 422; an admin-blocked user can still be found by exact referral code; a user the caller blocked in chat is still returned. Regression: iter121 36/36 and iter122 18/18 pass. Finance unchanged across the whole run: 2827 transactions and wallet sum 287525.91, before and after. Frontend (375x667): a CRITICAL crash on every ambiguous search, a red-screen 'Cannot read properties of null (reading name)' at chat.tsx:411, was found and fixed by me with a one-line typo fix. After the fix: the search box keeps lowercase, the inline chat-search-error works, the ambiguous list renders and picking a person works, and non-admins see no #codes in the result card or the request modal. Register hero copy is fixed. In the deletion dialog, 'Stay here' keeps the session and 'Sign out now' clears the tokens and goes to /login.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/chat/search", "issue": "The query param has max_length=20, so any name longer than 20 characters (e.g. 'Venkata Ramana Reddy Kumar') gets a raw pydantic 422. The UI hides this with TextInput maxLength=20, so a full long name can never be typed (only its prefix). Raise the limit to about 60 for names."},
+      {"endpoint": "GET /api/chat/search", "issue": "The exact referral-code path skips the is_blocked filter, so an admin-blocked or deletion-locked account is still returned (200, relationship can_request) when searched by code. Only the name path excludes it. Reference: routes/chat.py:317"},
+      {"endpoint": "GET /api/chat/search", "issue": "Users the caller blocked through POST /api/chat/block/{id} (chat_blocks) are still returned by both name and code search."},
+      {"endpoint": "GET /api/chat/search (ambiguous)", "issue": "matches[] goes through _user_brief and includes referral_code and sponsor_code for every match. Any non-admin can list other people's codes by name prefix, even though the UI now hides codes from non-admins. Unapproved users (status not approved) are not filtered out of matches either."},
+      {"endpoint": "DELETE /api/admin/users/{id}", "issue": "The archive budget is 1.5MB per collection across 11 collections, up to about 16.5MB plus the user doc. That is over MongoDB's 16MB document cap, and len(str(row)) is only an estimate of BSON size. A very heavy account could hit DocumentTooLarge and a 500 before the delete runs. Use a total budget of about 12MB across all collections. Normal deletes are fine (0.15s)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Chat request modal (chat.tsx:411/413)", "issue": "FIXED BY TESTING AGENT: `searchResult?.user.name` threw when an ambiguous result (user:null) was set. The modal's JSX is evaluated even while hidden, so every ambiguous search crashed the Friends screen with a red screen. Changed to `searchResult?.user?.name`.", "testID": "chat-search-match-<id>", "priority": "CRITICAL (fixed)"},
+      {"component": "Ambiguous match pick", "issue": "onPress forces relationship:'can_request'. Picking someone you already chat with (e.g. testbuyer -> 'Test Vendor', backend says already_chatting) shows 'Request' instead of 'Open'. Sending then fails with 400 'You're already chatting', and the error goes through Alert.alert, which does nothing on web, so the failure is silent. Fix: after picking, re-call /chat/search with that match's code or id to get the real relationship and thread_id.", "testID": "chat-search-match-<id>", "priority": "MEDIUM"},
+      {"component": "Ambiguous list", "issue": "People with the same name cannot be told apart (3 identical 'TEST iter60 UI' rows with no secondary info now that codes are hidden). Add a non-sensitive hint such as city or role.", "testID": "chat-search-match-<id>", "priority": "LOW"},
+      {"component": "Deletion success dialog", "issue": "The body still says 'You are being signed out now.' while the 'Stay here' button keeps the user signed in, so the copy contradicts the button. Also, after 'Stay here' the screen does not reload: the full form and an active 'Request account deletion' button stay on screen for a locked account, and every further call returns 403. Call load() (or show the 'Request under review' state) on cancel.", "testID": "deletion-submitted", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Send chat request failure", "issue": "onSendRequest, accept and reject errors still use Alert.alert, which does nothing on the web preview, so failures are silent there.", "affected_testIDs": ["chat-request-send"]}
+    ],
+    "design_issues": [
+      {"screen": "Friends (chat)", "issues": ["The search placeholder 'Search people by code or name (e.g. ABC123)' is cut off at 375px ('...(e.g'). Shorten it to 'Search by name or code'.", "The clear (x) button does not clear searchError."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter123_chat_search_cancel.py",
+    "/app/test_reports/pytest/pytest_iter123.xml",
+    "/app/test_reports/pytest/pytest_iter121_rerun.xml",
+    "/app/test_reports/pytest/pytest_iter122_rerun.xml"
+  ],
+  "action_items": [
+    "Keep the testing agent's fix in chat.tsx (searchResult?.user?.name in the request modal). Check any other `?.user.` access in that file.",
+    "On ambiguous pick, fetch the real relationship and thread_id for the chosen person instead of hard-coding can_request.",
+    "Deletion dialog: fix the body copy to match 'Stay here', and refresh the screen state when 'Stay here' is tapped.",
+    "chat/search: apply the is_blocked filter (and optionally chat_blocks) to the exact-code path as well; strip referral_code and sponsor_code from ambiguous matches for non-admin callers; filter unapproved users.",
+    "chat/search: raise max_length to about 60 and the TextInput maxLength to match, so full names work.",
+    "Admin delete archive: make the size budget a total (about 12MB) rather than per-collection."
+  ],
+  "critical_code_review_comments": [
+    "routes/chat.py search_by_refcode: the exclusion rules differ between the code path and the name path (blocked users excluded only on the name path).",
+    "server.py admin_delete_user: worst-case archive size can go over 16MB (11 x 1.5MB).",
+    "tickets.py admin_cancel_deletion: the scoped update and the unlocked flag are correct; admin_block_user clears deletion_ticket_id correctly."
+  ],
+  "updated_files": [
+    "/app/frontend/app/(tabs)/chat.tsx (null-safe searchResult?.user?.name crash fix at lines 411/413; added testIDs chat-search-input, chat-search-submit, chat-search-clear, chat-search-result-request, chat-search-result-open, chat-request-send)",
+    "/app/backend/tests/test_iter123_chat_search_cancel.py (new)"
+  ],
+  "success_rate": {"backend": "84% new suite (16/19); regression 100% (54/54)", "frontend": "100% of requested flows after the crash fix (the crash blocked the ambiguous flow before the fix)"},
+  "seed_data_creation": "Created TEST_i123* users (4 by the suite in each of 2 runs, plus 2 for the UI) and their tickets and archives. All were deleted by id. No seed or real data was changed; no chat requests were sent to seed users.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Use the public URL from EXPO_PUBLIC_BACKEND_URL (the frontend .env has no EXPO_BACKEND_URL key). Registration is limited to 5 per minute: wait about 62s between suites. testbuyer@test.com logs in to /verify-mobile, but /chat and other routes can be opened directly. testbuyer already chats with 'Test Vendor' (thread 55331e40...), which is useful for testing the ambiguous-pick relationship. Finance baseline: 2827 tx, wallet sum 287525.91.",
+  "rca_of_issue": "Ambiguous-search crash: setSearchResult({user:null, relationship:'ambiguous', matches}) followed by a render of the always-mounted <Modal> children, where `(searchResult?.user.name || '?')` reads .name of null. The JSX is evaluated eagerly even when visible=false, so the error is thrown and the red screen appears. Mitigation: use optional chaining (applied)."
+}

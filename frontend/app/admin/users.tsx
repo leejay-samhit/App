@@ -347,9 +347,11 @@ export default function AdminUsers() {
             </View>
             <View style={{ alignItems: "flex-end" }}>
               <Text style={styles.userAmount}>{formatINR(item.total_earned)}</Text>
-              <View style={[styles.statusDot, { backgroundColor: item.registration_paid ? colors.success : colors.warning }]}>
-                <Text style={styles.statusDotText}>{item.registration_paid ? "MEMBER" : "FREE"}</Text>
-              </View>
+              {(item as any).is_blocked ? (
+                <View style={[styles.statusDot, { backgroundColor: colors.error }]}>
+                  <Text style={styles.statusDotText}>LOCKED</Text>
+                </View>
+              ) : null}
             </View>
             <Feather name="chevron-right" size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
           </TouchableOpacity>

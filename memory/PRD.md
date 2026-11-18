@@ -3112,3 +3112,91 @@ money document was written by any of this work.
 
 Verified by the testing agent (9/9 flows) plus local end-to-end OTP tests covering
 claim-release, same-account re-login, one-time use and replay rejection.
+
+## Nov 2026 (5) — 20-point audit & upgrade
+
+Owner brief: audit and repair the existing app against 20 numbered requirements.
+No rebuild, no destructive migrations, nothing financial touched.
+
+**Production bugs fixed (RCA from live logs, not guesswork)**
+- *Admin user deletion 500* — `admin_delete_user` took a FULL database snapshot
+  before deleting one account; on Atlas that read timed out (`NetworkTimeout`),
+  worsened by `db_snapshot_chunks` having no index on `snapshot_id` and 1,160
+  accumulated snapshots. Now it writes a SCOPED archive of just that account's
+  rows into `deleted_user_archives` (capped by row count AND ~1.5MB per
+  collection, with an honest `truncated` map) and finishes in ~0.15s. Added
+  `ix_snapchunk_lookup`, and `POST /api/admin/backups/purge-old?keep=10`
+  (super-admin, with a button in Admin → Backups) to clear the backlog.
+- *Registration 500* — an `E11000` on `uniq_user_phone` escaped as a 500.
+  Phone numbers are now normalised to 10 digits, pre-checked, and
+  `DuplicateKeyError` answers 409 in plain language. Same for
+  `PATCH /api/admin/users/{id}`, which also resets `phone_verified` and
+  validates the number (req 4).
+- Atlas-tuned motor client (`core/db.py`): 15s selection/connect, 180s socket,
+  retryable reads/writes, zlib compression — this is what killed the recurring
+  "Auto-backup failed: read operation timed out" warning. Auto-snapshots now run
+  every 6 hours on a remote DB instead of every 15 minutes, and the three
+  historical financial backfills are marker-guarded so they run once per DB
+  instead of scanning 100k transactions on every boot.
+
+**Requirements delivered**
+- 3 + 14 — login offers three equal doors: Google, Mobile Number (WhatsApp OTP)
+  and Email & Password, the last opening into its form with a show/hide eye.
+- 5 + 6 — all membership and MLM wording and screens removed: `SubscribeBanner`,
+  `MembershipCard`, `app/payment-upi.tsx`, `app/admin/subscription.tsx`,
+  `src/subscription.tsx`, the admin "Membership (₹118)" menu entry, the
+  MEMBER/FREE badge, the referral roadmap block and the "Referral bonus of ₹25"
+  copy. Historical transactions untouched.
+- 7 — vendor, delivery-partner and service applications no longer require a paid
+  membership (gates deleted from `vendor_apply`, `service_apply`, `dp_apply`);
+  document review and admin approval still apply.
+- 8 — `POST /api/me/mobile/change/send-otp` + `/verify` with the new
+  `app/change-mobile.tsx`: the number only changes once a WhatsApp code proves
+  it, duplicates answer 409, and the account id, wallet and orders stay put.
+- 9 + 12 — Profile now groups Mobile number, KYC, Address, Support & Help,
+  Account deletion, Login activity and Notifications, each with its own state.
+- 11 + 13 — `POST /api/me/account-deletion` raises a high-priority
+  `account_deletion` ticket AND locks the account immediately (the owner's
+  choice): `get_current_user` rejects blocked accounts, so tokens already issued
+  stop working. `POST /api/admin/account-deletion/{id}/cancel` unlocks only the
+  lock that request created. "Account Deletion" is a ticket category in both
+  ticket forms.
+- 15 — `src/confirm-dialog.tsx` replaces the OS alert for fingerprint login
+  (ask, then result), and for the deletion confirmation on web.
+- 16 — AI banner artwork generated for all ten festivals; the service icon
+  library grew from 21 glyphs to ~80 labelled, grouped and searchable ones
+  (`src/service-icon-library.ts`) inside the SAME picker — AI generation and the
+  colour picker are untouched.
+- 17 — festival banner height dropped to a clamped 112px and the heading,
+  subtitle, alignment, sizes, colours and height are editable per festival from
+  Admin → Branding → Festival Themes (`PUT /api/admin/festival-theme/banner-text`).
+- 18 — `src/category-picker.tsx`: one searchable dropdown replacing the chip
+  walls, in the product editor (main category → subcategory, changing the main
+  clears the sub) and in Admin → Shop Layout (block scope, filter, view-more
+  target, per-item link). Category ids and product links unchanged.
+- 19 — System Wallet gets `src/collapsible-section.tsx` for Treasury tools and
+  User source accountability; every figure still comes from the backend.
+- 20 — the Friends screen's Downline tab is now **Delivery**: threads carry
+  `is_delivery_partner`, sorting is newest-first, and `POST /api/chat/threads`
+  opens directly for anyone sharing an order (customer ↔ seller ↔ rider) or for
+  an approved service provider. Chat search now accepts a NAME as well as a
+  code and reports ambiguous matches instead of guessing.
+
+**BUG-006 (req 10) — chat & vendor-order notifications: diagnosed, not code**
+Production evidence: `EMERGENT_PUSH_KEY` is set and real; all 213 `push_log`
+rows — chat (`chat_v3`) and `vendor_new_order` (`orders_v3`) included — are
+`stage: accepted, result: sent, http_status: 202` with the recipients' live
+tokens; 59 registered Android devices with permission granted. The trigger,
+channel map, preference filter and tokens are all correct. The push dies between
+the relay and the handset — the signature of an FCM credential mismatch: the
+relay's FCM channel needs the V1 service-account for Firebase project
+**slangcart / sender 944605701670**, which is what `google-services.json` bakes
+into the APK. That is deployment configuration, not application code. A chat
+push does fire correctly in preview (verified in `push_log`; rejected only
+because the preview key is "placeholder"). Also hardened: a reader's
+"viewing this thread" claim now expires after 60s, so a dead socket can no
+longer suppress that person's chat notifications forever.
+
+Verified across testing-agent iterations 121 and 122 (36/36 and 18/18 backend,
+plus frontend runs), with the transaction count (2,827) and wallet total
+(₹287,525.91) identical before and after every run.

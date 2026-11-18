@@ -119,7 +119,9 @@ async def ensure_indexes() -> None:
     """
     keep: Dict[str, Any] = {}
     dup_ids = []
-    async for d in db.legal_pages.find({}, {"kind": 1, "updated_at": 1}):
+    async for d in db.legal_pages.find(
+        {"superseded": {"$ne": True}}, {"kind": 1, "updated_at": 1},
+    ):
         k = d.get("kind")
         prev = keep.get(k)
         if prev is None or (d.get("updated_at") or "") > (prev.get("updated_at") or ""):
@@ -129,15 +131,28 @@ async def ensure_indexes() -> None:
         else:
             dup_ids.append(d["_id"])
     if dup_ids:
-        await db.legal_pages.delete_many({"_id": {"$in": dup_ids}})
-    await db.legal_pages.create_index("kind", unique=True)
+        # Nov-2026 — a boot must never hard-delete admin-authored content. The
+        # stale copies are retired instead: `kind` is renamed out of the way so
+        # the unique index can still build, and the readers skip them. The
+        # explicit admin reset endpoint is the only thing that deletes.
+        await db.legal_pages.update_many(
+            {"_id": {"$in": dup_ids}},
+            {"$set": {"superseded": True}, "$rename": {"kind": "superseded_kind"}},
+        )
+    try:
+        await db.legal_pages.create_index(
+            "kind", unique=True,
+            partialFilterExpression={"kind": {"$exists": True, "$type": "string"}},
+        )
+    except Exception:
+        pass
 
 
 @router.get("/legal/{kind}")
 async def get_legal_page(kind: str):
     if kind not in VALID_KINDS:
         raise HTTPException(status_code=404, detail="Unknown legal page")
-    doc = await db.legal_pages.find_one({"kind": kind}, {"_id": 0})
+    doc = await db.legal_pages.find_one({"kind": kind, "superseded": {"$ne": True}}, {"_id": 0})
     if not doc:
         return {
             "kind":         kind,
@@ -153,7 +168,7 @@ async def get_legal_page(kind: str):
 async def list_legal_pages(_: Dict[str, Any] = Depends(require_admin)):
     out = []
     for kind in sorted(VALID_KINDS):
-        doc = await db.legal_pages.find_one({"kind": kind}, {"_id": 0})
+        doc = await db.legal_pages.find_one({"kind": kind, "superseded": {"$ne": True}}, {"_id": 0})
         if doc:
             doc["is_default"] = False
             out.append(doc)
@@ -182,7 +197,9 @@ async def upsert_legal_page(
         "updated_at":   now_iso,
         "updated_by":   admin.get("email") or admin.get("id"),
     }
-    await db.legal_pages.update_one({"kind": kind}, {"$set": update_doc}, upsert=True)
+    await db.legal_pages.update_one(
+        {"kind": kind, "superseded": {"$ne": True}}, {"$set": update_doc}, upsert=True
+    )
     return {"ok": True, "kind": kind, "updated_at": now_iso}
 
 

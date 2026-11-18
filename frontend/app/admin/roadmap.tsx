@@ -77,14 +77,11 @@ const ROADMAP: Section[] = [
     ],
   },
   {
-    title: "User app — Wallet & Referral",
+    title: "User app — Wallet",
     icon: "gift",
     items: [
       { name: "Wallet balance + txns", status: "done" },
       { name: "Use wallet for payments", status: "done" },
-      { name: "Referral code + invite", status: "done" },
-      { name: "Downline / network tree", status: "done" },
-      { name: "Earnings tracking (multi-level)", status: "done" },
       { name: "Add money to wallet", status: "planned", note: "Needs payment gateway" },
       { name: "Cashback engine", status: "planned" },
     ],
@@ -109,16 +106,6 @@ const ROADMAP: Section[] = [
       { name: "Wallet credit/debit/freeze", status: "done" },
       { name: "Transactions & manual refund", status: "done" },
       { name: "Audit log", status: "done" },
-    ],
-  },
-  {
-    title: "Admin — Referral / MLM",
-    icon: "git-merge",
-    items: [
-      { name: "Commission structure setup", status: "done" },
-      { name: "Level income settings", status: "done" },
-      { name: "Bonus distribution", status: "done" },
-      { name: "Manual bonus credit", status: "done", note: "via admin wallet adjust" },
     ],
   },
   {
@@ -249,7 +236,7 @@ export default function Roadmap() {
         <View style={styles.footer}>
           <Feather name="info" size={14} color={colors.textMuted} />
           <Text style={styles.footerText}>
-            MVP first: User login · Product listing · Cart + checkout · Wallet · Referral. Then scale into recharge, vendor panel, and AI fraud detection.
+            MVP first: User login · Product listing · Cart + checkout · Wallet. Then scale into recharge, vendor panel, and AI fraud detection.
           </Text>
         </View>
       </ScrollView>

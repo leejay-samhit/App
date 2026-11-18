@@ -221,3 +221,79 @@ async def complete_profile(
     await db.users.update_one({"id": user["id"]}, {"$set": update})
     fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     return {"user": serialize_user(fresh)}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Changing the mobile number on an existing account (Nov-2026, req 8).
+# The new number must be proven by a WhatsApp code before it replaces the
+# old one, so nobody can take over a number they do not control. Wallet,
+# orders and transactions stay on the same account id throughout.
+# ──────────────────────────────────────────────────────────────────────
+
+class ChangeMobileSendRequest(BaseModel):
+    mobile: str = Field(..., min_length=10, max_length=15)
+
+
+class ChangeMobileVerifyRequest(BaseModel):
+    mobile: str = Field(..., min_length=10, max_length=15)
+    otp: str = Field(..., min_length=4, max_length=8)
+
+
+@router.post("/me/mobile/change/send-otp")
+async def change_mobile_send(
+    request: Request,
+    payload: ChangeMobileSendRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        mobile = otply.normalise_mobile(payload.mobile)
+    except otply.OtpError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+    if mobile == (user.get("phone") or ""):
+        raise HTTPException(
+            status_code=400, detail="That is already your registered number.",
+        )
+    clash = await db.users.find_one(
+        {"phone": mobile, "id": {"$ne": user["id"]}}, {"_id": 0, "name": 1, "email": 1},
+    )
+    if clash:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This number is already on another Slangcart account"
+                f"{(' (' + _mask_email(clash.get('email', '')) + ')') if clash.get('email') else ''}. "
+                "Sign in to that account instead."
+            ),
+        )
+    try:
+        return await otply.send_otp(mobile, ip=_client_ip(request), purpose="change")
+    except otply.OtpError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+
+
+@router.post("/me/mobile/change/verify")
+async def change_mobile_verify(
+    payload: ChangeMobileVerifyRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        mobile = await otply.verify_otp(payload.mobile, payload.otp)
+    except otply.OtpError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+    try:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {
+                "phone": mobile,
+                "phone_verified": True,
+                "phone_verified_at": now_utc().isoformat(),
+                "phone_changed_at": now_utc().isoformat(),
+            }},
+        )
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409,
+            detail="This number was just taken by another account. Try a different one.",
+        )
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"ok": True, "user": serialize_user(fresh)}

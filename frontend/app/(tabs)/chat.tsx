@@ -1,9 +1,9 @@
-// Chat home — thread list (downline pinned on top), search by referral code,
+// Chat home — thread list, search by referral code,
 // pending requests inbox. Real-time updates via WebSocket.
 import { useState, useCallback, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl,
-  ActivityIndicator, TextInput, Alert, Image, Modal,
+  ActivityIndicator, TextInput, Image, Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -16,18 +16,22 @@ import { useChatSettings } from "../../src/chat-settings";
 import { ChatLockGate } from "../../src/chat-lock-gate";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
-type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; is_vendor?: boolean; is_service_provider?: boolean };
-type Thread = { id: string; other: UserBrief; is_downline: boolean; is_announcement?: boolean; unread_count: number; last_message: any; last_message_at?: string };
+type UserBrief = { id: string; name: string; referral_code: string; avatar?: string; profile_image?: string | null; is_vendor?: boolean; is_service_provider?: boolean; is_delivery_partner?: boolean };
+type Thread = { id: string; other: UserBrief; is_delivery_partner?: boolean; is_announcement?: boolean; unread_count: number; last_message: any; last_message_at?: string };
 type Request = { id: string; from_user_id: string; to_user_id: string; status: string; message: string; created_at: string; from?: UserBrief; to?: UserBrief };
 
-type Tab = "all" | "downline" | "vendors" | "services" | "unread";
+// Nov-2026 — the retired "Downline" tab is replaced by Delivery, which lists
+// the delivery partners the user is talking to about their orders.
+type Tab = "all" | "delivery" | "vendors" | "services" | "unread";
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: "all",      label: "All",      icon: "list" },
-  { key: "downline", label: "Downline", icon: "git-branch" },
+  { key: "delivery", label: "Delivery", icon: "truck" },
   { key: "vendors",  label: "Vendors",  icon: "shopping-bag" },
   { key: "services", label: "Services", icon: "briefcase" },
   { key: "unread",   label: "Unread",   icon: "bell" },
 ];
+
+const isDelivery = (t: Thread) => !!(t.is_delivery_partner || t.other?.is_delivery_partner);
 
 export default function ChatListScreen() {
   useBackToInitialTab();
@@ -42,6 +46,8 @@ export default function ChatListScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [searchResult, setSearchResult] = useState<any | null>(null);
+  const [searchError, setSearchError] = useState("");
+  const [banner, setBanner] = useState("");
   const [searching, setSearching] = useState(false);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestMessage, setRequestMessage] = useState("");
@@ -77,7 +83,7 @@ export default function ChatListScreen() {
   const chatThreads = threads.filter((t) => !t.is_announcement);
   const filteredThreads = (() => {
     switch (activeTab) {
-      case "downline": return chatThreads.filter((t) => t.is_downline);
+      case "delivery": return chatThreads.filter(isDelivery);
       case "vendors":  return chatThreads.filter((t) => t.other?.is_vendor);
       case "services": return chatThreads.filter((t) => t.other?.is_service_provider);
       case "unread":   return chatThreads.filter((t) => t.unread_count > 0);
@@ -96,14 +102,28 @@ export default function ChatListScreen() {
   };
 
   const onSearch = async () => {
-    const code = search.trim().toUpperCase();
-    if (!code) return;
-    setSearching(true); setSearchResult(null);
+    const term = search.trim();
+    if (!term) return;
+    setSearching(true); setSearchResult(null); setSearchError(""); setBanner("");
     try {
-      const r = await api.get<any>("/chat/search", { params: { code } });
+      // The backend takes a referral code OR a name (Nov-2026).
+      const r = await api.get<any>("/chat/search", { params: { code: term } });
       setSearchResult(r.data);
     } catch (e) {
-      Alert.alert("Search failed", formatApiError(e));
+      // Shown inline — Alert.alert is a no-op on the web preview.
+      setSearchError(formatApiError(e));
+    } finally { setSearching(false); }
+  };
+
+  // Nov-2026 — resolve the real relationship for the person picked out of an
+  // ambiguous list, so we offer "Open" rather than a request that would 400.
+  const pickMatch = async (m: any) => {
+    setSearching(true); setSearchError(""); setBanner("");
+    try {
+      const r = await api.get<any>("/chat/search", { params: { user_id: m.id } });
+      setSearchResult(r.data);
+    } catch (e) {
+      setSearchError(formatApiError(e));
     } finally { setSearching(false); }
   };
 
@@ -111,11 +131,15 @@ export default function ChatListScreen() {
     if (!searchResult?.user?.id) return;
     try {
       await api.post("/chat/request", { to_user_id: searchResult.user.id, message: requestMessage.trim() });
+      const name = searchResult.user.name;
       setShowRequestModal(false); setRequestMessage(""); setSearchResult(null); setSearch("");
-      Alert.alert("Request sent", `Waiting for ${searchResult.user.name} to accept.`);
+      setSearchError("");
+      setBanner(`Request sent — waiting for ${name} to accept.`);
       load();
     } catch (e) {
-      Alert.alert("Failed", formatApiError(e));
+      setSearchError(formatApiError(e));
+      setBanner("");
+      setShowRequestModal(false);
     }
   };
 
@@ -125,13 +149,13 @@ export default function ChatListScreen() {
       load();
       if (r.data?.thread_id) router.push(`/chat/${r.data.thread_id}` as any);
     } catch (e) {
-      Alert.alert("Failed", formatApiError(e));
+      setSearchError(formatApiError(e));
     }
   };
 
   const onRejectRequest = async (req: Request) => {
     try { await api.post(`/chat/request/${req.id}/reject`); load(); }
-    catch (e) { Alert.alert("Failed", formatApiError(e)); }
+    catch (e) { setSearchError(formatApiError(e)); }
   };
 
   return (
@@ -148,49 +172,84 @@ export default function ChatListScreen() {
           </TouchableOpacity>
         </View>
 
-      {/* Search by referral code */}
+      {/* Search people by code or name */}
       <View style={styles.searchWrap}>
         <Feather name="search" size={16} color={colors.textMuted} />
         <TextInput
           style={styles.searchInput}
           value={search}
           onChangeText={setSearch}
-          placeholder="Search by referral code (e.g. ABC123)"
+          placeholder="Search by name or code"
           placeholderTextColor={colors.textMuted}
-          autoCapitalize="characters"
-          maxLength={20}
+          autoCapitalize="none"
+          maxLength={60}
           onSubmitEditing={onSearch}
+          testID="chat-search-input"
         />
         {search ? (
-          <TouchableOpacity onPress={() => { setSearch(""); setSearchResult(null); }} style={styles.searchClear}>
+          <TouchableOpacity onPress={() => { setSearch(""); setSearchResult(null); setSearchError(""); setBanner(""); }} style={styles.searchClear} testID="chat-search-clear">
             <Feather name="x" size={14} color={colors.textMuted} />
           </TouchableOpacity>
         ) : null}
-        <TouchableOpacity onPress={onSearch} disabled={searching || !search.trim()} style={[styles.searchBtn, (!search.trim() || searching) && { opacity: 0.5 }]}>
+        <TouchableOpacity testID="chat-search-submit" onPress={onSearch} disabled={searching || !search.trim()} style={[styles.searchBtn, (!search.trim() || searching) && { opacity: 0.5 }]}>
           {searching ? <ActivityIndicator size="small" color={colors.primaryFg} /> : <Text style={styles.searchBtnText}>Find</Text>}
         </TouchableOpacity>
       </View>
 
+      {searchError ? (
+        <Text style={styles.searchError} testID="chat-search-error">{searchError}</Text>
+      ) : null}
+      {banner ? (
+        <Text style={styles.searchBanner} testID="chat-banner">{banner}</Text>
+      ) : null}
+
+      {/* More than one person answers to that name — let the user choose. */}
+      {searchResult && searchResult.relationship === "ambiguous" ? (
+        <View style={styles.searchCard}>
+          <View style={{ flex: 1, gap: 10 }}>
+            <Text style={styles.userName}>Several people match that name</Text>
+            {(searchResult.matches || []).map((m: any) => (
+              <TouchableOpacity
+                key={m.id}
+                onPress={() => pickMatch(m)}
+                style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6 }}
+                testID={`chat-search-match-${m.id}`}
+              >
+                <View style={styles.avatar}><Text style={styles.avatarText}>{(m.name || "?").substring(0, 1).toUpperCase()}</Text></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.userName} numberOfLines={1}>{m.name}</Text>
+                  <Text style={styles.userCode} numberOfLines={1}>
+                    {[m.city, m.is_vendor ? "Seller" : m.is_service_provider ? "Service" : m.is_delivery_partner ? "Delivery" : ""]
+                      .filter(Boolean).join(" · ") || "Slangcart member"}
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
       {/* Search result card */}
-      {searchResult ? (
+      {searchResult && searchResult.user ? (
         <View style={styles.searchCard}>
           <View style={styles.avatar}><Text style={styles.avatarText}>{(searchResult.user.name || "?").substring(0, 1).toUpperCase()}</Text></View>
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <Text style={styles.userName}>{searchResult.user.name}</Text>
-              {searchResult.is_downline ? <View style={styles.downlineBadge}><Text style={styles.downlineBadgeText}>DOWNLINE</Text></View> : null}
+              <Text style={styles.userName} numberOfLines={1}>{searchResult.user.name}</Text>
+
             </View>
             {isAdmin ? <Text style={styles.userCode}>#{searchResult.user.referral_code}</Text> : null}
           </View>
           {searchResult.relationship === "already_chatting" ? (
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => router.push(`/chat/${searchResult.thread_id}` as any)}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => router.push(`/chat/${searchResult.thread_id}` as any)} testID="chat-search-result-open">
               <Feather name="message-circle" size={14} color={colors.primaryFg} />
               <Text style={styles.primaryBtnText}>Open</Text>
             </TouchableOpacity>
           ) : searchResult.relationship === "request_pending" ? (
             <View style={styles.pendingBtn}><Text style={styles.pendingBtnText}>Pending…</Text></View>
           ) : (
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => setShowRequestModal(true)}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => setShowRequestModal(true)} testID="chat-search-result-request">
               <Feather name="send" size={14} color={colors.primaryFg} />
               <Text style={styles.primaryBtnText}>Request</Text>
             </TouchableOpacity>
@@ -202,7 +261,7 @@ export default function ChatListScreen() {
         <View style={styles.center}><ActivityIndicator color={colors.primary} /></View>
       ) : (
         <ScrollView
-          contentContainerStyle={{ padding: spacing.screen, paddingTop: 4, paddingBottom: 80 }}
+          contentContainerStyle={{ padding: spacing.screen, paddingTop: 4, paddingBottom: 110 }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.primary} />}
         >
           {/* Incoming requests */}
@@ -286,7 +345,7 @@ export default function ChatListScreen() {
               const active = t.key === activeTab;
               const count =
                 t.key === "all" ? threads.length :
-                t.key === "downline" ? threads.filter((x) => x.is_downline).length :
+                t.key === "delivery" ? threads.filter(isDelivery).length :
                 t.key === "vendors" ? threads.filter((x) => x.other?.is_vendor).length :
                 t.key === "services" ? threads.filter((x) => x.other?.is_service_provider).length :
                 totalUnread;
@@ -315,7 +374,7 @@ export default function ChatListScreen() {
             <View style={styles.emptyCard}>
               <Feather name="message-square" size={28} color={colors.textMuted} />
               <Text style={styles.emptyText}>{activeTab === "all" ? "No chats yet" : `No ${activeTab} chats`}</Text>
-              <Text style={styles.emptySub}>{activeTab === "all" ? "Search a friend's referral code above to start a conversation." : "Switch to another tab or start a new chat."}</Text>
+              <Text style={styles.emptySub}>{activeTab === "all" ? "Search for someone above to start a conversation." : "Switch to another tab or start a new chat."}</Text>
             </View>
           ) : (
             filteredThreads.map((t) => (
@@ -333,7 +392,7 @@ export default function ChatListScreen() {
                     {isAdmin && t.other.referral_code ? (
                       <Text style={styles.threadCode} numberOfLines={1}>#{t.other.referral_code}</Text>
                     ) : null}
-                    {t.is_downline ? <View style={styles.downlineBadge}><Text style={styles.downlineBadgeText}>DOWNLINE</Text></View> : null}
+                    {isDelivery(t) ? <View style={styles.roleBadge}><Text style={styles.roleBadgeText}>DELIVERY</Text></View> : null}
                   </View>
                   <Text style={styles.lastMessage} numberOfLines={1}>
                     {t.last_message?.deleted ? <Text style={{ fontStyle: "italic" }}>Message deleted</Text> :
@@ -368,17 +427,17 @@ export default function ChatListScreen() {
             <View style={styles.modalHeader}>
               <TouchableOpacity onPress={() => setShowRequestModal(false)} style={styles.iconBtn}><Feather name="x" size={20} color={colors.textMain} /></TouchableOpacity>
               <Text style={styles.modalTitle}>Send chat request</Text>
-              <TouchableOpacity onPress={onSendRequest} style={[styles.iconBtn, { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+              <TouchableOpacity testID="chat-request-send" onPress={onSendRequest} style={[styles.iconBtn, { backgroundColor: colors.primary, borderColor: colors.primary }]}>
                 <Feather name="send" size={18} color={colors.primaryFg} />
               </TouchableOpacity>
             </View>
             <View style={{ padding: 20 }}>
               <Text style={styles.label}>To</Text>
               <View style={[styles.searchCard, { marginBottom: 12, padding: 12, marginHorizontal: 0 }]}>
-                <View style={styles.avatar}><Text style={styles.avatarText}>{(searchResult?.user.name || "?").substring(0, 1).toUpperCase()}</Text></View>
+                <View style={styles.avatar}><Text style={styles.avatarText}>{(searchResult?.user?.name || "?").substring(0, 1).toUpperCase()}</Text></View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.userName}>{searchResult?.user.name}</Text>
-                  <Text style={styles.userCode}>#{searchResult?.user.referral_code}</Text>
+                  <Text style={styles.userName}>{searchResult?.user?.name}</Text>
+                  {isAdmin && searchResult?.user?.referral_code ? <Text style={styles.userCode}>#{searchResult.user.referral_code}</Text> : null}
                 </View>
               </View>
               <Text style={styles.label}>Add a note (optional)</Text>
@@ -439,17 +498,26 @@ const styles = StyleSheet.create({
   badgeText: { fontSize: 11, fontWeight: "800", color: "#B91C1C" },
   searchWrap: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: spacing.screen, marginBottom: 12, backgroundColor: colors.surface, borderRadius: 999, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, paddingVertical: 4 },
   searchInput: { flex: 1, fontSize: 14, color: colors.textMain, paddingVertical: 8 },
-  searchClear: { padding: 4 },
-  searchBtn: { backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999 },
+  // Touch targets kept at 44px (Nov-2026 accessibility pass).
+  searchClear: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  searchBtn: { backgroundColor: colors.primary, paddingHorizontal: 16, minHeight: 44, minWidth: 64, alignItems: "center", justifyContent: "center", borderRadius: 999 },
   searchBtnText: { fontSize: 12, fontWeight: "800", color: colors.primaryFg },
   searchCard: { flexDirection: "row", alignItems: "center", gap: 12, marginHorizontal: spacing.screen, marginBottom: 12, backgroundColor: colors.surface, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: colors.border },
   avatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.brand100, alignItems: "center", justifyContent: "center" },
   avatarText: { fontSize: 18, fontWeight: "900", color: colors.primary },
   userName: { fontSize: 14, fontWeight: "800", color: colors.textMain },
+  searchBanner: {
+    marginHorizontal: spacing.screen, marginTop: 8, fontSize: 12.5,
+    color: colors.success, fontWeight: "600",
+  },
+  searchError: {
+    marginHorizontal: spacing.screen, marginTop: 8, fontSize: 12.5,
+    color: colors.error, fontWeight: "600",
+  },
   userCode: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   threadCode: { fontSize: 10, color: colors.textMuted, fontWeight: "700", letterSpacing: 0.3, backgroundColor: colors.surfaceMuted, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 },
-  downlineBadge: { backgroundColor: "#DCFCE7", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999 },
-  downlineBadgeText: { fontSize: 9, fontWeight: "900", color: "#065F46", letterSpacing: 0.6 },
+  roleBadge: { backgroundColor: colors.surfaceMuted, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999 },
+  roleBadgeText: { fontSize: 9, fontWeight: "900", color: colors.success, letterSpacing: 0.6 },
   primaryBtn: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999 },
   primaryBtnText: { fontSize: 12, fontWeight: "800", color: colors.primaryFg },
   pendingBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: "#FEF3C7" },

@@ -1,0 +1,54 @@
+{
+  "summary": "20-point upgrade round tested (backend pytest 36 cases + 7 Playwright UI runs at 390x844). Backend 31/36 pass. WORKING: BUG1 admin delete (200 in 0.15s, scoped archive in deleted_user_archives, cascade counts, only that user's tickets+messages removed, unrelated ticket untouched); BUG2 register (+91 normalised, dup phone 400 readable, '12345' 400, clean reg 200 token + approved); BUG4 admin phone edit (normalised, phone_verified reset, dup 400, invalid 400); REQ8 mobile change (invalid 400, own number 400, other account's 409, OTP verify via otp_codes doc changes phone, id/wallet/orders unchanged; wrong OTP 400); REQ20 chat (403 with no shared order, 200 with shared order / approved provider, is_delivery_partner flags, newest-first sort; UI Delivery tab, no Downline); REQ16 all 10 banner artworks return images; REQ17 banner text PUT/GET, bad align/colour 400, apply returns festival.banner_text (branding doc restored afterwards); purge-old rejects non super admin. FAILING: REQ7 – all three role applications still 403 'Only members ... activate your membership first' for a new free account; REQ11/13 – account lock does not revoke existing sessions (GET /auth/me, /cart still 200 with old token after request; login is correctly blocked 403); an account_deletion ticket created via POST /tickets makes POST /me/account-deletion return already_requested without locking. Frontend: login three options/email form/eye toggle/back link/OTP card OK; profile rows + links OK, no WhatsApp/membership/Downline; change-mobile & account-deletion validation OK; category picker search OK (product editor + shop-layout block-cat-picker); icon search cctv/plumber OK; System Wallet collapsibles OK, no NaN. Financial invariant held: transactions 2827->2827, sum(wallet_balance) 287525.91->287525.91. No deprecated Expo packages detected.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/vendor/apply, /api/delivery-partner/apply, /api/service/apply", "issue": "REQ7 NOT DONE: still gated by `if not user.get('registration_paid')` -> 403 'Only members can ... activate your membership first'. New accounts are created with registration_paid=False (server.py register, otp_auth.py:161) so NO new user can apply. Refs: server.py ~9186, ~10200, routes/delivery_partner.py ~99", "priority": "CRITICAL"},
+      {"endpoint": "POST /api/me/account-deletion", "issue": "Account is not locked for already-issued tokens: it sets active_session_ids=[] but leaves legacy `active_session_id`; get_current_user (core/security.py ~311) then accepts the token because legacy_sid == token sid, and get_current_user never checks is_blocked. Verified: after the request GET /api/auth/me and /api/cart still return 200. Login is correctly 403.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/me/account-deletion", "issue": "If the user already has an open ticket with category 'account_deletion' (allowed via POST /api/tickets), endpoint returns {already_requested:true} and NEVER locks the account. Should still lock (or /tickets should reject that category / route to the deletion flow)."},
+      {"endpoint": "POST /api/admin/account-deletion/{id}/cancel", "issue": "Unconditionally sets is_blocked=False/block_reason=None – would also lift an unrelated admin block (e.g. fraud). Does not clear deletion_ticket_id. Should only unlock if block_reason is the deletion one."},
+      {"endpoint": "DELETE /api/admin/users/{id}", "issue": "Archive uses to_list(2000) per collection (silently truncates heavy users) and stores everything in ONE document – a large account could exceed the 16MB BSON limit and 500 before deletion. Consider per-collection archive docs."},
+      {"endpoint": "POST /api/admin/backups/purge-old", "issue": "NOT executed (bulk destructive; preview has 193 snapshots / 10163 chunks so keep=10 would delete 183). Only auth gate tested (403 for normal user). Code review OK. Needs manual check."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Admin → Service Application Management → Edit Category modal", "issue": "Sheet background is transparent: styles.modalSheet uses colors.bg but the theme palette has no `bg` key (src/theme.ts has background/surface) -> list behind bleeds through the form, labels unreadable. Same `colors.bg` usage in app/admin/area-mapping.tsx. Reference: app/admin/service-management.tsx:714", "testID": "cat-icon-search", "priority": "HIGH"},
+      {"component": "Account deletion submit (web)", "issue": "After a successful request the sign-out happens only inside Alert.alert onPress; Alert is a no-op on web so the user stays on the form with no feedback. Combined with the session bug the user keeps using the app. Use the in-app ConfirmDialog. Reference: app/account-deletion.tsx ~70", "testID": "deletion-submit", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Become vendor / delivery partner / service provider", "issue": "Backend 403 membership gate (see backend critical) blocks every new free user from applying.", "affected_testIDs": ["profile-delivery-apply-link", "profile-vendor-link", "profile-service-provider-link"]}
+    ],
+    "design_issues": [
+      {"screen": "Login", "issues": ["Stray 'OR' divider is the first element above 'Continue with Google' (GoogleSignInButton renders its own divider, src/google-signin-button.tsx:79) – nothing precedes it now.", "Google option is styled differently (centered, no icon-left/chevron) from the other two – not visually 'three equal options'."]},
+      {"screen": "Friends (chat)", "issues": ["Search placeholder still says 'Search by referral code (e.g. ABC123)' – referral wording (app/(tabs)/chat.tsx:162)."]},
+      {"screen": "Admin System Wallet", "issues": ["Group 7/8 ledger cards: list icon sits on its own line above 'Tap to view transactions' (misaligned)."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iter121_20pt_upgrade.py", "/app/test_reports/pytest/iter121.xml"],
+  "action_items": [
+    "REQ7: remove the registration_paid gate from vendor_apply, service_apply and dp_apply (server.py ~9186/~10200, routes/delivery_partner.py ~99).",
+    "Account deletion lock: also clear `active_session_id` (set None) and/or make get_current_user reject is_blocked users, so existing tokens die immediately.",
+    "POST /me/account-deletion: lock even when an account_deletion ticket already exists (or block that category in POST /tickets).",
+    "Admin cancel deletion: only unblock if block_reason is the deletion reason; clear deletion_ticket_id.",
+    "Fix colors.bg -> colors.background (or surface) in app/admin/service-management.tsx and app/admin/area-mapping.tsx.",
+    "account-deletion.tsx: replace Alert.alert success with ConfirmDialog/inline state then logout.",
+    "Login: drop the leading 'OR' divider from GoogleSignInButton in the method stack; align Google button style with the other two.",
+    "Chat search placeholder: remove 'referral code' wording."
+  ],
+  "critical_code_review_comments": [
+    "src/rich-product-editor.tsx >2000 lines and server.py >10k lines – should be split.",
+    "Biometric ConfirmDialog (profile-biometric-dialog) could not be exercised on web (toggle not rendered without biometric hardware); verified by code only.",
+    "Shop-layout layout-category-filter / layout-viewall-target only render in auto-source mode / after the View-all switch – not exercised; block-cat-picker verified. Product sub-category picker not shown for Electronics (no subcats) – clear-on-main-change verified by code (rich-product-editor.tsx ~2016-2020).",
+    "Mobile-change success path verified by inserting an otp_codes doc directly (no WhatsApp sent); real send-otp delivery not exercised."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter121_20pt_upgrade.py"],
+  "success_rate": {"backend": "86% (31/36)", "frontend": "~85% (core flows work; 1 high modal bug, web alert issue)"},
+  "seed_data_creation": "Throwaway TEST users test_i121_* (all deleted by id), one TEST order + chat threads (deleted), one deleted_user_archive (deleted). Branding settings doc backed up and restored. Some notifications rows for deleted TEST users may remain.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run pytest /app/backend/tests/test_iter121_20pt_upgrade.py (needs ADMIN_EMAIL/ADMIN_PASSWORD from backend/.env; registers 5 users -> rate limit 5/min). Do NOT run purge-old against preview (193 snapshots). Festival deepavali is the live theme; test restores the branding doc.",
+  "rca_of_issue": "Account lock bypass: request_account_deletion sets active_session_ids=[] only; core/security.py get_current_user falls into the `elif legacy_sid is not None` branch and legacy active_session_id still equals the token sid -> token accepted; is_blocked is never checked there. REQ7: membership checks were left in the three apply handlers while registration always writes registration_paid=False."
+}

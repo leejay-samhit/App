@@ -26,7 +26,7 @@ DB_NAME = os.environ["DB_NAME"]
 
 ALICE = {"email": "test_alice_73dc7f@test.com", "password": "Passw0rd!"}
 BOB = {"email": "test_bob_d96d89@test.com", "password": "Passw0rd!"}
-ADMIN = {"email": "support@networkrupay.com", "password": "Nlee@1115"}
+ADMIN = {"email": "support@networkrupay.com", "password": os.environ.get("ADMIN_PASSWORD", "")}
 
 
 # ──────────────────── Fixtures ────────────────────

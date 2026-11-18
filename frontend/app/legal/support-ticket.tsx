@@ -20,7 +20,8 @@ const CATEGORIES: { key: string; label: string; icon: any }[] = [
   { key: "withdrawal", label: "Withdrawal Issue",      icon: "arrow-up-circle" },
   { key: "kyc",        label: "KYC Issue",             icon: "shield" },
   { key: "account",    label: "Account / Login Issue", icon: "user" },
-  { key: "product",    label: "Referral / Network",    icon: "git-branch" },
+  { key: "product",    label: "Shop / Product",        icon: "shopping-bag" },
+  { key: "account_deletion", label: "Account Deletion", icon: "user-x" },
   { key: "other",      label: "Other",                 icon: "help-circle" },
 ];
 

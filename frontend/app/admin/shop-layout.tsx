@@ -16,6 +16,7 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError, resolveImageUrl } from "../../src/api";
 import { useAdminProductSearch } from "../../src/use-admin-product-search";
 import { colors, radii, spacing } from "../../src/theme";
+import { CategoryPicker } from "../../src/category-picker";
 import { GradientCard } from "../../src/gradient-card";
 import { LayoutBlock, LayoutItem, BlockType } from "../../src/shop-layout-renderer";
 import { DraggableLayoutList } from "../../src/draggable-layout-list";
@@ -1073,22 +1074,16 @@ function BlockFormModal({
             </View>
             {scope === "category" ? (
               <>
-                <Text style={styles.label}>Category</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                  {categories.length === 0 ? (
-                    <Text style={styles.hint}>No categories yet — assign a category to your products first.</Text>
-                  ) : categories.map((c) => (
-                    <TouchableOpacity
-                      key={c.name}
-                      onPress={() => setScopeCategory(c.name)}
-                      style={[styles.chip, scopeCategory === c.name && styles.chipActive]}
-                      testID={`block-cat-${c.name}`}
-                    >
-                      {c.depth ? <Feather name="corner-down-right" size={11} color={scopeCategory === c.name ? colors.primaryFg : colors.primary} style={{ marginRight: 4 }} /> : null}
-                      <Text style={[styles.chipText, scopeCategory === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+                <CategoryPicker
+                  label="CATEGORY"
+                  value={scopeCategory}
+                  options={categories.map((c) => c.name)}
+                  placeholder="Select a category"
+                  emptyHint="No categories yet — assign a category to your products first."
+                  disabled={categories.length === 0}
+                  onChange={setScopeCategory}
+                  testID="block-cat-picker"
+                />
               </>
             ) : null}
 
@@ -1413,18 +1408,16 @@ function BlockFormModal({
                   </>
                 ) : (
                   <>
-                    <Text style={styles.label}>Filter by category (optional)</Text>
-                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                      <TouchableOpacity onPress={() => setCategoryFilter("")} style={[styles.chip, !categoryFilter && styles.chipActive]}>
-                        <Text style={[styles.chipText, !categoryFilter && { color: colors.primaryFg }]}>All</Text>
-                      </TouchableOpacity>
-                      {categories.map((c) => (
-                        <TouchableOpacity key={c.name} onPress={() => setCategoryFilter(c.name)} style={[styles.chip, categoryFilter === c.name && styles.chipActive]}>
-                          {c.depth ? <Feather name="corner-down-right" size={11} color={categoryFilter === c.name ? colors.primaryFg : colors.primary} style={{ marginRight: 4 }} /> : null}
-                          <Text style={[styles.chipText, categoryFilter === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
+                    {/* Nov-2026 (req 18) — searchable dropdown instead of a
+                        wall of category chips. */}
+                    <CategoryPicker
+                      label="FILTER BY CATEGORY (OPTIONAL)"
+                      value={categoryFilter}
+                      options={categories.map((c) => c.name)}
+                      placeholder="All categories"
+                      onChange={setCategoryFilter}
+                      testID="layout-category-filter"
+                    />
                     <Text style={styles.label}>Product count (1-500)</Text>
                     <TextInput style={styles.input} value={productCount} onChangeText={(t) => setProductCount(t.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="numeric" placeholder="10" placeholderTextColor={colors.textMuted} />
                     <Text style={styles.hint}>How many auto-picked products to show. Max 500.</Text>
@@ -1475,17 +1468,14 @@ function BlockFormModal({
 
                     {showViewAll ? (
                       <>
-                        <Text style={styles.label}>{`"View More"`} target</Text>
-                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                          <TouchableOpacity onPress={() => setViewAllLink("")} style={[styles.chip, !viewAllLink && styles.chipActive]}>
-                            <Text style={[styles.chipText, !viewAllLink && { color: colors.primaryFg }]}>Whole shop</Text>
-                          </TouchableOpacity>
-                          {categories.map((c) => (
-                            <TouchableOpacity key={`val-${c.name}`} onPress={() => setViewAllLink(c.name)} style={[styles.chip, viewAllLink === c.name && styles.chipActive]}>
-                              <Text style={[styles.chipText, viewAllLink === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
-                            </TouchableOpacity>
-                          ))}
-                        </View>
+                        <CategoryPicker
+                          label={'"VIEW MORE" TARGET'}
+                          value={viewAllLink}
+                          options={categories.map((c) => c.name)}
+                          placeholder="Whole shop"
+                          onChange={setViewAllLink}
+                          testID="layout-viewall-target"
+                        />
                       </>
                     ) : null}
                   </>
@@ -1544,13 +1534,13 @@ function BlockFormModal({
                         ))}
                       </View>
                       {it.link_type === "category" ? (
-                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4 }}>
-                          {categories.map((c) => (
-                            <TouchableOpacity key={c.name} onPress={() => updateItem(idx, { link_value: c.name })} style={[styles.miniChip, it.link_value === c.name && styles.miniChipActive]}>
-                              <Text style={[styles.miniChipText, it.link_value === c.name && { color: colors.primaryFg }]}>{c.label}</Text>
-                            </TouchableOpacity>
-                          ))}
-                        </View>
+                        <CategoryPicker
+                          value={it.link_value || ""}
+                          options={categories.map((c) => c.name)}
+                          placeholder="Pick a category"
+                          onChange={(v) => updateItem(idx, { link_value: v })}
+                          testID={`layout-item-category-${idx}`}
+                        />
                       ) : it.link_type === "product" ? (
                         <TouchableOpacity style={[styles.input, { paddingVertical: 6 }]} onPress={() => {
                           setEditingItemIdx(idx); setShowProductPicker(true);

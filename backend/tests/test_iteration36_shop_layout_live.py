@@ -38,7 +38,7 @@ if _fe.exists():
 
 BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "support@networkrupay.com")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Nlee@1115")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 
 TINY_JPEG_DATA_URL = (
     "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL"

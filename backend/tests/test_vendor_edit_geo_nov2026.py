@@ -19,7 +19,7 @@ BASE_URL = (os.environ.get("BACKEND_URL_OVERRIDE") or "http://localhost:8001").r
 API = f"{BASE_URL}/api"
 
 ADMIN_EMAIL = "support@networkrupay.com"
-ADMIN_PASSWORD = "Nlee@1115"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 # Shared state populated by fixtures / early tests
 STATE: dict = {

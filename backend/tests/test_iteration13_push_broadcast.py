@@ -28,7 +28,7 @@ if _fe.exists():
 
 BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "support@networkrupay.com")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Nlee@1115")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 
 
 def _h(t):

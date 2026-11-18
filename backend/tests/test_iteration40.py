@@ -34,7 +34,7 @@ if not BASE_URL:
 VENDOR_EMAIL = "test_alice_73dc7f@test.com"
 VENDOR_PASSWORD = "Passw0rd!"
 ADMIN_EMAIL = "support@networkrupay.com"
-ADMIN_PASSWORD = "Nlee@1115"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 ECOM_BLOCKLIST = {"amazon", "flipkart", "meesho", "ajio", "myntra",
                   "alibaba", "shopee", "deodap", "snapdeal"}

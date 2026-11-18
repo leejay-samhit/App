@@ -849,7 +849,7 @@ function AreaEditor({
 // Styles
 // ============================================================================
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
+  safe: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   container: { padding: spacing.lg, paddingBottom: 60 },
   header: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 12 },
@@ -902,7 +902,7 @@ const styles = StyleSheet.create({
 
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
   modalSheet: {
-    backgroundColor: colors.bg, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    backgroundColor: colors.background, borderTopLeftRadius: 24, borderTopRightRadius: 24,
     padding: 18, maxHeight: "92%",
   },
   modalHandle: {
@@ -990,7 +990,7 @@ const styles = StyleSheet.create({
     position: "absolute", left: 0, right: 0, bottom: 0,
     flexDirection: "row", alignItems: "center", gap: 10,
     paddingVertical: 12, paddingHorizontal: 18,
-    backgroundColor: colors.bg,
+    backgroundColor: colors.background,
     borderTopWidth: 1, borderTopColor: colors.border,
   },
   footerCount: { flex: 1, fontSize: 12, fontWeight: "700", color: colors.textMuted },
@@ -1015,7 +1015,7 @@ const styles = StyleSheet.create({
 
   // Confirm modal
   confirmBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center", padding: 24 },
-  confirmBox: { backgroundColor: colors.bg, borderRadius: 14, padding: 20, width: "100%", maxWidth: 380 },
+  confirmBox: { backgroundColor: colors.background, borderRadius: 14, padding: 20, width: "100%", maxWidth: 380 },
   confirmTitle: { fontSize: 16, fontWeight: "800", color: colors.textMain },
   confirmMsg: { fontSize: 13, color: colors.textMuted, marginTop: 8, lineHeight: 18 },
   confirmRow: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 18 },

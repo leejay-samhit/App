@@ -64,7 +64,6 @@ export default function ServiceApply() {
   const [submitting, setSubmitting] = useState(false);
   const [existing, setExisting] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
-  const [registrationPaid, setRegistrationPaid] = useState<boolean | null>(null);
   const [approvalStatus, setApprovalStatus] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   // ── June 2026 — Edit mode for approved providers ───────────────────────
@@ -104,7 +103,6 @@ export default function ServiceApply() {
         } catch {}
         // also check registration / approval status — apply requires both
         const me = await api.get<any>("/auth/me");
-        setRegistrationPaid(!!me.data?.registration_paid);
         setApprovalStatus(me.data?.approval_status || null);
         const { data } = await api.get<any>("/service/me");
         setExisting(data);

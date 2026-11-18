@@ -49,7 +49,9 @@ export default function Login() {
   const [bioLoading, setBioLoading] = useState(false);
   const [error, setError] = useState("");
   // Nov-2026 — mobile sign-in with a WhatsApp code.
-  const [otpOpen, setOtpOpen] = useState(false);
+  // Which sign-in door the user picked: null = show all three options.
+  const [method, setMethod] = useState<null | "email" | "otp">(null);
+  const [showPassword, setShowPassword] = useState(false);
   // When biometric is enabled the password form is hidden. User can tap
   // "Use a different account" to force-disable biometric and unlock the
   // password fields. Tracked separately from biometricReady so we don't
@@ -89,6 +91,8 @@ export default function Login() {
       ? "You’ve been signed in on another device. Please log in again."
       : sessionEndReason === "refresh_failed"
       ? "Your session has expired. Please log in again."
+      : sessionEndReason === "account_blocked"
+      ? "This account is locked and under review. Contact support if you need help."
       : null;
 
   // Signs the session returned by /auth/otp/verify into the app.
@@ -224,64 +228,107 @@ export default function Login() {
               </TouchableOpacity>
             </View>
           ) : null}
-          {/* ── Email + Password — hidden when biometric is enabled ── */}
+          {/* ── Three equal ways in (Nov-2026) ─────────────────────────
+              Google, WhatsApp code and email + password all sit together as
+              compact choices. Email opens into its form on demand instead of
+              dominating the screen. Hidden while the fingerprint card is the
+              primary login. */}
           {showPasswordForm ? (
-            <>
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Email</Text>
-                <TextInput
-                  testID="login-email-input"
-                  value={email}
-                  onChangeText={setEmail}
-                  autoCapitalize="none"
-                  keyboardType="email-address"
-                  placeholder="you@example.com"
-                  placeholderTextColor={colors.textMuted}
-                  style={styles.input}
-                />
+            method === null ? (
+              <View style={styles.methodStack}>
+                <GoogleSignInButton onError={setError} label="Continue with Google" />
+
+                <TouchableOpacity
+                  onPress={() => { setError(""); setMethod("otp"); }}
+                  style={styles.methodBtn}
+                  testID="login-otp-open"
+                  activeOpacity={0.85}
+                >
+                  <Feather name="message-circle" size={18} color={colors.primary} />
+                  <Text style={styles.methodBtnText}>Continue with Mobile Number</Text>
+                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => { setError(""); setMethod("email"); }}
+                  style={styles.methodBtn}
+                  testID="login-email-open"
+                  activeOpacity={0.85}
+                >
+                  <Feather name="mail" size={18} color={colors.primary} />
+                  <Text style={styles.methodBtnText}>Sign in with Email &amp; Password</Text>
+                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                </TouchableOpacity>
+
+                {error ? <Text style={styles.error} testID="login-error">{error}</Text> : null}
               </View>
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Password</Text>
-                <TextInput
-                  testID="login-password-input"
-                  value={password}
-                  onChangeText={setPassword}
-                  secureTextEntry
-                  placeholder="Your password"
-                  placeholderTextColor={colors.textMuted}
-                  style={styles.input}
-                />
+            ) : method === "email" ? (
+              <View style={styles.methodPanel}>
+                <View style={styles.formGroup}>
+                  <Text style={styles.label}>Email</Text>
+                  <TextInput
+                    testID="login-email-input"
+                    value={email}
+                    onChangeText={setEmail}
+                    autoCapitalize="none"
+                    autoComplete="email"
+                    keyboardType="email-address"
+                    placeholder="you@example.com"
+                    placeholderTextColor={colors.textMuted}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.formGroup}>
+                  <Text style={styles.label}>Password</Text>
+                  <View style={styles.passwordRow}>
+                    <TextInput
+                      testID="login-password-input"
+                      value={password}
+                      onChangeText={setPassword}
+                      secureTextEntry={!showPassword}
+                      autoComplete="password"
+                      placeholder="Your password"
+                      placeholderTextColor={colors.textMuted}
+                      style={[styles.input, { flex: 1, paddingRight: 46 }]}
+                      onSubmitEditing={onSubmit}
+                      returnKeyType="go"
+                    />
+                    <TouchableOpacity
+                      onPress={() => setShowPassword((v) => !v)}
+                      style={styles.eyeBtn}
+                      hitSlop={10}
+                      testID="login-password-toggle"
+                    >
+                      <Feather name={showPassword ? "eye-off" : "eye"} size={18} color={colors.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {error ? <Text style={styles.error} testID="login-error">{error}</Text> : null}
+
+                <TouchableOpacity
+                  testID="login-submit-button"
+                  style={[styles.primaryBtn, loading && { opacity: 0.7 }]}
+                  onPress={onSubmit}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <ActivityIndicator color={colors.primaryFg} />
+                  ) : (
+                    <Text style={styles.primaryBtnText}>Sign in</Text>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => { setMethod(null); setError(""); }}
+                  style={styles.otpToggleBtn}
+                  testID="login-email-close"
+                >
+                  <Text style={styles.otpToggleText}>Back to all sign-in options</Text>
+                </TouchableOpacity>
               </View>
-
-              {error ? <Text style={styles.error} testID="login-error">{error}</Text> : null}
-
-              <TouchableOpacity
-                testID="login-submit-button"
-                style={[styles.primaryBtn, loading && { opacity: 0.7 }]}
-                onPress={onSubmit}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color={colors.primaryFg} />
-                ) : (
-                  <Text style={styles.primaryBtnText}>Sign in</Text>
-                )}
-              </TouchableOpacity>
-            </>
-          ) : null}
-
-          {/* Emergent-managed Google sign-in. Hidden while the fingerprint
-              card is the primary login — the user is already identified
-              there and "Use a different account" reveals this again. */}
-          {showPasswordForm ? (
-            <GoogleSignInButton onError={setError} />
-          ) : null}
-
-          {/* Nov-2026 — mobile sign-in with a WhatsApp code (OTPly). Replaces
-              the Truecaller one-tap button that used to sit here. */}
-          {showPasswordForm ? (
-            otpOpen ? (
-              <View style={{ marginTop: 12 }}>
+            ) : (
+              <View style={styles.methodPanel}>
                 <MobileOtpCard
                   mode="login"
                   onVerified={async (data: any) => {
@@ -289,23 +336,13 @@ export default function Login() {
                   }}
                 />
                 <TouchableOpacity
-                  onPress={() => setOtpOpen(false)}
+                  onPress={() => { setMethod(null); setError(""); }}
                   style={styles.otpToggleBtn}
                   testID="login-otp-close"
                 >
-                  <Text style={styles.otpToggleText}>Use email or Google instead</Text>
+                  <Text style={styles.otpToggleText}>Back to all sign-in options</Text>
                 </TouchableOpacity>
               </View>
-            ) : (
-              <TouchableOpacity
-                onPress={() => { setError(""); setOtpOpen(true); }}
-                style={styles.otpBtn}
-                testID="login-otp-open"
-                activeOpacity={0.85}
-              >
-                <Feather name="message-circle" size={18} color={colors.primary} />
-                <Text style={styles.otpBtnText}>Continue with Mobile Number</Text>
-              </TouchableOpacity>
             )
           ) : null}
 
@@ -414,6 +451,16 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: colors.textMain,
   },
+  methodStack: { gap: 12 },
+  methodPanel: { marginTop: 4 },
+  methodBtn: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    minHeight: 54, borderRadius: radii.button, paddingHorizontal: 16,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface,
+  },
+  methodBtnText: { flex: 1, fontSize: 15, fontWeight: "700", color: colors.textMain },
+  passwordRow: { flexDirection: "row", alignItems: "center" },
+  eyeBtn: { position: "absolute", right: 12, height: 44, width: 32, alignItems: "center", justifyContent: "center" },
   otpBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
     minHeight: 50, borderRadius: radii.button, marginTop: 12,

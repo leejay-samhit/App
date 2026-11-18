@@ -35,7 +35,7 @@ BASE_URL = os.environ.get(
 assert BASE_URL, "EXPO_PUBLIC_BACKEND_URL / EXPO_BACKEND_URL env var must be set"
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "support@networkrupay.com")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Nlee@1115")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", os.environ.get("ADMIN_PASSWORD", ""))
 ALICE_EMAIL = "test_alice_73dc7f@test.com"
 ALICE_PASSWORD = "Passw0rd!"
 

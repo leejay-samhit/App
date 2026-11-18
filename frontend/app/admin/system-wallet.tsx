@@ -8,6 +8,7 @@ import { Feather } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { api, formatApiError } from "../../src/api";
 import { colors, radii, spacing, formatINR } from "../../src/theme";
+import { CollapsibleSection } from "../../src/collapsible-section";
 import { GradientCard } from "../../src/gradient-card";
 import { downloadInvoicePdf, fetchInvoiceHtml } from "../../src/invoices";
 import { WebView } from "react-native-webview";
@@ -781,8 +782,16 @@ export default function AdminSystemWallet() {
           for personal or business use). Properly audit-logged.
         </Text>
 
-        {/* ─── CSV Exports + Manual Adjustment (merged from old Finance Dashboard) ─── */}
-        <Text style={[styles.sectionLabel, { marginTop: 18 }]}>Treasury Tools · Exports & Adjustments</Text>
+        {/* ─── CSV Exports + Manual Adjustment ───
+            Nov-2026 (req 19) — folded into a collapsible group so the money
+            figures above are what you see first on this screen. */}
+        <View style={{ marginTop: 18 }} />
+        <CollapsibleSection
+          title="Treasury tools · exports & adjustments"
+          summary="CSV exports, manual corrections and ledger resets"
+          icon="tool"
+          testID="sw-treasury-tools"
+        >
         <NwActionRow
           icon="rotate-ccw" color="#EAB308"
           label="Manual Adjustment Entry"
@@ -830,14 +839,20 @@ export default function AdminSystemWallet() {
           onPress={() => setResetTarget("payments")}
         />
 
+        </CollapsibleSection>
+
         {/* Phase: User-source unification — 3-way accountability breakdown.
             Shows registration revenue and downstream payout fan-out grouped
             by HOW the user joined (Razorpay / UPI manual / Offline cash).
             Always rendered, even when totals are zero, so admins know the
             tracking is active. Empty rows are styled muted. */}
         {sourceBreakdown ? (
-          <View style={{ marginTop: 8 }}>
-            <Text style={styles.sectionLabel}>USER SOURCE ACCOUNTABILITY</Text>
+          <CollapsibleSection
+            title="User source accountability"
+            summary={`${formatINR(sourceBreakdown.totals.amount)} · ${sourceBreakdown.totals.count} user${sourceBreakdown.totals.count === 1 ? "" : "s"}`}
+            icon="users"
+            testID="sw-source-accountability"
+          >
             <View style={[styles.identityCard, { padding: 12 }]} testID="src-breakdown-card">
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                 <Text style={{ fontSize: 12.5, color: colors.textMuted }}>Registration revenue by source</Text>
@@ -874,7 +889,7 @@ export default function AdminSystemWallet() {
                 Inflow on the LEFT vs upline payouts on the RIGHT — must reconcile to the bucket balances above.
               </Text>
             </View>
-          </View>
+          </CollapsibleSection>
         ) : null}
 
         {/* Recent UTR Deposits — removed 2026-06-01 per admin request:
@@ -1867,6 +1882,6 @@ const styles = StyleSheet.create({
   gTxnMeta:    { fontSize: 10, color: colors.textMuted, marginTop: 2 },
 
   // "Tap to view transactions" affordance inside each Group card
-  viewAll:     { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, justifyContent: "center" },
-  viewAllText: { fontSize: 10.5, fontWeight: "700", color: colors.primary, letterSpacing: 0.4 },
+  viewAll:     { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, justifyContent: "center", flexWrap: "nowrap" },
+  viewAllText: { fontSize: 10.5, fontWeight: "700", color: colors.primary, letterSpacing: 0.4, flexShrink: 1 },
 });

@@ -22,10 +22,8 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { api, formatApiError } from "../../src/api";
 import { useAuth } from "../../src/auth";
-import { useBranding } from "../../src/branding";
-import { openWhatsApp, buildWelcomeMessage, DEFAULT_SUPPORT_WHATSAPP } from "../../src/whatsapp";
 import { colors, radii, spacing } from "../../src/theme";
-import { MembershipCard } from "../../src/subscription";
+import { ConfirmDialog } from "../../src/confirm-dialog";
 import { GradientCard } from "../../src/gradient-card";
 import { useBackToInitialTab } from "../../src/use-double-tap-exit";
 
@@ -40,9 +38,6 @@ export default function ProfileScreen() {
     enableBiometric,
     disableBiometric,
   } = useAuth();
-  const branding = useBranding();
-  const supportWhatsapp = (branding as any)?.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
-  const appName = branding?.app_name || "Slangcart";
   const router = useRouter();
   const [upi, setUpi] = useState("");
   const [bank, setBank] = useState("");
@@ -117,28 +112,32 @@ export default function ProfileScreen() {
     ]);
   }, [refresh]);
 
-  const onToggleBiometric = useCallback(async () => {
+  // Nov-2026 — fingerprint changes are confirmed in a compact in-app dialog
+  // instead of the stock OS alert, and the result is reported the same way.
+  const [bioDialog, setBioDialog] = useState<null | "enable" | "disable" | "done-on" | "done-off" | "error">(null);
+  const [bioError, setBioError] = useState("");
+
+  const onToggleBiometric = useCallback(() => {
+    setBioDialog(biometricReady ? "disable" : "enable");
+  }, [biometricReady]);
+
+  const applyBiometricChange = useCallback(async () => {
+    const turningOn = bioDialog === "enable";
     setBioBusy(true);
     try {
-      if (biometricReady) {
-        await disableBiometric();
-        Alert.alert("Fingerprint login disabled", "You'll need to use your password to sign in next time.");
-      } else {
-        await enableBiometric();
-        Alert.alert(
-          "Fingerprint login enabled",
-          "Next time, just tap 'Login with Fingerprint' on the login screen.",
-        );
-      }
+      if (turningOn) await enableBiometric();
+      else await disableBiometric();
+      setBioDialog(turningOn ? "done-on" : "done-off");
     } catch (e: any) {
-      Alert.alert("Couldn't update fingerprint login", e?.message || "Unknown error");
+      setBioError(e?.message || "Your device did not confirm the change.");
+      setBioDialog("error");
     } finally {
       setBioBusy(false);
     }
-  }, [biometricReady, enableBiometric, disableBiometric]);
+  }, [bioDialog, enableBiometric, disableBiometric]);
 
   // ── Profile-picture privacy (June 2026) ─────────────────────────────
-  // Normal users can choose: everyone / downline / accepted_requests.
+  // Normal users can choose: everyone / accepted_requests.
   // Service Providers + Vendors are locked to "everyone" by the backend.
   const [privacyVis, setPrivacyVis] = useState<string>(((user as any)?.profile_visibility) || "everyone");
   const [privacyLocked, setPrivacyLocked] = useState<boolean>(false);
@@ -153,8 +152,6 @@ export default function ProfileScreen() {
     || (user as any)?.is_delivery_partner
     || (user as any)?.role === "admin"
   );
-  // WhatsApp support is a subscribed-member perk (owner's rule, Oct-2026).
-  const showWhatsApp = !!user && ((user as any)?.role === "admin" || !!(user as any)?.registration_paid);
   const [privacySaving, setPrivacySaving] = useState<string | null>(null);
   useEffect(() => {
     (async () => {
@@ -165,7 +162,7 @@ export default function ProfileScreen() {
       } catch {}
     })();
   }, [user?.id]);
-  const onSetPrivacy = useCallback(async (level: "everyone" | "downline" | "accepted_requests") => {
+  const onSetPrivacy = useCallback(async (level: "everyone" | "accepted_requests") => {
     if (privacyLocked || level === privacyVis) return;
     setPrivacySaving(level);
     try {
@@ -223,7 +220,6 @@ export default function ProfileScreen() {
           keyboardShouldPersistTaps="handled"
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
         >
-          <MembershipCard />
           <GradientCard variant="royal" style={{ marginBottom: spacing.cardPad, padding: 24 }}>
             <View style={{ flexDirection: "row", alignItems: "center" }}>
               {/* Avatar: tap to view full size, long-press / camera icon to upload.
@@ -296,6 +292,18 @@ export default function ProfileScreen() {
           {/* ───── ACCOUNT GROUP ───── */}
           <Text style={styles.groupLabel}>ACCOUNT</Text>
           <View style={styles.groupCard}>
+            <TouchableOpacity onPress={() => router.push("/change-mobile" as any)} style={styles.rowItem} testID="profile-mobile-link">
+              <View style={[styles.kycDot, { backgroundColor: (user as any)?.phone_verified ? colors.success : colors.warning }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>Mobile number</Text>
+                <Text style={styles.kycSub}>
+                  {(user as any)?.phone ? `+91 ${(user as any).phone}` : "NOT SET"}
+                  {(user as any)?.phone ? ((user as any)?.phone_verified ? " · VERIFIED" : " · NOT VERIFIED") : " — TAP TO ADD"}
+                </Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
             <TouchableOpacity onPress={() => router.push("/kyc")} style={styles.rowItem} testID="profile-kyc-link">
               <View style={[styles.kycDot, { backgroundColor: (user as any)?.kyc_status === "approved" ? colors.success : (user as any)?.kyc_status === "pending" ? colors.warning : (user as any)?.kyc_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
               <View style={{ flex: 1 }}>
@@ -319,6 +327,15 @@ export default function ProfileScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.kycTitle}>Support &amp; Help</Text>
                 <Text style={styles.kycSub}>RAISE A TICKET · MY CONVERSATIONS</Text>
+              </View>
+              <Feather name="chevron-right" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={styles.rowDivider} />
+            <TouchableOpacity onPress={() => router.push("/account-deletion" as any)} style={styles.rowItem} testID="profile-delete-account-link">
+              <View style={[styles.kycDot, { backgroundColor: colors.error }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.kycTitle}>Delete my account</Text>
+                <Text style={styles.kycSub}>REQUEST REMOVAL · REVIEWED BY OUR TEAM</Text>
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>
@@ -521,7 +538,6 @@ export default function ProfileScreen() {
               <View style={{ marginTop: 8, gap: 6 }}>
                 {([
                   { value: "everyone",          label: "Everyone",                  sub: "All app users can see your photo.", icon: "globe" },
-                  { value: "downline",          label: "Downline Only",             sub: "Only people referred under you.",   icon: "users" },
                   { value: "accepted_requests", label: "Accepted Message Requests", sub: "Only chats you've accepted.",       icon: "message-square" },
                 ] as const).map((opt) => {
                   const active = privacyVis === opt.value;
@@ -627,35 +643,47 @@ export default function ProfileScreen() {
             </View>
           ) : null}
 
-          {/* WhatsApp chat button — always-on contact channel for the user.
-              Tapping opens WhatsApp with a pre-filled welcome message
-              going to the admin support number.
-              Oct-2026 — subscribed members only. */}
-          {showWhatsApp ? (
-          <TouchableOpacity
-            onPress={() => openWhatsApp(
-              buildWelcomeMessage({
-                name: user?.name,
-                referral_code: user?.referral_code,
-                app_name: appName,
-              }),
-              supportWhatsapp,
-            )}
-            style={styles.waButton}
-            testID="profile-whatsapp"
-            activeOpacity={0.85}
-          >
-            <Feather name="message-circle" size={16} color="#FFFFFF" />
-            <Text style={styles.waButtonText}>Chat with us on WhatsApp</Text>
-          </TouchableOpacity>
-          ) : null}
-
           <TouchableOpacity onPress={onLogout} style={styles.logoutBtn} testID="profile-logout">
             <Feather name="log-out" size={16} color="#B3261E" />
             <Text style={styles.logoutText}>Logout</Text>
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <ConfirmDialog
+        visible={bioDialog === "enable" || bioDialog === "disable"}
+        icon="shield"
+        title={bioDialog === "disable" ? "Turn off fingerprint login?" : "Use your fingerprint to sign in?"}
+        body={bioDialog === "disable"
+          ? "You will need your password the next time you sign in."
+          : "Your fingerprint stays on this device. We only store a signed key, never the fingerprint itself."}
+        confirmLabel={bioDialog === "disable" ? "Turn off" : "Turn on"}
+        cancelLabel="Not now"
+        destructive={bioDialog === "disable"}
+        busy={bioBusy}
+        onConfirm={applyBiometricChange}
+        onCancel={() => setBioDialog(null)}
+        testID="profile-biometric-dialog"
+      />
+
+      <ConfirmDialog
+        visible={bioDialog === "done-on" || bioDialog === "done-off" || bioDialog === "error"}
+        icon={bioDialog === "error" ? "alert-triangle" : bioDialog === "done-on" ? "check-circle" : "unlock"}
+        iconTint={bioDialog === "error" ? colors.error : bioDialog === "done-on" ? colors.success : colors.textMuted}
+        title={bioDialog === "error"
+          ? "Could not update fingerprint login"
+          : bioDialog === "done-on" ? "Fingerprint login is on" : "Fingerprint login is off"}
+        body={bioDialog === "error"
+          ? bioError
+          : bioDialog === "done-on"
+            ? "Tap \u201CSign in with fingerprint\u201D next time you open Slangcart."
+            : "Sign in with your email and password from now on."}
+        confirmLabel="Got it"
+        cancelLabel="Close"
+        onConfirm={() => setBioDialog(null)}
+        onCancel={() => setBioDialog(null)}
+        testID="profile-biometric-result"
+      />
 
       {/* Full-screen avatar preview — opens when user taps their photo.
           Same UX pattern used for chat images so it feels familiar. */}
@@ -726,16 +754,6 @@ const styles = StyleSheet.create({
   // Logout: subtle outlined button instead of naked text — clearer affordance
   // and visually anchors the bottom of the screen.
   logoutBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: spacing.sectionGap, marginBottom: 8, paddingVertical: 14, borderRadius: radii.button, borderWidth: 1, borderColor: "#F2B8B5", backgroundColor: "#FFF6F5" },
-  // WhatsApp chat-with-us pill (above Logout).
-  waButton: {
-    flexDirection: "row", alignItems: "center", justifyContent: "center",
-    gap: 10,
-    marginTop: spacing.sectionGap,
-    paddingVertical: 13,
-    borderRadius: radii.button,
-    backgroundColor: "#25D366",
-  },
-  waButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 14, letterSpacing: 0.3 },
   // Fingerprint / Biometric card
   bioCard: {
     marginTop: spacing.sectionGap,

@@ -37,6 +37,8 @@ export type User = {
 type AuthState = {
   user: User | null | undefined; // undefined = checking, null = not auth
   loading: boolean;
+  /** True once the cold-start session restore has finished. */
+  bootstrapped: boolean;
   login: (email: string, password: string) => Promise<User>;
   /**
    * Exchange a one-time Emergent `session_id` (captured from the Google
@@ -54,7 +56,7 @@ type AuthState = {
    * Reset by calling clearSessionEnd() after the banner is dismissed or
    * the next successful login.
    */
-  sessionEndReason: "session_revoked" | "refresh_failed" | null;
+  sessionEndReason: "session_revoked" | "refresh_failed" | "account_blocked" | null;
   clearSessionEnd: () => void;
   /** Phase 3 — Latest device-integrity verdict from the backend.
    *  null = haven't checked yet (still loading), or check failed silently
@@ -87,6 +89,10 @@ const AuthContext = createContext<AuthState | null>(null);
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [loading, setLoading] = useState(false);
+  // False until the cold-start token restore above has settled. Screens that
+  // redirect signed-out visitors must wait for this, otherwise a hard reload
+  // on web bounces a signed-in user to /login (Nov-2026).
+  const [bootstrapped, setBootstrapped] = useState(false);
   const [sessionEndReason, setSessionEndReason] = useState<AuthState["sessionEndReason"]>(null);
   const [integrity, setIntegrity] = useState<IntegrityVerdict | null>(null);
   // ── Biometric state ────────────────────────────────────────────────
@@ -147,6 +153,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       const token = await AsyncStorage.getItem("auth_token");
       if (!token) {
         setUser(null);
+        setBootstrapped(true);
         return;
       }
       // 2026-06-10 — When biometric is enabled, every cold app launch must
@@ -164,9 +171,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       const bioEnabled = (await AsyncStorage.getItem("biometric_enabled_v1")) === "1";
       if (bioEnabled) {
         setUser(null);
+        setBootstrapped(true);
         return;
       }
       await refresh();
+      setBootstrapped(true);
       // Phase 3 — restored session → re-run integrity check so the
       // server's stamp on this user reflects the CURRENT device, not the
       // last one they signed in from.
@@ -356,7 +365,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   return (
     <AuthContext.Provider
       value={{
-        user, loading,
+        user, loading, bootstrapped,
         login, register, logout, refresh, setSession,
         loginWithGoogle,
         sessionEndReason, clearSessionEnd,

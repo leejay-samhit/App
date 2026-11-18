@@ -37,9 +37,11 @@ type Props = {
   /** Surface the error inline instead of relying on the caller. */
   onError?: (message: string) => void;
   label?: string;
+  /** Show the "OR" rule above the button (legacy single-option layouts). */
+  showDivider?: boolean;
 };
 
-export function GoogleSignInButton({ referralCode, onError, label }: Props) {
+export function GoogleSignInButton({ referralCode, onError, label, showDivider = false }: Props) {
   const { loginWithGoogle } = useAuth();
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState("");
@@ -74,11 +76,13 @@ export function GoogleSignInButton({ referralCode, onError, label }: Props) {
 
   return (
     <View>
-      <View style={styles.dividerRow}>
-        <View style={styles.dividerLine} />
-        <Text style={styles.dividerText}>OR</Text>
-        <View style={styles.dividerLine} />
-      </View>
+      {showDivider ? (
+        <View style={styles.dividerRow}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>OR</Text>
+          <View style={styles.dividerLine} />
+        </View>
+      ) : null}
       <TouchableOpacity
         onPress={onPress}
         disabled={busy}
@@ -108,11 +112,11 @@ const styles = StyleSheet.create({
   dividerText: { fontSize: 11, fontWeight: "800", letterSpacing: 1.2, color: colors.textMuted },
   btn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
-    minHeight: 52, paddingVertical: 14, paddingHorizontal: 16,
-    borderRadius: radii.input ?? 12,
+    minHeight: 54, paddingVertical: 14, paddingHorizontal: 16,
+    borderRadius: radii.button ?? 12,
     backgroundColor: colors.surface,
     borderWidth: 1, borderColor: colors.border,
   },
-  btnText: { fontSize: 15, fontWeight: "800", color: colors.textMain, letterSpacing: -0.2 },
+  btnText: { fontSize: 15, fontWeight: "700", color: colors.textMain, letterSpacing: -0.2 },
   error: { marginTop: 8, fontSize: 12, color: "#B3261E", textAlign: "center" },
 });

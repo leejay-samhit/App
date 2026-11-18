@@ -1,0 +1,42 @@
+{
+  "summary": "I re-tested the iteration 121 follow-up fixes. Backend: I wrote a new suite, test_iter122_lock_apply_fixes.py, and all 18 tests pass. I also re-ran test_iter121_20pt_upgrade.py and all 36 tests pass. Frontend: 8 Playwright runs at 390x844. Every fix in the request works. (1) REQ7: a new free account gets 200 from /vendor/apply, /service/apply and /delivery-partner/apply with valid payloads, with no 'Only members' 403. (2) REQ11/13: after POST /me/account-deletion, the same token gets 403 on /auth/me and /cart, the refresh token is rejected, re-login gets 403, and active_session_ids is [] and active_session_id is None. A deletion ticket raised first through POST /tickets now also locks the account (already_requested true, account_locked true, me/cart/login all 403). (3) Scoped unlock: a normal cancel unlocks the account and login works again. After a separate admin block, calling cancel with the stale ticket id leaves the block in place. (4) An admin-blocked user's token gets 403 on /auth/me, /cart, /orders/me, /me/account-deletion, /tickets/me, /chat/threads and /notifications/me. (5) DELETE /admin/users/{id} returns 200 in 0.15s, and the archive doc has a `truncated` dict. Frontend: the Edit Category sheet, the area-mapping Promote sheet and services/location are all opaque now. The /account-deletion page shows the ConfirmDialog (deletion-submitted); Sign out goes to /login, and logging in again shows 'Account blocked: Account deletion requested...'. The login screen has no 'OR' divider and the Google button is the same size and shape as the other two (358x54, radius 999). The register screen still shows its OR divider. The chat search no longer contains the word 'referral', but searching by name does not work (see issues). Profile rows are fine. Money did not move: transactions 2827->2827 and sum(wallet_balance) 287525.91->287525.91. No deprecated Expo packages found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/admin/account-deletion/{ticket_id}/cancel", "issue": "When the ticket did not cause the block (stale id), the call still returns {ok:true, unlocked:true} even though nothing was unlocked. It should return unlocked:false (based on update_one modified_count) so the admin UI tells the truth. It also re-closes the ticket."},
+      {"endpoint": "POST /api/admin/users/{id}/block + deletion cancel", "issue": "Edge case: if a user is locked by deletion and an admin then also blocks them, deletion_ticket_id is kept. Cancelling the deletion then also lifts the admin block. admin_block_user should clear deletion_ticket_id, or set a block source."},
+      {"endpoint": "GET /api/chat/search", "issue": "It only matches by referral_code (db.users.find_one({referral_code})). The error text is still 'No user matches that referral code.' / 'That's your own referral code.', yet the UI now asks people to search by name."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Friends/chat search", "issue": "The placeholder says 'Search people by code or name (e.g. ABC123)', but name search returns 404 (the backend only matches by referral code). On web the failure uses Alert.alert, which does nothing there, so the user gets no feedback. The input also forces uppercase (autoCapitalize='characters'), which is wrong for names. Ref: app/(tabs)/chat.tsx:102-111,162-164", "testID": "n/a (search input has no testID)", "priority": "MEDIUM"},
+      {"component": "Chat request modal", "issue": "Shows '#{referral_code}' to every user. The isAdmin gate used elsewhere is missing here. Ref: app/(tabs)/chat.tsx:385", "testID": "n/a", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "account-deletion success dialog", "issues": ["'Close' and 'Sign out' both sign the user out, so 'Close' is misleading. Use a single 'OK, sign out' button."]},
+      {"screen": "register", "issues": ["The hero still says 'Refer 4 friends to unlock recurring rewards.' That is leftover membership/referral wording, even though every account is now free."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_iter122_lock_apply_fixes.py", "/app/backend/tests/test_iter121_20pt_upgrade.py", "/app/test_reports/pytest/iter122.xml", "/app/test_reports/pytest/iter122_regression.xml"],
+  "action_items": [
+    "Chat search: either add a name lookup to /chat/search (and stop forcing uppercase), or change the placeholder back to code-only. Reword the backend 404/400 messages. Show errors in-app on web (ConfirmDialog/toast) instead of Alert.alert.",
+    "Hide referral_code in the chat request modal for non-admins (chat.tsx:385).",
+    "admin_cancel_deletion: return unlocked based on modified_count. admin_block_user: clear deletion_ticket_id so a later deletion cancel cannot lift an admin block.",
+    "Add testIDs to app/admin/area-mapping.tsx and app/services/location.tsx. Neither has any.",
+    "Optional: remove the 'Refer 4 friends...' text on register, and make the deletion dialog a single button."
+  ],
+  "critical_code_review_comments": [
+    "admin_delete_user caps each collection at 2000 rows. 2000 large order docs could still go over the 16MB document limit. The insert is not in a try block, so an oversized archive would make the delete return 500 before anything is removed. Consider a byte-size cap.",
+    "app/admin/area-mapping.tsx and app/services/location.tsx have no testID attributes."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter122_lock_apply_fixes.py"],
+  "success_rate": {"backend": "100% (54/54 across both suites)", "frontend": "~90% (all requested fixes verified; chat name search broken)"},
+  "seed_data_creation": "Registered 5 throwaway TEST users plus 1 UI user (test_i122_*@example.com). All were removed by id along with their tickets, applications and archive docs. No seeded or user data was changed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run pytest /app/backend/tests/test_iter122_lock_apply_fixes.py and test_iter121_20pt_upgrade.py. Each one registers 5 users, and registration is limited to 5/min per IP, so wait about 60s between them. The frontend env key is EXPO_PUBLIC_BACKEND_URL. testbuyer logs in to /verify-mobile.",
+  "rca_of_issue": "Chat name search: chat.tsx was reworded to 'code or name', but GET /chat/search (routes/chat.py search_by_refcode) only queries {referral_code: code.upper()}. Any name returns 404, and Alert.alert does nothing on web."
+}

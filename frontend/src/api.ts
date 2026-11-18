@@ -101,13 +101,13 @@ let _refreshing: Promise<string | null> | null = null;
 
 // Tiny pub-sub so AuthProvider can react to session-revoked without an
 // import cycle. AuthProvider subscribes in its useEffect.
-type Listener = (reason: "session_revoked" | "refresh_failed") => void;
+type Listener = (reason: "session_revoked" | "refresh_failed" | "account_blocked") => void;
 const _sessionListeners = new Set<Listener>();
 export const onSessionInvalidated = (cb: Listener) => {
   _sessionListeners.add(cb);
   return () => { _sessionListeners.delete(cb); };
 };
-const _emitSessionInvalidated = (reason: "session_revoked" | "refresh_failed") => {
+const _emitSessionInvalidated = (reason: "session_revoked" | "refresh_failed" | "account_blocked") => {
   for (const cb of _sessionListeners) { try { cb(reason); } catch { /* ignore */ } }
 };
 
@@ -145,12 +145,31 @@ async function _refreshAccessToken(): Promise<string | null> {
   }
 }
 
+// Set once an "account blocked" 403 has ended the session; cleared when a new
+// token is stored (see setSessionTokens / setAuthToken below).
+let _blockedHandled = false;
+
 api.interceptors.response.use(
   (resp) => resp,
   async (error: AxiosError<any>) => {
     const status = error.response?.status;
     const detail = error.response?.data?.detail;
     const original = error.config as AxiosRequestConfig & { _retry?: boolean; _retryCount?: number };
+
+    // Nov-2026 — the account was blocked (admin action, or the owner's own
+    // deletion request). Every call now 403s, so end the session once with a
+    // clear reason instead of letting the app rot into a half-signed-in state.
+    if (status === 403 && typeof detail === "string" && /blocked|deletion/i.test(detail)) {
+      // Several in-flight calls fail together, so only the first one ends the
+      // session; the rest just reject.
+      if (!_blockedHandled) {
+        _blockedHandled = true;
+        await AsyncStorage.removeItem(ACCESS_KEY);
+        await AsyncStorage.removeItem(REFRESH_KEY);
+        _emitSessionInvalidated("account_blocked");
+      }
+      return Promise.reject(error);
+    }
 
     if (status === 401 && detail === "session_revoked") {
       // Definitive kick: clear tokens and notify UI.
@@ -234,8 +253,11 @@ api.interceptors.response.use(
 
 // ────────────────── TOKEN HELPERS ──────────────────
 export const setAuthToken = async (token: string | null) => {
-  if (token) await AsyncStorage.setItem(ACCESS_KEY, token);
-  else await AsyncStorage.removeItem(ACCESS_KEY);
+  if (token) {
+    // A fresh sign-in re-arms the blocked-account handler.
+    _blockedHandled = false;
+    await AsyncStorage.setItem(ACCESS_KEY, token);
+  } else await AsyncStorage.removeItem(ACCESS_KEY);
 };
 
 export const setRefreshToken = async (token: string | null) => {
