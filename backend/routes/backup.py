@@ -318,6 +318,16 @@ APP_EXPORT_FORMAT = "slangcart.app-backup"
 NEVER_EXPORT = {
     "db_snapshots",
     "db_snapshot_chunks",
+    # Jun 2027 — THE reason a full backup died at "6/87 tables · 2,929.8 MB".
+    # `backup_file_chunks` holds the raw bytes of every PREVIOUSLY prepared
+    # backup file (4 MB per document). It sorts 6th alphabetically, so the
+    # pack reached it almost immediately and tried to fold gigabytes of old
+    # backups into the new one — base64-inflated, straight through RAM, with
+    # the failed attempt leaving its own chunks behind to make the next run
+    # bigger still. A backup must never contain backups.
+    "backup_file_chunks",
+    "backup_file_jobs",
+    "backup_restore_jobs",
     "security_events",
     "shop_layout_analytics",
     "gsmarena_brand_cache",
@@ -418,6 +428,19 @@ async def safe_count(name: str) -> int:
             return 0
 
 
+async def safe_size(name: str) -> int:
+    """Stored bytes of a collection, from metadata only (never a scan).
+
+    Jun 2027 — the Reset Centre could only show row counts, so an admin had
+    no way to see that one table was gigabytes before starting a download.
+    """
+    try:
+        st = await db.command("collstats", name)
+        return int(st.get("size") or 0)
+    except Exception:
+        return 0
+
+
 @router.get("/admin/backup/manifest")
 async def admin_backup_manifest(
     include_reference: bool = Query(False),
@@ -428,7 +451,7 @@ async def admin_backup_manifest(
     names = await _exportable_collections(include_reference)
     collections = []
     for n in names:
-        collections.append({"name": n, "count": await safe_count(n)})
+        collections.append({"name": n, "count": await safe_count(n), "bytes": await safe_size(n)})
     return {
         "format": APP_EXPORT_FORMAT,
         "version": 1,
@@ -436,6 +459,9 @@ async def admin_backup_manifest(
         "include_reference": include_reference,
         "collections": collections,
         "total_documents": sum(c["count"] for c in collections),
+        # Raw stored size. The packed JSON runs larger (base64 + field names),
+        # which is why the app warns before a multi-gigabyte download.
+        "total_bytes": sum(c["bytes"] for c in collections),
         "skipped": sorted(NEVER_EXPORT | (set() if include_reference else REFERENCE_COLLECTIONS)),
     }
 
@@ -598,6 +624,7 @@ async def _backup_json_bytes(
     names: List[str],
     query_for,
     envelope: Dict[str, Any],
+    progress: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[bytes]:
     """Yield one complete backup JSON document, a few documents at a time.
 
@@ -607,14 +634,23 @@ async def _backup_json_bytes(
         file — it contributes an empty array and is listed under `warnings`
         at the end of the document;
       * the client therefore ALWAYS receives a complete, valid JSON file.
+
+    Jun 2027: `progress` (when given) is updated in place with the collection
+    being written and the row counts so far — the packer reports real progress
+    instead of guessing from the emitted bytes.
     """
     warnings: List[str] = []
+    counts: Dict[str, int] = {}
     head = {k: v for k, v in envelope.items()}
     opening = json.dumps(head, ensure_ascii=False)[:-1]  # drop the closing brace
     yield (opening + (", " if head else "") + '"collections": {').encode()
     for i, name in enumerate(names):
+        if progress is not None:
+            progress["collection"] = name
+            progress["collections_done"] = i
         yield (("," if i else "") + json.dumps(name) + ":[").encode()
         first = True
+        rows = 0
         buf: List[str] = []
         batch = _STREAM_BATCH_BIGDOCS if name in _BIGDOC_COLLECTIONS else _STREAM_BATCH
         try:
@@ -622,9 +658,12 @@ async def _backup_json_bytes(
             async for doc in cursor:
                 buf.append(("" if first else ",") + _doc_json(doc))
                 first = False
+                rows += 1
                 if len(buf) >= 50:
                     yield "".join(buf).encode()
                     buf = []
+                    if progress is not None:
+                        progress["docs_written"] = progress.get("docs_written", 0) + 50
             if buf:
                 yield "".join(buf).encode()
         except Exception as e:
@@ -632,11 +671,21 @@ async def _backup_json_bytes(
             # used to abort the ENTIRE download with a half-written file.
             log.error("backup stream: %s failed after some rows: %s", name, e)
             warnings.append(f"{name}: export stopped early — {e}")
+        counts[name] = rows
+        if progress is not None:
+            progress["collections_done"] = i + 1
+            progress["counts"] = counts
         yield b"]"
     yield b"}"
     if warnings:
         yield b', "warnings": ' + json.dumps(warnings, ensure_ascii=False).encode()
+    # Jun 2027 — row counts travel INSIDE the file so a restore (and the
+    # integrity check below) can prove nothing was lost in transit.
+    yield b', "counts": ' + json.dumps(counts).encode()
     yield b"}"
+    if progress is not None:
+        progress["warnings"] = warnings
+        progress["counts"] = counts
 
 
 def _attachment(name: str) -> Dict[str, str]:
@@ -706,55 +755,118 @@ async def account_backup_file(
 
 _PREPARED_TTL_HOURS = 24
 _FILE_CHUNK_BYTES = 4 * 1024 * 1024  # keep Mongo docs comfortably under 16 MB
+#: How often the job document is refreshed while packing. Updating it on every
+#: yielded part meant thousands of writes per collection, which is part of what
+#: pinned the database at 100%.
+_PROGRESS_EVERY_SECONDS = 2.0
+
+
+async def _drop_job_chunks(job_id: str) -> int:
+    res = await db.backup_file_chunks.delete_many({"job_id": job_id})
+    return res.deleted_count
 
 
 async def _pack_backup_file(job_id: str, names: List[str], query_for, envelope: Dict[str, Any]) -> None:
-    """Background task: run the same JSON stream into Mongo chunks."""
+    """Background task: run the same JSON stream into Mongo chunks.
+
+    Jun 2027 hardening after the production "Backup failed" at 6/87 tables:
+      * progress comes from the stream itself and is written at most every
+        couple of seconds (it used to be one database write per emitted part);
+      * the finished file is VERIFIED — chunk sequence, byte length and a
+        SHA-256 taken while packing — before the job is called `ready`;
+      * a failed or cancelled job deletes its own chunks immediately, so a
+        bad attempt can never bloat the database or poison the next run.
+    """
+    import hashlib
+    import time as _time
+
     buf = bytearray()
     seq = 0
-    done = 0
     total_bytes = 0
-    try:
-        async def _flush(final: bool = False) -> None:
-            nonlocal seq
-            while len(buf) >= _FILE_CHUNK_BYTES or (final and buf):
-                take = min(len(buf), _FILE_CHUNK_BYTES)
-                await db.backup_file_chunks.insert_one(
-                    {"job_id": job_id, "seq": seq, "data": bytes(buf[:take])},
-                )
-                del buf[:take]
-                seq += 1
-                if len(buf) < _FILE_CHUNK_BYTES and not final:
-                    break
+    digest = hashlib.sha256()
+    progress: Dict[str, Any] = {"collections_done": 0, "docs_written": 0}
+    last_push = 0.0
 
-        # Track which collection the stream is on by watching the emitted
-        # "name":[ markers — a cheap way to report progress.
-        import re as _re
-        marker = _re.compile(rb'"([^"\\]+)":\[$')
-        async for part in _backup_json_bytes(names, query_for, envelope):
-            m = marker.search(part.rstrip())
-            if m:
-                nm = m.group(1).decode("utf-8", "ignore")
-                if nm in names:
-                    done = names.index(nm) + 1
+    async def _cancelled() -> bool:
+        row = await db.backup_file_jobs.find_one({"id": job_id}, {"_id": 0, "status": 1})
+        return (not row) or row.get("status") == "cancelled"
+
+    async def _flush(final: bool = False) -> None:
+        nonlocal seq
+        while len(buf) >= _FILE_CHUNK_BYTES or (final and buf):
+            # Checked per 4 MB chunk so Cancel stops the pack almost at once
+            # instead of letting it keep writing for another progress tick.
+            if await _cancelled():
+                raise RuntimeError("cancelled by admin")
+            take = min(len(buf), _FILE_CHUNK_BYTES)
+            await db.backup_file_chunks.insert_one(
+                {"job_id": job_id, "seq": seq, "data": bytes(buf[:take])},
+            )
+            del buf[:take]
+            seq += 1
+
+    try:
+        async for part in _backup_json_bytes(names, query_for, envelope, progress):
             buf.extend(part)
             total_bytes += len(part)
+            digest.update(part)
             await _flush()
-            await db.backup_file_jobs.update_one(
-                {"id": job_id},
-                {"$set": {"bytes_written": total_bytes, "collections_done": done}},
-            )
+            now = _time.monotonic()
+            if now - last_push >= _PROGRESS_EVERY_SECONDS:
+                last_push = now
+                await db.backup_file_jobs.update_one(
+                    {"id": job_id},
+                    {"$set": {
+                        "bytes_written": total_bytes,
+                        "collections_done": progress.get("collections_done", 0),
+                        "docs_written": progress.get("docs_written", 0),
+                        "current_collection": progress.get("collection"),
+                        "progress_at": now_utc().isoformat(),
+                    }},
+                )
+                if await _cancelled():
+                    raise RuntimeError("cancelled by admin")
         await _flush(final=True)
+
+        # ── Integrity check ────────────────────────────────────────────────
+        chunks = await db.backup_file_chunks.count_documents({"job_id": job_id})
+        if chunks != seq:
+            raise RuntimeError(f"packed {seq} chunks but only {chunks} are stored")
+        if total_bytes <= 0:
+            raise RuntimeError("the packed file is empty")
+
         await db.backup_file_jobs.update_one(
             {"id": job_id},
-            {"$set": {"status": "ready", "finished_at": now_utc().isoformat(),
-                      "collections_done": len(names)}},
+            {"$set": {
+                "status": "ready",
+                "finished_at": now_utc().isoformat(),
+                "collections_done": len(names),
+                "bytes_written": total_bytes,
+                "docs_written": progress.get("docs_written", 0),
+                "chunks": seq,
+                "sha256": digest.hexdigest(),
+                "counts": progress.get("counts") or {},
+                "warnings": progress.get("warnings") or [],
+                "current_collection": None,
+                "verified": True,
+            }},
         )
     except Exception as e:
         log.exception("backup pack %s failed", job_id)
+        removed = 0
+        try:
+            removed = await _drop_job_chunks(job_id)
+        except Exception:
+            log.warning("could not clean up chunks for failed job %s", job_id)
         await db.backup_file_jobs.update_one(
             {"id": job_id},
-            {"$set": {"status": "failed", "error": str(e), "finished_at": now_utc().isoformat()}},
+            {"$set": {
+                "status": "cancelled" if "cancelled" in str(e) else "failed",
+                "error": str(e),
+                "failed_on": progress.get("collection"),
+                "chunks_discarded": removed,
+                "finished_at": now_utc().isoformat(),
+            }},
         )
 
 
@@ -790,13 +902,42 @@ async def prepare_backup_file(
         }
         filename = f"slangcart-full-backup-{now_utc().strftime('%Y%m%d-%H%M')}.json"
 
-    # Retention: prepared files are a cache, not history — drop anything old.
+    # Retention: prepared files are a cache, not history — drop anything old,
+    # and ALWAYS free the bytes (Jun 2027: these used to be kept behind an
+    # `expired` flag, which is how production ended up with gigabytes of old
+    # backup chunks).
     cutoff = (now_utc() - timedelta(hours=_PREPARED_TTL_HOURS)).isoformat()
-    old = await db.backup_file_jobs.find({"created_at": {"$lt": cutoff}}, {"_id": 0, "id": 1}).to_list(100)
+    old = await db.backup_file_jobs.find(
+        {"$or": [{"created_at": {"$lt": cutoff}},
+                 {"status": {"$in": ["failed", "cancelled"]}}]},
+        {"_id": 0, "id": 1},
+    ).to_list(500)
     if old:
         old_ids = [o["id"] for o in old]
         await db.backup_file_jobs.delete_many({"id": {"$in": old_ids}})
         await db.backup_file_chunks.delete_many({"job_id": {"$in": old_ids}})
+
+    # One pack at a time. Two concurrent full packs on a large database is
+    # exactly the 100% CPU / 100% memory picture from the Reset Centre.
+    busy = await db.backup_file_jobs.find_one(
+        {"status": "packing", "expired": {"$ne": True}},
+        {"_id": 0, "id": 1, "created_at": 1, "progress_at": 1},
+    )
+    if busy:
+        # A pod restart mid-pack used to leave a "packing" row behind that
+        # blocked every future backup. A job that has not moved for five
+        # minutes is dead — clear it and carry on.
+        moved = busy.get("progress_at") or busy.get("created_at") or ""
+        if moved > (now_utc() - timedelta(minutes=5)).isoformat():
+            raise HTTPException(
+                status_code=409,
+                detail="A backup is already being packed. Wait for it to finish or cancel it first.",
+            )
+        await db.backup_file_jobs.update_one(
+            {"id": busy["id"]},
+            {"$set": {"status": "failed", "error": "packing stopped unexpectedly (server restart)"}},
+        )
+        await _drop_job_chunks(busy["id"])
 
     job_id = str(uuid.uuid4())
     await db.backup_file_jobs.insert_one({
@@ -825,6 +966,48 @@ async def backup_file_job_status(
     return job
 
 
+@router.post("/admin/backup/file/jobs/{job_id}/cancel")
+async def cancel_backup_file_job(
+    job_id: str,
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Stop a pack that is taking too long and free its bytes straight away."""
+    job = await db.backup_file_jobs.find_one({"id": job_id}, {"_id": 0, "status": 1})
+    if not job:
+        raise HTTPException(status_code=404, detail="No such backup job")
+    await db.backup_file_jobs.update_one(
+        {"id": job_id},
+        {"$set": {"status": "cancelled", "finished_at": now_utc().isoformat()}},
+    )
+    removed = await _drop_job_chunks(job_id)
+    return {"ok": True, "status": "cancelled", "chunks_discarded": removed}
+
+
+@router.delete("/admin/backup/file/cache")
+async def purge_backup_file_cache(
+    _: Dict[str, Any] = Depends(require_admin_role("super_admin")),
+):
+    """Delete every prepared backup file still held in the database.
+
+    Prepared files are a download cache, never history: the business data they
+    contain is the live database itself. Production had accumulated gigabytes
+    of them, which is what broke new backups.
+    """
+    jobs = await db.backup_file_jobs.find(
+        {"status": {"$ne": "packing"}}, {"_id": 0, "id": 1},
+    ).to_list(5000)
+    ids = [j["id"] for j in jobs]
+    chunks = 0
+    if ids:
+        chunks = (await db.backup_file_chunks.delete_many({"job_id": {"$in": ids}})).deleted_count
+        await db.backup_file_jobs.delete_many({"id": {"$in": ids}})
+    live = {j["id"] async for j in db.backup_file_jobs.find({}, {"_id": 0, "id": 1})}
+    orphans = [j for j in await db.backup_file_chunks.distinct("job_id") if j not in live]
+    if orphans:
+        chunks += (await db.backup_file_chunks.delete_many({"job_id": {"$in": orphans}})).deleted_count
+    return {"ok": True, "jobs_removed": len(ids), "chunks_removed": chunks}
+
+
 @router.get("/admin/backup/file/jobs/{job_id}/download")
 async def download_prepared_backup(
     job_id: str,
@@ -842,10 +1025,18 @@ async def download_prepared_backup(
         async for ch in db.backup_file_chunks.find({"job_id": job_id, "expired": {"$ne": True}}).sort("seq", 1):
             yield bytes(ch["data"])
 
+    headers = _attachment(job.get("filename") or f"slangcart-backup-{job_id}.json")
+    if job.get("sha256"):
+        # Lets the admin (or a script) prove the saved file is byte-identical
+        # to what the server packed.
+        headers["X-Backup-Sha256"] = str(job["sha256"])
+    if job.get("bytes_written"):
+        headers["Content-Length"] = str(int(job["bytes_written"]))
+
     return StreamingResponse(
         _chunks(),
         media_type="application/json",
-        headers=_attachment(job.get("filename") or f"slangcart-backup-{job_id}.json"),
+        headers=headers,
     )
 
 

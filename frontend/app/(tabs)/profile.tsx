@@ -292,32 +292,11 @@ export default function ProfileScreen() {
           {/* ───── ACCOUNT GROUP ───── */}
           <Text style={styles.groupLabel}>ACCOUNT</Text>
           <View style={styles.groupCard}>
-            <TouchableOpacity onPress={() => router.push("/change-mobile" as any)} style={styles.rowItem} testID="profile-mobile-link">
-              <View style={[styles.kycDot, { backgroundColor: (user as any)?.phone_verified ? colors.success : colors.warning }]} />
+            <TouchableOpacity onPress={() => router.push("/personal-info" as any)} style={styles.rowItem} testID="profile-personal-info-link">
+              <View style={[styles.kycDot, { backgroundColor: ((user as any)?.phone_verified && (user as any)?.kyc_status === "approved") ? colors.success : colors.warning }]} />
               <View style={{ flex: 1 }}>
-                <Text style={styles.kycTitle}>Mobile number</Text>
-                <Text style={styles.kycSub}>
-                  {(user as any)?.phone ? `+91 ${(user as any).phone}` : "NOT SET"}
-                  {(user as any)?.phone ? ((user as any)?.phone_verified ? " · VERIFIED" : " · NOT VERIFIED") : " — TAP TO ADD"}
-                </Text>
-              </View>
-              <Feather name="chevron-right" size={18} color={colors.textMuted} />
-            </TouchableOpacity>
-            <View style={styles.rowDivider} />
-            <TouchableOpacity onPress={() => router.push("/kyc")} style={styles.rowItem} testID="profile-kyc-link">
-              <View style={[styles.kycDot, { backgroundColor: (user as any)?.kyc_status === "approved" ? colors.success : (user as any)?.kyc_status === "pending" ? colors.warning : (user as any)?.kyc_status === "rejected" ? "#B3261E" : "#94A3B8" }]} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.kycTitle}>KYC Verification</Text>
-                <Text style={styles.kycSub}>{(user as any)?.kyc_status ? ((user as any).kyc_status as string).toUpperCase() : "NOT SUBMITTED"}</Text>
-              </View>
-              <Feather name="chevron-right" size={18} color={colors.textMuted} />
-            </TouchableOpacity>
-            <View style={styles.rowDivider} />
-            <TouchableOpacity onPress={() => router.push("/edit-address" as any)} style={styles.rowItem} testID="profile-address-link">
-              <View style={[styles.kycDot, { backgroundColor: "#0EA5E9" }]} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.kycTitle}>My Address</Text>
-                <Text style={styles.kycSub}>{(user as any)?.address ? `${(user as any).address || ""}${(user as any).city ? ", " + (user as any).city : ""}`.slice(0, 50) || "NOT SET" : "NOT SET — TAP TO ADD"}</Text>
+                <Text style={styles.kycTitle}>Personal Information</Text>
+                <Text style={styles.kycSub}>MOBILE NUMBER · KYC VERIFICATION · ADDRESS</Text>
               </View>
               <Feather name="chevron-right" size={18} color={colors.textMuted} />
             </TouchableOpacity>

@@ -23,35 +23,56 @@ export async function downloadPackedBackup(opts: {
   userId?: string;
   filename: string;
   onProgress?: (msg: string) => void;
-}): Promise<{ ok: boolean; path?: string; bytes?: number }> {
-  const { scope, userId, filename, onProgress } = opts;
+  /** Called once with the job id so the screen can offer a Cancel button. */
+  onJobStarted?: (jobId: string) => void;
+}): Promise<{ ok: boolean; path?: string; bytes?: number; warnings?: string[] }> {
+  const { scope, userId, filename, onProgress, onJobStarted } = opts;
   const { data: job } = await api.post<any>("/admin/backup/file/prepare", {
     scope,
     user_id: scope === "account" ? userId : undefined,
   });
+  onJobStarted?.(job.job_id);
   let status: any = null;
-  for (let tries = 0; tries < 600; tries++) { // ~20 min of polling
+  let idle = 0;
+  for (let tries = 0; tries < 1800; tries++) { // up to ~60 min of polling
     await new Promise((r) => setTimeout(r, 2000));
     try {
       const { data } = await api.get<any>(`/admin/backup/file/jobs/${job.job_id}`);
       status = data;
       const mb = (Number(data.bytes_written || 0) / 1024 / 1024).toFixed(1);
+      const docs = Number(data.docs_written || 0).toLocaleString("en-IN");
+      const where = data.current_collection ? ` · ${data.current_collection}` : "";
       onProgress?.(
-        `Packing on the server… ${data.collections_done || 0}/${data.collections_total || "?"} tables · ${mb} MB`,
+        `Packing on the server… ${data.collections_done || 0}/${data.collections_total || "?"} tables` +
+          `${where} · ${docs} records · ${mb} MB`,
       );
-      if (data.status === "ready" || data.status === "failed") break;
+      if (data.status === "ready" || data.status === "failed" || data.status === "cancelled") break;
+      idle = 0;
     } catch {
-      // transient network blip while polling — keep waiting
+      // transient network blip while polling — keep waiting, but don't poll
+      // a vanished job forever.
+      if (++idle > 30) break;
     }
   }
   if (!status || status.status !== "ready") {
-    throw new Error(status?.error || "The server could not finish the pack. Please try again.");
+    if (status?.status === "cancelled") throw new Error("Backup cancelled.");
+    throw new Error(
+      status?.error
+        ? `${status.error}${status.failed_on ? ` (while packing ${status.failed_on})` : ""}`
+        : "The server could not finish the pack. Please try again.",
+    );
   }
   onProgress?.("Downloading the packed file…");
-  return downloadServerFile({
+  const res = await downloadServerFile({
     path: `/admin/backup/file/jobs/${job.job_id}/download`,
     filename,
   });
+  return { ...res, warnings: status.warnings || [] };
+}
+
+/** Stop a pack that is taking too long and free the space it used. */
+export async function cancelPackedBackup(jobId: string): Promise<void> {
+  await api.post(`/admin/backup/file/jobs/${jobId}/cancel`, {});
 }
 
 /**

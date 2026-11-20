@@ -10,6 +10,7 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  useWindowDimensions,
 } from "react-native";
 import { useRouter, Link } from "expo-router";
 import { Feather } from "@expo/vector-icons";
@@ -43,6 +44,10 @@ export default function Login() {
   const { app_name, tagline, login_subtitle } = useBranding();
   const router = useRouter();
   const wideColumn = useResponsiveContainer();
+  // Small Android phones (≤ 360 dp) get a tighter banner so the three
+  // sign-in options stay above the fold without scrolling.
+  const { width: screenW } = useWindowDimensions();
+  const compact = screenW <= 360;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -199,15 +204,17 @@ export default function Login() {
       >
         <ScrollView contentContainerStyle={[styles.container, wideColumn]} keyboardShouldPersistTaps="handled">
           <Animated.View entering={FadeInDown.duration(400)}>
-            <GradientCard variant="emerald" style={styles.heroBrand}>
+            <GradientCard variant="emerald" style={[styles.heroBrand, compact && styles.heroBrandCompact]}>
               <View style={styles.brandRow}>
                 <View style={styles.logoBox}>
                   <Feather name="git-merge" size={22} color={colors.primary} />
                 </View>
-                <Text style={[styles.brandText, { color: "#fff" }]}>{app_name}</Text>
+                <Text style={[styles.brandText, { color: "#fff" }]} numberOfLines={1}>{app_name}</Text>
               </View>
               <Text style={styles.heroOverline}>WELCOME BACK</Text>
-              <Text style={styles.heroH1}>{login_subtitle}</Text>
+              <Text style={[styles.heroH1, compact && styles.heroH1Compact]} allowFontScaling={false}>
+                {login_subtitle}
+              </Text>
               <Text style={styles.heroTagline}>{tagline}</Text>
               {/* Festive decoration — nothing renders on the normal theme. */}
               <FestivalStrip compact />
@@ -236,6 +243,10 @@ export default function Login() {
           {showPasswordForm ? (
             method === null ? (
               <View style={styles.methodStack}>
+                {/* Jun-2027 centre pass — all three options are identical
+                    rows with the icon+label centred as one group, the way
+                    "Continue with Google" is laid out. Same height, radius,
+                    border and spacing on every screen. */}
                 <GoogleSignInButton onError={setError} label="Continue with Google" />
 
                 <TouchableOpacity
@@ -243,10 +254,10 @@ export default function Login() {
                   style={styles.methodBtn}
                   testID="login-otp-open"
                   activeOpacity={0.85}
+                  accessibilityRole="button"
                 >
                   <Feather name="message-circle" size={18} color={colors.primary} />
-                  <Text style={styles.methodBtnText}>Continue with Mobile Number</Text>
-                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                  <Text style={styles.methodBtnText} numberOfLines={1}>Continue with Mobile Number</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -254,10 +265,10 @@ export default function Login() {
                   style={styles.methodBtn}
                   testID="login-email-open"
                   activeOpacity={0.85}
+                  accessibilityRole="button"
                 >
                   <Feather name="mail" size={18} color={colors.primary} />
-                  <Text style={styles.methodBtnText}>Sign in with Email &amp; Password</Text>
-                  <Feather name="chevron-right" size={18} color={colors.textMuted} />
+                  <Text style={styles.methodBtnText} numberOfLines={1}>Sign in with Email &amp; Password</Text>
                 </TouchableOpacity>
 
                 {error ? <Text style={styles.error} testID="login-error">{error}</Text> : null}
@@ -400,7 +411,7 @@ export default function Login() {
             </Link>
           </View>
 
-          <View style={[styles.footerRow, { marginTop: 8, flexWrap: "wrap", justifyContent: "center" }]}>
+          <View style={styles.legalRow}>
             <Link href={"/legal/terms" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Terms</Text></TouchableOpacity></Link>
             <Text style={styles.muted}> · </Text>
             <Link href={"/legal/privacy" as any} asChild><TouchableOpacity><Text style={styles.legalLink}>Privacy</Text></TouchableOpacity></Link>
@@ -420,12 +431,20 @@ export default function Login() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
-  container: { padding: spacing.screen, paddingTop: spacing.lg, paddingBottom: 60 },
-  heroBrand: { padding: 28, marginBottom: 28 },
-  heroOverline: { fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700", marginTop: 28 },
-  heroH1: { fontSize: 32, fontWeight: "800", color: "#fff", lineHeight: 38, letterSpacing: -1, marginTop: 8 },
-  heroTagline: { fontSize: 13, color: "rgba(255,255,255,0.85)", marginTop: 10, lineHeight: 18 },
-  brandRow: { flexDirection: "row", alignItems: "center" },
+  container: {
+    padding: spacing.screen, paddingTop: spacing.lg, paddingBottom: 40,
+    // Short content (the three sign-in options) sits balanced in the middle
+    // of a tall screen instead of leaving a big empty block underneath;
+    // taller content (open email form + keyboard) simply scrolls as before.
+    flexGrow: 1, justifyContent: "center",
+  },
+  heroBrand: { padding: 24, marginBottom: 20 },
+  heroBrandCompact: { padding: 18, marginBottom: 16 },
+  heroOverline: { fontSize: 11, letterSpacing: 2, color: "rgba(255,255,255,0.7)", fontWeight: "700", marginTop: 20 },
+  heroH1: { fontSize: 30, fontWeight: "800", color: "#fff", lineHeight: 36, letterSpacing: -0.8, marginTop: 6 },
+  heroH1Compact: { fontSize: 25, lineHeight: 30 },
+  heroTagline: { fontSize: 13, color: "rgba(255,255,255,0.85)", marginTop: 8, lineHeight: 18 },
+  brandRow: { flexDirection: "row", alignItems: "center", minHeight: 38 },
   logoBox: {
     width: 38,
     height: 38,
@@ -435,7 +454,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 10,
   },
-  brandText: { fontSize: 18, fontWeight: "800", color: colors.textMain, letterSpacing: -0.3 },
+  brandText: {
+    flexShrink: 1, fontSize: 18, lineHeight: 22, fontWeight: "800",
+    color: colors.textMain, letterSpacing: -0.3,
+    ...(Platform.OS === "android" ? { includeFontPadding: false } : null),
+  },
   overline: { fontSize: 11, letterSpacing: 2, color: colors.textMuted, fontWeight: "700", marginBottom: 12 },
   h1: { fontSize: 36, fontWeight: "800", color: colors.textMain, lineHeight: 42, letterSpacing: -1 },
   subtitle: { fontSize: 15, color: colors.textMuted, marginTop: 12, marginBottom: 32, lineHeight: 22 },
@@ -453,12 +476,16 @@ const styles = StyleSheet.create({
   },
   methodStack: { gap: 12 },
   methodPanel: { marginTop: 4 },
+  // Matches GoogleSignInButton exactly: same height, radius, border,
+  // padding, and the icon + label centred as one group.
   methodBtn: {
-    flexDirection: "row", alignItems: "center", gap: 12,
-    minHeight: 54, borderRadius: radii.button, paddingHorizontal: 16,
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
+    minHeight: 54, borderRadius: radii.button, paddingHorizontal: 16, paddingVertical: 14,
     borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface,
   },
-  methodBtnText: { flex: 1, fontSize: 15, fontWeight: "700", color: colors.textMain },
+  methodBtnText: {
+    fontSize: 15, fontWeight: "700", color: colors.textMain, letterSpacing: -0.2,
+  },
   passwordRow: { flexDirection: "row", alignItems: "center" },
   eyeBtn: { position: "absolute", right: 12, height: 44, width: 32, alignItems: "center", justifyContent: "center" },
   otpBtn: {
@@ -518,7 +545,11 @@ const styles = StyleSheet.create({
   bioPrimarySub: { fontSize: 13, color: colors.textMuted, fontWeight: "700", marginTop: 4 },
   bioSwitchLink: { marginTop: 14, paddingVertical: 8 },
   bioSwitchText: { fontSize: 13, fontWeight: "700", color: colors.textMuted, textDecorationLine: "underline" },
-  footerRow: { flexDirection: "row", justifyContent: "center", marginTop: 24 },
+  footerRow: { flexDirection: "row", justifyContent: "center", alignItems: "center", marginTop: 20 },
+  legalRow: {
+    flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center",
+    marginTop: 10, columnGap: 2, rowGap: 4,
+  },
   muted: { color: colors.textMuted, fontSize: 14 },
   link: { color: colors.primary, fontWeight: "700", fontSize: 14 },
   legalLink: { color: colors.textMuted, fontSize: 12, fontWeight: "600", textDecorationLine: "underline" },

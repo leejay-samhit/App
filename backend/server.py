@@ -7797,9 +7797,19 @@ async def _backup_scheduler():
                 await db.backup_file_jobs.update_many(
                     {"id": {"$in": ids}}, {"$set": {"expired": True}},
                 )
-                await db.backup_file_chunks.update_many(
-                    {"job_id": {"$in": ids}}, {"$set": {"expired": True}},
-                )
+                # Jun 2027 — the BYTES are pure cache and used to be kept
+                # forever behind an `expired` flag. Production accumulated
+                # 1,752 four-megabyte chunks that way, which is what made a
+                # fresh full backup try to pack gigabytes of old backups.
+                # The job row stays as a tombstone; the payload goes.
+                await db.backup_file_chunks.delete_many({"job_id": {"$in": ids}})
+            # Orphans: chunks whose job row is long gone (old crashed packs).
+            live = {j["id"] async for j in db.backup_file_jobs.find({}, {"_id": 0, "id": 1})}
+            orphan_ids = await db.backup_file_chunks.distinct("job_id")
+            stale = [j for j in orphan_ids if j not in live]
+            if stale:
+                res = await db.backup_file_chunks.delete_many({"job_id": {"$in": stale}})
+                logging.info(f"backup housekeeping: dropped {res.deleted_count} orphan file chunks")
         except Exception as e:
             logging.warning(f"backup housekeeping failed: {e}")
         await asyncio.sleep(BACKUP_INTERVAL_SECONDS)

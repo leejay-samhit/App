@@ -23,16 +23,22 @@ import { Feather } from "@expo/vector-icons";
 
 import { api, formatApiError } from "./api";
 import { colors, radii, spacing } from "./theme";
-import { downloadPackedBackup } from "./download";
+import { downloadPackedBackup, cancelPackedBackup } from "./download";
 import { notify } from "./notify";
 import { BackupRestoreCard } from "./backup-restore-card";
 
 type Manifest = {
-  collections: { name: string; count: number }[];
+  collections: { name: string; count: number; bytes?: number }[];
   total_documents: number;
+  total_bytes?: number;
   skipped: string[];
   generated_at: string;
 };
+
+const fmtSize = (b: number) =>
+  b >= 1024 * 1024 * 1024 ? `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`
+    : b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(b / 1024))} KB`;
 
 export function AppBackupPanel() {
   const [manifest, setManifest] = useState<Manifest | null>(null);
@@ -40,6 +46,7 @@ export function AppBackupPanel() {
   const [busy, setBusy] = useState<"" | "download">("");
   const [progress, setProgress] = useState("");
   const [result, setResult] = useState("");
+  const [jobId, setJobId] = useState("");
 
   const loadManifest = useCallback(async () => {
     try {
@@ -65,18 +72,42 @@ export function AppBackupPanel() {
         scope: "app",
         filename: `slangcart-app-backup-${stamp}.json`,
         onProgress: setProgress,
+        onJobStarted: setJobId,
       });
       if (res.ok) {
-        const mb = res.bytes ? ` (${(res.bytes / 1024 / 1024).toFixed(1)} MB)` : "";
+        const size = res.bytes ? ` (${fmtSize(res.bytes)})` : "";
+        const warn = res.warnings?.length
+          ? `\n⚠️ ${res.warnings.length} table(s) stopped early: ${res.warnings.join("; ")}`
+          : "";
         setResult(
           `✅ Saved ${manifest.total_documents.toLocaleString("en-IN")} records across ` +
-          `${manifest.collections.length} collections${mb}.`,
+          `${manifest.collections.length} collections${size}.${warn}`,
         );
       }
     } catch (e) {
       notify("Backup failed", formatApiError(e));
-    } finally { setBusy(""); setProgress(""); }
+    } finally { setBusy(""); setProgress(""); setJobId(""); }
   }, [manifest]);
+
+  // Prepared files are a download cache, not history — this frees the space
+  // they occupy in the database. Production had gigabytes of them.
+  const onPurge = useCallback(async () => {
+    try {
+      const { data } = await api.delete<any>("/admin/backup/file/cache");
+      setResult(
+        `🧹 Cleared ${data.jobs_removed} prepared file(s) and ${data.chunks_removed} stored pieces from the server.`,
+      );
+      loadManifest();
+    } catch (e) {
+      notify("Could not clear", formatApiError(e));
+    }
+  }, [loadManifest]);
+
+  const onCancel = useCallback(async () => {
+    if (!jobId) return;
+    try { await cancelPackedBackup(jobId); } catch { /* the poll will report it */ }
+    setProgress("Cancelling…");
+  }, [jobId]);
 
   return (
     <ScrollView contentContainerStyle={{ padding: spacing.screen, paddingBottom: 60 }}>
@@ -96,11 +127,24 @@ export function AppBackupPanel() {
                 invoices, chat, services, wallet and settings — in one file you can
                 restore into a fork or back into live.
               </Text>
+              {(manifest.total_bytes || 0) > 700 * 1024 * 1024 ? (
+                <View style={styles.warnBox} testID="appbackup-size-warning">
+                  <Feather name="alert-triangle" size={14} color={colors.warning} />
+                  <Text style={styles.warnText}>
+                    This database holds about {fmtSize(manifest.total_bytes || 0)} of data, mostly
+                    product photos. The packed file will be larger still, so save it somewhere with
+                    plenty of free space and keep this screen open on Wi-Fi.
+                  </Text>
+                </View>
+              ) : null}
               <View style={styles.chipsWrap}>
                 {manifest.collections.filter((c) => c.count > 0).map((c) => (
                   <View key={c.name} style={styles.chip}>
                     <Text style={styles.chipName}>{c.name}</Text>
                     <Text style={styles.chipCount}>{c.count.toLocaleString("en-IN")}</Text>
+                    {c.bytes && c.bytes > 5 * 1024 * 1024
+                      ? <Text style={styles.chipSize}>{fmtSize(c.bytes)}</Text>
+                      : null}
                   </View>
                 ))}
               </View>
@@ -115,6 +159,15 @@ export function AppBackupPanel() {
                   : <Feather name="download" size={16} color={colors.primaryFg} />}
                 <Text style={styles.primaryBtnText}>{busy === "download" ? "Packing…" : "Download backup file"}</Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                onPress={onPurge}
+                disabled={!!busy}
+                style={styles.linkBtn}
+                testID="appbackup-purge"
+              >
+                <Feather name="trash-2" size={13} color={colors.textMuted} />
+                <Text style={styles.linkText}>Clear prepared backup files from the server</Text>
+              </TouchableOpacity>
             </>
           ) : null}
         </View>
@@ -126,6 +179,11 @@ export function AppBackupPanel() {
           <View style={styles.progressRow}>
             <ActivityIndicator color={colors.primary} size="small" />
             <Text style={styles.progressText}>{progress}</Text>
+            {jobId ? (
+              <TouchableOpacity onPress={onCancel} style={styles.cancelBtn} testID="appbackup-cancel">
+                <Text style={styles.cancelText}>Cancel</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         ) : null}
 
@@ -153,6 +211,23 @@ const styles = StyleSheet.create({
   },
   chipName: { fontSize: 10, color: colors.textMuted },
   chipCount: { fontSize: 11, fontWeight: "800", color: colors.textMain },
+  chipSize: { fontSize: 9.5, fontWeight: "700", color: colors.warning },
+  warnBox: {
+    flexDirection: "row", gap: 8, alignItems: "flex-start",
+    backgroundColor: colors.surfaceMuted, borderRadius: radii.card,
+    padding: 10, marginBottom: 12,
+  },
+  warnText: { flex: 1, fontSize: 11.5, color: colors.textMain, lineHeight: 16 },
+  cancelBtn: {
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: radii.button,
+    borderWidth: 1, borderColor: colors.border, minHeight: 36, justifyContent: "center",
+  },
+  cancelText: { fontSize: 12, fontWeight: "800", color: colors.error },
+  linkBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
+    minHeight: 44, marginTop: 4,
+  },
+  linkText: { fontSize: 11.5, fontWeight: "700", color: colors.textMuted },
   primaryBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
     backgroundColor: colors.primary, borderRadius: radii.button, minHeight: 46,
